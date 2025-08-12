@@ -1,0 +1,117 @@
+{
+  "atlas_uid": "qc-atlas-HILIC-positive-2f8ff361a0f547b6",
+  "atlas_name": "HILIC_QCv7_positive",
+  "atlas_description": "",
+  "created_by": "bkieft",
+  "creation_time": "2025-08-07T11:50:42.208476",
+  "last_modified": "2025-08-07T11:50:42.208476",
+  "notes": "",
+  "method": {
+    "method_name": "HILIC_positive",
+    "chromatography": "HILIC",
+    "polarity": "positive"
+  },
+  "atlas_settings": {
+    "source_table": "/global/homes/b/bkieft/metatlas-data/HILIC/HILIC_QCv7_positive.tsv",
+    "compounds_database": "/global/homes/b/bkieft/metatlas2/data/databases/compounds/Compounds.json",
+    "total_compounds": 20,
+    "default_mz_tolerance_ppm": 5.0
+  },
+  "rt_mz_source": {
+    "methods": "/global/homes/b/bkieft/metatlas2/data/databases/mz_rt_references/MZ_RT_References_Methods.json",
+    "mz_rt_references": "/global/homes/b/bkieft/metatlas2/data/databases/mz_rt_references/MZ_RT_References.json",
+    "mz_rt_index": "/global/homes/b/bkieft/metatlas2/data/databases/mz_rt_references/MZ_RT_References_Index.json"
+  },
+  "processing_stats": {
+    "input_compounds": 20,
+    "compounds_found_in_db": 20,
+    "compounds_missing_from_db": 0,
+    "compounds_missing_rt": 0,
+    "compounds_missing_mz": 0,
+    "mz_rt_references_created": 0,
+    "mz_rt_references_existing": 20,
+    "compounds_added_to_atlas": 20
+  },
+  "compounds": [
+    {
+      "compound_uid": "comp-48a43ab203c5441d",
+      "mz_rt_reference_uid": "mzrt-ref-8a25937d40524583"
+    },
+    {
+      "compound_uid": "comp-cc0b92306d0d4a79",
+      "mz_rt_reference_uid": "mzrt-ref-ea8f7e4141504121"
+    },
+    {
+      "compound_uid": "comp-79a78a16f2874349",
+      "mz_rt_reference_uid": "mzrt-ref-d7d1097899174414"
+    },
+    {
+      "compound_uid": "comp-27cbd93fcb1d446b",
+      "mz_rt_reference_uid": "mzrt-ref-0781090d5e2a4183"
+    },
+    {
+      "compound_uid": "comp-857c6137ef694344",
+      "mz_rt_reference_uid": "mzrt-ref-be7e28d988464e77"
+    },
+    {
+      "compound_uid": "comp-71807ecb676f48ce",
+      "mz_rt_reference_uid": "mzrt-ref-2b013bf0e3f3471a"
+    },
+    {
+      "compound_uid": "comp-4493ceedd452451e",
+      "mz_rt_reference_uid": "mzrt-ref-fb9037741cc04787"
+    },
+    {
+      "compound_uid": "comp-2f852ba761d14ce9",
+      "mz_rt_reference_uid": "mzrt-ref-843996e1d23a448c"
+    },
+    {
+      "compound_uid": "comp-9cb530119cad4198",
+      "mz_rt_reference_uid": "mzrt-ref-ce75596a6e6848d7"
+    },
+    {
+      "compound_uid": "comp-e004d46c3fd048ca",
+      "mz_rt_reference_uid": "mzrt-ref-7f5128115c9e489a"
+    },
+    {
+      "compound_uid": "comp-51736ba2e6ed4067",
+      "mz_rt_reference_uid": "mzrt-ref-5b37eb546f4f47ec"
+    },
+    {
+      "compound_uid": "comp-0a085e788f1e40ec",
+      "mz_rt_reference_uid": "mzrt-ref-baa326ae9d1b47dc"
+    },
+    {
+      "compound_uid": "comp-74e1805e3a314791",
+      "mz_rt_reference_uid": "mzrt-ref-bca66c09afba48ce"
+    },
+    {
+      "compound_uid": "comp-d899db25ab2f49ec",
+      "mz_rt_reference_uid": "mzrt-ref-26ff9a194f7c4c99"
+    },
+    {
+      "compound_uid": "comp-ead0f66502fc4077",
+      "mz_rt_reference_uid": "mzrt-ref-fc88a40a43d74595"
+    },
+    {
+      "compound_uid": "comp-63bcf91505674dd0",
+      "mz_rt_reference_uid": "mzrt-ref-b1ee75eafd934476"
+    },
+    {
+      "compound_uid": "comp-084ae137b6714ab6",
+      "mz_rt_reference_uid": "mzrt-ref-74352db00b904470"
+    },
+    {
+      "compound_uid": "comp-089fadab09174f36",
+      "mz_rt_reference_uid": "mzrt-ref-ef34747a0bfb496f"
+    },
+    {
+      "compound_uid": "comp-790a45c1999a4cd7",
+      "mz_rt_reference_uid": "mzrt-ref-e845869c31bb4f65"
+    },
+    {
+      "compound_uid": "comp-8e2d6324ace24a26",
+      "mz_rt_reference_uid": "mzrt-ref-46d432df55a14309"
+    }
+  ]
+}

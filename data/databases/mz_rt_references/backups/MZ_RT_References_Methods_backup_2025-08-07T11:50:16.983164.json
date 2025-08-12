@@ -1,0 +1,15 @@
+{
+  "method-00d8cb5acdc64b46": {
+    "method_uid": "method-00d8cb5acdc64b46",
+    "method_name": "HILIC_positive",
+    "chromatography": "HILIC",
+    "polarity": "positive",
+    "column": "HILIC column",
+    "mobile_phase": "ACN/H2O gradient",
+    "instrument": "QExactive",
+    "method_notes": "Standard HILIC method for metabolomics",
+    "created_by": "bkieft",
+    "creation_time": "2025-08-07T11:50:03.193175",
+    "last_modified": "2025-08-07T11:50:03.193175"
+  }
+}

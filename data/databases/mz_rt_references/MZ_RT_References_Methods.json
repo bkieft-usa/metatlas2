@@ -1,0 +1,28 @@
+{
+  "method-00d8cb5acdc64b46": {
+    "method_uid": "method-00d8cb5acdc64b46",
+    "method_name": "HILIC_positive",
+    "chromatography": "HILIC",
+    "polarity": "positive",
+    "column": "HILIC column",
+    "mobile_phase": "ACN/H2O gradient",
+    "instrument": "QExactive",
+    "method_notes": "Standard HILIC method for metabolomics",
+    "created_by": "bkieft",
+    "creation_time": "2025-08-07T11:50:03.193175",
+    "last_modified": "2025-08-07T11:50:03.193175"
+  },
+  "method-5110c300988642c1": {
+    "method_uid": "method-5110c300988642c1",
+    "method_name": "HILIC_negative",
+    "chromatography": "HILIC",
+    "polarity": "negative",
+    "column": "HILIC column",
+    "mobile_phase": "ACN/H2O gradient",
+    "instrument": "QExactive",
+    "method_notes": "Standard HILIC method for metabolomics",
+    "created_by": "bkieft",
+    "creation_time": "2025-08-07T11:50:16.983164",
+    "last_modified": "2025-08-07T11:50:16.983164"
+  }
+}

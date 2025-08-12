@@ -1,0 +1,22 @@
+{
+  "database_info": {
+    "last_updated": "2025-08-07T11:41:48.507382",
+    "updated_by": "bkieft",
+    "notes": "Core compounds database initialization",
+    "operation": "update"
+  },
+  "database_totals": {
+    "total_compounds": 87,
+    "unique_inchi_keys": 87
+  },
+  "database_files": {
+    "compounds": "/global/homes/b/bkieft/metatlas2/data/databases/compounds/Compounds.json",
+    "compound_index": "/global/homes/b/bkieft/metatlas2/data/databases/compounds/Compounds_Index.json",
+    "metadata": "/global/homes/b/bkieft/metatlas2/data/databases/compounds/Compounds_Metadata.json"
+  },
+  "backup_info": {
+    "backup_created": false,
+    "backup_location": null,
+    "backed_up_files": []
+  }
+}

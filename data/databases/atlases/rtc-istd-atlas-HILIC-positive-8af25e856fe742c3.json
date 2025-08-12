@@ -1,0 +1,375 @@
+{
+  "atlas_uid": "rtc-istd-atlas-HILIC-positive-8af25e856fe742c3",
+  "atlas_name": "HILIC_ISTDsEtcV7_positive_rtc-20250807133533",
+  "atlas_description": " (RT-corrected)",
+  "created_by": "bkieft",
+  "creation_time": "2025-08-07T13:35:32.751557",
+  "last_modified": "2025-08-07T13:35:32.751557",
+  "notes": " (RT-corrected)",
+  "method": {
+    "method_name": "HILIC_positive",
+    "chromatography": "HILIC",
+    "polarity": "positive"
+  },
+  "atlas_settings": {
+    "source_table": "/global/homes/b/bkieft/metatlas-data/HILIC/HILIC_ISTDsEtcV7_positive.tsv",
+    "compounds_database": "/global/homes/b/bkieft/metatlas2/data/databases/compounds/Compounds.json",
+    "total_compounds": 65,
+    "default_mz_tolerance_ppm": 5.0
+  },
+  "rt_mz_source": {
+    "mz_rt_experimental": "/global/homes/b/bkieft/metatlas2/data/tests/projects/20250707_JGI_MS_510172_SedRhizVegOut_final_IQX_HILICZ_USHXG02519/mz_rt_experimental/mz-rt-exp-rtc-istd-atlas-HILIC-positive-8af25e856fe742c3.json"
+  },
+  "processing_stats": {
+    "input_compounds": 65,
+    "compounds_found_in_db": 65,
+    "compounds_missing_from_db": 0,
+    "compounds_missing_rt": 0,
+    "compounds_missing_mz": 0,
+    "mz_rt_references_created": 65,
+    "mz_rt_references_existing": 0,
+    "compounds_added_to_atlas": 65
+  },
+  "compounds": [
+    {
+      "compound_uid": "comp-48a43ab203c5441d",
+      "mz_rt_reference_uid": "mzrt-ref-8a25937d40524583",
+      "mz_rt_experimental_uid": "mzrt-exp-63198a60856c4323"
+    },
+    {
+      "compound_uid": "comp-c6efc61eb14e4418",
+      "mz_rt_reference_uid": "mzrt-ref-f9ba6add586c4d82",
+      "mz_rt_experimental_uid": "mzrt-exp-a6b1da2b335245de"
+    },
+    {
+      "compound_uid": "comp-913fa8561d304f60",
+      "mz_rt_reference_uid": "mzrt-ref-c140dd060a604d67",
+      "mz_rt_experimental_uid": "mzrt-exp-3614c3e2afb449a4"
+    },
+    {
+      "compound_uid": "comp-cc0b92306d0d4a79",
+      "mz_rt_reference_uid": "mzrt-ref-ea8f7e4141504121",
+      "mz_rt_experimental_uid": "mzrt-exp-c2ee70c890894234"
+    },
+    {
+      "compound_uid": "comp-a4697efccf394a7e",
+      "mz_rt_reference_uid": "mzrt-ref-90f796616c1144ab",
+      "mz_rt_experimental_uid": "mzrt-exp-ecc9245cd0dc49ff"
+    },
+    {
+      "compound_uid": "comp-6e728e9ffea84392",
+      "mz_rt_reference_uid": "mzrt-ref-487832176ebc41f0",
+      "mz_rt_experimental_uid": "mzrt-exp-96b453257c914240"
+    },
+    {
+      "compound_uid": "comp-01798aa0f9204719",
+      "mz_rt_reference_uid": "mzrt-ref-3cd96d49edd4485d",
+      "mz_rt_experimental_uid": "mzrt-exp-b8f36852040248b0"
+    },
+    {
+      "compound_uid": "comp-79a78a16f2874349",
+      "mz_rt_reference_uid": "mzrt-ref-d7d1097899174414",
+      "mz_rt_experimental_uid": "mzrt-exp-b9c2254c07224a10"
+    },
+    {
+      "compound_uid": "comp-49b4c8c336b7422a",
+      "mz_rt_reference_uid": "mzrt-ref-9e946490f8af44fe",
+      "mz_rt_experimental_uid": "mzrt-exp-31e497a7790a429e"
+    },
+    {
+      "compound_uid": "comp-27cbd93fcb1d446b",
+      "mz_rt_reference_uid": "mzrt-ref-0781090d5e2a4183",
+      "mz_rt_experimental_uid": "mzrt-exp-d8c21cbc5415450f"
+    },
+    {
+      "compound_uid": "comp-60a69182eced44d7",
+      "mz_rt_reference_uid": "mzrt-ref-874aa936a56d4088",
+      "mz_rt_experimental_uid": "mzrt-exp-7b0d13ebe7894c3a"
+    },
+    {
+      "compound_uid": "comp-64400e5008604ef7",
+      "mz_rt_reference_uid": "mzrt-ref-80cb01694c7c437e",
+      "mz_rt_experimental_uid": "mzrt-exp-dce2e2ab4239473b"
+    },
+    {
+      "compound_uid": "comp-36dc7f4bb2ce42cb",
+      "mz_rt_reference_uid": "mzrt-ref-8d027ec65cbe41a3",
+      "mz_rt_experimental_uid": "mzrt-exp-15473f4e710842b0"
+    },
+    {
+      "compound_uid": "comp-857c6137ef694344",
+      "mz_rt_reference_uid": "mzrt-ref-be7e28d988464e77",
+      "mz_rt_experimental_uid": "mzrt-exp-976aca34fe20426e"
+    },
+    {
+      "compound_uid": "comp-5ab0741ba4fd43b4",
+      "mz_rt_reference_uid": "mzrt-ref-09e5e4c6538144b1",
+      "mz_rt_experimental_uid": "mzrt-exp-44ef9530a2c84e54"
+    },
+    {
+      "compound_uid": "comp-71807ecb676f48ce",
+      "mz_rt_reference_uid": "mzrt-ref-2b013bf0e3f3471a",
+      "mz_rt_experimental_uid": "mzrt-exp-d080bf19cb904d72"
+    },
+    {
+      "compound_uid": "comp-dd274c0c07f44df0",
+      "mz_rt_reference_uid": "mzrt-ref-43885c2f7d104324",
+      "mz_rt_experimental_uid": "mzrt-exp-e464a481965d4835"
+    },
+    {
+      "compound_uid": "comp-4493ceedd452451e",
+      "mz_rt_reference_uid": "mzrt-ref-fb9037741cc04787",
+      "mz_rt_experimental_uid": "mzrt-exp-22156abf28304a82"
+    },
+    {
+      "compound_uid": "comp-12e23ab3672348fb",
+      "mz_rt_reference_uid": "mzrt-ref-799e6b5d5a494523",
+      "mz_rt_experimental_uid": "mzrt-exp-43108a9c4d66442d"
+    },
+    {
+      "compound_uid": "comp-14e5f8c35b5f4edb",
+      "mz_rt_reference_uid": "mzrt-ref-80da9d2758de46c9",
+      "mz_rt_experimental_uid": "mzrt-exp-817dd78c1e364444"
+    },
+    {
+      "compound_uid": "comp-f0f3950afb1b4abb",
+      "mz_rt_reference_uid": "mzrt-ref-60a7a8a3b37c431d",
+      "mz_rt_experimental_uid": "mzrt-exp-3b0885309c3a41d7"
+    },
+    {
+      "compound_uid": "comp-2f852ba761d14ce9",
+      "mz_rt_reference_uid": "mzrt-ref-843996e1d23a448c",
+      "mz_rt_experimental_uid": "mzrt-exp-00dbeca711694b99"
+    },
+    {
+      "compound_uid": "comp-7d60aa678db9437e",
+      "mz_rt_reference_uid": "mzrt-ref-f1678ae9bd21474b",
+      "mz_rt_experimental_uid": "mzrt-exp-204d4600871e42cd"
+    },
+    {
+      "compound_uid": "comp-101c2655cbc54a83",
+      "mz_rt_reference_uid": "mzrt-ref-370c0d9055384670",
+      "mz_rt_experimental_uid": "mzrt-exp-5f7847a49f7f4ee8"
+    },
+    {
+      "compound_uid": "comp-d74665a8656c48e2",
+      "mz_rt_reference_uid": "mzrt-ref-a8af32df7cff4014",
+      "mz_rt_experimental_uid": "mzrt-exp-15676d7b8a254144"
+    },
+    {
+      "compound_uid": "comp-74c5907268024060",
+      "mz_rt_reference_uid": "mzrt-ref-a8e7fc3ececf4657",
+      "mz_rt_experimental_uid": "mzrt-exp-05386c7d017845c2"
+    },
+    {
+      "compound_uid": "comp-8bc034c73fc14689",
+      "mz_rt_reference_uid": "mzrt-ref-0167daa7991945f6",
+      "mz_rt_experimental_uid": "mzrt-exp-afed525e939543a6"
+    },
+    {
+      "compound_uid": "comp-2eb68d4fbbf5476f",
+      "mz_rt_reference_uid": "mzrt-ref-4330565a6e184f7a",
+      "mz_rt_experimental_uid": "mzrt-exp-e46a00a0afd44c92"
+    },
+    {
+      "compound_uid": "comp-4e0685512a3d4934",
+      "mz_rt_reference_uid": "mzrt-ref-56c3829a648a4e52",
+      "mz_rt_experimental_uid": "mzrt-exp-5900798d94ba4dbb"
+    },
+    {
+      "compound_uid": "comp-9cb530119cad4198",
+      "mz_rt_reference_uid": "mzrt-ref-ce75596a6e6848d7",
+      "mz_rt_experimental_uid": "mzrt-exp-7084cc21f20a4309"
+    },
+    {
+      "compound_uid": "comp-90dac0b012e840bb",
+      "mz_rt_reference_uid": "mzrt-ref-5b581bcc485d49ff",
+      "mz_rt_experimental_uid": "mzrt-exp-a202be26094b4556"
+    },
+    {
+      "compound_uid": "comp-e004d46c3fd048ca",
+      "mz_rt_reference_uid": "mzrt-ref-7f5128115c9e489a",
+      "mz_rt_experimental_uid": "mzrt-exp-6798e677667e4bb0"
+    },
+    {
+      "compound_uid": "comp-12a9b023eea04c41",
+      "mz_rt_reference_uid": "mzrt-ref-73d2034363b148ad",
+      "mz_rt_experimental_uid": "mzrt-exp-f3c33de9f02e4009"
+    },
+    {
+      "compound_uid": "comp-fca73f12d5a04980",
+      "mz_rt_reference_uid": "mzrt-ref-c484107f4d4d420f",
+      "mz_rt_experimental_uid": "mzrt-exp-92b98dfeeb3d4143"
+    },
+    {
+      "compound_uid": "comp-2c6c54c5b66e4955",
+      "mz_rt_reference_uid": "mzrt-ref-8fc44e55796c4ede",
+      "mz_rt_experimental_uid": "mzrt-exp-31585c370d6047a0"
+    },
+    {
+      "compound_uid": "comp-51736ba2e6ed4067",
+      "mz_rt_reference_uid": "mzrt-ref-5b37eb546f4f47ec",
+      "mz_rt_experimental_uid": "mzrt-exp-0b2b955073024c1b"
+    },
+    {
+      "compound_uid": "comp-6468fb2f650549c5",
+      "mz_rt_reference_uid": "mzrt-ref-36ba741e170f4ed4",
+      "mz_rt_experimental_uid": "mzrt-exp-9f287afb47f94643"
+    },
+    {
+      "compound_uid": "comp-0a085e788f1e40ec",
+      "mz_rt_reference_uid": "mzrt-ref-baa326ae9d1b47dc",
+      "mz_rt_experimental_uid": "mzrt-exp-4e028da23e44422e"
+    },
+    {
+      "compound_uid": "comp-6039b63204a7477d",
+      "mz_rt_reference_uid": "mzrt-ref-8aa5b8ea612b452d",
+      "mz_rt_experimental_uid": "mzrt-exp-ce09a82fb9de4ca4"
+    },
+    {
+      "compound_uid": "comp-74e1805e3a314791",
+      "mz_rt_reference_uid": "mzrt-ref-bca66c09afba48ce",
+      "mz_rt_experimental_uid": "mzrt-exp-2b674824fb314075"
+    },
+    {
+      "compound_uid": "comp-f32314a608644fe9",
+      "mz_rt_reference_uid": "mzrt-ref-6a1409af0b00463a",
+      "mz_rt_experimental_uid": "mzrt-exp-c118ef6cf3984b03"
+    },
+    {
+      "compound_uid": "comp-d899db25ab2f49ec",
+      "mz_rt_reference_uid": "mzrt-ref-26ff9a194f7c4c99",
+      "mz_rt_experimental_uid": "mzrt-exp-e2eee0485da04e21"
+    },
+    {
+      "compound_uid": "comp-1cb11f4437824596",
+      "mz_rt_reference_uid": "mzrt-ref-b4f21476738b48e0",
+      "mz_rt_experimental_uid": "mzrt-exp-bd6d669f21ff486e"
+    },
+    {
+      "compound_uid": "comp-59065f48cc1a4796",
+      "mz_rt_reference_uid": "mzrt-ref-e699686de6d74bf1",
+      "mz_rt_experimental_uid": "mzrt-exp-446d9d434fea467d"
+    },
+    {
+      "compound_uid": "comp-90f3438d03104b91",
+      "mz_rt_reference_uid": "mzrt-ref-94341c1042134519",
+      "mz_rt_experimental_uid": "mzrt-exp-fc56e98fde934a78"
+    },
+    {
+      "compound_uid": "comp-64802728cdc3409f",
+      "mz_rt_reference_uid": "mzrt-ref-b2c3570eaa744be1",
+      "mz_rt_experimental_uid": "mzrt-exp-5d175e6c87c64ced"
+    },
+    {
+      "compound_uid": "comp-685dede2c0b54c1c",
+      "mz_rt_reference_uid": "mzrt-ref-85f97d5045034cb5",
+      "mz_rt_experimental_uid": "mzrt-exp-c339b381b1774ba5"
+    },
+    {
+      "compound_uid": "comp-a31aabb65f7e4c21",
+      "mz_rt_reference_uid": "mzrt-ref-08c38948549a4065",
+      "mz_rt_experimental_uid": "mzrt-exp-34f69aaa9ae24bf1"
+    },
+    {
+      "compound_uid": "comp-5ae0d8c8f4984e2b",
+      "mz_rt_reference_uid": "mzrt-ref-b5318603bbd64402",
+      "mz_rt_experimental_uid": "mzrt-exp-071a856605134fc1"
+    },
+    {
+      "compound_uid": "comp-ead0f66502fc4077",
+      "mz_rt_reference_uid": "mzrt-ref-fc88a40a43d74595",
+      "mz_rt_experimental_uid": "mzrt-exp-87c3a80a336d44a5"
+    },
+    {
+      "compound_uid": "comp-523b8bc3e1254d1d",
+      "mz_rt_reference_uid": "mzrt-ref-d5943ce0c8f243ab",
+      "mz_rt_experimental_uid": "mzrt-exp-84d357bc843c43c6"
+    },
+    {
+      "compound_uid": "comp-ac154463fcdb400f",
+      "mz_rt_reference_uid": "mzrt-ref-88ace90e448e43c3",
+      "mz_rt_experimental_uid": "mzrt-exp-7cb73ff055974b48"
+    },
+    {
+      "compound_uid": "comp-26ee282d046f493f",
+      "mz_rt_reference_uid": "mzrt-ref-e1bffac37e864530",
+      "mz_rt_experimental_uid": "mzrt-exp-33e0c528d6ff4dd5"
+    },
+    {
+      "compound_uid": "comp-864f25e925534248",
+      "mz_rt_reference_uid": "mzrt-ref-6aed7fe487914998",
+      "mz_rt_experimental_uid": "mzrt-exp-3f26d0f2c65f4375"
+    },
+    {
+      "compound_uid": "comp-0fc0a428d3454e1a",
+      "mz_rt_reference_uid": "mzrt-ref-b9a365df5f254c73",
+      "mz_rt_experimental_uid": "mzrt-exp-cf2c57d64b6e4908"
+    },
+    {
+      "compound_uid": "comp-63bcf91505674dd0",
+      "mz_rt_reference_uid": "mzrt-ref-b1ee75eafd934476",
+      "mz_rt_experimental_uid": "mzrt-exp-50a3e60289cb46f0"
+    },
+    {
+      "compound_uid": "comp-cce7fe636f0c47d0",
+      "mz_rt_reference_uid": "mzrt-ref-d9bbcf30fe574a9d",
+      "mz_rt_experimental_uid": "mzrt-exp-22ab29ce9d764e2d"
+    },
+    {
+      "compound_uid": "comp-084ae137b6714ab6",
+      "mz_rt_reference_uid": "mzrt-ref-74352db00b904470",
+      "mz_rt_experimental_uid": "mzrt-exp-65f33f9cb7084c8e"
+    },
+    {
+      "compound_uid": "comp-c761c12445ac4ea8",
+      "mz_rt_reference_uid": "mzrt-ref-3aca12b98cc24fcf",
+      "mz_rt_experimental_uid": "mzrt-exp-4e9e7460cf864c48"
+    },
+    {
+      "compound_uid": "comp-089fadab09174f36",
+      "mz_rt_reference_uid": "mzrt-ref-ef34747a0bfb496f",
+      "mz_rt_experimental_uid": "mzrt-exp-a547c52932de4fcb"
+    },
+    {
+      "compound_uid": "comp-0f34c8fe46824d09",
+      "mz_rt_reference_uid": "mzrt-ref-595084e05d534e66",
+      "mz_rt_experimental_uid": "mzrt-exp-983e4549b19f4b5d"
+    },
+    {
+      "compound_uid": "comp-790a45c1999a4cd7",
+      "mz_rt_reference_uid": "mzrt-ref-e845869c31bb4f65",
+      "mz_rt_experimental_uid": "mzrt-exp-e21457ab1ad648c9"
+    },
+    {
+      "compound_uid": "comp-487debe292e74d7e",
+      "mz_rt_reference_uid": "mzrt-ref-1a1f85810d6a41ba",
+      "mz_rt_experimental_uid": "mzrt-exp-40a4a057b7a74bd3"
+    },
+    {
+      "compound_uid": "comp-8e2d6324ace24a26",
+      "mz_rt_reference_uid": "mzrt-ref-46d432df55a14309",
+      "mz_rt_experimental_uid": "mzrt-exp-b7a38a3379ff4262"
+    },
+    {
+      "compound_uid": "comp-c9777b636eb648e2",
+      "mz_rt_reference_uid": "mzrt-ref-7d3c87a4b3294327",
+      "mz_rt_experimental_uid": "mzrt-exp-473a9e8586cc440e"
+    }
+  ],
+  "source_atlas_uid": "istd-atlas-HILIC-positive-c2eb0f0ffef24fc2",
+  "rtc_model_info": {
+    "polynomial_degree": 2,
+    "r_squared": 0.9997696562526108,
+    "coefficients": [
+      0.0,
+      0.9461100910200745,
+      0.002823781367884859
+    ],
+    "equation": "RT_corrected = 0.188479 + 0.946110 * RT_atlas + 0.002824 * RT_atlas\u00b2",
+    "rmse": 0.08199663729327483,
+    "qc_files_used": 2,
+    "compounds_used_for_modeling": 19,
+    "rt_correction_date": "2025-08-07T13:35:32.751557"
+  }
+}

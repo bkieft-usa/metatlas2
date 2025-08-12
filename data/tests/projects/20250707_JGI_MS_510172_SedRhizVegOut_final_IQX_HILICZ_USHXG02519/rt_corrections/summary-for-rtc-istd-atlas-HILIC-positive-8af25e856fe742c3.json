@@ -1,0 +1,596 @@
+{
+  "total_compounds": 65,
+  "corrected_compounds": 65,
+  "uncorrected_compounds": 0,
+  "correction_stats": [
+    {
+      "compound_name": "ABMBA (unlabeled)",
+      "compound_uid": "comp-48a43ab203c5441d",
+      "mz_rt_reference_uid": "mzrt-ref-8a25937d40524583",
+      "mz_rt_experimental_uid": "mzrt-exp-cbc9928b9ccb40e8",
+      "original_rt": 1.093806323,
+      "corrected_rt": 1.2267190161332642,
+      "rt_shift": 0.13291269313326426
+    },
+    {
+      "compound_name": "nicotinamide (U - 13C)",
+      "compound_uid": "comp-c6efc61eb14e4418",
+      "mz_rt_reference_uid": "mzrt-ref-f9ba6add586c4d82",
+      "mz_rt_experimental_uid": "mzrt-exp-878e5d25ceef4e56",
+      "original_rt": 1.146589137,
+      "corrected_rt": 1.2769912935971244,
+      "rt_shift": 0.13040215659712429
+    },
+    {
+      "compound_name": "nicotinamide (unlabeled)",
+      "compound_uid": "comp-913fa8561d304f60",
+      "mz_rt_reference_uid": "mzrt-ref-c140dd060a604d67",
+      "mz_rt_experimental_uid": "mzrt-exp-c3967f21e1dd4be6",
+      "original_rt": 1.146589137,
+      "corrected_rt": 1.2769912935971244,
+      "rt_shift": 0.13040215659712429
+    },
+    {
+      "compound_name": "thymine (U - 13C, 15N)",
+      "compound_uid": "comp-cc0b92306d0d4a79",
+      "mz_rt_reference_uid": "mzrt-ref-ea8f7e4141504121",
+      "mz_rt_experimental_uid": "mzrt-exp-779c8f1736764e51",
+      "original_rt": 1.255231064,
+      "corrected_rt": 1.380515349961024,
+      "rt_shift": 0.12528428596102414
+    },
+    {
+      "compound_name": "thymine (unlabeled)",
+      "compound_uid": "comp-a4697efccf394a7e",
+      "mz_rt_reference_uid": "mzrt-ref-90f796616c1144ab",
+      "mz_rt_experimental_uid": "mzrt-exp-0cb51da06ccf47d5",
+      "original_rt": 1.255231064,
+      "corrected_rt": 1.380515349961024,
+      "rt_shift": 0.12528428596102414
+    },
+    {
+      "compound_name": "uracil (U - 13C, 15N)",
+      "compound_uid": "comp-6e728e9ffea84392",
+      "mz_rt_reference_uid": "mzrt-ref-487832176ebc41f0",
+      "mz_rt_experimental_uid": "mzrt-exp-29603ffd00364511",
+      "original_rt": 1.393699506,
+      "corrected_rt": 1.5125574842803786,
+      "rt_shift": 0.1188579782803787
+    },
+    {
+      "compound_name": "uracil (unlabeled)",
+      "compound_uid": "comp-01798aa0f9204719",
+      "mz_rt_reference_uid": "mzrt-ref-3cd96d49edd4485d",
+      "mz_rt_experimental_uid": "mzrt-exp-d42b7fc000db4a96",
+      "original_rt": 1.393699506,
+      "corrected_rt": 1.5125574842803786,
+      "rt_shift": 0.1188579782803787
+    },
+    {
+      "compound_name": "adenine (U - 15N)",
+      "compound_uid": "comp-79a78a16f2874349",
+      "mz_rt_reference_uid": "mzrt-ref-d7d1097899174414",
+      "mz_rt_experimental_uid": "mzrt-exp-06ab011a363346b4",
+      "original_rt": 2.677601998,
+      "corrected_rt": 2.742030928333825,
+      "rt_shift": 0.06442893033382502
+    },
+    {
+      "compound_name": "adenine (unlabeled)",
+      "compound_uid": "comp-49b4c8c336b7422a",
+      "mz_rt_reference_uid": "mzrt-ref-9e946490f8af44fe",
+      "mz_rt_experimental_uid": "mzrt-exp-f1aae091cf754449",
+      "original_rt": 2.677601998,
+      "corrected_rt": 2.742030928333825,
+      "rt_shift": 0.06442893033382502
+    },
+    {
+      "compound_name": "hypoxanthine (U - 15N)",
+      "compound_uid": "comp-27cbd93fcb1d446b",
+      "mz_rt_reference_uid": "mzrt-ref-0781090d5e2a4183",
+      "mz_rt_experimental_uid": "mzrt-exp-80f1bcadc7b54762",
+      "original_rt": 3.102967341,
+      "corrected_rt": 3.1514166374314843,
+      "rt_shift": 0.048449296431484434
+    },
+    {
+      "compound_name": "hypoxanthine (unlabeled)",
+      "compound_uid": "comp-60a69182eced44d7",
+      "mz_rt_reference_uid": "mzrt-ref-874aa936a56d4088",
+      "mz_rt_experimental_uid": "mzrt-exp-3fc4bb88d53d42c3",
+      "original_rt": 3.102967341,
+      "corrected_rt": 3.1514166374314843,
+      "rt_shift": 0.048449296431484434
+    },
+    {
+      "compound_name": "cytosine (13C2, 15N3)",
+      "compound_uid": "comp-64400e5008604ef7",
+      "mz_rt_reference_uid": "mzrt-ref-80cb01694c7c437e",
+      "mz_rt_experimental_uid": "mzrt-exp-618a3569b91b4806",
+      "original_rt": 4.833663875,
+      "corrected_rt": 4.827633271620813,
+      "rt_shift": -0.0060306033791874825
+    },
+    {
+      "compound_name": "cytosine (unlabeled)",
+      "compound_uid": "comp-36dc7f4bb2ce42cb",
+      "mz_rt_reference_uid": "mzrt-ref-8d027ec65cbe41a3",
+      "mz_rt_experimental_uid": "mzrt-exp-1a2123d66b0843aa",
+      "original_rt": 4.833663875,
+      "corrected_rt": 4.827633271620813,
+      "rt_shift": -0.0060306033791874825
+    },
+    {
+      "compound_name": "inosine (U - 15N)",
+      "compound_uid": "comp-857c6137ef694344",
+      "mz_rt_reference_uid": "mzrt-ref-be7e28d988464e77",
+      "mz_rt_experimental_uid": "mzrt-exp-1a8c374676bb4412",
+      "original_rt": 5.434235961,
+      "corrected_rt": 5.413253752352449,
+      "rt_shift": -0.02098220864755085
+    },
+    {
+      "compound_name": "inosine (unlabeled)",
+      "compound_uid": "comp-5ab0741ba4fd43b4",
+      "mz_rt_reference_uid": "mzrt-ref-09e5e4c6538144b1",
+      "mz_rt_experimental_uid": "mzrt-exp-d337ebf3aac8436a",
+      "original_rt": 5.434235961,
+      "corrected_rt": 5.413253752352449,
+      "rt_shift": -0.02098220864755085
+    },
+    {
+      "compound_name": "guanine (U - 15N)",
+      "compound_uid": "comp-71807ecb676f48ce",
+      "mz_rt_reference_uid": "mzrt-ref-2b013bf0e3f3471a",
+      "mz_rt_experimental_uid": "mzrt-exp-5ab4af980c9d4ac4",
+      "original_rt": 6.265359988,
+      "corrected_rt": 6.227046509653605,
+      "rt_shift": -0.03831347834639498
+    },
+    {
+      "compound_name": "guanine (unlabeled)",
+      "compound_uid": "comp-dd274c0c07f44df0",
+      "mz_rt_reference_uid": "mzrt-ref-43885c2f7d104324",
+      "mz_rt_experimental_uid": "mzrt-exp-99366520b2a44d2d",
+      "original_rt": 6.265359988,
+      "corrected_rt": 6.227046509653605,
+      "rt_shift": -0.03831347834639498
+    },
+    {
+      "compound_name": "N-acetyl-glucosamine (U - 13C)",
+      "compound_uid": "comp-4493ceedd452451e",
+      "mz_rt_reference_uid": "mzrt-ref-fb9037741cc04787",
+      "mz_rt_experimental_uid": "mzrt-exp-0ff97c3a143a44d0",
+      "original_rt": 6.707815287,
+      "corrected_rt": 6.661866579513775,
+      "rt_shift": -0.04594870748622526
+    },
+    {
+      "compound_name": "N-acetyl-glucosamine (unlabeled)",
+      "compound_uid": "comp-12e23ab3672348fb",
+      "mz_rt_reference_uid": "mzrt-ref-799e6b5d5a494523",
+      "mz_rt_experimental_uid": "mzrt-exp-96ab28c412b84ad1",
+      "original_rt": 6.707815287,
+      "corrected_rt": 6.661866579513775,
+      "rt_shift": -0.04594870748622526
+    },
+    {
+      "compound_name": "mannitol (U - 13C)",
+      "compound_uid": "comp-14e5f8c35b5f4edb",
+      "mz_rt_reference_uid": "mzrt-ref-80da9d2758de46c9",
+      "mz_rt_experimental_uid": "mzrt-exp-c1fd78de6e26431b",
+      "original_rt": 9.534507075,
+      "corrected_rt": 9.465873765308032,
+      "rt_shift": -0.06863330969196824
+    },
+    {
+      "compound_name": "mannitol (unlabeled)",
+      "compound_uid": "comp-f0f3950afb1b4abb",
+      "mz_rt_reference_uid": "mzrt-ref-60a7a8a3b37c431d",
+      "mz_rt_experimental_uid": "mzrt-exp-94ef4eb740694ece",
+      "original_rt": 9.534507075,
+      "corrected_rt": 9.465873765308032,
+      "rt_shift": -0.06863330969196824
+    },
+    {
+      "compound_name": "phenylalanine (U - 13C, 15N)",
+      "compound_uid": "comp-2f852ba761d14ce9",
+      "mz_rt_reference_uid": "mzrt-ref-843996e1d23a448c",
+      "mz_rt_experimental_uid": "mzrt-exp-3851a63d83364ea9",
+      "original_rt": 8.979305704,
+      "corrected_rt": 8.911566795626896,
+      "rt_shift": -0.06773890837310326
+    },
+    {
+      "compound_name": "phenylalanine (unlabeled)",
+      "compound_uid": "comp-7d60aa678db9437e",
+      "mz_rt_reference_uid": "mzrt-ref-f1678ae9bd21474b",
+      "mz_rt_experimental_uid": "mzrt-exp-9bb41e71d27b45aa",
+      "original_rt": 8.979305704,
+      "corrected_rt": 8.911566795626896,
+      "rt_shift": -0.06773890837310326
+    },
+    {
+      "compound_name": "thiamine (U - 13C)",
+      "compound_uid": "comp-101c2655cbc54a83",
+      "mz_rt_reference_uid": "mzrt-ref-370c0d9055384670",
+      "mz_rt_experimental_uid": "mzrt-exp-723cad99ef60465d",
+      "original_rt": 9.066112444,
+      "corrected_rt": 8.998118879944066,
+      "rt_shift": -0.06799356405593393
+    },
+    {
+      "compound_name": "thiamine (unlabeled)",
+      "compound_uid": "comp-d74665a8656c48e2",
+      "mz_rt_reference_uid": "mzrt-ref-a8af32df7cff4014",
+      "mz_rt_experimental_uid": "mzrt-exp-9d9063b685af4b89",
+      "original_rt": 9.066112444,
+      "corrected_rt": 8.998118879944066,
+      "rt_shift": -0.06799356405593393
+    },
+    {
+      "compound_name": "leucine (U - 13C, 15N)",
+      "compound_uid": "comp-74c5907268024060",
+      "mz_rt_reference_uid": "mzrt-ref-a8e7fc3ececf4657",
+      "mz_rt_experimental_uid": "mzrt-exp-f7f64f39dfa148f1",
+      "original_rt": 9.319656306,
+      "corrected_rt": 9.251162622176011,
+      "rt_shift": -0.06849368382398957
+    },
+    {
+      "compound_name": "leucine (unlabeled)",
+      "compound_uid": "comp-8bc034c73fc14689",
+      "mz_rt_reference_uid": "mzrt-ref-0167daa7991945f6",
+      "mz_rt_experimental_uid": "mzrt-exp-1cc8e856c70c4da8",
+      "original_rt": 9.319656306,
+      "corrected_rt": 9.251162622176011,
+      "rt_shift": -0.06849368382398957
+    },
+    {
+      "compound_name": "isoleucine (U - 13C, 15N)",
+      "compound_uid": "comp-2eb68d4fbbf5476f",
+      "mz_rt_reference_uid": "mzrt-ref-4330565a6e184f7a",
+      "mz_rt_experimental_uid": "mzrt-exp-f986704f563d4018",
+      "original_rt": 9.70543744,
+      "corrected_rt": 9.63687925212847,
+      "rt_shift": -0.06855818787153112
+    },
+    {
+      "compound_name": "isoleucine (unlabeled)",
+      "compound_uid": "comp-4e0685512a3d4934",
+      "mz_rt_reference_uid": "mzrt-ref-56c3829a648a4e52",
+      "mz_rt_experimental_uid": "mzrt-exp-1c2d1bbb3fe84709",
+      "original_rt": 9.70543744,
+      "corrected_rt": 9.63687925212847,
+      "rt_shift": -0.06855818787153112
+    },
+    {
+      "compound_name": "tryptophan (U - 13C, 15N)",
+      "compound_uid": "comp-9cb530119cad4198",
+      "mz_rt_reference_uid": "mzrt-ref-ce75596a6e6848d7",
+      "mz_rt_experimental_uid": "mzrt-exp-62fb03b7be5241ec",
+      "original_rt": 10.15664925,
+      "corrected_rt": 10.089082050208336,
+      "rt_shift": -0.0675671997916627
+    },
+    {
+      "compound_name": "tryptophan (unlabeled)",
+      "compound_uid": "comp-90dac0b012e840bb",
+      "mz_rt_reference_uid": "mzrt-ref-5b581bcc485d49ff",
+      "mz_rt_experimental_uid": "mzrt-exp-bf38fe9202304af8",
+      "original_rt": 10.15664925,
+      "corrected_rt": 10.089082050208336,
+      "rt_shift": -0.0675671997916627
+    },
+    {
+      "compound_name": "methionine (U - 13C, 15N)",
+      "compound_uid": "comp-e004d46c3fd048ca",
+      "mz_rt_reference_uid": "mzrt-ref-7f5128115c9e489a",
+      "mz_rt_experimental_uid": "mzrt-exp-e966291c254b4645",
+      "original_rt": 10.4409554,
+      "corrected_rt": 10.374603103859718,
+      "rt_shift": -0.06635229614028226
+    },
+    {
+      "compound_name": "methionine (unlabeled)",
+      "compound_uid": "comp-12a9b023eea04c41",
+      "mz_rt_reference_uid": "mzrt-ref-73d2034363b148ad",
+      "mz_rt_experimental_uid": "mzrt-exp-caab424d5a824f16",
+      "original_rt": 10.4409554,
+      "corrected_rt": 10.374603103859718,
+      "rt_shift": -0.06635229614028226
+    },
+    {
+      "compound_name": "proline (U - 13C, 15N)",
+      "compound_uid": "comp-fca73f12d5a04980",
+      "mz_rt_reference_uid": "mzrt-ref-c484107f4d4d420f",
+      "mz_rt_experimental_uid": "mzrt-exp-915ae49a5a394b60",
+      "original_rt": 10.91977168,
+      "corrected_rt": 10.856497269565896,
+      "rt_shift": -0.06327441043410431
+    },
+    {
+      "compound_name": "proline (unlabeled)",
+      "compound_uid": "comp-2c6c54c5b66e4955",
+      "mz_rt_reference_uid": "mzrt-ref-8fc44e55796c4ede",
+      "mz_rt_experimental_uid": "mzrt-exp-1025c823d127432d",
+      "original_rt": 10.91977168,
+      "corrected_rt": 10.856497269565896,
+      "rt_shift": -0.06327441043410431
+    },
+    {
+      "compound_name": "valine (U - 13C, 15N)",
+      "compound_uid": "comp-51736ba2e6ed4067",
+      "mz_rt_reference_uid": "mzrt-ref-5b37eb546f4f47ec",
+      "mz_rt_experimental_uid": "mzrt-exp-d571d76be055495d",
+      "original_rt": 11.11600911,
+      "corrected_rt": 11.054370204758444,
+      "rt_shift": -0.061638905241556685
+    },
+    {
+      "compound_name": "valine (unlabeled)",
+      "compound_uid": "comp-6468fb2f650549c5",
+      "mz_rt_reference_uid": "mzrt-ref-36ba741e170f4ed4",
+      "mz_rt_experimental_uid": "mzrt-exp-3be5fce965e746fc",
+      "original_rt": 11.11600911,
+      "corrected_rt": 11.054370204758444,
+      "rt_shift": -0.061638905241556685
+    },
+    {
+      "compound_name": "tyrosine (U - 13C, 15N)",
+      "compound_uid": "comp-0a085e788f1e40ec",
+      "mz_rt_reference_uid": "mzrt-ref-baa326ae9d1b47dc",
+      "mz_rt_experimental_uid": "mzrt-exp-a545bc3628e148d1",
+      "original_rt": 11.85515564,
+      "corrected_rt": 11.801629339530052,
+      "rt_shift": -0.05352630046994733
+    },
+    {
+      "compound_name": "tyrosine (unlabeled)",
+      "compound_uid": "comp-6039b63204a7477d",
+      "mz_rt_reference_uid": "mzrt-ref-8aa5b8ea612b452d",
+      "mz_rt_experimental_uid": "mzrt-exp-cbac0f4f89fd4263",
+      "original_rt": 11.85515564,
+      "corrected_rt": 11.801629339530052,
+      "rt_shift": -0.05352630046994733
+    },
+    {
+      "compound_name": "alanine (U - 13C, 15N)",
+      "compound_uid": "comp-74e1805e3a314791",
+      "mz_rt_reference_uid": "mzrt-ref-bca66c09afba48ce",
+      "mz_rt_experimental_uid": "mzrt-exp-8362c41202f846ba",
+      "original_rt": 13.40509074,
+      "corrected_rt": 13.378594539055191,
+      "rt_shift": -0.02649620094480909
+    },
+    {
+      "compound_name": "alanine (unlabeled)",
+      "compound_uid": "comp-f32314a608644fe9",
+      "mz_rt_reference_uid": "mzrt-ref-6a1409af0b00463a",
+      "mz_rt_experimental_uid": "mzrt-exp-0844740a74454286",
+      "original_rt": 13.40509074,
+      "corrected_rt": 13.378594539055191,
+      "rt_shift": -0.02649620094480909
+    },
+    {
+      "compound_name": "threonine (U - 13C, 15N)",
+      "compound_uid": "comp-d899db25ab2f49ec",
+      "mz_rt_reference_uid": "mzrt-ref-26ff9a194f7c4c99",
+      "mz_rt_experimental_uid": "mzrt-exp-82d1c3c887f64b08",
+      "original_rt": 13.48957226,
+      "corrected_rt": 13.464939276954036,
+      "rt_shift": -0.024632983045963286
+    },
+    {
+      "compound_name": "threonine (unlabeled)",
+      "compound_uid": "comp-1cb11f4437824596",
+      "mz_rt_reference_uid": "mzrt-ref-b4f21476738b48e0",
+      "mz_rt_experimental_uid": "mzrt-exp-dbbb21f5b91d40e9",
+      "original_rt": 13.48957226,
+      "corrected_rt": 13.464939276954036,
+      "rt_shift": -0.024632983045963286
+    },
+    {
+      "compound_name": "glycine (U - 13C, 15N)",
+      "compound_uid": "comp-59065f48cc1a4796",
+      "mz_rt_reference_uid": "mzrt-ref-e699686de6d74bf1",
+      "mz_rt_experimental_uid": "mzrt-exp-4705573ed1bb4882",
+      "original_rt": 14.10051479,
+      "corrected_rt": 14.09055570858745,
+      "rt_shift": -0.009959081412549864
+    },
+    {
+      "compound_name": "glycine (unlabeled)",
+      "compound_uid": "comp-90f3438d03104b91",
+      "mz_rt_reference_uid": "mzrt-ref-94341c1042134519",
+      "mz_rt_experimental_uid": "mzrt-exp-7e97c338eed847b4",
+      "original_rt": 14.10051479,
+      "corrected_rt": 14.09055570858745,
+      "rt_shift": -0.009959081412549864
+    },
+    {
+      "compound_name": "serine (U - 13C, 15N)",
+      "compound_uid": "comp-64802728cdc3409f",
+      "mz_rt_reference_uid": "mzrt-ref-b2c3570eaa744be1",
+      "mz_rt_experimental_uid": "mzrt-exp-9db6dc1933c4403a",
+      "original_rt": 14.31261357,
+      "corrected_rt": 14.308241712043994,
+      "rt_shift": -0.004371857956005698
+    },
+    {
+      "compound_name": "serine (unlabeled)",
+      "compound_uid": "comp-685dede2c0b54c1c",
+      "mz_rt_reference_uid": "mzrt-ref-85f97d5045034cb5",
+      "mz_rt_experimental_uid": "mzrt-exp-023a61f37c2a4c3d",
+      "original_rt": 14.31261357,
+      "corrected_rt": 14.308241712043994,
+      "rt_shift": -0.004371857956005698
+    },
+    {
+      "compound_name": "glutamine (U - 13C, 15N)",
+      "compound_uid": "comp-a31aabb65f7e4c21",
+      "mz_rt_reference_uid": "mzrt-ref-08c38948549a4065",
+      "mz_rt_experimental_uid": "mzrt-exp-6ea1018412d94d22",
+      "original_rt": 14.31275825,
+      "corrected_rt": 14.30839028999557,
+      "rt_shift": -0.0043679600044299605
+    },
+    {
+      "compound_name": "glutamine (unlabeled)",
+      "compound_uid": "comp-5ae0d8c8f4984e2b",
+      "mz_rt_reference_uid": "mzrt-ref-b5318603bbd64402",
+      "mz_rt_experimental_uid": "mzrt-exp-198f915882b440e4",
+      "original_rt": 14.31275825,
+      "corrected_rt": 14.30839028999557,
+      "rt_shift": -0.0043679600044299605
+    },
+    {
+      "compound_name": "asparagine (U - 13C, 15N)",
+      "compound_uid": "comp-ead0f66502fc4077",
+      "mz_rt_reference_uid": "mzrt-ref-fc88a40a43d74595",
+      "mz_rt_experimental_uid": "mzrt-exp-f134645426d4486f",
+      "original_rt": 14.36808894,
+      "corrected_rt": 14.365220360520594,
+      "rt_shift": -0.002868579479406108
+    },
+    {
+      "compound_name": "asparagine (unlabeled)",
+      "compound_uid": "comp-523b8bc3e1254d1d",
+      "mz_rt_reference_uid": "mzrt-ref-d5943ce0c8f243ab",
+      "mz_rt_experimental_uid": "mzrt-exp-74a4971692384230",
+      "original_rt": 14.36808894,
+      "corrected_rt": 14.365220360520594,
+      "rt_shift": -0.002868579479406108
+    },
+    {
+      "compound_name": "trehalose (U - 13C)",
+      "compound_uid": "comp-ac154463fcdb400f",
+      "mz_rt_reference_uid": "mzrt-ref-88ace90e448e43c3",
+      "mz_rt_experimental_uid": "mzrt-exp-a1e787201a6d4e6c",
+      "original_rt": 14.44384736,
+      "corrected_rt": 14.443059765825737,
+      "rt_shift": -0.0007875941742625514
+    },
+    {
+      "compound_name": "trehalose (unlabeled)",
+      "compound_uid": "comp-26ee282d046f493f",
+      "mz_rt_reference_uid": "mzrt-ref-e1bffac37e864530",
+      "mz_rt_experimental_uid": "mzrt-exp-b6d4451097334072",
+      "original_rt": 14.44384736,
+      "corrected_rt": 14.443059765825737,
+      "rt_shift": -0.0007875941742625514
+    },
+    {
+      "compound_name": "histidine (U - 13C, 15N)",
+      "compound_uid": "comp-864f25e925534248",
+      "mz_rt_reference_uid": "mzrt-ref-6aed7fe487914998",
+      "mz_rt_experimental_uid": "mzrt-exp-754ee5c046864b18",
+      "original_rt": 14.87779878,
+      "corrected_rt": 14.889555857409265,
+      "rt_shift": 0.011757077409265904
+    },
+    {
+      "compound_name": "histidine (unlabeled)",
+      "compound_uid": "comp-0fc0a428d3454e1a",
+      "mz_rt_reference_uid": "mzrt-ref-b9a365df5f254c73",
+      "mz_rt_experimental_uid": "mzrt-exp-ca5d51d3ecbd45c6",
+      "original_rt": 14.87779878,
+      "corrected_rt": 14.889555857409265,
+      "rt_shift": 0.011757077409265904
+    },
+    {
+      "compound_name": "glutamic acid (U - 13C, 15N)",
+      "compound_uid": "comp-63bcf91505674dd0",
+      "mz_rt_reference_uid": "mzrt-ref-b1ee75eafd934476",
+      "mz_rt_experimental_uid": "mzrt-exp-d7d609821c4745bc",
+      "original_rt": 15.93538957,
+      "corrected_rt": 15.982173840918328,
+      "rt_shift": 0.046784270918328374
+    },
+    {
+      "compound_name": "glutamic acid (unlabeled)",
+      "compound_uid": "comp-cce7fe636f0c47d0",
+      "mz_rt_reference_uid": "mzrt-ref-d9bbcf30fe574a9d",
+      "mz_rt_experimental_uid": "mzrt-exp-9e735d1fbb074a83",
+      "original_rt": 15.93538957,
+      "corrected_rt": 15.982173840918328,
+      "rt_shift": 0.046784270918328374
+    },
+    {
+      "compound_name": "aspartic acid (U - 13C, 15N)",
+      "compound_uid": "comp-084ae137b6714ab6",
+      "mz_rt_reference_uid": "mzrt-ref-74352db00b904470",
+      "mz_rt_experimental_uid": "mzrt-exp-8f9b0578ba354cc5",
+      "original_rt": 16.13036002,
+      "corrected_rt": 16.184291275376772,
+      "rt_shift": 0.05393125537677079
+    },
+    {
+      "compound_name": "aspartic acid (unlabeled)",
+      "compound_uid": "comp-c761c12445ac4ea8",
+      "mz_rt_reference_uid": "mzrt-ref-3aca12b98cc24fcf",
+      "mz_rt_experimental_uid": "mzrt-exp-c003641baa62462e",
+      "original_rt": 16.13036002,
+      "corrected_rt": 16.184291275376772,
+      "rt_shift": 0.05393125537677079
+    },
+    {
+      "compound_name": "cystine (U - 13C, 15N)",
+      "compound_uid": "comp-089fadab09174f36",
+      "mz_rt_reference_uid": "mzrt-ref-ef34747a0bfb496f",
+      "mz_rt_experimental_uid": "mzrt-exp-6e8d22ec27684318",
+      "original_rt": 16.90430834,
+      "corrected_rt": 16.988727565108988,
+      "rt_shift": 0.08441922510898792
+    },
+    {
+      "compound_name": "cystine (unlabeled)",
+      "compound_uid": "comp-0f34c8fe46824d09",
+      "mz_rt_reference_uid": "mzrt-ref-595084e05d534e66",
+      "mz_rt_experimental_uid": "mzrt-exp-9c29757035f64748",
+      "original_rt": 16.90430834,
+      "corrected_rt": 16.988727565108988,
+      "rt_shift": 0.08441922510898792
+    },
+    {
+      "compound_name": "arginine (U - 13C, 15N)",
+      "compound_uid": "comp-790a45c1999a4cd7",
+      "mz_rt_reference_uid": "mzrt-ref-e845869c31bb4f65",
+      "mz_rt_experimental_uid": "mzrt-exp-5b07c3ae71404d9d",
+      "original_rt": 16.93991539,
+      "corrected_rt": 17.025818673491,
+      "rt_shift": 0.08590328349099963
+    },
+    {
+      "compound_name": "arginine (unlabeled)",
+      "compound_uid": "comp-487debe292e74d7e",
+      "mz_rt_reference_uid": "mzrt-ref-1a1f85810d6a41ba",
+      "mz_rt_experimental_uid": "mzrt-exp-06335174187f4863",
+      "original_rt": 16.93991539,
+      "corrected_rt": 17.025818673491,
+      "rt_shift": 0.08590328349099963
+    },
+    {
+      "compound_name": "lysine (U - 13C, 15N)",
+      "compound_uid": "comp-8e2d6324ace24a26",
+      "mz_rt_reference_uid": "mzrt-ref-46d432df55a14309",
+      "mz_rt_experimental_uid": "mzrt-exp-2d67928047c2459f",
+      "original_rt": 17.01131041,
+      "corrected_rt": 17.10021092281733,
+      "rt_shift": 0.0889005128173288
+    },
+    {
+      "compound_name": "lysine (unlabeled)",
+      "compound_uid": "comp-c9777b636eb648e2",
+      "mz_rt_reference_uid": "mzrt-ref-7d3c87a4b3294327",
+      "mz_rt_experimental_uid": "mzrt-exp-f3bc8325729343d0",
+      "original_rt": 17.01131041,
+      "corrected_rt": 17.10021092281733,
+      "rt_shift": 0.0889005128173288
+    }
+  ],
+  "mean_correction": 0.0026781107237318644,
+  "std_correction": 0.06567721745537074,
+  "min_correction": -0.06863330969196824,
+  "max_correction": 0.13291269313326426
+}

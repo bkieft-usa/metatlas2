@@ -1,0 +1,326 @@
+{
+  "compound_to_mz_rt_refs": {
+    "comp-48a43ab203c5441d": [
+      "mzrt-ref-8a25937d40524583",
+      "mzrt-ref-3818e77a27dd40ca"
+    ],
+    "comp-c6efc61eb14e4418": [
+      "mzrt-ref-f9ba6add586c4d82"
+    ],
+    "comp-913fa8561d304f60": [
+      "mzrt-ref-c140dd060a604d67"
+    ],
+    "comp-cc0b92306d0d4a79": [
+      "mzrt-ref-ea8f7e4141504121",
+      "mzrt-ref-194142b8c3504766"
+    ],
+    "comp-a4697efccf394a7e": [
+      "mzrt-ref-90f796616c1144ab",
+      "mzrt-ref-1c7aea0351314334"
+    ],
+    "comp-6e728e9ffea84392": [
+      "mzrt-ref-487832176ebc41f0",
+      "mzrt-ref-c0bb88e9020f4502"
+    ],
+    "comp-01798aa0f9204719": [
+      "mzrt-ref-3cd96d49edd4485d",
+      "mzrt-ref-76a8df8dee3c4f7f"
+    ],
+    "comp-79a78a16f2874349": [
+      "mzrt-ref-d7d1097899174414",
+      "mzrt-ref-c8b643cd39974639"
+    ],
+    "comp-49b4c8c336b7422a": [
+      "mzrt-ref-9e946490f8af44fe",
+      "mzrt-ref-0a2b552290ed4f64"
+    ],
+    "comp-27cbd93fcb1d446b": [
+      "mzrt-ref-0781090d5e2a4183",
+      "mzrt-ref-7da0562ce5f64f2e"
+    ],
+    "comp-60a69182eced44d7": [
+      "mzrt-ref-874aa936a56d4088",
+      "mzrt-ref-c4716aa6d2964eb0"
+    ],
+    "comp-64400e5008604ef7": [
+      "mzrt-ref-80cb01694c7c437e",
+      "mzrt-ref-37a37048d8fd4d37"
+    ],
+    "comp-36dc7f4bb2ce42cb": [
+      "mzrt-ref-8d027ec65cbe41a3",
+      "mzrt-ref-bbda381b736c4a79"
+    ],
+    "comp-857c6137ef694344": [
+      "mzrt-ref-be7e28d988464e77",
+      "mzrt-ref-2af9cc9360914b7f"
+    ],
+    "comp-5ab0741ba4fd43b4": [
+      "mzrt-ref-09e5e4c6538144b1",
+      "mzrt-ref-44a5d06fb3324737"
+    ],
+    "comp-71807ecb676f48ce": [
+      "mzrt-ref-2b013bf0e3f3471a",
+      "mzrt-ref-3f2543ec70aa4556"
+    ],
+    "comp-dd274c0c07f44df0": [
+      "mzrt-ref-43885c2f7d104324",
+      "mzrt-ref-9ece313abc6b4581"
+    ],
+    "comp-4493ceedd452451e": [
+      "mzrt-ref-fb9037741cc04787",
+      "mzrt-ref-cb3687d01ca344bb"
+    ],
+    "comp-12e23ab3672348fb": [
+      "mzrt-ref-799e6b5d5a494523",
+      "mzrt-ref-10345f34863d4b0d"
+    ],
+    "comp-14e5f8c35b5f4edb": [
+      "mzrt-ref-80da9d2758de46c9",
+      "mzrt-ref-141cd5ab58f543b8"
+    ],
+    "comp-f0f3950afb1b4abb": [
+      "mzrt-ref-60a7a8a3b37c431d",
+      "mzrt-ref-71af755202194418"
+    ],
+    "comp-2f852ba761d14ce9": [
+      "mzrt-ref-843996e1d23a448c",
+      "mzrt-ref-decb40943fc64126"
+    ],
+    "comp-7d60aa678db9437e": [
+      "mzrt-ref-f1678ae9bd21474b",
+      "mzrt-ref-68dd0fb8b4bc4e3c"
+    ],
+    "comp-101c2655cbc54a83": [
+      "mzrt-ref-370c0d9055384670"
+    ],
+    "comp-d74665a8656c48e2": [
+      "mzrt-ref-a8af32df7cff4014"
+    ],
+    "comp-74c5907268024060": [
+      "mzrt-ref-a8e7fc3ececf4657",
+      "mzrt-ref-27f08b2149cb4286"
+    ],
+    "comp-8bc034c73fc14689": [
+      "mzrt-ref-0167daa7991945f6",
+      "mzrt-ref-e0f165a97f3f40f8"
+    ],
+    "comp-2eb68d4fbbf5476f": [
+      "mzrt-ref-4330565a6e184f7a",
+      "mzrt-ref-383f41f239884d14"
+    ],
+    "comp-4e0685512a3d4934": [
+      "mzrt-ref-56c3829a648a4e52",
+      "mzrt-ref-a82d7ea663cf4e58"
+    ],
+    "comp-9cb530119cad4198": [
+      "mzrt-ref-ce75596a6e6848d7",
+      "mzrt-ref-d8c936f053e94729"
+    ],
+    "comp-90dac0b012e840bb": [
+      "mzrt-ref-5b581bcc485d49ff",
+      "mzrt-ref-bf0940ebb69b4a3f"
+    ],
+    "comp-e004d46c3fd048ca": [
+      "mzrt-ref-7f5128115c9e489a",
+      "mzrt-ref-5239d391b98b4a93"
+    ],
+    "comp-12a9b023eea04c41": [
+      "mzrt-ref-73d2034363b148ad",
+      "mzrt-ref-3030adb2aa714ac2"
+    ],
+    "comp-fca73f12d5a04980": [
+      "mzrt-ref-c484107f4d4d420f",
+      "mzrt-ref-61df8997f88c428c"
+    ],
+    "comp-2c6c54c5b66e4955": [
+      "mzrt-ref-8fc44e55796c4ede",
+      "mzrt-ref-4430473486654968"
+    ],
+    "comp-51736ba2e6ed4067": [
+      "mzrt-ref-5b37eb546f4f47ec",
+      "mzrt-ref-f1f4ad9c969c434f"
+    ],
+    "comp-6468fb2f650549c5": [
+      "mzrt-ref-36ba741e170f4ed4",
+      "mzrt-ref-c767ee48a22a4511"
+    ],
+    "comp-0a085e788f1e40ec": [
+      "mzrt-ref-baa326ae9d1b47dc",
+      "mzrt-ref-96fdf0087fa34672"
+    ],
+    "comp-6039b63204a7477d": [
+      "mzrt-ref-8aa5b8ea612b452d",
+      "mzrt-ref-028ff158b5604cff"
+    ],
+    "comp-74e1805e3a314791": [
+      "mzrt-ref-bca66c09afba48ce",
+      "mzrt-ref-f620b383d7a0433b"
+    ],
+    "comp-f32314a608644fe9": [
+      "mzrt-ref-6a1409af0b00463a",
+      "mzrt-ref-21107f93c1374913"
+    ],
+    "comp-d899db25ab2f49ec": [
+      "mzrt-ref-26ff9a194f7c4c99",
+      "mzrt-ref-646bd88dffb74cea"
+    ],
+    "comp-1cb11f4437824596": [
+      "mzrt-ref-b4f21476738b48e0",
+      "mzrt-ref-ae95b7b15a0d4888"
+    ],
+    "comp-59065f48cc1a4796": [
+      "mzrt-ref-e699686de6d74bf1",
+      "mzrt-ref-ff564e3b23054a6b"
+    ],
+    "comp-90f3438d03104b91": [
+      "mzrt-ref-94341c1042134519",
+      "mzrt-ref-44892838dab54962"
+    ],
+    "comp-64802728cdc3409f": [
+      "mzrt-ref-b2c3570eaa744be1",
+      "mzrt-ref-22e7529d9ad64216"
+    ],
+    "comp-685dede2c0b54c1c": [
+      "mzrt-ref-85f97d5045034cb5",
+      "mzrt-ref-3553335b419c4932"
+    ],
+    "comp-a31aabb65f7e4c21": [
+      "mzrt-ref-08c38948549a4065",
+      "mzrt-ref-5a6f6baba1bc4fcc"
+    ],
+    "comp-5ae0d8c8f4984e2b": [
+      "mzrt-ref-b5318603bbd64402",
+      "mzrt-ref-a63ee8e1d6da4e90"
+    ],
+    "comp-ead0f66502fc4077": [
+      "mzrt-ref-fc88a40a43d74595",
+      "mzrt-ref-6646e1fd325c45f9"
+    ],
+    "comp-523b8bc3e1254d1d": [
+      "mzrt-ref-d5943ce0c8f243ab",
+      "mzrt-ref-0d167a2b6f1e4f84"
+    ],
+    "comp-ac154463fcdb400f": [
+      "mzrt-ref-88ace90e448e43c3",
+      "mzrt-ref-e7b97d8b70d348b9"
+    ],
+    "comp-26ee282d046f493f": [
+      "mzrt-ref-e1bffac37e864530",
+      "mzrt-ref-ac2d058673164a5f"
+    ],
+    "comp-864f25e925534248": [
+      "mzrt-ref-6aed7fe487914998",
+      "mzrt-ref-9bd04d9d346649fc"
+    ],
+    "comp-0fc0a428d3454e1a": [
+      "mzrt-ref-b9a365df5f254c73",
+      "mzrt-ref-0e1403e541d64382"
+    ],
+    "comp-63bcf91505674dd0": [
+      "mzrt-ref-b1ee75eafd934476",
+      "mzrt-ref-cc7452fc408b474f"
+    ],
+    "comp-cce7fe636f0c47d0": [
+      "mzrt-ref-d9bbcf30fe574a9d",
+      "mzrt-ref-0e81903cdbd24f7c"
+    ],
+    "comp-084ae137b6714ab6": [
+      "mzrt-ref-74352db00b904470",
+      "mzrt-ref-ade167b928a545cd"
+    ],
+    "comp-c761c12445ac4ea8": [
+      "mzrt-ref-3aca12b98cc24fcf",
+      "mzrt-ref-c51be72385f0432d"
+    ],
+    "comp-089fadab09174f36": [
+      "mzrt-ref-ef34747a0bfb496f",
+      "mzrt-ref-d455b4b6abd44819"
+    ],
+    "comp-0f34c8fe46824d09": [
+      "mzrt-ref-595084e05d534e66",
+      "mzrt-ref-ac721feff4d34bd0"
+    ],
+    "comp-790a45c1999a4cd7": [
+      "mzrt-ref-e845869c31bb4f65",
+      "mzrt-ref-23546179e2a44346"
+    ],
+    "comp-487debe292e74d7e": [
+      "mzrt-ref-1a1f85810d6a41ba",
+      "mzrt-ref-211c92eeecae4d96"
+    ],
+    "comp-8e2d6324ace24a26": [
+      "mzrt-ref-46d432df55a14309",
+      "mzrt-ref-b1ae7a4334fc4b54"
+    ],
+    "comp-c9777b636eb648e2": [
+      "mzrt-ref-7d3c87a4b3294327",
+      "mzrt-ref-fbd799fc0a344173"
+    ],
+    "comp-0d57819cbb8449e6": [
+      "mzrt-ref-0b80833489f34e70"
+    ],
+    "comp-ac7d35735d314e76": [
+      "mzrt-ref-da52877781bf47dc"
+    ],
+    "comp-c8e6f96bffd445ad": [
+      "mzrt-ref-17c2307750cd4159"
+    ],
+    "comp-07860c6e645447af": [
+      "mzrt-ref-8116a67c89ad4aef"
+    ],
+    "comp-a89fa88405c84e6a": [
+      "mzrt-ref-46ad614e6e8946c0"
+    ],
+    "comp-3943fff9e1e84133": [
+      "mzrt-ref-ead08820bb4b40c7"
+    ],
+    "comp-db4df2d4f5744b51": [
+      "mzrt-ref-dbe91b6cff454b9c"
+    ],
+    "comp-c3a4fab6782643af": [
+      "mzrt-ref-f3f86505c46341cb"
+    ],
+    "comp-3a43dea6ac6a478c": [
+      "mzrt-ref-48bb0f2f707f4312"
+    ],
+    "comp-bd784c951a5f4d76": [
+      "mzrt-ref-fc9f049b386b4dcf"
+    ],
+    "comp-da9979689eec4355": [
+      "mzrt-ref-2d62a7bbb9fd4a49"
+    ],
+    "comp-a4875638e3fe4051": [
+      "mzrt-ref-ecfc0dac728e4db2"
+    ],
+    "comp-9f6a44c8f8bf48be": [
+      "mzrt-ref-734cacad615e4f53"
+    ],
+    "comp-b9415ec09cff4f32": [
+      "mzrt-ref-0c617410a7554743"
+    ],
+    "comp-77a6811e41dd466f": [
+      "mzrt-ref-18569bc50b60433f"
+    ],
+    "comp-4fecf0c709994e39": [
+      "mzrt-ref-022990b2ff4745fe"
+    ],
+    "comp-9919cd5b93114beb": [
+      "mzrt-ref-718b2d91ee15486d"
+    ],
+    "comp-39fea36e29194109": [
+      "mzrt-ref-7ae6fbc0d04a4005"
+    ],
+    "comp-bcb24b78953b4bbd": [
+      "mzrt-ref-3194e30e1ea64f29"
+    ],
+    "comp-8af332586d924d72": [
+      "mzrt-ref-e033442f92484401"
+    ],
+    "comp-61e7c571f4ef403e": [
+      "mzrt-ref-ded37d337e33445b"
+    ],
+    "comp-11edb29b56744181": [
+      "mzrt-ref-d1dac4216dad449a"
+    ]
+  }
+}
