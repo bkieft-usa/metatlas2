@@ -13,8 +13,7 @@ from typing import Dict, List, Optional, Any, Tuple
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 import metatlas2.lcmsruns_tools as lrt
 
-def get_atlas_compounds_from_db(db_path: str, atlas_name: str = None, atlas_uid: str = None, 
-                               chromatography: str = None, polarity: str = None) -> Tuple[pd.DataFrame, str, str]:
+def get_atlas_compounds_from_db(db_path: str, atlas_uid: str = None) -> pd.DataFrame:
     """
     Retrieve compounds and their RT/MZ reference data from database for a specific atlas.
     Returns the DataFrame along with the atlas chromatography and polarity.
@@ -46,147 +45,84 @@ def get_atlas_compounds_from_db(db_path: str, atlas_name: str = None, atlas_uid:
         ORDER BY aca.association_order
         """
         df = conn.execute(query, [atlas_uid]).df()
-        
     else:
-        # Get compounds by atlas name and filters  
-        conditions = ["1=1"]
-        params = []
-        
-        if atlas_name:
-            conditions.append("a.atlas_name = ?")
-            params.append(atlas_name)
-        if chromatography:
-            # Handle HILIC/HILICZ interchangeability
-            if chromatography.upper() in ['HILIC', 'HILICZ']:
-                conditions.append("(UPPER(mzrt.chromatography) = 'HILIC' OR UPPER(mzrt.chromatography) = 'HILICZ')")
-            else:
-                conditions.append("UPPER(mzrt.chromatography) = UPPER(?)")
-                params.append(chromatography)
-        if polarity:
-            conditions.append("mzrt.polarity = ?")
-            params.append(polarity)
-            
-        query = f"""
-        SELECT 
-            c.compound_uid,
-            c.name as compound_name,
-            c.inchi_key,
-            mzrt.mz_rt_reference_uid,
-            mzrt.rt_peak,
-            mzrt.rt_min,
-            mzrt.rt_max,
-            mzrt.mz,
-            mzrt.mz_tolerance,
-            mzrt.adduct,
-            a.atlas_name,
-            a.chromatography,
-            a.polarity
-        FROM atlases a
-        JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
-        JOIN compounds c ON aca.compound_uid = c.compound_uid
-        JOIN mz_rt_references mzrt ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
-        WHERE {' AND '.join(conditions)}
-        ORDER BY aca.association_order
-        """
-        df = conn.execute(query, params).df()
-    
+        print("Must provide Atlas UID")
+        return None
+
     conn.close()
     
-    if len(df) == 0:
+    if df.empty:
         print(f"No compounds found for atlas criteria")
-        return df, None, None
+        return None
     else:
-        # Get chromatography and polarity from the atlas
-        atlas_chromatography = df['chromatography'].iloc[0] if not df.empty else None
-        atlas_polarity = df['polarity'].iloc[0] if not df.empty else None
-        
-        print(f"Retrieved {len(df)} compounds for atlas {atlas_name or atlas_uid}")
+        atlas_chromatography = df['chromatography'].iloc[0]
+        atlas_polarity = df['polarity'].iloc[0]
+        print(f"Retrieved {len(df)} compounds for atlas {atlas_uid}")
         print(f"Atlas chromatography: {atlas_chromatography}, polarity: {atlas_polarity}")
         
-        return df, atlas_chromatography, atlas_polarity
+        return df
 
-def create_project_database(project_db_path: Path) -> None:
-    """Create project-specific database with required tables."""
+def create_project_database(project_db_path: Path, overwrite_existing: bool = False) -> None:
+    """Create project-specific database with required tables.
+    If overwrite_existing is True, delete the database file and remake it.
+    """
     project_db_path.parent.mkdir(parents=True, exist_ok=True)
     
+    if overwrite_existing and project_db_path.exists():
+        project_db_path.unlink()
+        print(f"Overwrite is set to True; Deleted existing database at {project_db_path} and proceeding...")
+    elif not overwrite_existing and project_db_path.exists():
+        print(f"Overwrite is set to False but database already exists at {project_db_path}. Use overwrite_existing=True to replace it.")
+        return
+
     conn = duckdb.connect(str(project_db_path))
     
-    # Create lcmsruns table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS lcmsruns (
-            file_path VARCHAR PRIMARY KEY,
-            filename VARCHAR NOT NULL,
-            analysis_type VARCHAR NOT NULL,
-            chromatography VARCHAR,
-            polarity VARCHAR,
-            created_by VARCHAR,
-            creation_time TIMESTAMP
-        )
-    """)
-    
-    # Create mz_rt_experimental table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS mz_rt_experimental (
-            mz_rt_experimental_uid VARCHAR PRIMARY KEY,
-            compound_uid VARCHAR NOT NULL,
-            rt_peak DOUBLE NOT NULL,
-            rt_min DOUBLE NOT NULL,
-            rt_max DOUBLE NOT NULL,
-            mz DOUBLE NOT NULL,
-            mz_tolerance DOUBLE NOT NULL,
-            adduct VARCHAR NOT NULL,
-            rt_correction_applied BOOLEAN DEFAULT FALSE,
-            rt_shift DOUBLE,
-            source_mz_rt_reference_uid VARCHAR,
-            created_by VARCHAR,
-            creation_time TIMESTAMP
-        )
-    """)
-    
-    # Create rt_alignment table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS rt_alignment (
-            rt_alignment_uid VARCHAR PRIMARY KEY,
-            project_name VARCHAR NOT NULL,
-            model_type VARCHAR NOT NULL,
-            polynomial_degree INTEGER,
-            r_squared DOUBLE,
-            rmse DOUBLE,
-            coefficients TEXT,
-            equation TEXT,
-            qc_files_count INTEGER,
-            compounds_used_count INTEGER,
-            chromatography VARCHAR,
-            polarity VARCHAR,
-            created_by VARCHAR,
-            creation_time TIMESTAMP,
-            model_metadata TEXT
-        )
-    """)
-    
-    # Create indexes
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_lcmsruns_analysis ON lcmsruns(analysis_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_mzrt_exp_compound ON mz_rt_experimental(compound_uid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_alignment_project ON rt_alignment(project_name)")
+    # Create all tables for project database
+    _create_database_tables(conn, db_type="project")
     
     conn.close()
     print(f"Project database created at {project_db_path}")
 
-def save_lcmsruns_to_db(project_db_path: Path, project_path: Path, project_metadata: dict) -> Dict:
+def save_lcmsruns_to_db(
+    project_db_path: Path,
+    project_path: Path,
+    project_metadata: dict,
+    overwrite_existing: bool = False
+) -> Dict:
     """
     Save LCMS run files to project database and return file paths grouped by chromatography/polarity/analysis type.
     Chromatography and polarity are inferred from filenames.
+    If the lcmsruns table exists and has rows, do not overwrite unless overwrite_existing=True.
     """
     project_name = os.path.basename(project_path)
     files_by_group = lrt.get_project_files(project_path, "lcmsruns")
 
     conn = duckdb.connect(str(project_db_path))
-    conn.execute("DELETE FROM lcmsruns")
+
+    # Check if lcmsruns table exists
+    table_exists = conn.execute(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'lcmsruns'"
+    ).fetchone()[0] > 0
+
+    # Check if lcmsruns table has rows
+    has_rows = False
+    if table_exists:
+        has_rows = conn.execute("SELECT COUNT(*) FROM lcmsruns").fetchone()[0] > 0
+
+    if table_exists and has_rows and not overwrite_existing:
+        print("LCMS runs already exist in the database. Skipping overwrite.")
+        conn.close()
+        print_files_summary(files_by_group)
+        return files_by_group
+
+    if table_exists and has_rows and overwrite_existing:
+        print(f"LCMS runs already exist in the database for {project_name} but overwrite is set to True. Creating new table...")
+        conn.execute("DELETE FROM lcmsruns")
 
     total_files = 0
     for chrom, pol_dict in files_by_group.items():
         for pol, analysis_dict in pol_dict.items():
-            for analysis_type, file_list in analysis_dict.items():
+            for file_type, file_list in analysis_dict.items():
                 for file_path in file_list:
                     filename = os.path.basename(file_path)
                     conn.execute(
@@ -194,7 +130,7 @@ def save_lcmsruns_to_db(project_db_path: Path, project_path: Path, project_metad
                         (
                             file_path,
                             filename,
-                            analysis_type,
+                            file_type,
                             chrom,
                             pol,
                             project_metadata["analyst"],
@@ -204,8 +140,17 @@ def save_lcmsruns_to_db(project_db_path: Path, project_path: Path, project_metad
                     total_files += 1
 
     conn.close()
-    print(f"Saved {total_files} LCMS runs to database")
+    print(f"Saved {total_files} LCMS runs to database:")
+    print_files_summary(files_by_group)
     return files_by_group
+
+def print_files_summary(file_list: Dict[str, Any]):
+    for chrom, pol_dict in file_list.items():
+        print(f"\nChromatography: {chrom}")
+        for pol, filetype_dict in pol_dict.items():
+            print(f"  Polarity: {pol}")
+            for file_type, files_list in filetype_dict.items():
+                print(f"    {file_type}: {len(files_list)} files")
 
 def list_available_atlases(db_path: str, chromatography: str = None, polarity: str = None) -> pd.DataFrame:
     """List all available atlases with optional filtering."""
@@ -232,12 +177,13 @@ def list_available_atlases(db_path: str, chromatography: str = None, polarity: s
         a.atlas_description,
         a.chromatography,
         a.polarity,
+        a.creation_time,
         COUNT(aca.compound_uid) as compound_count
     FROM atlases a
     LEFT JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
     WHERE {' AND '.join(conditions)}
     GROUP BY a.atlas_uid, a.atlas_name, a.atlas_description, 
-             a.chromatography, a.polarity
+             a.chromatography, a.polarity, a.creation_time
     ORDER BY a.atlas_name
     """
     
@@ -285,9 +231,13 @@ def validate_database(db_path: Path) -> None:
             print(f"   No method combinations found")
 
         if not atlas_info.empty:
-            print(f"\n   Available atlases:")
+            print(f"   Available atlases:")
             for _, row in atlas_info.iterrows():
-                print(f"      {row['atlas_name']} (UID: {row['atlas_uid']}) ({row['chromatography']}/{row['polarity']}): {row['compound_count']} compounds")
+                print(f"      {row['atlas_uid']}")
+                print(f"            {row['atlas_name']}")
+                print(f"            {row['chromatography']} {row['polarity']}")
+                print(f"            {row['compound_count']} compounds")
+                print(f"            {row['creation_time']}")
         else:
             print(f"\n   No atlases found")
 
@@ -297,13 +247,16 @@ def validate_database(db_path: Path) -> None:
     except Exception as e:
         print(f"Error validating database: {e}")
 
-def save_rt_alignment_model_to_db(project_db_path: Path, best_model: dict, qc_files: list, modeling_data: list, project_metadata: dict) -> str:
+def save_rt_alignment_model_to_db(corrected_atlas_uid: str, project_db_path: Path, best_model: dict, qc_files: list, modeling_data: list, project_metadata: dict) -> str:
     """Save RT alignment model to project database."""
-    rt_alignment_uid = f"rta-{uuid.uuid4().hex[:32]}"
+    rt_alignment_uid = _generate_uid("rt_alignment")
+    
+    # Extract project name from path
+    project_name = project_db_path.stem.replace('.duckdb', '')
     
     model_metadata = {
         "qc_files": [os.path.basename(f) for f in qc_files],
-        "compounds_used": [d['compound_uid'] for d in modeling_data],
+        "compounds_used": [d.get('compound_uid', '') for d in modeling_data],
         "correction_timestamp": project_metadata["timestamp"],
         "correction_method": "polynomial_qc_based",
         "analyst": project_metadata["analyst"]
@@ -311,10 +264,11 @@ def save_rt_alignment_model_to_db(project_db_path: Path, best_model: dict, qc_fi
     
     conn = duckdb.connect(str(project_db_path))
     conn.execute("""
-        INSERT INTO rt_alignment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO rt_alignment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         rt_alignment_uid,
-        PROJECT,
+        project_name,
+        corrected_atlas_uid,
         "polynomial",
         best_model['degree'],
         best_model['r2'],
@@ -323,8 +277,8 @@ def save_rt_alignment_model_to_db(project_db_path: Path, best_model: dict, qc_fi
         best_model['equation'],
         len(qc_files),
         len(modeling_data),
-        CHROMATOGRAPHY,
-        POLARITY,
+        project_metadata["analyst"],
+        project_metadata["timestamp"],
         json.dumps(model_metadata)
     ))
     conn.close()
@@ -341,7 +295,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, pubchem_cache: Dict, db_path: Pa
     timestamp = datetime.now()
     
     # Create tables if they don't exist
-    _create_database_tables(conn)
+    _create_database_tables(conn, db_type="main")
     
     # Get existing compounds
     existing_inchi_keys = set()
@@ -391,9 +345,10 @@ def add_compounds_to_db(input_df: pd.DataFrame, pubchem_cache: Dict, db_path: Pa
         
         # Create RT/MZ reference if data available and compound_uid exists
         if compound_uid and pd.notna(row.get('rt_peak')) and pd.notna(row.get('mz')):
-            ref_created = _create_mz_rt_reference(conn, row, compound_uid, chromatography, 
-                                                polarity, input_file_path, creator_name, timestamp)
-            if ref_created:
+            ref_uid = _create_mz_rt_reference(conn, row, compound_uid, chromatography, 
+                                            polarity, input_file_path, creator_name, timestamp,
+                                            table_name="mz_rt_references")
+            if ref_uid:
                 references_created += 1
             else:
                 references_skipped += 1
@@ -415,17 +370,162 @@ def add_compounds_to_db(input_df: pd.DataFrame, pubchem_cache: Dict, db_path: Pa
     conn.close()
     return compounds_created, references_created, compounds_skipped, references_skipped
 
-def create_atlas_from_compounds(db_path: Path, atlas_name: str, atlas_description: str,
-                               chromatography: str, polarity: str, creator_name: str,
-                               compound_uids: list = None, compound_filter: dict = None,
-                               target_adducts: list = None):
-    """Create an atlas and associate compounds with it. Always creates a new atlas with new UID."""
+def _create_compound_record(conn, row, pubchem_cache: Dict, input_df: pd.DataFrame, idx: int, 
+                           creator_name: str, timestamp) -> str:
+    """Create a new compound record in the database."""
+    compound_uid = _generate_uid("compound")
+    
+    # Extract compound data from row
+    name = str(row.get('name', row.get('compound_name', f'Compound_{idx}')))
+    inchi_key = str(row.get('inchi_key', ''))
+    inchi = str(row.get('inchi', '')) if pd.notna(row.get('inchi')) else None
+    smiles = str(row.get('smiles', '')) if pd.notna(row.get('smiles')) else None
+    formula = str(row.get('formula', '')) if pd.notna(row.get('formula')) else None
+    
+    # Handle optional fields
+    compound_classes = str(row.get('compound_classes', '')) if pd.notna(row.get('compound_classes')) else None
+    compound_pathways = str(row.get('compound_pathways', '')) if pd.notna(row.get('compound_pathways')) else None
+    compound_tags = str(row.get('compound_tags', '')) if pd.notna(row.get('compound_tags')) else None
+    molecular_weight = row.get('molecular_weight') if pd.notna(row.get('molecular_weight')) else None
+    mono_isotopic_molecular_weight = row.get('mono_isotopic_molecular_weight') if pd.notna(row.get('mono_isotopic_molecular_weight')) else None
+    iupac_name = str(row.get('iupac_name', '')) if pd.notna(row.get('iupac_name')) else None
+    pubchem_cid = str(row.get('pubchem_cid', '')) if pd.notna(row.get('pubchem_cid')) else None
+    cas_number = str(row.get('cas_number', '')) if pd.notna(row.get('cas_number')) else None
+    synonyms = str(row.get('synonyms', '')) if pd.notna(row.get('synonyms')) else None
+    
+    # Insert compound record
+    conn.execute("""
+        INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        compound_uid,
+        name,
+        inchi_key,
+        inchi,
+        smiles,
+        formula,
+        compound_classes,
+        compound_pathways,
+        compound_tags,
+        molecular_weight,
+        mono_isotopic_molecular_weight,
+        iupac_name,
+        pubchem_cid,
+        cas_number,
+        synonyms,
+        creator_name,
+        timestamp,
+        timestamp
+    ))
+    
+    return compound_uid
+
+def _create_mz_rt_reference(conn, row, compound_uid: str, chromatography: str, 
+                           polarity: str, input_file_path: str, creator_name: str, timestamp,
+                           table_name: str = "mz_rt_references", rt_correction_applied: bool = False,
+                           rt_shift: float = None, source_mz_rt_reference_uid: str = None) -> str:
+    """Create a new mz_rt_reference or mz_rt_experimental record in the database."""
+    
+    if table_name == "mz_rt_references":
+        # Check for duplicate reference (same compound, chromatography, polarity, adduct)
+        adduct = str(row.get('adduct', ''))
+        
+        existing_ref = conn.execute("""
+            SELECT mz_rt_reference_uid 
+            FROM mz_rt_references 
+            WHERE compound_uid = ? AND chromatography = ? AND polarity = ? AND adduct = ?
+        """, [compound_uid, chromatography, polarity, adduct]).fetchone()
+        
+        if existing_ref:
+            print(f"Warning! Attempting to add an exact duplicate to the database: {existing_ref}. Skipping")
+            return None  # Skip duplicate
+        
+        uid = _generate_uid("mz_rt_reference")
+        
+        # Extract RT/MZ data
+        rt_peak = float(row.get('rt_peak'))
+        rt_min = float(row.get('rt_min', rt_peak - 0.5))  # Default to ±0.5 min if not provided
+        rt_max = float(row.get('rt_max', rt_peak + 0.5))
+        mz = float(row.get('mz'))
+        mz_tolerance = float(row.get('mz_tolerance', 5.0))
+        adduct = str(row.get('adduct', ''))
+        
+        confidence = str(row.get('confidence', 'Unknown')) if pd.notna(row.get('confidence')) else 'Unknown'
+        source = input_file_path if input_file_path else 'Unknown'
+        
+        # Insert mz_rt_reference record
+        conn.execute("""
+            INSERT INTO mz_rt_references VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            uid,
+            compound_uid,
+            rt_peak,
+            rt_min,
+            rt_max,
+            mz,
+            mz_tolerance,
+            adduct,
+            chromatography,
+            polarity,
+            confidence,
+            source,
+            creator_name,
+            timestamp
+        ))
+        
+    elif table_name == "mz_rt_experimental":
+        uid = _generate_uid("mz_rt_experimental")
+        
+        # Extract RT/MZ data
+        rt_peak = float(row.get('rt_peak'))
+        rt_min = float(row.get('rt_min', rt_peak - 0.5))
+        rt_max = float(row.get('rt_max', rt_peak + 0.5))
+        mz = float(row.get('mz'))
+        mz_tolerance = float(row.get('mz_tolerance', 5.0))
+        adduct = str(row.get('adduct', ''))
+        
+        # Insert mz_rt_experimental record
+        conn.execute("""
+            INSERT INTO mz_rt_experimental VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            uid,
+            compound_uid,
+            rt_peak,
+            rt_min,
+            rt_max,
+            mz,
+            mz_tolerance,
+            adduct,
+            rt_correction_applied,
+            rt_shift,
+            source_mz_rt_reference_uid,
+            creator_name,
+            timestamp
+        ))
+    else:
+        raise ValueError(f"Invalid table_name: {table_name}. Must be 'mz_rt_references' or 'mz_rt_experimental'")
+    
+    return uid
+
+def create_atlas_from_compounds(
+    db_path: Path,
+    atlas_name: str,
+    atlas_description: str,
+    chromatography: str,
+    polarity: str,
+    creator_name: str,
+    compound_uids: list = None,
+    compound_filter: dict = None,
+    target_adducts: list = None,
+    experimental_uid_map: dict = None
+):
+    """
+    Create an atlas and associate compounds with it.
+    """
     conn = duckdb.connect(str(db_path))
     timestamp = datetime.now()
-    
-    # Always create a new atlas with a new UID (no duplicate checking)
-    atlas_uid = f"atlas-{uuid.uuid4().hex[:32]}"
-    
+
+    atlas_uid = _generate_uid("atlas")
+
     conn.execute("""
         INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
@@ -438,27 +538,23 @@ def create_atlas_from_compounds(db_path: Path, atlas_name: str, atlas_descriptio
         timestamp,
         timestamp
     ))
-    
+
     print(f"Created new atlas: {atlas_name} (UID: {atlas_uid})")
-    
+
     # Get compounds to associate
     if compound_uids:
-        placeholders = ','.join(['?' for _ in compound_uids])
-        
         # Build the query to filter by chromatography, polarity, and adduct
+        placeholders = ','.join(['?' for _ in compound_uids])
         adduct_condition = ""
         params = [chromatography, polarity]
-        
         if target_adducts:
             adduct_placeholders = ','.join(['?' for _ in target_adducts])
             adduct_condition = f"AND mzrt2.adduct IN ({adduct_placeholders})"
             params.extend(target_adducts)
-        
         params.extend(compound_uids)
-        
         query = f"""
         SELECT c.compound_uid, 
-               (SELECT mz_rt_reference_uid 
+                (SELECT mz_rt_reference_uid 
                 FROM mz_rt_references mzrt2 
                 WHERE mzrt2.compound_uid = c.compound_uid 
                 AND mzrt2.chromatography = ? 
@@ -469,10 +565,8 @@ def create_atlas_from_compounds(db_path: Path, atlas_name: str, atlas_descriptio
         WHERE c.compound_uid IN ({placeholders})
         ORDER BY c.compound_uid
         """
-        
         result = conn.execute(query, params).fetchall()
         compounds_to_associate = result
-        
     elif compound_filter:
         # Filter compounds based on criteria
         conditions = ["1=1"]
@@ -512,9 +606,9 @@ def create_atlas_from_compounds(db_path: Path, atlas_name: str, atlas_descriptio
     # Create associations - each atlas gets its own unique associations
     atlas_associations_created = 0
     
-    for idx, (compound_uid, mz_rt_ref_uid) in enumerate(compounds_to_associate):
+    for idx, (compound_uid, ref_or_exp_uid) in enumerate(compounds_to_associate):
         # Always create new association UID for each atlas
-        association_uid = f"assoc-{uuid.uuid4().hex[:32]}"
+        association_uid = _generate_uid("association")
         
         conn.execute("""
             INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -522,7 +616,7 @@ def create_atlas_from_compounds(db_path: Path, atlas_name: str, atlas_descriptio
             association_uid,
             atlas_uid,
             compound_uid,
-            mz_rt_ref_uid,
+            ref_or_exp_uid,
             idx + 1,
             creator_name,
             timestamp
@@ -537,7 +631,7 @@ def create_new_atlas(conn, atlas_name: str, atlas_description: str,
     """Create a new atlas with a new UID. No duplicate checking - always creates new."""
     
     # Always create new atlas with unique UID
-    atlas_uid = f"atlas-{uuid.uuid4().hex[:32]}"
+    atlas_uid = _generate_uid("atlas")
     
     conn.execute("""
         INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -555,8 +649,15 @@ def create_new_atlas(conn, atlas_name: str, atlas_description: str,
     print(f"Created new atlas: {atlas_name} (UID: {atlas_uid})")
     return atlas_uid
 
-def _create_database_tables(conn):
-    """Create all required database tables."""
+def _create_database_tables(conn, db_type: str = "main"):
+    """Create all required database tables.
+    
+    Parameters:
+        conn: DuckDB connection object
+        db_type: Either "main" or "project" to determine which tables to create
+    """
+    # Core tables (common to both main and project databases)
+    
     # Create compounds table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS compounds (
@@ -581,6 +682,7 @@ def _create_database_tables(conn):
         )
     """)
     
+    # Create atlases table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS atlases (
             atlas_uid VARCHAR PRIMARY KEY,
@@ -594,7 +696,7 @@ def _create_database_tables(conn):
         )
     """)
     
-    # Create mz_rt_references table with proper column order
+    # Create mz_rt_references table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS mz_rt_references (
             mz_rt_reference_uid VARCHAR PRIMARY KEY,
@@ -615,58 +717,115 @@ def _create_database_tables(conn):
         )
     """)
     
-    # Create atlas_compound_associations table with proper column order
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS atlas_compound_associations (
-            association_uid VARCHAR PRIMARY KEY,
-            atlas_uid VARCHAR NOT NULL,
-            compound_uid VARCHAR NOT NULL,
-            mz_rt_reference_uid VARCHAR,
-            association_order INTEGER,
-            created_by VARCHAR,
-            creation_time TIMESTAMP,
-            FOREIGN KEY (atlas_uid) REFERENCES atlases(atlas_uid),
-            FOREIGN KEY (compound_uid) REFERENCES compounds(compound_uid),
-            FOREIGN KEY (mz_rt_reference_uid) REFERENCES mz_rt_references(mz_rt_reference_uid)
-        )
-    """)
+    # Create atlas_compound_associations table with conditional foreign keys
+    if db_type == "main":
+        # Main database: enforce foreign key constraints
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS atlas_compound_associations (
+                association_uid VARCHAR PRIMARY KEY,
+                atlas_uid VARCHAR NOT NULL,
+                compound_uid VARCHAR NOT NULL,
+                mz_rt_reference_uid VARCHAR,
+                association_order INTEGER,
+                created_by VARCHAR,
+                creation_time TIMESTAMP,
+                FOREIGN KEY (atlas_uid) REFERENCES atlases(atlas_uid),
+                FOREIGN KEY (compound_uid) REFERENCES compounds(compound_uid),
+                FOREIGN KEY (mz_rt_reference_uid) REFERENCES mz_rt_references(mz_rt_reference_uid)
+            )
+        """)
+    else:
+        # Project database: no foreign key constraints (lightweight)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS atlas_compound_associations (
+                association_uid VARCHAR PRIMARY KEY,
+                atlas_uid VARCHAR NOT NULL,
+                compound_uid VARCHAR NOT NULL,
+                mz_rt_reference_uid VARCHAR,
+                association_order INTEGER,
+                created_by VARCHAR,
+                creation_time TIMESTAMP
+            )
+        """)
     
-    # Create rt_alignment table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS rt_alignment (
-            rt_alignment_uid VARCHAR PRIMARY KEY,
-            project_name VARCHAR NOT NULL,
-            model_type VARCHAR NOT NULL,
-            polynomial_degree INTEGER,
-            r_squared DOUBLE,
-            rmse DOUBLE,
-            coefficients TEXT,
-            equation TEXT,
-            qc_files_count INTEGER,
-            compounds_used_count INTEGER,
-            chromatography VARCHAR,
-            polarity VARCHAR,
-            created_by VARCHAR,
-            creation_time TIMESTAMP,
-            model_metadata TEXT
-        )
-    """)
+    # Project-specific tables
+    if db_type == "project":
+        # Create lcmsruns table (project-specific)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lcmsruns (
+                file_path VARCHAR PRIMARY KEY,
+                filename VARCHAR NOT NULL,
+                file_type VARCHAR NOT NULL,
+                chromatography VARCHAR,
+                polarity VARCHAR,
+                created_by VARCHAR,
+                creation_time TIMESTAMP
+            )
+        """)
+        
+        # Create mz_rt_experimental table (project-specific)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mz_rt_experimental (
+                mz_rt_experimental_uid VARCHAR PRIMARY KEY,
+                compound_uid VARCHAR NOT NULL,
+                rt_peak DOUBLE NOT NULL,
+                rt_min DOUBLE NOT NULL,
+                rt_max DOUBLE NOT NULL,
+                mz DOUBLE NOT NULL,
+                mz_tolerance DOUBLE NOT NULL,
+                adduct VARCHAR NOT NULL,
+                rt_correction_applied BOOLEAN DEFAULT FALSE,
+                rt_shift DOUBLE,
+                source_mz_rt_reference_uid VARCHAR,
+                created_by VARCHAR,
+                creation_time TIMESTAMP
+            )
+        """)
+        
+        # Create rt_alignment table without atlas foreign key constraint
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rt_alignment (
+                rt_alignment_uid VARCHAR PRIMARY KEY,
+                project_name VARCHAR NOT NULL,
+                atlas_uid VARCHAR,
+                model_type VARCHAR NOT NULL,
+                polynomial_degree INTEGER,
+                r_squared DOUBLE,
+                rmse DOUBLE,
+                coefficients TEXT,
+                equation TEXT,
+                qc_files_count INTEGER,
+                compounds_used_count INTEGER,
+                created_by VARCHAR,
+                creation_time TIMESTAMP,
+                model_metadata TEXT
+            )
+        """)
     
-    # Create indexes
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_lcmsruns_analysis ON lcmsruns(analysis_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_mzrt_exp_compound ON mz_rt_experimental(compound_uid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_alignment_project ON rt_alignment(project_name)")
+    # Create indexes (common to both database types)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_compounds_inchi_key ON compounds(inchi_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mzrt_ref_compound ON mz_rt_references(compound_uid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_atlas_associations_atlas ON atlas_compound_associations(atlas_uid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_atlas_associations_compound ON atlas_compound_associations(compound_uid)")
     
-def delete_atlas_from_db(db_path: str, atlas_uid: str) -> bool:
+    # Project-specific indexes
+    if db_type == "project":
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lcmsruns_analysis ON lcmsruns(file_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mzrt_exp_compound ON mz_rt_experimental(compound_uid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_alignment_project ON rt_alignment(project_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_alignment_atlas ON rt_alignment(atlas_uid)")
+    
+def delete_atlas_from_db(db_path: str, atlas_uid: str) -> str:
     """
     Delete an atlas and all its associated metadata from the database.
+    This includes cascading deletions from related tables.
     
     Parameters:
         db_path (str): Path to the DuckDB database file
         atlas_uid (str): UID of the atlas to delete
         
     Returns:
-        bool: True if atlas was successfully deleted, False otherwise
+        str: Status message indicating success or failure
     """
     conn = duckdb.connect(str(db_path))
     
@@ -685,31 +844,105 @@ def delete_atlas_from_db(db_path: str, atlas_uid: str) -> bool:
         atlas_name = atlas_result[0]
         atlas_description = atlas_result[1]
         
-        # Get count of associations before deletion for confirmation
+        print(f"Found atlas: {atlas_name}")
+        print(f"Description: {atlas_description}")
+        
+        # Track deletions for summary
+        deletion_summary = {}
+        
+        # Check and delete from atlas_compound_associations
         associations_count = conn.execute("""
             SELECT COUNT(*) 
             FROM atlas_compound_associations 
             WHERE atlas_uid = ?
         """, [atlas_uid]).fetchone()[0]
-
-        print(f"Found atlas")
-        print(f"Description: {atlas_description}")
-        print(f"Atlas has {associations_count} compound associations")
         
-        # Delete all atlas-compound associations first (due to foreign key constraints)
-        conn.execute("""
-            DELETE FROM atlas_compound_associations 
-            WHERE atlas_uid = ?
-        """, [atlas_uid])
+        if associations_count > 0:
+            conn.execute("""
+                DELETE FROM atlas_compound_associations 
+                WHERE atlas_uid = ?
+            """, [atlas_uid])
+            deletion_summary['atlas_compound_associations'] = associations_count
+            print(f"Removed {associations_count} compound associations")
         
-        # Delete the atlas record
+        # Check and delete from rt_alignment table (if it exists and has atlas_uid column)
+        try:
+            # First check if table exists
+            table_exists = conn.execute("""
+                SELECT COUNT(*) 
+                FROM information_schema.tables 
+                WHERE table_name = 'rt_alignment'
+            """).fetchone()[0] > 0
+            
+            if table_exists:
+                # Check if atlas_uid column exists in rt_alignment table
+                column_exists = conn.execute("""
+                    SELECT COUNT(*) 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'rt_alignment' AND column_name = 'atlas_uid'
+                """).fetchone()[0] > 0
+                
+                if column_exists:
+                    rt_alignment_count = conn.execute("""
+                        SELECT COUNT(*) 
+                        FROM rt_alignment 
+                        WHERE atlas_uid = ?
+                    """, [atlas_uid]).fetchone()[0]
+                    
+                    if rt_alignment_count > 0:
+                        conn.execute("""
+                            DELETE FROM rt_alignment 
+                            WHERE atlas_uid = ?
+                        """, [atlas_uid])
+                        deletion_summary['rt_alignment'] = rt_alignment_count
+                        print(f"Removed {rt_alignment_count} RT alignment records")
+        except Exception as e:
+            # Table or column might not exist, which is fine
+            pass
+        
+        # Check for any other tables that might reference atlas_uid
+        # This is a generic approach to find tables with atlas_uid columns
+        try:
+            tables_with_atlas_uid = conn.execute("""
+                SELECT DISTINCT table_name 
+                FROM information_schema.columns 
+                WHERE column_name = 'atlas_uid' 
+                AND table_name NOT IN ('atlases', 'atlas_compound_associations', 'rt_alignment')
+            """).fetchall()
+            
+            for (table_name,) in tables_with_atlas_uid:
+                try:
+                    count = conn.execute(f"""
+                        SELECT COUNT(*) 
+                        FROM {table_name} 
+                        WHERE atlas_uid = ?
+                    """, [atlas_uid]).fetchone()[0]
+                    
+                    if count > 0:
+                        conn.execute(f"""
+                            DELETE FROM {table_name} 
+                            WHERE atlas_uid = ?
+                        """, [atlas_uid])
+                        deletion_summary[table_name] = count
+                        print(f"Removed {count} records from {table_name}")
+                except Exception as e:
+                    print(f"Warning: Could not delete from table {table_name}: {e}")
+        except Exception as e:
+            # Information schema queries might fail in some contexts
+            pass
+        
+        # Finally, delete the atlas record itself
         conn.execute("""
             DELETE FROM atlases 
             WHERE atlas_uid = ?
         """, [atlas_uid])
         
-        print(f"Successfully deleted atlas '{atlas_name}' (UID: {atlas_uid})")
-        print(f"Removed {associations_count} compound associations")
+        print(f"\nSuccessfully deleted atlas '{atlas_name}' (UID: {atlas_uid})")
+        
+        if deletion_summary:
+            print("Cascade deletions performed:")
+            for table, count in deletion_summary.items():
+                print(f"  - {table}: {count} records")
         
         return "Deletion successful!"
         
@@ -719,3 +952,77 @@ def delete_atlas_from_db(db_path: str, atlas_uid: str) -> bool:
 
     finally:
         conn.close()
+
+def get_atlas_from_db(db_path: str, atlas_uid: str) -> pd.DataFrame:
+    """
+    Retrieve atlas metadata from database for a specific atlas.
+    Returns DataFrame with atlas information including name, description, chromatography, polarity, etc.
+    """
+    conn = duckdb.connect(str(db_path))
+    
+    query = """
+    SELECT 
+        atlas_uid,
+        atlas_name,
+        atlas_description,
+        chromatography,
+        polarity,
+        created_by,
+        creation_time,
+        last_modified
+    FROM atlases 
+    WHERE atlas_uid = ?
+    """
+    
+    df = conn.execute(query, [atlas_uid]).df()
+    conn.close()
+    
+    if df.empty:
+        print(f"No atlas found with UID: {atlas_uid}")
+        return pd.DataFrame()
+    else:
+        print(f"Retrieved atlas metadata for: {df['atlas_name'].iloc[0]}")
+        return df
+
+def get_rt_correction_table_entry(db_path: Path, atlas_uid: str) -> Optional[dict]:
+    """
+    Retrieve the RT correction table entry for a given atlas UID from the rt_alignment table.
+    Returns a dictionary with the entry if found, else None.
+    """
+    conn = duckdb.connect(str(db_path))
+    query = """
+        SELECT *
+        FROM rt_alignment
+        WHERE atlas_uid = ?
+        ORDER BY creation_time DESC
+        LIMIT 1
+    """
+    result = conn.execute(query, [atlas_uid]).fetchone()
+    columns = [desc[0] for desc in conn.description] if result else []
+    conn.close()
+    if result and columns:
+        return dict(zip(columns, result))
+    else:
+        print(f"No RT correction entry found for atlas UID: {atlas_uid}")
+        return None
+
+
+def _generate_uid(entity_type: str, rt_atlas: bool = False) -> str:
+    """Generate a unique identifier for database entities."""
+    if entity_type == "atlas":
+        if rt_atlas is False:
+            return f"atlas-{uuid.uuid4().hex[:32]}"
+        elif rt_atlas is True:
+            return f"atlas-rt-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "mz_rt_experimental":
+        return f"mzrt-exp-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "compound":
+        return f"compound-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "mz_rt_reference":
+        return f"mzrt-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "association":
+        return f"assoc-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "rt_alignment":
+        return f"rta-{uuid.uuid4().hex[:32]}"
+    else:
+        return f"{entity_type}-{uuid.uuid4().hex[:32]}"

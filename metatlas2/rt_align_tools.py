@@ -1,12 +1,21 @@
 import pandas as pd
+import numpy as np
+import sys
+import duckdb
+import os
+import json
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from sklearn.metrics import mean_squared_error
-
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+from typing import Dict, Tuple
+
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
+import metatlas2.database_interact as dbi
 
 def build_polynomial_model(X, y, degree):
     """Build polynomial regression model."""
@@ -148,7 +157,7 @@ def create_RT_summary(compounds: pd.DataFrame, best_model: dict, qc_files: list,
     for _, row in compounds.iterrows():
         entry = row.to_dict()
         if entry['rt_peak'] is not None:
-            new_uid = f"mzrt-exp-{uuid.uuid4().hex[:32]}"
+            new_uid = dbi._generate_uid("mz_rt_experimental")
             corrected_rt = predict_rt_correction([entry['rt_peak']], best_model)[0]
             window = (entry['rt_max'] - entry['rt_min']) if entry['rt_min'] is not None and entry['rt_max'] is not None else None
             corrected_min = corrected_rt - window / 2 if window is not None else None
@@ -160,12 +169,9 @@ def create_RT_summary(compounds: pd.DataFrame, best_model: dict, qc_files: list,
                 "rt_peak": corrected_rt,
                 "rt_min": corrected_min,
                 "rt_max": corrected_max,
-                "rt_units": "min",
                 "mz": entry['mz'],
                 "mz_tolerance": entry['mz_tolerance'],
-                "mz_tolerance_units": "ppm",
                 "adduct": entry['adduct'],
-                "charge": 1 if '+' in str(entry['adduct']) else -1 if '-' in str(entry['adduct']) else 0,
                 "last_modified": TIMESTAMP,
                 "updated_from_ref": True,
                 "data_source": "rt_correction",
@@ -219,78 +225,271 @@ def create_RT_summary(compounds: pd.DataFrame, best_model: dict, qc_files: list,
             json.dump(summary, f, indent=2)
         print(f"RT alignment summary saved to {alignment_summary_file}")
 
-def find_qc_compounds_in_peaks(qc_compounds, ms1_data, default_mz_tol, rt_window_expand):
-    print("Matching QC Atlas compounds with QC peak data")
+def build_rt_alignment_model(matches_df: pd.DataFrame, rt_settings: Dict) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
+    """
+    Build RT alignment model from QC compound matches.
+    
+    Args:
+        matches_df: DataFrame of QC compound matches
+        rt_settings: Dictionary containing RT modeling settings
+    
+    Returns:
+        Tuple of (best_model, modeling_results_df, compound_rt_stats)
+    """
+    print("Building RT alignment model...")
+    
+    # Filter by excluded InChI keys if specified
+    if rt_settings.get('exclude_inchikeys'):
+        if 'inchi_key' not in matches_df.columns:
+            raise ValueError("matches_df must contain an 'inchi_key' column to filter by InChI Key.")
+        before_count = len(matches_df)
+        matches_df = matches_df[~matches_df['inchi_key'].isin(rt_settings['exclude_inchikeys'])]
+        after_count = len(matches_df)
+        print(f"Filtered out {before_count - after_count} matches by InChI Key.")
+    
+    # Aggregate matches to calculate median/mean observed RT values for each compound
+    compound_rt_stats = matches_df.groupby(['compound_uid', 'compound_name', 'inchi_key']).agg({
+        'atlas_rt_peak': 'first',
+        'atlas_rt_min': 'first',
+        'atlas_rt_max': 'first',
+        'atlas_mz': 'first',
+        'observed_rt': ['mean', 'median', 'std', 'count'],
+        'observed_mz': ['mean', 'std'],
+        'observed_intensity': ['mean', 'median', 'max'],
+        'rt_difference': ['mean', 'median', 'std'],
+        'mz_error_ppm': ['mean', 'std']
+    }).round(4)
+    
+    # Flatten column names
+    compound_rt_stats.columns = [
+        'ref_rt_peak',           # Atlas RT peak (reference)
+        'ref_rt_min',            # Atlas RT min
+        'ref_rt_max',            # Atlas RT max  
+        'ref_mz',                # Atlas m/z
+        'exp_rt_mean',           # Mean observed RT across files
+        'exp_rt_median',         # Median observed RT across files (more robust)
+        'exp_rt_std',            # Standard deviation of observed RT
+        'observation_count',     # Number of files where compound was observed
+        'exp_mz_mean',           # Mean observed m/z
+        'exp_mz_std',            # Std dev of observed m/z
+        'exp_intensity_mean',    # Mean intensity
+        'exp_intensity_median',  # Median intensity  
+        'exp_intensity_max',     # Max intensity
+        'rt_diff_mean',          # Mean RT difference (observed - atlas)
+        'rt_diff_median',        # Median RT difference
+        'rt_diff_std',           # Std dev of RT difference
+        'mz_error_mean',         # Mean m/z error (ppm)
+        'mz_error_std'           # Std dev of m/z error (ppm)
+    ]
+    
+    # Reset index to get compound info as columns
+    compound_rt_stats = compound_rt_stats.reset_index()
+    
+    # Display summary statistics
+    print(f"\nRT Statistics Summary:")
+    print(f"  Atlas RT range: {compound_rt_stats['ref_rt_peak'].min():.2f} - {compound_rt_stats['ref_rt_peak'].max():.2f} min")
+    print(f"  Observed RT range (median): {compound_rt_stats['exp_rt_median'].min():.2f} - {compound_rt_stats['exp_rt_median'].max():.2f} min")
+    print(f"  Mean RT difference (observed - atlas): {compound_rt_stats['rt_diff_median'].mean():.3f} ± {compound_rt_stats['rt_diff_median'].std():.3f} min")
+    
+    # Filter compounds with sufficient observations for reliable modeling
+    reliable_compounds = compound_rt_stats[
+        compound_rt_stats['observation_count'] >= rt_settings['min_observations_per_compound']
+    ]
+    print(f"Using {len(reliable_compounds)} compounds with ≥{rt_settings['min_observations_per_compound']} observations (QC files) for modeling")
+    
+    if len(reliable_compounds) < rt_settings['min_compounds_for_modeling']:
+        raise ValueError(f"Insufficient compounds for modeling. Need at least {rt_settings['min_compounds_for_modeling']}, but found {len(reliable_compounds)}")
+    
+    # Extract X (Atlas RT) and y (observed median RT) for modeling
+    X_atlas_rt = reliable_compounds['ref_rt_peak'].values
+    y_observed_rt = reliable_compounds['exp_rt_median'].values
+    
+    # Create modeling dataset
+    modeling_results_df = reliable_compounds.copy()
+    
+    # Build polynomial model
+    print(f"Building polynomial model (degree {rt_settings['polynomial_degree']})...")
+    best_model = build_polynomial_model(X_atlas_rt, y_observed_rt, rt_settings['polynomial_degree'])
+    
+    # Add predictions and residuals to modeling results
+    modeling_results_df['predicted_rt'] = best_model['y_pred']
+    modeling_results_df['residual'] = y_observed_rt - best_model['y_pred']
+    modeling_results_df['abs_residual'] = np.abs(modeling_results_df['residual'])
+    
+    # Model evaluation
+    print(f"\nModel built successfully:")
+    print(f"  Model type: Polynomial degree {best_model['degree']}")
+    print(f"  R² = {best_model['r2']:.4f}")
+    print(f"  RMSE = {best_model['rmse']:.4f} min")
+    print(f"  Max residual = {modeling_results_df['abs_residual'].max():.4f} min")
+    
+    # Display polynomial equation
+    equation = format_polynomial_equation(best_model)
+    print(f"  Equation: {equation}")
+    best_model['equation'] = equation
+    
+    # Check model quality
+    if best_model['r2'] < rt_settings['r2_threshold']:
+        print(f"Warning: Model R² ({best_model['r2']:.4f}) is below threshold ({rt_settings['r2_threshold']})")
+    
+    if modeling_results_df['abs_residual'].max() > rt_settings['max_residual_rt']:
+        print(f"Warning: Maximum residual ({modeling_results_df['abs_residual'].max():.4f} min) exceeds threshold ({rt_settings['max_residual_rt']} min)")
+    
+    # Add compounds used for modeling
+    best_model['compounds_used_for_modeling'] = reliable_compounds['compound_uid'].tolist()
+    
+    # Display compound statistics table
+    print(f"\nCompound RT Statistics:")
+    display(compound_rt_stats[['compound_name', 'inchi_key', 'ref_rt_peak', 'exp_rt_median', 'rt_diff_median', 
+                            'observation_count', 'exp_rt_std']])
 
-    compound_matches = []
-    matching_stats = {
-        'total_compounds': len(qc_compounds),
-        'compounds_with_matches': 0,
-        'compounds_without_matches': 0,
-        'total_matches': 0,
-        'multiple_matches': 0
+    return best_model, modeling_results_df, compound_rt_stats
+
+
+def apply_rt_correction_to_target(
+    project_db_path,
+    database_path,
+    target_atlas_uid,
+    best_model,
+    lcmsrun_files,
+    modeling_results_df,
+    analyst_name,
+    timestamp
+):
+    """
+    Clone target atlas to project database and apply RT correction.
+    Uses lightweight approach - stores only UIDs without copying full compound data.
+    """
+    print("Cloning target atlas and applying RT correction...")
+
+    # Get target atlas and compounds from master database
+    target_atlas_df = dbi.get_atlas_from_db(database_path, target_atlas_uid)
+    target_compounds_df = dbi.get_atlas_compounds_from_db(database_path, target_atlas_uid)
+    
+    if target_atlas_df.empty:
+        raise ValueError(f"Atlas {target_atlas_uid} not found in master database")
+    
+    atlas_info = target_atlas_df.iloc[0]
+    
+    # Connect to project database only
+    conn = duckdb.connect(str(project_db_path))
+    
+    try:
+        # Clear any existing experimental data
+        conn.execute("DELETE FROM mz_rt_experimental")
+        
+        # Clone atlas to project database with updated name
+        corrected_atlas_name = f"{atlas_info['atlas_name']} (RT Corrected)"
+        corrected_atlas_uid = dbi._generate_uid("atlas", rt_atlas=True)
+
+        conn.execute("""
+            INSERT INTO atlases (
+                atlas_uid, atlas_name, atlas_description, chromatography, 
+                polarity, created_by, creation_time, last_modified
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            corrected_atlas_uid,
+            corrected_atlas_name,
+            f"RT-corrected version of {target_atlas_uid} using QC-based polynomial model",
+            atlas_info['chromatography'],
+            atlas_info['polarity'],
+            analyst_name,
+            timestamp,
+            timestamp
+        ])
+        
+        # Create RT-corrected experimental data and associations
+        correction_stats = []
+        
+        for _, compound in target_compounds_df.iterrows():
+            compound_uid = compound['compound_uid']
+            original_rt_peak = compound['rt_peak']
+            original_rt_min = compound['rt_min']
+            original_rt_max = compound['rt_max']
+
+            # Apply RT correction using the polynomial model
+            corrected_rt_peak = predict_rt_correction([original_rt_peak], best_model)[0]
+            corrected_rt_min = predict_rt_correction([original_rt_min], best_model)[0]
+            corrected_rt_max = predict_rt_correction([original_rt_max], best_model)[0]
+            rt_shift = corrected_rt_peak - original_rt_peak
+
+            # Create new mz_rt_experimental entry with corrected values
+            mz_rt_experimental_uid = dbi._generate_uid("mz_rt_experimental")
+            
+            conn.execute("""
+                INSERT INTO mz_rt_experimental (
+                    mz_rt_experimental_uid, compound_uid, rt_peak, rt_min, rt_max,
+                    mz, mz_tolerance, adduct, 
+                    created_by, creation_time, rt_correction_applied, rt_shift,
+                    source_mz_rt_reference_uid
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                mz_rt_experimental_uid, compound_uid, corrected_rt_peak, corrected_rt_min, 
+                corrected_rt_max, compound['mz'], compound['mz_tolerance'],
+                compound['adduct'],
+                analyst_name, timestamp, True, rt_shift, compound['mz_rt_reference_uid']
+            ])
+            
+            # Create atlas association using experimental UID (no foreign key constraint)
+            association_uid = dbi._generate_uid("association")
+            conn.execute("""
+                INSERT INTO atlas_compound_associations (
+                    association_uid, atlas_uid, compound_uid, mz_rt_reference_uid, 
+                    association_order, created_by, creation_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [
+                association_uid, corrected_atlas_uid, compound_uid, mz_rt_experimental_uid, 
+                len(correction_stats) + 1, analyst_name, timestamp
+            ])
+            
+            correction_stats.append({
+                'compound_name': compound['compound_name'],
+                'compound_uid': compound_uid,
+                'mz_rt_reference_uid': compound['mz_rt_reference_uid'],
+                'mz_rt_experimental_uid': mz_rt_experimental_uid,
+                'original_rt': original_rt_peak,
+                'corrected_rt': corrected_rt_peak,
+                'rt_shift': rt_shift
+            })
+        
+        # Save RT alignment model to database
+        rt_alignment_uid = dbi.save_rt_alignment_model_to_db(
+            corrected_atlas_uid,
+            project_db_path,
+            best_model,
+            [f for files in lcmsrun_files.values() for pol_files in files.values() for f in pol_files.get('qc', [])],
+            modeling_results_df.to_dict('records'),
+            {"analyst": analyst_name, "timestamp": timestamp}
+        )
+        
+        conn.commit()
+        print(f"Created RT-corrected atlas with {len(correction_stats)} associations.")
+        
+    finally:
+        conn.close()
+    
+    # Create summary
+    correction_df = pd.DataFrame(correction_stats)
+    summary = {
+        'total_compounds': len(target_compounds_df),
+        'corrected_compounds': len(correction_stats),
+        'rt_alignment_uid': rt_alignment_uid,
+        'corrected_atlas_uid': corrected_atlas_uid,
+        'corrected_atlas_name': corrected_atlas_name,
+        'mean_correction': correction_df['rt_shift'].mean() if not correction_df.empty else 0,
+        'std_correction': correction_df['rt_shift'].std() if not correction_df.empty else 0,
+        'min_correction': correction_df['rt_shift'].min() if not correction_df.empty else 0,
+        'max_correction': correction_df['rt_shift'].max() if not correction_df.empty else 0
     }
 
-    for idx, compound in tqdm(qc_compounds.iterrows(), 
-                             total=len(qc_compounds), 
-                             desc="Matching QC compounds"):
-        compound_name = compound['compound_name']
-        target_mz = compound['mz']
-        atlas_rt = compound['rt_peak']
+    print(f"RT correction completed: {summary['corrected_compounds']}/{summary['total_compounds']} compounds corrected")
+    if summary['corrected_compounds']:
+        print(f"Correction statistics: mean = {summary['mean_correction']:.4f}, std = {summary['std_correction']:.4f} min")
 
-        mz_tolerance = compound['mz_tolerance'] if pd.notna(compound['mz_tolerance']) else default_mz_tol
+    print(f"\nRT-corrected atlas created:")
+    print(f"  Atlas UID: {corrected_atlas_uid}")
+    print(f"  Atlas name: {corrected_atlas_name}")
+    print(f"  RT alignment model UID: {rt_alignment_uid}")
+    print(f"  Project database: {project_db_path}")
 
-        matching_peaks = find_peaks_in_rt_window(
-            ms1_data, 
-            target_mz, 
-            mz_tolerance, 
-            atlas_rt, 
-            rt_window_expand
-        )
-
-        if len(matching_peaks) > 0:
-            matching_stats['compounds_with_matches'] += 1
-            matching_stats['total_matches'] += len(matching_peaks)
-            if len(matching_peaks) > 1:
-                matching_stats['multiple_matches'] += 1
-
-            file_grouped = matching_peaks.groupby('filename')
-            best_peaks_per_file = []
-            for filename, file_peaks in file_grouped:
-                best_peak = file_peaks.loc[file_peaks['i'].idxmax()]
-                best_peaks_per_file.append({
-                    'compound_uid': compound['compound_uid'],
-                    'compound_name': compound_name,
-                    'atlas_rt_peak': atlas_rt,
-                    'atlas_rt_min': compound['rt_min'],
-                    'atlas_rt_max': compound['rt_max'],
-                    'atlas_mz': target_mz,
-                    'observed_rt': best_peak['rt'],
-                    'observed_mz': best_peak['mz'],
-                    'observed_intensity': best_peak['i'],
-                    'mz_error_ppm': best_peak['mz_error_ppm'],
-                    'rt_difference': best_peak['rt_difference'],
-                    'filename': filename,
-                    'file_path': best_peak['file_path'],
-                    'mz_tolerance_used': mz_tolerance
-                })
-            compound_matches.extend(best_peaks_per_file)
-        else:
-            matching_stats['compounds_without_matches'] += 1
-
-    if compound_matches:
-        matches_df = pd.DataFrame(compound_matches)
-        matches_df['inchi_key'] = matches_df['compound_uid'].apply(
-            lambda uid: qc_compounds[qc_compounds['compound_uid'] == uid]['inchi_key'].iloc[0] 
-            if len(qc_compounds[qc_compounds['compound_uid'] == uid]) > 0 else 'unknown'
-        )
-
-        print(f"Compounds with matches: {matching_stats['compounds_with_matches']}")
-        print(f"Compounds without matches: {matching_stats['compounds_without_matches']}")
-        print(f"Total peak matches: {matching_stats['total_matches']}")
-        print(f"Mean m/z error: {matches_df['mz_error_ppm'].mean():.2f} ± {matches_df['mz_error_ppm'].std():.2f} ppm")
-        print(f"Mean RT difference: {matches_df['rt_difference'].mean():.3f} ± {matches_df['rt_difference'].std():.3f} min")
-        return matches_df, matching_stats
-    else:
-        print("No QC compound matches found. Check Atlas compound definitions, m/z tolerance, RT window settings, and QC file data quality")
-        raise ValueError("No compound matches found")
+    return summary

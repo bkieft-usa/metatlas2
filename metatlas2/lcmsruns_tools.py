@@ -1,6 +1,7 @@
 import glob
 import os
 import pandas as pd
+import duckdb
 from typing import Dict, List, Optional, Any, Tuple
 
 def get_project_files(project_path: str, lcmsrun_dir: str) -> dict:
@@ -16,7 +17,7 @@ def get_project_files(project_path: str, lcmsrun_dir: str) -> dict:
     abnormal_filenames = 0
     for file in all_files:
         base = os.path.basename(file)
-        print(base)
+        #print("      " + base)
         parts = base.split('_')
 
         if len(parts) != 16:
@@ -60,3 +61,28 @@ def read_hdf_file(filename,desired_key=None):
     """
     if desired_key is not None:
         return pd.read_hdf(filename,desired_key)
+
+def get_files_by_type_from_db(project_db_path: str, file_type: str) -> pd.DataFrame:
+    """
+    Get files of a specific type from the project database.
+    
+    Args:
+        project_db_path: Path to project database
+        file_type: Type of files to retrieve ('qc', 'experimental', 'istd', 'injbl', 'exctrl')
+    
+    Returns:
+        DataFrame with columns: file_path, chromatography, polarity, file_type
+    """
+    conn = duckdb.connect(str(project_db_path))
+    files_df = conn.execute("""
+        SELECT file_path, chromatography, polarity, file_type 
+        FROM lcmsruns 
+        WHERE file_type = ?
+        ORDER BY chromatography, polarity, file_path
+    """, [file_type]).df()
+    conn.close()
+    
+    if files_df.empty:
+        raise ValueError(f"No {file_type} files found in the project database")
+    
+    return files_df
