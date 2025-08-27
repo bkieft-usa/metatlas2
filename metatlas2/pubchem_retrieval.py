@@ -2,11 +2,14 @@ import pandas as pd
 import pubchempy as pcp
 import numpy as np
 import re
+import time
+import sys
 from pathlib import Path
 import pickle
 from typing import Dict, List, Optional, Any, Tuple
+from tqdm.notebook import tqdm
 
-def get_pubchem_data(inchi_key: str, timestamp: str) -> Dict[str, Any]:
+def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
     """Get comprehensive compound data from PubChem using InChI key."""
     try:
 
@@ -127,3 +130,92 @@ def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
         print(f"Saved global PubChem cache with {len(cache)} entries to {cache_file}")
     except Exception as e:
         print(f"Error saving cache: {e}")
+
+def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, timestamp: str, force_cache_update: bool = False) -> None:
+
+    # Load existing global cache
+    pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path)
+
+    # Determine which compounds need to be fetched
+    unique_inchi_keys = compounds['inchi_key'].dropna().unique()
+
+    if force_cache_update:
+        compounds_to_fetch = list(unique_inchi_keys)
+        compounds_in_cache = []
+        print(f"Force update enabled - will query all {len(compounds_to_fetch)} compounds")
+    else:
+        # Normal mode: only query compounds not in cache
+        compounds_to_fetch = [key for key in unique_inchi_keys if key not in pubchem_cache]
+        compounds_in_cache = [key for key in unique_inchi_keys if key in pubchem_cache]
+        print(f"Compounds already in cache: {len(compounds_in_cache)}")
+        print(f"Compounds needing PubChem lookup: {len(compounds_to_fetch)}")
+
+    if compounds_to_fetch:
+        print(f"\nFetching PubChem data for {len(compounds_to_fetch)} compounds...")
+        if force_cache_update:
+            print("Force update mode: updating existing cache entries")
+        print("This may take several minutes depending on the number of compounds.")
+        
+        # Track how many were actually updated
+        new_entries = 0
+        updated_entries = 0
+        
+        # Fetch data for compounds
+        for inchi_key in tqdm(compounds_to_fetch, desc="Fetching PubChem data"):
+            
+            was_in_cache = inchi_key in pubchem_cache
+            
+            # Get PubChem data
+            pubchem_data = fetch_pubchem_entry(inchi_key, timestamp)
+            
+            if pubchem_data:
+                pubchem_cache[inchi_key] = pubchem_data
+                
+                if was_in_cache:
+                    updated_entries += 1
+                else:
+                    new_entries += 1
+            else:
+                print(f"No PubChem data found for {inchi_key}")
+                empty_entry = {
+                    "inchi_key": inchi_key,
+                    "pubchem_cid": "",
+                    "iupac_name": "",
+                    "synonyms": ["Undefined"],
+                    "error": "not_found_in_pubchem",
+                    "last_updated": timestamp
+                }
+                
+                # Only store empty entry if not forcing updates or if it's truly new
+                if not was_in_cache:
+                    pubchem_cache[inchi_key] = empty_entry
+                    new_entries += 1
+            
+            # Be respectful to PubChem API
+            time.sleep(0.25)
+        
+        # Save updated cache
+        save_pubchem_cache(pubchem_cache, pubchem_cache_path)
+        
+        # Report what was done
+        if force_cache_update:
+            print(f"Force update completed: {updated_entries} entries updated, {new_entries} entries added")
+        else:
+            print(f"Cache update completed: {new_entries} new entries added")
+        
+    else:
+        print("All compounds already in cache!")
+
+    successful_retrievals = [k for k, v in pubchem_cache.items() 
+                            if v.get('pubchem_cid') and v.get('pubchem_cid') != '']
+    failed_retrievals = [k for k, v in pubchem_cache.items() 
+                        if not v.get('pubchem_cid') or v.get('pubchem_cid') == '']
+                        
+    if failed_retrievals:
+        print(f"\nSome compounds not found in PubChem: {failed_retrievals}...")
+        print("These will be created with minimal information from the input table.")
+
+    print(f"\nPubChem data retrieval complete!")
+    print(f"    Total compounds in global cache: {len(pubchem_cache)}")
+    print(f"    Successful PubChem retrievals in cache: {len(successful_retrievals)}")
+    print(f"    Failed retrievals in cache: {len(failed_retrievals)}")

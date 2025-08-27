@@ -4,6 +4,7 @@ import sys
 import duckdb
 import os
 import json
+from tqdm.notebook import tqdm
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
@@ -353,14 +354,16 @@ def apply_rt_correction_to_target(
     best_model,
     lcmsrun_files,
     modeling_results_df,
-    analyst_name,
-    timestamp
+    metadata,
 ):
     """
     Clone target atlas to project database and apply RT correction.
     Uses lightweight approach - stores only UIDs without copying full compound data.
     """
     print("Cloning target atlas and applying RT correction...")
+
+    analyst_name = metadata["analyst"]
+    timestamp = metadata["timestamp"]
 
     # Get target atlas and compounds from master database
     target_atlas_df = dbi.get_atlas_from_db(database_path, target_atlas_uid)
@@ -385,8 +388,8 @@ def apply_rt_correction_to_target(
         conn.execute("""
             INSERT INTO atlases (
                 atlas_uid, atlas_name, atlas_description, chromatography, 
-                polarity, created_by, creation_time, last_modified
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                polarity, created_by, last_modified
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, [
             corrected_atlas_uid,
             corrected_atlas_name,
@@ -394,7 +397,6 @@ def apply_rt_correction_to_target(
             atlas_info['chromatography'],
             atlas_info['polarity'],
             analyst_name,
-            timestamp,
             timestamp
         ])
         
@@ -420,7 +422,7 @@ def apply_rt_correction_to_target(
                 INSERT INTO mz_rt_experimental (
                     mz_rt_experimental_uid, compound_uid, rt_peak, rt_min, rt_max,
                     mz, mz_tolerance, adduct, 
-                    created_by, creation_time, rt_correction_applied, rt_shift,
+                    created_by, last_modified, rt_correction_applied, rt_shift,
                     source_mz_rt_reference_uid
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
@@ -435,7 +437,7 @@ def apply_rt_correction_to_target(
             conn.execute("""
                 INSERT INTO atlas_compound_associations (
                     association_uid, atlas_uid, compound_uid, mz_rt_reference_uid, 
-                    association_order, created_by, creation_time
+                    association_order, created_by, last_modified
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """, [
                 association_uid, corrected_atlas_uid, compound_uid, mz_rt_experimental_uid, 

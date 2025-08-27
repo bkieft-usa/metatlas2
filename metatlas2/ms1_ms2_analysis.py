@@ -34,7 +34,7 @@ def extract_and_match_qc_compounds(project_db_path: str, database_path: str, qc_
     print("Loading QC files and atlas compounds from databases...")
     
     # Get QC files from project database
-    qc_files_df = lrt.get_files_by_type_from_db(project_db_path, 'qc')
+    qc_files_df = dbi.get_files_by_type_from_db(project_db_path, 'qc')
     
     # Load QC compounds from atlas
     qc_compounds = dbi.get_atlas_compounds_table(database_path, qc_atlas_uid)

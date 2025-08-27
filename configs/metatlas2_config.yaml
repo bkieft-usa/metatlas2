@@ -1,0 +1,48 @@
+paths:
+  projects_dir: /Users/BKieft/Metabolomics/metatlas2/data/test_data/projects
+  main_database: /Users/BKieft/Metabolomics/metatlas2/data/databases/metatlas.duckdb
+  msms_refs: /Users/BKieft/Metabolomics/metatlas2/data/databases/msms_refs/msms_refs.tab
+  pubchem_cache: /Users/BKieft/Metabolomics/metatlas2/data/databases/pubchem_cache/pubchem_global_cache.pkl
+
+mass_tolerance:
+  default_ppm: 5.0
+  qc_extraction_ppm: 20.0
+
+rt_alignment:
+  polynomial_degree: 2
+  min_observations_per_compound: 1
+  min_compounds_for_modeling: 2
+  r2_threshold: 0.7
+  max_residual_rt: 1.0
+  rt_window_expansion: 1.0
+  exclude_inchikeys:
+    #- OVRNDRQMDRJTHS-ZEUBEQSHSA-N
+
+analysis_settings:
+  min_qc_files: 1
+  min_peak_intensity: 100000
+  targeted_rt_window_expansion: 0
+  ms2_min_score: 0.3
+  ms2_min_matches: 2
+
+database_options:
+  overwrite_existing: false
+  add_compound_duplicates: false
+  force_cache_update: false
+
+ms2_analysis:
+  min_score_threshold: 0.3
+  min_matches_threshold: 2
+  high_quality_min_score: 0.4
+  high_quality_min_matches: 2
+
+output_settings:
+  max_colwidth: 300
+  timestamp_format: "%Y%m%d_%H%M%S"
+
+plot_settings:
+  file_color_mapping:
+    ISTD: blue
+    ExCtrl: red
+    InjBl: orange
+  include_plots: true
