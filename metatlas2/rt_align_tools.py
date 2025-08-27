@@ -364,7 +364,7 @@ def apply_rt_correction_to_target(
 
     # Get target atlas and compounds from master database
     target_atlas_df = dbi.get_atlas_from_db(database_path, target_atlas_uid)
-    target_compounds_df = dbi.get_atlas_compounds_from_db(database_path, target_atlas_uid)
+    target_compounds_df = dbi.get_atlas_compounds_table(database_path, target_atlas_uid)
     
     if target_atlas_df.empty:
         raise ValueError(f"Atlas {target_atlas_uid} not found in master database")

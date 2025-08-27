@@ -13,54 +13,145 @@ from typing import Dict, List, Optional, Any, Tuple
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 import metatlas2.lcmsruns_tools as lrt
 
-def get_atlas_compounds_from_db(db_path: str, atlas_uid: str = None) -> pd.DataFrame:
+def get_atlas_compounds_table(database_path: str, atlas_uid: str) -> pd.DataFrame:
     """
-    Retrieve compounds and their RT/MZ reference data from database for a specific atlas.
-    Returns the DataFrame along with the atlas chromatography and polarity.
+    Extract all compound information for a given atlas UID from the database and return as a pandas DataFrame.
+    Handles both main database (with mz_rt_references) and project database (with mz_rt_experimental) structures.
     """
-    conn = duckdb.connect(str(db_path))
+    conn = duckdb.connect(database_path)
     
-    if atlas_uid:
-        # Get compounds by specific atlas UID
+    # Check if this is a project database by looking for mz_rt_experimental table
+    is_project_db = conn.execute("""
+        SELECT COUNT(*) 
+        FROM information_schema.tables 
+        WHERE table_name = 'mz_rt_experimental'
+    """).fetchone()[0] > 0
+    
+    if is_project_db:
+        # Project database query - uses experimental data and limited compound info
         query = """
-        SELECT 
-            c.compound_uid,
-            c.name as compound_name,
-            c.inchi_key,
-            mzrt.mz_rt_reference_uid,
-            mzrt.rt_peak,
-            mzrt.rt_min,
-            mzrt.rt_max,
-            mzrt.mz,
-            mzrt.mz_tolerance,
-            mzrt.adduct,
-            a.atlas_name,
-            a.chromatography,
-            a.polarity
-        FROM atlases a
-        JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
-        JOIN compounds c ON aca.compound_uid = c.compound_uid
-        JOIN mz_rt_references mzrt ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
-        WHERE a.atlas_uid = ?
-        ORDER BY aca.association_order
+            SELECT
+                a.atlas_uid,
+                a.atlas_name,
+                a.atlas_description,
+                a.chromatography,
+                a.polarity,
+                aca.compound_uid,
+                'Compound_' || aca.compound_uid AS compound_name,
+                '' AS inchi_key,
+                '' AS inchi,
+                mzrt_exp.adduct,
+                mzrt_exp.mz,
+                mzrt_exp.rt_peak,
+                mzrt_exp.rt_min,
+                mzrt_exp.rt_max,
+                mzrt_exp.mz_tolerance,
+                mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
+                mzrt_exp.rt_correction_applied,
+                mzrt_exp.rt_shift,
+                mzrt_exp.source_mz_rt_reference_uid
+            FROM atlases a
+            JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+            LEFT JOIN mz_rt_experimental mzrt_exp ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
+            WHERE a.atlas_uid = ?
+            ORDER BY aca.association_order, mzrt_exp.rt_peak
         """
-        df = conn.execute(query, [atlas_uid]).df()
     else:
-        print("Must provide Atlas UID")
-        return None
-
-    conn.close()
+        # Main database query - uses reference data with full compound info
+        query = """
+            SELECT
+                a.atlas_uid,
+                a.atlas_name,
+                a.atlas_description,
+                a.chromatography,
+                a.polarity,
+                c.compound_uid,
+                c.name AS compound_name,
+                c.inchi_key,
+                c.inchi,
+                mzrt.adduct,
+                mzrt.mz,
+                mzrt.rt_peak,
+                mzrt.rt_min,
+                mzrt.rt_max,
+                mzrt.mz_tolerance,
+                mzrt.mz_rt_reference_uid,
+                FALSE AS rt_correction_applied,
+                NULL AS rt_shift,
+                NULL AS source_mz_rt_reference_uid
+            FROM atlases a
+            JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+            JOIN compounds c ON aca.compound_uid = c.compound_uid
+            LEFT JOIN mz_rt_references mzrt ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
+            WHERE a.atlas_uid = ?
+            ORDER BY aca.association_order, mzrt.rt_peak
+        """
     
+    df = conn.execute(query, [atlas_uid]).df()
+    conn.close()
+
     if df.empty:
-        print(f"No compounds found for atlas criteria")
-        return None
+        print(f"No compounds found for atlas {atlas_uid}")
+        return pd.DataFrame()
     else:
-        atlas_chromatography = df['chromatography'].iloc[0]
-        atlas_polarity = df['polarity'].iloc[0]
-        print(f"Retrieved {len(df)} compounds for atlas {atlas_uid}")
-        print(f"Atlas chromatography: {atlas_chromatography}, polarity: {atlas_polarity}")
-        
-        return df
+        db_type = "project" if is_project_db else "main"
+        print(f"Retrieved {len(df)} compounds from {db_type} database for atlas: {df['atlas_name'].iloc[0]}")
+        print(f"Atlas chromatography: {df['chromatography'].iloc[0]}, polarity: {df['polarity'].iloc[0]}")
+        if is_project_db and df['rt_correction_applied'].any():
+            print(f"RT-corrected atlas detected with experimental data")
+
+    return df
+
+# def get_atlas_compounds_from_db(db_path: str, atlas_uid: str = None) -> pd.DataFrame:
+#     """
+#     Retrieve compounds and their RT/MZ reference data from database for a specific atlas.
+#     Updated to work with both atlas_name and atlas_uid parameters.
+#     """
+#     conn = duckdb.connect(str(db_path))
+    
+#     if atlas_uid:
+#         # Get compounds by specific atlas UID
+#         query = """
+#             SELECT
+#                 a.atlas_uid,
+#                 a.atlas_name,
+#                 a.atlas_description,
+#                 a.chromatography,
+#                 a.polarity,
+#                 c.compound_uid,
+#                 c.name AS compound_name,
+#                 c.inchi_key,
+#                 c.inchi,
+#                 mzrt.adduct,
+#                 mzrt.mz,
+#                 mzrt.rt_peak,
+#                 mzrt.rt_min,
+#                 mzrt.rt_max,
+#                 mzrt.mz_tolerance,
+#                 mzrt.mz_rt_reference_uid
+#             FROM atlases a
+#             JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+#             JOIN compounds c ON aca.compound_uid = c.compound_uid
+#             LEFT JOIN mz_rt_references mzrt ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
+#             WHERE a.atlas_uid = ?
+#             ORDER BY aca.association_order, mzrt.rt_peak
+#         """
+#         df = conn.execute(query, [atlas_uid]).df()
+#     else:
+#         print("Must provide atlas_uid")
+#         conn.close()
+#         return pd.DataFrame()
+
+#     conn.close()
+    
+#     if df.empty:
+#         print(f"No compounds found for atlas criteria")
+#         return pd.DataFrame()
+#     else:
+#         print(f"Retrieved {len(df)} compounds for atlas: {df['atlas_name'].iloc[0]}")
+#         print(f"Atlas chromatography: {df['chromatography'].iloc[0]}, polarity: {df['polarity'].iloc[0]}")
+
+#         return df
 
 def create_project_database(project_db_path: Path, overwrite_existing: bool = False) -> None:
     """Create project-specific database with required tables.
@@ -1026,3 +1117,207 @@ def _generate_uid(entity_type: str, rt_atlas: bool = False) -> str:
         return f"rta-{uuid.uuid4().hex[:32]}"
     else:
         return f"{entity_type}-{uuid.uuid4().hex[:32]}"
+
+def get_experimental_files_from_db(project_db_path: str, file_types: List[str] = None) -> List[str]:
+    """Get experimental files from project database."""
+    
+    if file_types is None:
+        file_types = ['experimental', 'istd', 'exctrl']  # Exclude QC files
+    
+    conn = duckdb.connect(str(project_db_path))
+    
+    # Get experimental files (excluding QC)
+    placeholders = ','.join(['?' for _ in file_types])
+    result = conn.execute(f"""
+        SELECT file_path 
+        FROM lcmsruns 
+        WHERE file_type IN ({placeholders})
+        ORDER BY filename
+    """, file_types).fetchall()
+    
+    conn.close()
+    
+    file_paths = [row[0] for row in result]
+    print(f"Found {len(file_paths)} experimental files in database")
+    
+    return file_paths
+
+def create_targeted_analysis_table(project_db_path: str) -> None:
+    """Create targeted_analysis table in project database to store analysis results."""
+    
+    conn = duckdb.connect(str(project_db_path))
+    
+    # Create targeted_analysis table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS targeted_analysis (
+            analysis_uid VARCHAR PRIMARY KEY,
+            project_name VARCHAR NOT NULL,
+            atlas_uid VARCHAR NOT NULL,
+            compound_uid VARCHAR NOT NULL,
+            inchi_key VARCHAR(27) NOT NULL,
+            compound_name VARCHAR NOT NULL,
+            
+            -- Original atlas data
+            original_rt_peak DOUBLE,
+            original_rt_min DOUBLE,
+            original_rt_max DOUBLE,
+            original_mz DOUBLE,
+            original_mz_tolerance DOUBLE,
+            adduct VARCHAR,
+            
+            -- Modified/corrected atlas data (if user adjusted)
+            final_rt_peak DOUBLE,
+            final_rt_min DOUBLE,
+            final_rt_max DOUBLE,
+            is_rt_modified BOOLEAN DEFAULT FALSE,
+            
+            -- Suggested RT bounds from EIC analysis
+            suggested_rt_peak DOUBLE,
+            suggested_rt_min DOUBLE,
+            suggested_rt_max DOUBLE,
+            suggestion_confidence DOUBLE,
+            suggestion_source_file VARCHAR,
+            
+            -- Best EIC match across all files
+            best_eic_file VARCHAR,
+            best_eic_rt DOUBLE,
+            best_eic_mz DOUBLE,
+            best_eic_intensity DOUBLE,
+            best_eic_ppm_error DOUBLE,
+            best_eic_rt_error DOUBLE,
+            
+            -- File detection summary
+            total_files_detected INTEGER DEFAULT 0,
+            file_detection_rate DOUBLE,
+            
+            -- MS2 analysis results
+            ms2_files_with_data INTEGER DEFAULT 0,
+            ms2_best_score DOUBLE,
+            ms2_best_database VARCHAR,
+            ms2_total_matches INTEGER DEFAULT 0,
+            
+            -- User annotations
+            ms1_notes VARCHAR DEFAULT 'keep',
+            ms2_notes VARCHAR DEFAULT 'no selection',
+            
+            -- Analysis metadata
+            analyst VARCHAR,
+            analysis_timestamp TIMESTAMP,
+            analysis_version VARCHAR DEFAULT '1.0'
+        )
+    """)
+    
+    # Create indexes for efficient querying
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_project ON targeted_analysis(project_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_atlas ON targeted_analysis(atlas_uid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_compound ON targeted_analysis(compound_uid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_inchi ON targeted_analysis(inchi_key)")
+    
+    conn.close()
+    print("Created targeted_analysis table in project database")
+
+
+def get_atlas_compounds_with_metadata(project_db_path: str, main_db_path: str, atlas_uid: str) -> pd.DataFrame:
+    """
+    Get atlas compounds from project database and enrich with metadata from main database.
+    This is specifically for RT-corrected atlases in project databases.
+    """
+    # Get basic atlas structure from project database
+    project_df = get_atlas_compounds_table(project_db_path, atlas_uid)
+    
+    if project_df.empty:
+        return pd.DataFrame()
+    
+    # Get compound UIDs that need metadata
+    compound_uids = project_df['compound_uid'].unique().tolist()
+    
+    # Fetch compound metadata from main database
+    conn_main = duckdb.connect(main_db_path)
+    
+    placeholders = ','.join(['?' for _ in compound_uids])
+    metadata_query = f"""
+        SELECT 
+            compound_uid,
+            name AS compound_name,
+            inchi_key,
+            inchi,
+            formula,
+            mono_isotopic_molecular_weight AS exact_mass
+        FROM compounds 
+        WHERE compound_uid IN ({placeholders})
+    """
+    
+    metadata_df = conn_main.execute(metadata_query, compound_uids).df()
+    conn_main.close()
+    
+    # Merge project data with metadata
+    enriched_df = project_df.merge(
+        metadata_df, 
+        on='compound_uid', 
+        how='left',
+        suffixes=('', '_meta')
+    )
+    
+    # Update compound_name and other fields with metadata
+    enriched_df['compound_name'] = enriched_df['compound_name_meta'].fillna(enriched_df['compound_name'])
+    enriched_df['inchi_key'] = enriched_df['inchi_key_meta'].fillna(enriched_df['inchi_key'])
+    enriched_df['inchi'] = enriched_df['inchi_meta'].fillna(enriched_df['inchi'])
+    
+    # Add label column for compatibility with feature_tools
+    enriched_df['label'] = enriched_df['compound_name']
+    
+    # Clean up duplicate columns
+    cols_to_drop = [col for col in enriched_df.columns if col.endswith('_meta')]
+    enriched_df = enriched_df.drop(columns=cols_to_drop)
+    
+    print(f"Enriched {len(enriched_df)} compounds with metadata from main database")
+    
+    return enriched_df
+
+
+def validate_targeted_analysis_data(project_db_path: str, analysis_uid: str = None) -> Dict:
+    """Validate targeted analysis results in database."""
+    
+    conn = duckdb.connect(str(project_db_path))
+    
+    # Get latest analysis if no specific UID provided
+    if analysis_uid:
+        condition = "WHERE analysis_uid = ?"
+        params = [analysis_uid]
+    else:
+        condition = "WHERE analysis_timestamp = (SELECT MAX(analysis_timestamp) FROM targeted_analysis)"
+        params = []
+    
+    # Validation queries
+    validation_query = f"""
+    SELECT 
+        COUNT(*) as total_records,
+        COUNT(CASE WHEN original_rt_peak IS NOT NULL THEN 1 END) as records_with_rt,
+        COUNT(CASE WHEN original_mz IS NOT NULL THEN 1 END) as records_with_mz,
+        COUNT(CASE WHEN best_eic_file IS NOT NULL THEN 1 END) as records_with_eic,
+        COUNT(CASE WHEN ms2_files_with_data > 0 THEN 1 END) as records_with_ms2,
+        COUNT(CASE WHEN is_rt_modified = true THEN 1 END) as modified_records,
+        AVG(file_detection_rate) as avg_detection_rate,
+        MIN(file_detection_rate) as min_detection_rate,
+        MAX(file_detection_rate) as max_detection_rate
+    FROM targeted_analysis
+    {condition}
+    """
+    
+    result = conn.execute(validation_query, params).fetchone()
+    conn.close()
+    
+    if result:
+        return {
+            'total_records': result[0],
+            'records_with_rt': result[1],
+            'records_with_mz': result[2],
+            'records_with_eic': result[3],
+            'records_with_ms2': result[4],
+            'modified_records': result[5],
+            'avg_detection_rate': result[6],
+            'min_detection_rate': result[7],
+            'max_detection_rate': result[8]
+        }
+    else:
+        return {}
