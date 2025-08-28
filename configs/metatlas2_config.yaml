@@ -4,45 +4,34 @@ paths:
   msms_refs: /Users/BKieft/Metabolomics/metatlas2/data/databases/msms_refs/msms_refs.tab
   pubchem_cache: /Users/BKieft/Metabolomics/metatlas2/data/databases/pubchem_cache/pubchem_global_cache.pkl
 
-mass_tolerance:
-  default_ppm: 5.0
-  qc_extraction_ppm: 20.0
-
 rt_alignment:
-  polynomial_degree: 2
-  min_observations_per_compound: 1
-  min_compounds_for_modeling: 2
-  r2_threshold: 0.7
-  max_residual_rt: 1.0
-  rt_window_expansion: 1.0
-  exclude_inchikeys:
-    #- OVRNDRQMDRJTHS-ZEUBEQSHSA-N
+  tolerances:
+    i: 10000.0 # Minimum intensity to consider a QC compound peak
+    mz: 20.0 # MZ tolerance to find QC compounds
+    rt: 1.0 # RT window expansion to find QC compounds
+  model:
+    polynomial_degree: 2
+    min_observations_per_compound: 1
+    min_compounds_for_modeling: 2
+    r2_threshold: 0.7
+    exclude_inchikeys:
+      - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
 
 analysis_settings:
-  min_qc_files: 1
-  min_peak_intensity: 100000
-  targeted_rt_window_expansion: 0
-  ms2_min_score: 0.3
+  default_ppm_error: 5.0
+  min_peak_intensity: 100000.0
+  extra_time: 0.0
+  ms2_min_score: 0.01
   ms2_min_matches: 2
 
 database_options:
-  overwrite_existing: false
+  overwrite_existing_main_db: true
+  overwrite_existing_project_db: true
   add_compound_duplicates: false
-  force_cache_update: false
-
-ms2_analysis:
-  min_score_threshold: 0.3
-  min_matches_threshold: 2
-  high_quality_min_score: 0.4
-  high_quality_min_matches: 2
-
-output_settings:
-  max_colwidth: 300
-  timestamp_format: "%Y%m%d_%H%M%S"
+  force_pubchem_cache_update: false
 
 plot_settings:
   file_color_mapping:
     ISTD: blue
     ExCtrl: red
     InjBl: orange
-  include_plots: true

@@ -9,6 +9,9 @@ import pickle
 from typing import Dict, List, Optional, Any, Tuple
 from tqdm.notebook import tqdm
 
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
+import metatlas2.load_tools as ldt
+
 def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
     """Get comprehensive compound data from PubChem using InChI key."""
     try:
@@ -131,10 +134,15 @@ def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
     except Exception as e:
         print(f"Error saving cache: {e}")
 
-def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, timestamp: str, force_cache_update: bool = False) -> None:
+def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
+
+    pubchem_cache_path = config["paths"]["pubchem_cache"]
+    force_cache_update = config["database_options"]["force_pubchem_cache_update"] if "force_pubchem_cache_update" in config["database_options"] else False
 
     # Load existing global cache
     pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path)
+
+    prov = ldt.get_provenance()
 
     # Determine which compounds need to be fetched
     unique_inchi_keys = compounds['inchi_key'].dropna().unique()
@@ -166,8 +174,8 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, time
             was_in_cache = inchi_key in pubchem_cache
             
             # Get PubChem data
-            pubchem_data = fetch_pubchem_entry(inchi_key, timestamp)
-            
+            pubchem_data = fetch_pubchem_entry(inchi_key, prov['timestamp'])
+
             if pubchem_data:
                 pubchem_cache[inchi_key] = pubchem_data
                 
@@ -183,7 +191,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, time
                     "iupac_name": "",
                     "synonyms": ["Undefined"],
                     "error": "not_found_in_pubchem",
-                    "last_updated": timestamp
+                    "last_updated": prov['timestamp']
                 }
                 
                 # Only store empty entry if not forcing updates or if it's truly new

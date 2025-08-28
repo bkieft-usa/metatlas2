@@ -141,17 +141,18 @@ def process_ms2_hits(ms2_data: Dict, reference_df: pd.DataFrame, min_score: floa
     return enhanced_ms2_data, all_hits
 
 def run_targeted_analysis_workflow(project_db_path: str, 
-                                    main_db_path: str, 
                                     target_atlas_uid: str, 
-                                    msms_refs_path: str, 
-                                    default_mz_tolerance: float = 5.0, 
-                                    rt_window_expansion: float = 0.0) -> Tuple[pd.DataFrame, Dict, Dict, pd.DataFrame]: 
+                                    config: Dict) -> Tuple[pd.DataFrame, Dict, Dict, pd.DataFrame]: 
     """ Execute the complete targeted analysis workflow.
     Returns:
         Tuple of (atlas_df, eics, ms2_data_with_hits, ms2_hits)
     """
     print("Setting up targeted analysis database...")
     dbi.create_targeted_analysis_table(project_db_path)
+
+    main_db_path = config["paths"]["main_database"]
+    msms_refs_path = Path(config["paths"]["msms_refs"])
+    analysis_settings = config["analysis_settings"]
 
     print("Loading target atlas...")
     atlas_df_ft = dbi.get_atlas_compounds_with_metadata(
@@ -177,8 +178,8 @@ def run_targeted_analysis_workflow(project_db_path: str,
     input_data_list = msa.prepare_feature_tools_inputs(
         atlas_df=atlas_df_ft,
         h5_files=project_files,
-        ppm_tolerance=default_mz_tolerance,
-        extra_time=rt_window_expansion
+        ppm_tolerance=analysis_settings["default_ppm_error"],
+        extra_time=analysis_settings["extra_time"]
     )
     print(f"Created {len(input_data_list)} input dictionaries")
 
@@ -1250,7 +1251,7 @@ def create_targeted_analysis_plot(compound_metadata,
 
     return fig
 
-def create_gui(compound_metadata, atlas_df, file_color_dict=None):
+def create_gui(compound_metadata, atlas_df, config):
     """
     Create an enhanced RT editor that includes MS2 file browsing capability.
     This combines the RT editing functionality with the ability to scroll through MS2 files.
@@ -1258,13 +1259,13 @@ def create_gui(compound_metadata, atlas_df, file_color_dict=None):
     Args:
         compound_metadata: Pre-calculated metadata dictionary
         atlas_df: Original atlas DataFrame
-        file_color_dict: File color mapping
     
     Returns:
         ipywidgets container with enhanced RT editor and MS2 browser
     """
     
     # Set starting status
+    file_color_dict = config['plot_settings']['file_color_mapping'] if 'file_color_mapping' in config['plot_settings'] else None
     compound_list = list(compound_metadata.keys())
     all_compound_names = [meta['original_atlas_data']['compound_name'] for meta in compound_metadata.values()]
     current_compound_index = [0]
@@ -1793,146 +1794,3 @@ def create_gui(compound_metadata, atlas_df, file_color_dict=None):
     full_update()
     
     return container
-
-def save_targeted_analysis_results(project_db_path: str, compound_metadata: Dict, 
-                                 atlas_uid: str, project_name: str, analyst: str) -> str:
-    """Save targeted analysis results to database."""
-    
-    conn = duckdb.connect(str(project_db_path))
-    
-    # Generate analysis batch UID
-    analysis_batch_uid = f"analysis-{uuid.uuid4().hex[:16]}"
-    timestamp = datetime.now()
-    
-    saved_count = 0
-    
-    for inchi_key, meta in compound_metadata.items():
-        # Generate unique analysis UID for each compound
-        analysis_uid = f"analysis-{uuid.uuid4().hex[:32]}"
-        
-        # Extract data from metadata
-        original_data = meta['original_atlas_data']
-        new_data = meta['new_atlas_data']
-        suggested_data = meta.get('suggested_atlas_data', {})
-        best_eic = meta['best_eic']
-        ms2_data = meta['ms2_data']
-        
-        # Fix the compound_index issue - convert to string if it's a pandas object
-        compound_index = original_data['compound_index']
-        if hasattr(compound_index, 'iloc'):
-            # It's a pandas Index/Series, get the first value
-            compound_index = str(compound_index.iloc[0]) if len(compound_index) > 0 else str(compound_index)
-        elif hasattr(compound_index, '__iter__') and not isinstance(compound_index, str):
-            # It's some other iterable, convert to string
-            compound_index = str(list(compound_index)[0]) if len(list(compound_index)) > 0 else str(compound_index)
-        else:
-            # It's already a simple value
-            compound_index = str(compound_index)
-        
-        # Calculate file detection rate
-        total_files_detected = meta['number_of_files']
-        # Estimate total files available (this could be improved with actual file count)
-        estimated_total_files = max(total_files_detected, 10)  # Minimum estimate
-        file_detection_rate = total_files_detected / estimated_total_files if estimated_total_files > 0 else 0.0
-        
-        # MS2 analysis summary
-        ms2_files_with_data = ms2_data.get('total_files', 0)
-        ms2_best_score = 0.0
-        ms2_best_database = None
-        ms2_total_matches = 0
-        
-        # Extract best MS2 scores from hit pairs
-        for file_name, file_data in ms2_data.items():
-            if file_name in ['total_files', 'has_any_data']:
-                continue
-            
-            hit_pairs = file_data.get('hit_pairs', [])
-            for query_spec, ref_spec in hit_pairs:
-                score = ref_spec.get('score', 0.0)
-                if score > ms2_best_score:
-                    ms2_best_score = score
-                    ms2_best_database = ref_spec.get('database', 'unknown')
-                ms2_total_matches += 1
-        
-        # Insert record
-        conn.execute("""
-            INSERT INTO targeted_analysis VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                ?, ?,
-                ?, ?, ?, ?,
-                ?, ?,
-                ?, ?, ?
-            )
-        """, (
-            analysis_uid,
-            project_name,
-            atlas_uid,
-            compound_index,  # Now properly converted to string
-            inchi_key,
-            original_data['compound_name'],
-            
-            # Original atlas data
-            original_data['rt_peak'],
-            original_data['rt_min'],
-            original_data['rt_max'],
-            original_data['mz'],
-            original_data['mz_tolerance'],
-            original_data['adduct'],
-            
-            # Final/modified data
-            new_data['rt_peak'],
-            new_data['rt_min'],
-            new_data['rt_max'],
-            meta['is_modified'],
-            
-            # Suggested data
-            suggested_data.get('rt_peak'),
-            suggested_data.get('rt_min'),
-            suggested_data.get('rt_max'),
-            suggested_data.get('confidence'),
-            suggested_data.get('source_file'),
-            
-            # Best EIC data
-            best_eic.get('file_peak'),
-            best_eic.get('rt_peak'),
-            best_eic.get('mz_peak'),
-            best_eic.get('intensity_peak'),
-            best_eic.get('ppm_diff'),
-            best_eic.get('rt_diff'),
-            
-            # File detection
-            total_files_detected,
-            file_detection_rate,
-            
-            # MS2 data
-            ms2_files_with_data,
-            ms2_best_score if ms2_best_score > 0 else None,
-            ms2_best_database,
-            ms2_total_matches,
-            
-            # Annotations
-            new_data.get('ms1_notes', 'keep'),
-            new_data.get('ms2_notes', 'no selection'),
-            
-            # Metadata
-            analyst,
-            timestamp,
-            '1.0'
-        ))
-        
-        saved_count += 1
-    
-    conn.close()
-    
-    print(f"Saved {saved_count} compound analysis results to database")
-    print(f"Analysis batch UID: {analysis_batch_uid}")
-    
-    return analysis_batch_uid
-
-# Note: The set_up_plot_data and create_gui functions are quite large
-# They should be moved here from the notebook, but I'll keep them in the notebook
-# for now since they're working. Let me know if you want me to move them as well.

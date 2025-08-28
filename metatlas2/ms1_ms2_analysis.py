@@ -16,23 +16,27 @@ sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 from metatlas.io import feature_tools as ft
 import metatlas2.lcmsruns_tools as lrt
 import metatlas2.database_interact as dbi
+import metatlas2.targeted_analysis as tga
 
-def extract_and_match_qc_compounds(project_db_path: str, database_path: str, qc_atlas_uid: str, metadata: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict]:
+def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, config: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict]:
     """
     Extract MS1 data from QC files and match with QC Atlas compounds.
     Simplified approach that processes all files and matches compounds in a straightforward manner.
     
     Args:
         project_db_path: Path to project database containing lcmsruns
-        database_path: Path to main compounds database
         qc_atlas_uid: UID of QC atlas to use for matching
-        metadata: Dictionary containing extraction parameters
-    
+        config: Dictionary containing extraction parameters
+
     Returns:
-        Tuple of (matches_df, matching_stats)
+        Tuple of (qc_compound_data, matching_stats)
     """
     print("Loading QC files and atlas compounds from databases...")
-    
+
+    # Define thresholds
+    database_path = config['paths']['main_database']
+    metadata = config['rt_alignment']['tolerances']
+
     # Get QC files from project database
     qc_files_df = dbi.get_files_by_type_from_db(project_db_path, 'qc')
     
@@ -76,7 +80,7 @@ def extract_and_match_qc_compounds(project_db_path: str, database_path: str, qc_
                         
                         # Filter by minimum intensity
                         if 'i' in ms1_data.columns:
-                            ms1_data = ms1_data[ms1_data['i'] >= metadata['min_peak_intensity']]
+                            ms1_data = ms1_data[ms1_data['i'] >= metadata['i']]
                         
                         # Filter by RT range
                         if 'rt' in ms1_data.columns and len(ms1_data) > 0:
@@ -116,12 +120,12 @@ def extract_and_match_qc_compounds(project_db_path: str, database_path: str, qc_
         compound_polarity = compound['polarity']
         
         # Calculate tolerances
-        mz_tolerance = compound['mz_tolerance'] if pd.notna(compound['mz_tolerance']) else metadata['default_ppm_tolerance']
+        mz_tolerance = metadata['mz']
         mz_tolerance_da = target_mz * mz_tolerance / 1e6
         
         # RT window with expansion
-        rt_min_search = atlas_rt_min - metadata['window_expansion']
-        rt_max_search = atlas_rt_max + metadata['window_expansion']
+        rt_min_search = atlas_rt_min - metadata['rt']
+        rt_max_search = atlas_rt_max + metadata['rt']
         
         # Filter MS1 data for this compound
         # Match chromatography exactly
@@ -177,14 +181,14 @@ def extract_and_match_qc_compounds(project_db_path: str, database_path: str, qc_
     
     # Create results
     if compound_matches:
-        matches_df = pd.DataFrame(compound_matches)
+        qc_compound_data = pd.DataFrame(compound_matches)
         
         # Calculate statistics
         matching_stats = {
             'total_compounds': len(qc_compounds),
-            'compounds_with_matches': matches_df['compound_uid'].nunique(),
-            'compounds_without_matches': len(qc_compounds) - matches_df['compound_uid'].nunique(),
-            'total_matches': len(matches_df),
+            'compounds_with_matches': qc_compound_data['compound_uid'].nunique(),
+            'compounds_without_matches': len(qc_compounds) - qc_compound_data['compound_uid'].nunique(),
+            'total_matches': len(qc_compound_data),
             'total_files': len(qc_files_df),
             'total_peaks_extracted': len(combined_ms1_data)
         }
@@ -192,10 +196,10 @@ def extract_and_match_qc_compounds(project_db_path: str, database_path: str, qc_
         print(f"\nMatching completed:")
         print(f"  Compounds with matches: {matching_stats['compounds_with_matches']}/{matching_stats['total_compounds']}")
         print(f"  Total compound-file matches: {matching_stats['total_matches']}")
-        print(f"  Mean m/z error: {matches_df['mz_error_ppm'].mean():.2f} ± {matches_df['mz_error_ppm'].std():.2f} ppm")
-        print(f"  Mean RT difference: {matches_df['rt_difference'].mean():.3f} ± {matches_df['rt_difference'].std():.3f} min")
+        print(f"  Mean m/z error: {qc_compound_data['mz_error_ppm'].mean():.2f} ± {qc_compound_data['mz_error_ppm'].std():.2f} ppm")
+        print(f"  Mean RT difference: {qc_compound_data['rt_difference'].mean():.3f} ± {qc_compound_data['rt_difference'].std():.3f} min")
         
-        return matches_df, matching_stats
+        return qc_compound_data, matching_stats
     else:
         print("No compound matches found. Check Atlas compound definitions, m/z tolerance, RT window settings, and QC file data quality")
         raise ValueError("No compound matches found")
@@ -756,3 +760,36 @@ def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame
     print(f"  MS2 data: {len(ms2_data)} files")
     
     return eics, ms2_data
+
+def summarize_ms2_hits(ms2_hits: pd.DataFrame, config: Dict):
+
+    analysis_settings = config["analysis_settings"]
+
+    if not ms2_hits.empty:
+        print("=== MS2 Hits Analysis Results ===")
+
+        # Analyze the results using config values
+        min_score = analysis_settings["ms2_min_score"]
+        min_matches = analysis_settings["ms2_min_matches"]
+
+        analysis = tga.analyze_ms2_hits_results(ms2_hits, min_score=min_score, min_matches=min_matches)
+
+        print(f"Analysis Summary:")
+        for key, value in analysis.items():
+            print(f"  {key}: {value}")
+
+        # Plot score distribution
+        print(f"\n=== Score Distribution ===")
+        tga.plot_ms2_score_distribution(ms2_hits, "MS2 Similarity Scores vs Reference Database")
+
+        # Show high-quality matches summary
+        print(f"\n=== High-Quality Matches (Score >= {min_score}, Matches >= {min_matches}) ===")
+        high_quality_hits = tga.filter_ms2_hits(ms2_hits, min_score=min_score, min_matches=min_matches)
+
+        if not high_quality_hits.empty:
+            print(f"Found {len(high_quality_hits)} high-quality matches")
+            print(f"Unique compounds with high-quality matches: {high_quality_hits['inchi_key'].nunique()}")
+        else:
+            print("No high-quality matches found")
+    else:
+        print("No MS2 hits data available for analysis")

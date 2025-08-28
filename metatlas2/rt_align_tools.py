@@ -17,6 +17,7 @@ from typing import Dict, Tuple
 
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 import metatlas2.database_interact as dbi
+import metatlas2.load_tools as ldt
 
 def build_polynomial_model(X, y, degree):
     """Build polynomial regression model."""
@@ -226,19 +227,20 @@ def create_RT_summary(compounds: pd.DataFrame, best_model: dict, qc_files: list,
             json.dump(summary, f, indent=2)
         print(f"RT alignment summary saved to {alignment_summary_file}")
 
-def build_rt_alignment_model(matches_df: pd.DataFrame, rt_settings: Dict) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
+def build_rt_alignment_model(matches_df: pd.DataFrame, config: Dict) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
     """
     Build RT alignment model from QC compound matches.
     
     Args:
         matches_df: DataFrame of QC compound matches
-        rt_settings: Dictionary containing RT modeling settings
+        config: Dictionary containing RT modeling settings
     
     Returns:
         Tuple of (best_model, modeling_results_df, compound_rt_stats)
     """
     print("Building RT alignment model...")
-    
+
+    rt_settings = config['rt_alignment']['model']
     # Filter by excluded InChI keys if specified
     if rt_settings.get('exclude_inchikeys'):
         if 'inchi_key' not in matches_df.columns:
@@ -333,9 +335,6 @@ def build_rt_alignment_model(matches_df: pd.DataFrame, rt_settings: Dict) -> Tup
     if best_model['r2'] < rt_settings['r2_threshold']:
         print(f"Warning: Model R² ({best_model['r2']:.4f}) is below threshold ({rt_settings['r2_threshold']})")
     
-    if modeling_results_df['abs_residual'].max() > rt_settings['max_residual_rt']:
-        print(f"Warning: Maximum residual ({modeling_results_df['abs_residual'].max():.4f} min) exceeds threshold ({rt_settings['max_residual_rt']} min)")
-    
     # Add compounds used for modeling
     best_model['compounds_used_for_modeling'] = reliable_compounds['compound_uid'].tolist()
     
@@ -349,12 +348,11 @@ def build_rt_alignment_model(matches_df: pd.DataFrame, rt_settings: Dict) -> Tup
 
 def apply_rt_correction_to_target(
     project_db_path,
-    database_path,
     target_atlas_uid,
+    config,
     best_model,
     lcmsrun_files,
     modeling_results_df,
-    metadata,
 ):
     """
     Clone target atlas to project database and apply RT correction.
@@ -362,8 +360,7 @@ def apply_rt_correction_to_target(
     """
     print("Cloning target atlas and applying RT correction...")
 
-    analyst_name = metadata["analyst"]
-    timestamp = metadata["timestamp"]
+    database_path = config['paths']['main_database']
 
     # Get target atlas and compounds from master database
     target_atlas_df = dbi.get_atlas_from_db(database_path, target_atlas_uid)
@@ -373,7 +370,8 @@ def apply_rt_correction_to_target(
         raise ValueError(f"Atlas {target_atlas_uid} not found in master database")
     
     atlas_info = target_atlas_df.iloc[0]
-    
+    prov = ldt.get_provenance()
+
     # Connect to project database only
     conn = duckdb.connect(str(project_db_path))
     
@@ -396,8 +394,8 @@ def apply_rt_correction_to_target(
             f"RT-corrected version of {target_atlas_uid} using QC-based polynomial model",
             atlas_info['chromatography'],
             atlas_info['polarity'],
-            analyst_name,
-            timestamp
+            prov["analyst"],
+            prov["timestamp"]
         ])
         
         # Create RT-corrected experimental data and associations
@@ -428,8 +426,8 @@ def apply_rt_correction_to_target(
             """, [
                 mz_rt_experimental_uid, compound_uid, corrected_rt_peak, corrected_rt_min, 
                 corrected_rt_max, compound['mz'], compound['mz_tolerance'],
-                compound['adduct'],
-                analyst_name, timestamp, True, rt_shift, compound['mz_rt_reference_uid']
+                compound['adduct'], prov["analyst"], prov["timestamp"],
+                True, rt_shift, compound['mz_rt_reference_uid']
             ])
             
             # Create atlas association using experimental UID (no foreign key constraint)
@@ -441,7 +439,7 @@ def apply_rt_correction_to_target(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """, [
                 association_uid, corrected_atlas_uid, compound_uid, mz_rt_experimental_uid, 
-                len(correction_stats) + 1, analyst_name, timestamp
+                len(correction_stats) + 1, prov["analyst"], prov["timestamp"]
             ])
             
             correction_stats.append({
@@ -460,8 +458,7 @@ def apply_rt_correction_to_target(
             project_db_path,
             best_model,
             [f for files in lcmsrun_files.values() for pol_files in files.values() for f in pol_files.get('qc', [])],
-            modeling_results_df.to_dict('records'),
-            {"analyst": analyst_name, "timestamp": timestamp}
+            modeling_results_df.to_dict('records')
         )
         
         conn.commit()
@@ -494,4 +491,4 @@ def apply_rt_correction_to_target(
     print(f"  RT alignment model UID: {rt_alignment_uid}")
     print(f"  Project database: {project_db_path}")
 
-    return summary
+    return summary, corrected_atlas_uid
