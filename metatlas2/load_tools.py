@@ -1,8 +1,64 @@
 import pandas as pd
+import numpy as np
 from datetime import datetime
 import getpass
 import yaml
 from typing import Dict, Any, List, Union
+import ast
+
+def load_msms_refs_file(file_path):
+    """
+    Load the msms_refs.tab file and convert it to a DataFrame format suitable for MS2 matching.
+    
+    Args:
+        file_path: Path to the msms_refs.tab file
+        
+    Returns:
+        DataFrame with columns: ['database', 'id', 'name', 'spectrum', 'collision_energy', 
+                                'precursor_mz', 'polarity', 'adduct', 'formula', 'exact_mass', 
+                                'inchi_key', 'inchi', 'smiles']
+    """
+    
+    print(f"Loading reference spectra from {file_path}...")
+
+    # Read the tab-separated file
+    df = pd.read_csv(file_path, sep='\t', header=None, names=[
+        'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy', 
+        'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id', 
+        'experiment', 'instrument', 'formula', 'exact_mass', 'inchi_key', 'inchi', 'smiles'
+    ])
+
+    # Convert spectrum strings to numpy arrays
+    def parse_spectrum(spec_str):
+        try:
+            # Parse the string representation of the spectrum
+            spectrum = ast.literal_eval(spec_str)
+            if len(spectrum) == 2 and len(spectrum[0]) == len(spectrum[1]):
+                return np.array(spectrum)
+            else:
+                return None
+        except:
+            return None
+
+    df['spectrum_parsed'] = df['spectrum'].apply(parse_spectrum)
+
+    # Remove rows with unparseable spectra
+    df = df.dropna(subset=['spectrum_parsed'])
+    df['spectrum'] = df['spectrum_parsed']
+    df = df.drop('spectrum_parsed', axis=1)
+
+    # Clean up data types
+    df['precursor_mz'] = pd.to_numeric(df['precursor_mz'], errors='coerce')
+    df['collision_energy'] = pd.to_numeric(df['collision_energy'], errors='coerce') 
+    df['exact_mass'] = pd.to_numeric(df['exact_mass'], errors='coerce')
+
+    if not df.empty:
+        print(f"    Reference DataFrame shape: {df.shape}")
+        print(f"    Number of unique InChI keys: {df['inchi_key'].nunique()}")
+        return df
+    else:
+        print("    Reference DataFrame is empty")
+        return None
 
 def load_metatlas_config(config_path: str) -> Dict[str, Any]:
     """Load and validate metatlas configuration from YAML file with type enforcement."""

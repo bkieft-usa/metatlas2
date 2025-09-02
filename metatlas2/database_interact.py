@@ -66,7 +66,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str) -> pd.DataFram
                 a.chromatography,
                 a.polarity,
                 aca.compound_uid,
-                COALESCE(c.name, CONCAT('Compound_', aca.compound_uid)) AS compound_name,
+                COALESCE(c.name, '') AS compound_name,
                 COALESCE(c.inchi_key, '') AS inchi_key,
                 COALESCE(c.inchi, '') AS inchi,
                 mzrt_exp.adduct,
@@ -127,7 +127,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str) -> pd.DataFram
         db_type = "project" if is_project_db else "main"
         chromatography = ldt.detect_atlas_input_chromatography(df)
         polarity = ldt.detect_atlas_input_polarity(df)
-        print(f"Retrieved {len(df)} compounds from {db_type} database for atlas: {df['atlas_name'].iloc[0]}")
+        print(f"Retrieved {len(df)} compounds from {db_type} database for atlas: {df['atlas_name'].iloc[0]} ({df['atlas_uid'].iloc[0]})")
         print(f"Atlas chromatography: {chromatography}, polarity: {polarity}")
         if is_project_db and df['rt_correction_applied'].any():
             print(f"RT-corrected atlas detected with experimental data")
@@ -477,7 +477,7 @@ def _create_compound_record(conn, row, pubchem_cache: Dict, input_df: pd.DataFra
     compound_uid = _generate_uid("compound")
     
     # Extract compound data from row
-    name = str(row.get('label', row.get('compound_name', f'Compound_{idx}')))
+    name = str(row.get('label', row.get('compound_name', 'Unknown')))
     inchi_key = str(row.get('inchi_key', ''))
     inchi = str(row.get('inchi', '')) if pd.notna(row.get('inchi')) else None
     smiles = str(row.get('smiles', '')) if pd.notna(row.get('smiles')) else None
@@ -859,6 +859,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_peak DOUBLE NOT NULL,
                 rt_min DOUBLE NOT NULL,
                 rt_max DOUBLE NOT NULL,
+                ms1_notes VARCHAR,
+                ms2_notes VARCHAR,
                 mz DOUBLE NOT NULL,
                 mz_tolerance DOUBLE NOT NULL,
                 adduct VARCHAR NOT NULL,
@@ -890,19 +892,97 @@ def _create_database_tables(conn, db_type: str = "main"):
             )
         """)
     
+        # Create targeted_analysis table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS targeted_analysis (
+                analysis_uid VARCHAR NOT NULL,
+                project_name VARCHAR NOT NULL,
+                atlas_uid VARCHAR NOT NULL,
+                compound_uid VARCHAR NOT NULL,
+                inchi_key VARCHAR(27) NOT NULL,
+                compound_name VARCHAR NOT NULL,
+
+                -- Pre targeted analysis atlas data
+                pre_rt_peak DOUBLE,
+                pre_rt_min DOUBLE,
+                pre_rt_max DOUBLE,
+                pre_mz DOUBLE,
+                mz_tolerance DOUBLE,
+                adduct VARCHAR,
+
+                -- Post targeted analysis atlas data
+                post_rt_peak DOUBLE,
+                post_rt_min DOUBLE,
+                post_rt_max DOUBLE,
+                is_rt_modified BOOLEAN DEFAULT FALSE,
+                
+                -- Best EIC match across all files
+                best_eic_file VARCHAR,
+                best_eic_rt DOUBLE,
+                best_eic_mz DOUBLE,
+                best_eic_intensity DOUBLE,
+                best_eic_ppm_error DOUBLE,
+                best_eic_rt_error DOUBLE,
+
+                -- Average EIC
+                avg_eic_rt DOUBLE,
+                avg_eic_intensity DOUBLE,
+                avg_eic_mz DOUBLE,
+
+                -- Best MS2 match across all files
+                best_ms2_file VARCHAR,
+                best_ms2_database VARCHAR,
+                best_ms2_ref_id VARCHAR,
+                best_ms2_rt_peak DOUBLE,
+                best_ms2_intensity_peak DOUBLE,
+                best_ms2_mz_peak DOUBLE,
+                best_ms2_score DOUBLE,
+                best_ms2_num_matches INTEGER,
+                best_ms2_ref_frags INTEGER,
+                best_ms2_data_frags INTEGER,
+                best_ms2_frags_matching TEXT,
+
+                -- Average MS2
+                avg_ms2_score DOUBLE,
+
+                -- File detection summary
+                total_files_detected INTEGER DEFAULT 0,
+                
+                -- MS2 analysis results
+                ms2_files_with_data INTEGER DEFAULT 0,
+                ms2_best_score DOUBLE,
+                ms2_best_database VARCHAR,
+                ms2_total_matches INTEGER DEFAULT 0,
+                
+                -- User annotations
+                ms1_notes VARCHAR DEFAULT 'keep',
+                ms2_notes VARCHAR DEFAULT 'no selection',
+                
+                -- Analysis metadata
+                analyst VARCHAR,
+                analysis_timestamp TIMESTAMP,
+            
+            PRIMARY KEY (analysis_uid, compound_uid)
+            )
+        """)
+
     # Create indexes (common to both database types)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_compounds_inchi_key ON compounds(inchi_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mzrt_ref_compound ON mz_rt_references(compound_uid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_atlas_associations_atlas ON atlas_compound_associations(atlas_uid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_atlas_associations_compound ON atlas_compound_associations(compound_uid)")
-    
+
     # Project-specific indexes
     if db_type == "project":
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lcmsruns_analysis ON lcmsruns(file_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mzrt_exp_compound ON mz_rt_experimental(compound_uid)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_alignment_project ON rt_alignment(project_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_alignment_atlas ON rt_alignment(atlas_uid)")
-    
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_project ON targeted_analysis(project_name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_atlas ON targeted_analysis(atlas_uid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_compound ON targeted_analysis(compound_uid)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_inchi ON targeted_analysis(inchi_key)")
+
 def delete_atlas_from_db(config: Dict, atlas_uid: str) -> str:
     """
     Delete an atlas and all its associated metadata from the database.
@@ -1099,25 +1179,28 @@ def get_rt_correction_table_entry(db_path: Path, atlas_uid: str) -> Optional[dic
         return None
 
 
-def _generate_uid(entity_type: str, rt_atlas: bool = False) -> str:
+def _generate_uid(entity_type: str) -> str:
     """Generate a unique identifier for database entities."""
     if entity_type == "atlas":
-        if rt_atlas is False:
-            return f"atlas-{uuid.uuid4().hex[:32]}"
-        elif rt_atlas is True:
-            return f"atlas-rt-{uuid.uuid4().hex[:32]}"
+        return f"atl-raw-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "rt_atlas":
+        return f"atl-rta-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "analyzed_atlas":
+        return f"atl-tga-{uuid.uuid4().hex[:32]}"
     elif entity_type == "mz_rt_experimental":
         return f"mzrt-exp-{uuid.uuid4().hex[:32]}"
     elif entity_type == "compound":
-        return f"compound-{uuid.uuid4().hex[:32]}"
+        return f"cmp-{uuid.uuid4().hex[:32]}"
     elif entity_type == "mz_rt_reference":
         return f"mzrt-{uuid.uuid4().hex[:32]}"
     elif entity_type == "association":
         return f"assoc-{uuid.uuid4().hex[:32]}"
     elif entity_type == "rt_alignment":
         return f"rta-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "analysis":
+        return f"tga-{uuid.uuid4().hex[:32]}"
     else:
-        return f"{entity_type}-{uuid.uuid4().hex[:32]}"
+        raise ValueError(f"Unknown entity type: {entity_type}")
 
 def get_experimental_files_from_db(project_db_path: str, file_types: List[str] = None) -> List[str]:
     """Get experimental files from project database."""
@@ -1142,80 +1225,6 @@ def get_experimental_files_from_db(project_db_path: str, file_types: List[str] =
     print(f"Found {len(file_paths)} experimental files in database")
     
     return file_paths
-
-def create_targeted_analysis_table(project_db_path: str) -> None:
-    """Create targeted_analysis table in project database to store analysis results."""
-    
-    conn = duckdb.connect(str(project_db_path))
-    
-    # Create targeted_analysis table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS targeted_analysis (
-            analysis_uid VARCHAR PRIMARY KEY,
-            project_name VARCHAR NOT NULL,
-            atlas_uid VARCHAR NOT NULL,
-            compound_uid VARCHAR NOT NULL,
-            inchi_key VARCHAR(27) NOT NULL,
-            compound_name VARCHAR NOT NULL,
-            
-            -- Original atlas data
-            original_rt_peak DOUBLE,
-            original_rt_min DOUBLE,
-            original_rt_max DOUBLE,
-            original_mz DOUBLE,
-            original_mz_tolerance DOUBLE,
-            adduct VARCHAR,
-            
-            -- Modified/corrected atlas data (if user adjusted)
-            final_rt_peak DOUBLE,
-            final_rt_min DOUBLE,
-            final_rt_max DOUBLE,
-            is_rt_modified BOOLEAN DEFAULT FALSE,
-            
-            -- Suggested RT bounds from EIC analysis
-            suggested_rt_peak DOUBLE,
-            suggested_rt_min DOUBLE,
-            suggested_rt_max DOUBLE,
-            suggestion_confidence DOUBLE,
-            suggestion_source_file VARCHAR,
-            
-            -- Best EIC match across all files
-            best_eic_file VARCHAR,
-            best_eic_rt DOUBLE,
-            best_eic_mz DOUBLE,
-            best_eic_intensity DOUBLE,
-            best_eic_ppm_error DOUBLE,
-            best_eic_rt_error DOUBLE,
-            
-            -- File detection summary
-            total_files_detected INTEGER DEFAULT 0,
-            file_detection_rate DOUBLE,
-            
-            -- MS2 analysis results
-            ms2_files_with_data INTEGER DEFAULT 0,
-            ms2_best_score DOUBLE,
-            ms2_best_database VARCHAR,
-            ms2_total_matches INTEGER DEFAULT 0,
-            
-            -- User annotations
-            ms1_notes VARCHAR DEFAULT 'keep',
-            ms2_notes VARCHAR DEFAULT 'no selection',
-            
-            -- Analysis metadata
-            analyst VARCHAR,
-            analysis_timestamp TIMESTAMP,
-            analysis_version VARCHAR DEFAULT '1.0'
-        )
-    """)
-    
-    # Create indexes for efficient querying
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_project ON targeted_analysis(project_name)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_atlas ON targeted_analysis(atlas_uid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_compound ON targeted_analysis(compound_uid)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_targeted_analysis_inchi ON targeted_analysis(inchi_key)")
-    
-    conn.close()
-    print("Created targeted_analysis table in project database")
 
 
 def get_atlas_compounds_with_metadata(project_db_path: str, main_db_path: str, atlas_uid: str) -> pd.DataFrame:
@@ -1285,22 +1294,17 @@ def validate_targeted_analysis_data(project_db_path: str, analysis_uid: str = No
     if analysis_uid:
         condition = "WHERE analysis_uid = ?"
         params = [analysis_uid]
-    else:
-        condition = "WHERE analysis_timestamp = (SELECT MAX(analysis_timestamp) FROM targeted_analysis)"
-        params = []
     
     # Validation queries
     validation_query = f"""
     SELECT 
         COUNT(*) as total_records,
-        COUNT(CASE WHEN original_rt_peak IS NOT NULL THEN 1 END) as records_with_rt,
-        COUNT(CASE WHEN original_mz IS NOT NULL THEN 1 END) as records_with_mz,
+        COUNT(CASE WHEN pre_rt_peak IS NOT NULL THEN 1 END) as records_with_rt,
+        COUNT(CASE WHEN pre_mz IS NOT NULL THEN 1 END) as records_with_mz,
         COUNT(CASE WHEN best_eic_file IS NOT NULL THEN 1 END) as records_with_eic,
+        COUNT(CASE WHEN avg_eic_rt IS NOT NULL THEN 1 END) as records_with_avg_eic_rt,
         COUNT(CASE WHEN ms2_files_with_data > 0 THEN 1 END) as records_with_ms2,
         COUNT(CASE WHEN is_rt_modified = true THEN 1 END) as modified_records,
-        AVG(file_detection_rate) as avg_detection_rate,
-        MIN(file_detection_rate) as min_detection_rate,
-        MAX(file_detection_rate) as max_detection_rate
     FROM targeted_analysis
     {condition}
     """
@@ -1309,16 +1313,420 @@ def validate_targeted_analysis_data(project_db_path: str, analysis_uid: str = No
     conn.close()
     
     if result:
-        return {
-            'total_records': result[0],
-            'records_with_rt': result[1],
-            'records_with_mz': result[2],
-            'records_with_eic': result[3],
-            'records_with_ms2': result[4],
-            'modified_records': result[5],
-            'avg_detection_rate': result[6],
-            'min_detection_rate': result[7],
-            'max_detection_rate': result[8]
-        }
+        return True
     else:
-        return {}
+        return False
+
+def clone_and_modify_atlas(
+    from_db: str,
+    to_db: str,
+    source_atlas_uid: str,
+    config: Dict,
+    compound_updates: Dict[str, Dict[str, Any]],
+    new_atlas_name: Optional[str] = None,
+    new_atlas_description: Optional[str] = None,
+    use_experimental_table: bool = False,
+    rt_correction_metadata: Optional[Dict] = None
+) -> str:
+    """
+    Clone an atlas and modify its compound associations and RT/MZ/annotation data.
+    Supports both RT correction and targeted analysis workflows.
+    Clones from one database (from_db) to another (to_db).
+
+    Args:
+        from_db: Path to source database (main).
+        to_db: Path to destination database (project).
+        source_atlas_uid: UID of the atlas to clone.
+        config: Metatlas config dictionary.
+        compound_updates: Dict keyed by compound_uid or inchi_key, with update fields.
+        new_atlas_name: Optional new atlas name.
+        new_atlas_description: Optional new atlas description.
+        use_experimental_table: If True, create new mz_rt_experimental entries.
+        rt_correction_metadata: Optional metadata for RT correction.
+
+    Returns:
+        str: UID of the new cloned atlas.
+    """
+    # Read source atlas and associations from from_db
+    conn_src = duckdb.connect(from_db)
+    atlas_row = conn_src.execute("""
+        SELECT atlas_name, atlas_description, chromatography, polarity, created_by
+        FROM atlases WHERE atlas_uid = ?
+    """, [source_atlas_uid]).fetchone()
+    if not atlas_row:
+        conn_src.close()
+        raise ValueError(f"Atlas UID {source_atlas_uid} not found in database {from_db}.")
+
+    associations = conn_src.execute("""
+        SELECT compound_uid, mz_rt_reference_uid, association_order
+        FROM atlas_compound_associations WHERE atlas_uid = ?
+    """, [source_atlas_uid]).fetchall()
+    conn_src.close()
+
+    # Write new atlas and associations to to_db
+    conn_dst = duckdb.connect(to_db)
+    prov = ldt.get_provenance()
+    timestamp = prov["timestamp"]
+    analyst = prov["analyst"]
+
+    new_atlas_uid = _generate_uid("analyzed_atlas")
+    atlas_name = new_atlas_name if new_atlas_name else atlas_row[0]
+    atlas_description = new_atlas_description if new_atlas_description else atlas_row[1]
+
+    conn_dst.execute("""
+        INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        new_atlas_uid,
+        atlas_name,
+        atlas_description,
+        atlas_row[2],
+        atlas_row[3],
+        analyst,
+        timestamp
+    ))
+
+    for compound_uid, mz_rt_reference_uid, association_order in associations:
+        update_fields = compound_updates.get(compound_uid) or compound_updates.get(mz_rt_reference_uid)
+        if update_fields and use_experimental_table:
+            new_mz_rt_exp_uid = _generate_uid("mz_rt_experimental")
+            conn_dst.execute("""
+                INSERT INTO mz_rt_experimental (
+                    mz_rt_experimental_uid, compound_uid, rt_peak, rt_min, rt_max,
+                    mz, mz_tolerance, adduct, ms1_notes, ms2_notes,
+                    rt_correction_applied, rt_shift, source_mz_rt_reference_uid,
+                    created_by, last_modified
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                new_mz_rt_exp_uid,
+                compound_uid,
+                update_fields.get('rt_peak'),
+                update_fields.get('rt_min'),
+                update_fields.get('rt_max'),
+                update_fields.get('mz'),
+                update_fields.get('mz_tolerance'),
+                update_fields.get('adduct'),
+                update_fields.get('ms1_notes'),
+                update_fields.get('ms2_notes'),
+                update_fields.get('rt_correction_applied', False),
+                update_fields.get('rt_shift'),
+                mz_rt_reference_uid,
+                analyst,
+                timestamp
+            ))
+            assoc_mz_uid = new_mz_rt_exp_uid
+        else:
+            assoc_mz_uid = mz_rt_reference_uid
+
+        new_assoc_uid = _generate_uid("association")
+        conn_dst.execute("""
+            INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            new_assoc_uid,
+            new_atlas_uid,
+            compound_uid,
+            assoc_mz_uid,
+            association_order,
+            analyst,
+            timestamp
+        ))
+
+        if update_fields and not use_experimental_table:
+            fields = []
+            values = []
+            for key in ['rt_min', 'rt_max', 'rt_peak', 'ms2_notes', 'ms1_notes']:
+                if key in update_fields and update_fields[key] is not None:
+                    fields.append(f"{key} = ?")
+                    values.append(update_fields[key])
+            if fields:
+                conn_dst.execute(
+                    f"UPDATE mz_rt_experimental SET {', '.join(fields)} WHERE compound_uid = ?",
+                    values + [compound_uid]
+                )
+
+    if rt_correction_metadata:
+        rt_alignment_uid = _generate_uid("rt_alignment")
+        conn_dst.execute("""
+            INSERT INTO rt_alignment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            rt_alignment_uid,
+            Path(to_db).stem.replace('.duckdb', ''),
+            new_atlas_uid,
+            rt_correction_metadata.get('model_type', 'polynomial'),
+            rt_correction_metadata.get('degree'),
+            rt_correction_metadata.get('r2'),
+            rt_correction_metadata.get('rmse'),
+            json.dumps(rt_correction_metadata.get('coefficients', [])),
+            rt_correction_metadata.get('equation'),
+            rt_correction_metadata.get('qc_files_count', 0),
+            rt_correction_metadata.get('compounds_used_count', 0),
+            analyst,
+            timestamp,
+            json.dumps(rt_correction_metadata)
+        ))
+
+    conn_dst.close()
+    print(f"Cloned and modified atlas {source_atlas_uid} from {from_db} to new atlas {new_atlas_uid} in {to_db}")
+    return new_atlas_uid
+
+def deposit_targeted_analysis_from_plot_data(
+    atlas_df,
+    project_db_path,
+    plot_data,
+    atlas_uid,
+    project_name
+):
+    """
+    Deposit all relevant targeted analysis info from plot_data into the targeted_analysis table.
+    Uses a single analysis_uid for all compounds in the project (not per compound).
+    """
+    prov = ldt.get_provenance()
+    analysis_uid = _generate_uid('analysis')
+
+    rows = []
+    for inchi_key, meta in plot_data.items():
+        input_data = meta.get('original_atlas_data', {})
+        new_data = meta.get('new_atlas_data', {})
+        best_eic = meta.get('best_eic', {})
+        avg_eic = meta.get('avg_eic', {})
+        best_ms2 = meta.get('best_ms2', {})
+        avg_ms2 = meta.get('avg_ms2', {})
+
+        compound_rows = atlas_df[atlas_df['inchi_key'] == inchi_key]
+        if compound_rows.empty:
+            continue
+        compound_uid = compound_rows.iloc[0]['compound_uid']
+        compound_name = compound_rows.iloc[0]['compound_name']
+        adduct = compound_rows.iloc[0]['adduct']
+
+        pre_rt_peak = input_data.get('rt_peak', None)
+        pre_rt_min = input_data.get('rt_min', None)
+        pre_rt_max = input_data.get('rt_max', None)
+        pre_mz = input_data.get('mz', None)
+        mz_tolerance = input_data.get('mz_tolerance', None)
+
+        post_rt_peak = new_data.get('rt_peak', None)
+        post_rt_min = new_data.get('rt_min', None)
+        post_rt_max = new_data.get('rt_max', None)
+        is_rt_modified = meta.get('is_modified', False)
+        ms1_notes = new_data.get('ms1_notes', 'keep')
+        ms2_notes = new_data.get('ms2_notes', 'no selection')
+        
+        best_eic_file = best_eic.get('file_peak', None)
+        best_eic_rt = best_eic.get('rt_peak', None)
+        best_eic_mz = best_eic.get('mz_peak', None)
+        best_eic_intensity = best_eic.get('intensity_peak', None)
+        best_eic_ppm_error = best_eic.get('ppm_diff', None)
+        best_eic_rt_error = best_eic.get('rt_diff', None)
+
+        avg_eic_rt = avg_eic.get('rt_peak', None)
+        avg_eic_mz = avg_eic.get('mz_peak', None)
+        avg_eic_intensity = avg_eic.get('intensity_peak', None)
+
+        best_ms2_file = best_ms2.get('file_peak', None)
+        best_ms2_database = best_ms2.get('database', None)
+        best_ms2_ref_id = best_ms2.get('ref_id', None)
+        best_ms2_rt_peak = best_ms2.get('rt_peak', None)
+        best_ms2_intensity_peak = best_ms2.get('intensity_peak', None)
+        best_ms2_mz_peak = best_ms2.get('mz_peak', None)
+        best_ms2_score = best_ms2.get('score', None)
+        best_ms2_num_matches = best_ms2.get('num_matches', None)
+        best_ms2_ref_frags = best_ms2.get('ref_frags', None)
+        best_ms2_data_frags = best_ms2.get('data_frags', None)
+        best_ms2_frags_matching = best_ms2.get('frags_matching', None)
+
+        avg_ms2_score = avg_ms2.get('avg_score', None)
+
+        total_files_detected = meta.get('number_of_files', 0)
+        ms2_files_with_data = meta.get('ms2_data', {}).get('total_files', 0)
+        ms2_best_score = None
+        ms2_best_database = None
+        ms2_total_matches = None
+
+        row = (
+            analysis_uid,
+            project_name,
+            atlas_uid,
+            compound_uid,
+            inchi_key,
+            compound_name,
+            pre_rt_peak,
+            pre_rt_min,
+            pre_rt_max,
+            pre_mz,
+            mz_tolerance,
+            adduct,
+            post_rt_peak,
+            post_rt_min,
+            post_rt_max,
+            is_rt_modified,
+            best_eic_file,
+            best_eic_rt,
+            best_eic_mz,
+            best_eic_intensity,
+            best_eic_ppm_error,
+            best_eic_rt_error,
+            avg_eic_rt,
+            avg_eic_intensity,
+            avg_eic_mz,
+            best_ms2_file,
+            best_ms2_database,
+            best_ms2_ref_id,
+            best_ms2_rt_peak,
+            best_ms2_intensity_peak,
+            best_ms2_mz_peak,
+            best_ms2_score,
+            best_ms2_num_matches,
+            best_ms2_ref_frags,
+            best_ms2_data_frags,
+            best_ms2_frags_matching,
+            avg_ms2_score,
+            total_files_detected,
+            ms2_files_with_data,
+            ms2_best_score,
+            ms2_best_database,
+            ms2_total_matches,
+            ms1_notes,
+            ms2_notes,
+            prov["analyst"],
+            prov["timestamp"]
+        )
+        rows.append(row)
+
+    conn = duckdb.connect(project_db_path)
+    insert_sql = '''
+        INSERT INTO targeted_analysis (
+            analysis_uid, project_name, atlas_uid, compound_uid, inchi_key, compound_name,
+            pre_rt_peak, pre_rt_min, pre_rt_max, pre_mz, mz_tolerance, adduct,
+            post_rt_peak, post_rt_min, post_rt_max, is_rt_modified,
+            best_eic_file, best_eic_rt, best_eic_mz, best_eic_intensity, best_eic_ppm_error, best_eic_rt_error,
+            avg_eic_rt, avg_eic_intensity, avg_eic_mz,
+            best_ms2_file, best_ms2_database, best_ms2_ref_id, best_ms2_rt_peak, best_ms2_intensity_peak, best_ms2_mz_peak,
+            best_ms2_score, best_ms2_num_matches, best_ms2_ref_frags, best_ms2_data_frags, best_ms2_frags_matching,
+            avg_ms2_score,
+            total_files_detected, ms2_files_with_data, ms2_best_score, ms2_best_database, ms2_total_matches,
+            ms1_notes, ms2_notes, analyst, analysis_timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    '''
+    conn.executemany(insert_sql, rows)
+    conn.close()
+    print(f"Inserted {len(rows)} rows into targeted_analysis table with analysis_uid {analysis_uid}.")
+
+    validated = validate_targeted_analysis_data(project_db_path, analysis_uid)
+    if validated is False:
+        print(f"    Validation failed for targeted analysis entry {analysis_uid}")
+        return None
+    elif validated is True:
+        return analysis_uid
+
+def verify_single_atlas_for_targeted_analysis(targeted_df: pd.DataFrame):
+    """Ensure that only one atlas is used for the targeted analysis."""
+    if targeted_df['atlas_uid'].nunique() > 1:
+        raise ValueError("Multiple atlases found in targeted analysis results.")
+        return None
+    else:
+        return targeted_df['atlas_uid'].iloc[0]
+    
+
+def generate_targeted_analysis_summary(project_db_path, config, analysis_uid):
+    """
+    Generate a per-compound targeted analysis summary table for a given analysis_uid.
+    Uses the targeted_analysis table and compounds metadata.
+    Args:
+        project_db_path: Path to project database.
+        config: Configuration dictionary with database paths.
+        analysis_uid: UID of the targeted analysis.
+    Returns:
+        pd.DataFrame with one row per compound, including all targeted analysis results and compound metadata.
+    """
+    main_db_path = config["paths"]["main_database"]
+
+    # Get targeted analysis results for this analysis_uid
+    conn_proj = duckdb.connect(project_db_path)
+    targeted_df = conn_proj.execute(
+        "SELECT * FROM targeted_analysis WHERE analysis_uid = ?", [analysis_uid]
+    ).df()
+
+    if targeted_df.empty:
+        conn_proj.close()
+        print(f"No targeted analysis results found for analysis_uid {analysis_uid}")
+        return pd.DataFrame()
+
+    # Infer atlas_uid from targeted analysis
+    atlas_uid = verify_single_atlas_for_targeted_analysis(targeted_df)
+
+    # Get compound metadata from main DB
+    compound_uids = targeted_df['compound_uid'].unique().tolist()
+    conn_main = duckdb.connect(main_db_path)
+    placeholders = ','.join(['?' for _ in compound_uids])
+    compounds_df = conn_main.execute(
+        f"SELECT * FROM compounds WHERE compound_uid IN ({placeholders})", compound_uids
+    ).df()
+    conn_main.close()
+
+    # Merge targeted analysis results with compound metadata
+    merged = targeted_df.merge(compounds_df, on='compound_uid', how='left', suffixes=('', '_compound'))
+
+    # Optionally, add atlas metadata columns
+    atlas_meta = conn_proj.execute("SELECT * FROM atlases WHERE atlas_uid = ?", [atlas_uid]).df()
+    conn_proj.close()
+    for col in atlas_meta.columns:
+        merged[col] = atlas_meta[col].iloc[0] if not atlas_meta.empty else None
+
+    # Final output: one row per compound with all targeted analysis and compound info
+    return merged
+
+def get_all_db_table_info(db_path = None):
+    """
+    Print all tables and their columns for a DuckDB database.
+    Either config (with 'paths'->'main_database') or db_path must be provided.
+    """
+    # Determine database path
+    if isinstance(db_path, str):
+        database = db_path
+    elif isinstance(db_path, Dict):
+        database = db_path["paths"]["main_database"]
+    else:
+        raise ValueError("Must provide a valid db_path.")
+
+    con = duckdb.connect(database)
+    tables = con.execute("SHOW TABLES").fetchdf()
+    for table in tables['name']:
+        print(f"Table: {table}")
+        columns = con.execute(f"DESCRIBE {table}").fetchdf()
+        print(columns[['column_name', 'column_type']])
+        print()
+    con.close()
+    if not targeted_df.empty:
+        merged = merged.merge(targeted_df, on=['atlas_uid', 'compound_uid'], how='left', suffixes=('', '_targ'))
+
+    # Optionally, merge atlas metadata
+    atlas_meta = conn_proj.execute("SELECT * FROM atlases WHERE atlas_uid = ?", [atlas_uid]).df()
+    for col in atlas_meta.columns:
+        merged[col] = atlas_meta[col].iloc[0] if not atlas_meta.empty else None
+
+    conn_proj.close()
+    conn_main.close()
+    return merged
+
+def get_all_db_table_info(db_path = None):
+    """
+    Print all tables and their columns for a DuckDB database.
+    Either config (with 'paths'->'main_database') or db_path must be provided.
+    """
+    # Determine database path
+    if isinstance(db_path, str):
+        database = db_path
+    elif isinstance(db_path, Dict):
+        database = db_path["paths"]["main_database"]
+    else:
+        raise ValueError("Must provide a valid db_path.")
+
+    con = duckdb.connect(database)
+    tables = con.execute("SHOW TABLES").fetchdf()
+    for table in tables['name']:
+        print(f"Table: {table}")
+        columns = con.execute(f"DESCRIBE {table}").fetchdf()
+        print(columns[['column_name', 'column_type']])
+        print()
+    con.close()
+

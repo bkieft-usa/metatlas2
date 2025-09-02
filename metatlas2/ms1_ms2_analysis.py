@@ -9,6 +9,17 @@ from tqdm.notebook import tqdm
 from matchms import Spectrum
 from matchms.similarity import CosineHungarian
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from IPython.display import display, HTML
+import ipywidgets as widgets
+from ipywidgets import Output
+from scipy.signal import find_peaks, peak_widths, peak_prominences
+from scipy.ndimage import gaussian_filter1d
+
 from typing import Dict, List, Optional, Any, Tuple
 
 sys.path.append('/Users/BKieft/Metabolomics/metatlas')
@@ -254,8 +265,68 @@ def find_peaks_in_rt_window(ms1_data: pd.DataFrame, target_mz: float,
 
     return matching_peaks
 
+def align_ms_arrays(query_mz, query_intensity, ref_mz, ref_intensity, mz_tolerance=0.005, intensity_tolerance=1000):
+    """
+    Align MS2 vectors using the metatlas approach for consistent fragment matching.
+    Produces aligned arrays for query and reference spectra, matching fragments within mz_tolerance
+    and intensity above intensity_tolerance. Non-matching fragments get intensity 0.
+
+    Args:
+        query_mz: Query spectrum m/z values (array-like)
+        query_intensity: Query spectrum intensities (array-like)
+        ref_mz: Reference spectrum m/z values (array-like)
+        ref_intensity: Reference spectrum intensities (array-like)
+        mz_tolerance: m/z tolerance for matching (default: 0.005)
+        intensity_tolerance: minimum intensity for counting a match (default: 1000)
+
+    Returns:
+        tuple: (aligned_query_mz, aligned_query_intensity, aligned_ref_mz, aligned_ref_intensity, num_matches)
+    """
+    # Convert to numpy arrays
+    query_mz = np.array(query_mz, dtype=np.float64)
+    query_intensity = np.array(query_intensity, dtype=np.float64)
+    ref_mz = np.array(ref_mz, dtype=np.float64)
+    ref_intensity = np.array(ref_intensity, dtype=np.float64)
+
+    # Check lengths
+    if len(query_mz) != len(query_intensity):
+        raise ValueError("query_mz and query_intensity must have the same length")
+    if len(ref_mz) != len(ref_intensity):
+        raise ValueError("ref_mz and ref_intensity must have the same length")
+
+    # Combine all m/z values and sort
+    all_mz = np.concatenate([query_mz, ref_mz])
+    all_mz_unique = np.unique(np.round(all_mz, 10))  # rounding to avoid floating point issues
+
+    aligned_query_intensity = []
+    aligned_ref_intensity = []
+    aligned_mz = []
+
+    num_matches = 0
+
+    for mz in all_mz_unique:
+        # Find closest query peak within tolerance
+        query_idx = np.where(np.abs(query_mz - mz) <= mz_tolerance)[0]
+        query_val = np.max(query_intensity[query_idx]) if len(query_idx) > 0 else 0.0
+
+        # Find closest ref peak within tolerance
+        ref_idx = np.where(np.abs(ref_mz - mz) <= mz_tolerance)[0]
+        ref_val = np.max(ref_intensity[ref_idx]) if len(ref_idx) > 0 else 0.0
+
+        aligned_mz.append(mz)
+        aligned_query_intensity.append(query_val)
+        aligned_ref_intensity.append(ref_val)
+
+        # Count as match if both intensities above threshold
+        if query_val > intensity_tolerance and ref_val > intensity_tolerance:
+            num_matches += 1
+
+    return (np.array(aligned_mz), np.array(aligned_query_intensity),
+            np.array(aligned_mz), np.array(aligned_ref_intensity), num_matches)
+
 def get_ms2_hits_from_data(ms2_data_dict, reference_df, 
-                          frag_mz_tolerance=0.005, 
+                          frag_mz_tolerance=0.005,
+                          intensity_tolerance=1000,
                           keep_nonmatches=True,
                           precursor_mz_tolerance_ppm=10.0):
     """
@@ -277,86 +348,18 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
         
     Returns:
         DataFrame with MS2 hits in the same format as get_msms_hits()
-        Columns: ['database', 'id', 'file_name', 'msms_scan', 'score', 'num_matches',
-                 'ref_frags', 'data_frags', 'msv_query_aligned', 'msv_ref_aligned', 
+        Columns: ['database', 'id', 'file_name', 'msms_scan', 'score',
+                 'msv_query_aligned', 'msv_ref_aligned', 
                  'name', 'adduct', 'inchi_key', 'precursor_mz', 'measured_precursor_mz',
                  'measured_precursor_intensity']
     """
-    
-    def align_all_ms_vectors_metatlas_style(query_mz, query_intensity, ref_mz, ref_intensity, mz_tolerance=0.005):
-        """
-        Align MS2 vectors using the metatlas approach for consistent fragment matching.
-        This creates aligned arrays where each position represents the same m/z value.
-        
-        Args:
-            query_mz: Query spectrum m/z values
-            query_intensity: Query spectrum intensities
-            ref_mz: Reference spectrum m/z values  
-            ref_intensity: Reference spectrum intensities
-            mz_tolerance: m/z tolerance for matching (default: 0.005)
-            
-        Returns:
-            tuple: (aligned_query_mz, aligned_query_intensity, aligned_ref_mz, aligned_ref_intensity, num_matches)
-        """
-        # Convert to numpy arrays and ensure they're sorted
-        query_mz = np.array(query_mz, dtype=np.float64)
-        query_intensity = np.array(query_intensity, dtype=np.float64)
-        ref_mz = np.array(ref_mz, dtype=np.float64)
-        ref_intensity = np.array(ref_intensity, dtype=np.float64)
-        
-        # Sort both spectra by m/z
-        query_sort_idx = np.argsort(query_mz)
-        query_mz = query_mz[query_sort_idx]
-        query_intensity = query_intensity[query_sort_idx]
-        
-        ref_sort_idx = np.argsort(ref_mz)
-        ref_mz = ref_mz[ref_sort_idx]
-        ref_intensity = ref_intensity[ref_sort_idx]
-        
-        # Get all unique m/z values from both spectra
-        all_mz = np.concatenate([query_mz, ref_mz])
-        all_mz_unique = np.unique(all_mz)
-        
-        # Initialize aligned arrays
-        aligned_query_mz = []
-        aligned_query_intensity = []
-        aligned_ref_mz = []
-        aligned_ref_intensity = []
-        num_matches = 0
-        
-        for target_mz in all_mz_unique:
-            # Find query peaks within tolerance
-            query_matches = np.abs(query_mz - target_mz) <= mz_tolerance
-            query_intensities = query_intensity[query_matches]
-            
-            # Find reference peaks within tolerance  
-            ref_matches = np.abs(ref_mz - target_mz) <= mz_tolerance
-            ref_intensities = ref_intensity[ref_matches]
-            
-            # Use the maximum intensity if multiple peaks match
-            query_max_intensity = np.max(query_intensities) if len(query_intensities) > 0 else 0.0
-            ref_max_intensity = np.max(ref_intensities) if len(ref_intensities) > 0 else 0.0
-            
-            # Only include if at least one spectrum has a peak
-            if query_max_intensity > 0 or ref_max_intensity > 0:
-                aligned_query_mz.append(target_mz)
-                aligned_query_intensity.append(query_max_intensity)
-                aligned_ref_mz.append(target_mz)
-                aligned_ref_intensity.append(ref_max_intensity)
-                
-                # Count as match if both spectra have intensity > 0
-                if query_max_intensity > 0 and ref_max_intensity > 0:
-                    num_matches += 1
-        
-        return (np.array(aligned_query_mz), np.array(aligned_query_intensity),
-                np.array(aligned_ref_mz), np.array(aligned_ref_intensity), num_matches)
     
     # Initialize the matchms similarity scorer
     cos = CosineHungarian(tolerance=frag_mz_tolerance)
     
     # Columns for the output DataFrame (matching get_msms_hits format)
     msms_hits_cols = ['database', 'id', 'file_name', 'msms_scan', 'score', 'num_matches',
-                     'ref_frags', 'data_frags',
+                     'msv_query_unaligned', 'msv_ref_unaligned',
                      'msv_query_aligned', 'msv_ref_aligned', 'name', 'adduct', 'inchi_key',
                      'precursor_mz', 'measured_precursor_mz',
                      'measured_precursor_intensity']
@@ -439,9 +442,6 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
                         'file_name': file_name,
                         'msms_scan': rt_value,
                         'score': 0.0,
-                        'num_matches': 0,
-                        'ref_frags': 0,
-                        'data_frags': len(mz_values),
                         'msv_query_aligned': np.array([mz_values, intensity_values]),
                         'msv_ref_aligned': np.array([[], []]),
                         'name': row.get('label', 'Unknown'),
@@ -466,9 +466,6 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
                         'file_name': file_name,
                         'msms_scan': rt_value,
                         'score': 0.0,
-                        'num_matches': 0,
-                        'ref_frags': 0,
-                        'data_frags': len(mz_values),
                         'msv_query_aligned': np.array([mz_values, intensity_values]),
                         'msv_ref_aligned': np.array([[], []]),
                         'name': row.get('label', 'Unknown'),
@@ -529,16 +526,12 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
                 # Align MS vectors using metatlas approach for consistent output format
                 try:
                     (aligned_query_mz, aligned_query_intensity,
-                     aligned_ref_mz, aligned_ref_intensity, metatlas_matches) = align_all_ms_vectors_metatlas_style(
+                     aligned_ref_mz, aligned_ref_intensity, num_matches) = align_ms_arrays(
                         mz_values, intensity_values, ref_mz, ref_intensity, frag_mz_tolerance
                     )
                     
-                    # Use metatlas matches for consistency with existing workflows
-                    num_matches = metatlas_matches
-                    
                 except Exception as e:
                     print(f"Error aligning spectra: {e}")
-                    num_matches = matchms_matches  # Fallback to matchms matches
                     aligned_query_mz = mz_values
                     aligned_query_intensity = intensity_values
                     aligned_ref_mz = ref_mz
@@ -547,13 +540,13 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
                 # Create hit entry
                 hit = {
                     'database': ref_row.get('database', 'unknown'),
-                    'id': str(ref_row.get('id', f'ref_{ref_row.name}')),
+                    'id': str(ref_row.get('id', '')),
                     'file_name': file_name,
                     'msms_scan': rt_value,
-                    'score': float(score),  # matchms cosine score
-                    'num_matches': int(num_matches),  # metatlas-style matches
-                    'ref_frags': len(ref_mz),
-                    'data_frags': len(mz_values),
+                    'score': float(score),
+                    'num_matches': num_matches,
+                    'msv_query_unaligned': np.array([mz_values, intensity_values]),
+                    'msv_ref_unaligned': np.array([ref_mz, ref_intensity]),
                     'msv_query_aligned': np.array([aligned_query_mz, aligned_query_intensity]),
                     'msv_ref_aligned': np.array([aligned_ref_mz, aligned_ref_intensity]),
                     'name': ref_row.get('name', row.get('label', 'Unknown')),
@@ -567,12 +560,12 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
     
     # Convert to DataFrame
     if not all_hits:
-        return pd.DataFrame(columns=msms_hits_cols).set_index(['id'])
+        return pd.DataFrame(columns=msms_hits_cols)
     
     hits_df = pd.DataFrame(all_hits)
     
     # Ensure numeric columns are properly typed
-    numeric_cols = ['score', 'num_matches', 'ref_frags', 'data_frags', 'msms_scan', 
+    numeric_cols = ['score', 'msms_scan', 'num_matches',
                    'precursor_mz', 'measured_precursor_mz', 'measured_precursor_intensity']
     for col in numeric_cols:
         if col in hits_df.columns:
@@ -582,11 +575,8 @@ def get_ms2_hits_from_data(ms2_data_dict, reference_df,
     if not keep_nonmatches:
         hits_df = hits_df.dropna(subset=['id'], how='all')
     
-    # Set the index to match get_msms_hits format
-    if not hits_df.empty:
-        hits_df = hits_df.set_index(['id'])
-    else:
-        hits_df = pd.DataFrame(columns=msms_hits_cols).set_index(['id'])
+    if hits_df.empty:
+        hits_df = pd.DataFrame(columns=msms_hits_cols)
 
     return hits_df
 
@@ -761,18 +751,140 @@ def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame
     
     return eics, ms2_data
 
-def summarize_ms2_hits(ms2_hits: pd.DataFrame, config: Dict):
+def process_ms2_hits(ms2_data: Dict, reference_df: pd.DataFrame, config: Dict) -> Tuple[Dict, pd.DataFrame]:
+    """
+    Process MS2 data against reference database and return enhanced data with hits.
+    
+    Args:
+        ms2_data: Raw MS2 data dictionary
+        reference_df: Reference spectra DataFrame
+        min_score: Minimum similarity score for high-quality matches
+        min_matches: Minimum number of fragment matches
+        
+    Returns:
+        Tuple of (enhanced_ms2_data, all_hits_df)
+    """
+    print("Running MS2 hits analysis...")
+    all_hits = get_ms2_hits_from_data(
+        ms2_data_dict=ms2_data,
+        reference_df=reference_df,
+        keep_nonmatches=True,
+    )
+    
+    if all_hits.empty:
+        print("No MS2 hits found")
+        return ms2_data, pd.DataFrame()
 
+    print(f"MS2 hits identified: {len(all_hits)}")
+
+    # Filter high-quality matches
+    min_score = config["analysis_settings"].get("ms2_min_score", 0.1)
+    min_matches = config["analysis_settings"].get("ms2_min_matches", 2)
+    high_quality_hits = all_hits[
+        (all_hits.get('score', 0) >= min_score) & 
+        (all_hits.get('num_matches', 0) >= min_matches)
+    ].copy()
+    
+    if high_quality_hits.empty:
+        print("No high-quality matches found")
+        return ms2_data, all_hits
+
+    print(f"MS2 hits with >={min_score} score and >={min_matches} matches: {len(high_quality_hits)}")
+
+    ms2_data_and_hits = {}
+    
+    for file_path, ms2_entries in ms2_data.items():
+        file_name = Path(file_path).name
+        ms2_data_and_hits[file_path] = []
+
+        if isinstance(ms2_entries, pd.DataFrame) and not ms2_entries.empty:
+            file_hits = high_quality_hits[high_quality_hits['file_name'] == file_name]
+
+            for _, entry in ms2_entries.iterrows():
+                enhanced_entry = entry.to_dict()
+                inchi_key = enhanced_entry.get('inchi_key', 'unknown')
+                matching_hits = file_hits[file_hits['inchi_key'] == inchi_key]
+                enhanced_entry['hits'] = matching_hits.to_dict('records') if not matching_hits.empty else []
+                ms2_data_and_hits[file_path].append(enhanced_entry)
+        else:
+            print(f"Warning: ms2_entries for {file_path} is not a DataFrame: {type(ms2_entries)}")
+            ms2_data_and_hits[file_path] = []
+
+    return ms2_data_and_hits
+
+
+def filter_ms2_hits(ms2_hits: pd.DataFrame, min_score: float, min_matches: int) -> pd.DataFrame:
+    """Filter MS2 hits based on quality criteria."""
+    if ms2_hits.empty:
+        return pd.DataFrame()
+    
+    filtered = ms2_hits[
+        (ms2_hits.get('score', 0) >= min_score) & 
+        (ms2_hits.get('num_matches', 0) >= min_matches)
+    ].copy()
+    
+    return filtered
+
+
+def analyze_ms2_hits_results(ms2_hits: pd.DataFrame, min_score: float, min_matches: int) -> Dict:
+    """Analyze MS2 hits results and return summary statistics."""
+    if ms2_hits.empty:
+        return {
+            'total_spectra': 0,
+            'spectra_with_hits': 0,
+            'high_quality_matches': 0,
+            'mean_score': 0.0,
+            'median_score': 0.0
+        }
+    
+    # Basic statistics
+    total_spectra = len(ms2_hits)
+    spectra_with_hits = (ms2_hits.get('score', pd.Series([0])) > 0).sum()
+    high_quality_matches = ((ms2_hits.get('score', pd.Series([0])) >= min_score) & 
+                           (ms2_hits.get('num_matches', pd.Series([0])) >= min_matches)).sum()
+    
+    scores = ms2_hits.get('score', pd.Series([0])).dropna()
+    mean_score = scores.mean() if len(scores) > 0 else 0.0
+    median_score = scores.median() if len(scores) > 0 else 0.0
+    
+    return {
+        'total_spectra': total_spectra,
+        'spectra_with_hits': spectra_with_hits,
+        'high_quality_matches': high_quality_matches,
+        'mean_score': mean_score,
+        'median_score': median_score
+    }
+
+def summarize_ms2_hits(ms2_data_and_hits: Dict, config: Dict):
+    """
+    Summarize MS2 hits analysis results using enhanced MS2 data with hits.
+
+    Args:
+        ms2_data_and_hits: Output dictionary from process_ms2_hits (enhanced MS2 data with hits)
+        config: Configuration dictionary containing analysis settings
+
+    Returns:
+        None
+    """
     analysis_settings = config["analysis_settings"]
 
-    if not ms2_hits.empty:
+    # Collect all hits from ms2_data_and_hits into a single DataFrame
+    all_hits = []
+    for _, file_hits in ms2_data_and_hits.items():
+        for entry in file_hits:
+            if 'hits' in entry and entry['hits']:
+                all_hits.extend(entry['hits'])
+
+    ms2_hits_df = pd.DataFrame(all_hits)
+
+    if not ms2_hits_df.empty:
         print("=== MS2 Hits Analysis Results ===")
 
         # Analyze the results using config values
         min_score = analysis_settings["ms2_min_score"]
         min_matches = analysis_settings["ms2_min_matches"]
 
-        analysis = tga.analyze_ms2_hits_results(ms2_hits, min_score=min_score, min_matches=min_matches)
+        analysis = analyze_ms2_hits_results(ms2_hits_df, min_score=min_score, min_matches=min_matches)
 
         print(f"Analysis Summary:")
         for key, value in analysis.items():
@@ -780,11 +892,11 @@ def summarize_ms2_hits(ms2_hits: pd.DataFrame, config: Dict):
 
         # Plot score distribution
         print(f"\n=== Score Distribution ===")
-        tga.plot_ms2_score_distribution(ms2_hits, "MS2 Similarity Scores vs Reference Database")
+        plot_ms2_score_distribution(ms2_hits_df, "MS2 Similarity Scores vs Reference Database")
 
         # Show high-quality matches summary
         print(f"\n=== High-Quality Matches (Score >= {min_score}, Matches >= {min_matches}) ===")
-        high_quality_hits = tga.filter_ms2_hits(ms2_hits, min_score=min_score, min_matches=min_matches)
+        high_quality_hits = filter_ms2_hits(ms2_hits_df, min_score=min_score, min_matches=min_matches)
 
         if not high_quality_hits.empty:
             print(f"Found {len(high_quality_hits)} high-quality matches")
@@ -793,3 +905,49 @@ def summarize_ms2_hits(ms2_hits: pd.DataFrame, config: Dict):
             print("No high-quality matches found")
     else:
         print("No MS2 hits data available for analysis")
+
+def plot_ms2_score_distribution(hits_df, title="MS2 Similarity Score Distribution"):
+    """
+    Plot the distribution of MS2 similarity scores
+    
+    Args:
+        hits_df: DataFrame from get_msms_hits_from_data()
+        title: Plot title
+    """
+    if hits_df.empty:
+        print("No hits to plot")
+        return
+    
+    scores = hits_df['score'].dropna()
+    if len(scores) == 0:
+        print("No valid scores to plot")
+        return
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Histogram
+    ax1.hist(scores, bins=50, alpha=0.7, edgecolor='black')
+    ax1.set_xlabel('Similarity Score')
+    ax1.set_ylabel('Frequency')
+    ax1.set_title('Score Distribution')
+    ax1.grid(True, alpha=0.3)
+    
+    # Box plot by database
+    hits_reset = hits_df.reset_index()
+    if 'database' in hits_reset.columns:
+        sns.boxplot(data=hits_reset, x='database', y='score', ax=ax2)
+        ax2.set_xlabel('Database')
+        ax2.set_ylabel('Similarity Score')
+        ax2.set_title('Scores by Database')
+        ax2.tick_params(axis='x', rotation=45)
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"Score statistics:")
+    print(f"  Mean: {scores.mean():.3f}")
+    print(f"  Median: {scores.median():.3f}")
+    print(f"  Min: {scores.min():.3f}")
+    print(f"  Max: {scores.max():.3f}")
+    print(f"  Total hits: {len(scores)}")

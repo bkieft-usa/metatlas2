@@ -381,7 +381,7 @@ def apply_rt_correction_to_target(
         
         # Clone atlas to project database with updated name
         corrected_atlas_name = f"{atlas_info['atlas_name']} (RT Corrected)"
-        corrected_atlas_uid = dbi._generate_uid("atlas", rt_atlas=True)
+        corrected_atlas_uid = dbi._generate_uid("rt_atlas")
 
         conn.execute("""
             INSERT INTO atlases (
@@ -481,14 +481,14 @@ def apply_rt_correction_to_target(
         'max_correction': correction_df['rt_shift'].max() if not correction_df.empty else 0
     }
 
-    print(f"RT correction completed: {summary['corrected_compounds']}/{summary['total_compounds']} compounds corrected")
-    if summary['corrected_compounds']:
-        print(f"Correction statistics: mean = {summary['mean_correction']:.4f}, std = {summary['std_correction']:.4f} min")
-
     print(f"\nRT-corrected atlas created:")
     print(f"  Atlas UID: {corrected_atlas_uid}")
     print(f"  Atlas name: {corrected_atlas_name}")
     print(f"  RT alignment model UID: {rt_alignment_uid}")
     print(f"  Project database: {project_db_path}")
 
-    return summary, corrected_atlas_uid
+    print(f"  Correction summary:")
+    for key, value in summary.items():
+        print(f"    {key}: {value}")
+
+    return corrected_atlas_uid
