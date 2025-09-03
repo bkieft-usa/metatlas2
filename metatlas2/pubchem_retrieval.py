@@ -1,12 +1,11 @@
 import pandas as pd
 import pubchempy as pcp
-import numpy as np
-import re
-import time
-import sys
-from pathlib import Path
 import pickle
-from typing import Dict, List, Optional, Any, Tuple
+import time
+import re
+from pathlib import Path
+import sys
+from typing import Dict, Any, List
 from tqdm.notebook import tqdm
 
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
@@ -15,7 +14,6 @@ import metatlas2.load_tools as ldt
 def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
     """Get comprehensive compound data from PubChem using InChI key."""
     try:
-
         # Get CID from InChI key
         cid_result = pcp.get_compounds(inchi_key, namespace='inchikey', 
                                         as_dataframe=True, listkey_count=5)
@@ -31,14 +29,13 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
             cid = (cid.rstrip().split('\n'))[-1]
         
         # Extract SMILES if available due to broken API response
+        smiles = ""
         try:
             cid_result_subset = cid_result[cid_result['cid'] == int(cid)]
             cid_result_subset_dict = cid_result_subset.to_dict()
             if "record" in cid_result_subset_dict:
                 if "props" in cid_result_subset_dict["record"][0]:
-                    cid_list = [i for i in cid_result_subset_dict["record"][0]["props"] if i["urn"]["label"] == "SMILES"]
-                    if cid_list:
-                        smiles = str(cid_list[0]['value']['sval'])
+                    smiles = cid_result_subset_dict["record"][0]["props"][0]["value"]["sval"]
         except:
             smiles = ""
 
@@ -65,10 +62,8 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
         if compound.synonyms:
             for synonym in compound.synonyms:
                 if not compound_data["cas_number"] and '-' in synonym and len(synonym.split('-')) == 3:
-                    parts = synonym.split('-')
-                    if all(part.isdigit() for part in parts):
-                        compound_data["cas_number"] = synonym
-                        break
+                    compound_data["cas_number"] = synonym
+                    break
         
         return compound_data
         
@@ -135,7 +130,7 @@ def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
         print(f"Error saving cache: {e}")
 
 def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
-
+    """Retrieve PubChem information for compounds and update global cache."""
     pubchem_cache_path = config["paths"]["pubchem_cache"]
     force_cache_update = config["database_options"]["force_pubchem_cache_update"] if "force_pubchem_cache_update" in config["database_options"] else False
 
@@ -170,7 +165,6 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
         
         # Fetch data for compounds
         for inchi_key in tqdm(compounds_to_fetch, desc="Fetching PubChem data"):
-            
             was_in_cache = inchi_key in pubchem_cache
             
             # Get PubChem data
@@ -185,20 +179,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
                     new_entries += 1
             else:
                 print(f"No PubChem data found for {inchi_key}")
-                empty_entry = {
-                    "inchi_key": inchi_key,
-                    "pubchem_cid": "",
-                    "iupac_name": "",
-                    "synonyms": ["Undefined"],
-                    "error": "not_found_in_pubchem",
-                    "last_updated": prov['timestamp']
-                }
-                
-                # Only store empty entry if not forcing updates or if it's truly new
-                if not was_in_cache:
-                    pubchem_cache[inchi_key] = empty_entry
-                    new_entries += 1
-            
+
             # Be respectful to PubChem API
             time.sleep(0.25)
         

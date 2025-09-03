@@ -33,6 +33,8 @@ from scipy.ndimage import gaussian_filter1d
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 import metatlas2.database_interact as dbi
 import metatlas2.ms1_ms2_analysis as msa
+import metatlas2.data_classes as dc
+import metatlas2.targeted_analysis as tga
 
 def get_current_rt_bounds(compound_metadata):
     """
@@ -475,7 +477,32 @@ def create_targeted_analysis_plot(compound_metadata,
 
     return fig
 
-def create_gui(compound_metadata, atlas_df, config):
+def create_gui(data, atlas_df: pd.DataFrame, config: Dict):
+    """
+    Create GUI that can handle both class-based data and pre-converted GUI format.
+    
+    Args:
+        data: Either ExperimentDataCollection (class-based) or dict (pre-converted GUI format)
+        atlas_df: Original atlas DataFrame
+        config: Configuration dictionary
+    
+    Returns:
+        ipywidgets container with RT editor and MS2 browser
+    """
+    # Check if data is already in GUI format (dict) or class-based (ExperimentDataCollection)
+    if isinstance(data, dict):
+        # Already converted to GUI format
+        compound_metadata = data
+    elif isinstance(data, dc.ExperimentDataCollection):
+        # Convert from class-based to GUI format
+        compound_metadata = tga.convert_experiment_data_to_gui_format(data, atlas_df)
+    else:
+        raise ValueError(f"Unsupported data type: {type(data)}. Expected dict or ExperimentDataCollection")
+    
+    # Use existing GUI implementation with the converted data
+    return _create_gui_widgets(compound_metadata, atlas_df, config)
+
+def _create_gui_widgets(compound_metadata, atlas_df, config):
     """
     Create an enhanced RT editor that includes MS2 file browsing capability.
     This combines the RT editing functionality with the ability to scroll through MS2 files.
@@ -1187,3 +1214,61 @@ def create_gui(compound_metadata, atlas_df, config):
     full_update()
     
     return container
+
+def get_selected_ms2_spectra_from_classes(compound: dc.CompoundDataCollection, 
+                                        current_ms2_file_index: int, 
+                                        rt_min: float, rt_max: float) -> Tuple[str, Any, Any, str]:
+    """
+    Enhanced MS2 selection using class-based data with better filtering and sorting.
+    
+    Returns:
+        Tuple of (ms2_data_type, selected_query, selected_ref, selected_file)
+    """
+    # Get MS2 spectra within RT window, sorted by score/intensity
+    spectra_in_window = compound.get_ms2_in_rt_window(rt_min, rt_max)
+    
+    if not spectra_in_window:
+        return None, None, None, None
+    
+    # Clamp file index to available spectra
+    idx = min(current_ms2_file_index, len(spectra_in_window) - 1)
+    selected_spectrum = spectra_in_window[idx]
+    
+    if selected_spectrum.has_hits:
+        best_hit = selected_spectrum.best_hit
+        
+        # Prepare query spectrum data
+        query_spec = {
+            'mz': selected_spectrum.mz_values,
+            'intensity': selected_spectrum.intensity_values,
+            'precursor_mz': selected_spectrum.precursor_mz,
+            'rt': selected_spectrum.rt,
+            'qry_frag_colors': best_hit.fragment_colors
+        }
+        
+        # Prepare reference spectrum data
+        ref_spec = {
+            'mz': best_hit.ref_mz_values,
+            'intensity': best_hit.ref_intensity_values,
+            'score': best_hit.score,
+            'database': best_hit.database,
+            'num_matches': best_hit.num_matches,
+            'ref_id': best_hit.ref_id,
+            'mz_measured': selected_spectrum.precursor_mz,
+            'mz_theoretical': best_hit.ref_precursor_mz,
+            'rt_measured': selected_spectrum.rt,
+            'qry_frag_colors': best_hit.fragment_colors
+        }
+        
+        return 'hits', query_spec, ref_spec, selected_spectrum.filename
+    else:
+        # No hits, show experimental spectrum only
+        query_spec = {
+            'mz': selected_spectrum.mz_values,
+            'intensity': selected_spectrum.intensity_values,
+            'precursor_mz': selected_spectrum.precursor_mz,
+            'rt': selected_spectrum.rt,
+            'qry_frag_colors': ['red'] * len(selected_spectrum.mz_values)
+        }
+        
+        return 'extracted', query_spec, None, selected_spectrum.filename

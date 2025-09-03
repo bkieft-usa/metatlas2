@@ -1,10 +1,11 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import getpass
 import yaml
-from typing import Dict, Any, List, Union
 import ast
+import getpass
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any, List, Union
 
 def load_msms_refs_file(file_path):
     """
@@ -22,22 +23,32 @@ def load_msms_refs_file(file_path):
     print(f"Loading reference spectra from {file_path}...")
 
     # Read the tab-separated file
-    df = pd.read_csv(file_path, sep='\t', header=None, names=[
-        'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy', 
-        'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id', 
-        'experiment', 'instrument', 'formula', 'exact_mass', 'inchi_key', 'inchi', 'smiles'
-    ])
+    df = pd.read_csv(file_path, sep='\t')
 
     # Convert spectrum strings to numpy arrays
     def parse_spectrum(spec_str):
+        """Parse spectrum string into numpy array format."""
         try:
-            # Parse the string representation of the spectrum
-            spectrum = ast.literal_eval(spec_str)
-            if len(spectrum) == 2 and len(spectrum[0]) == len(spectrum[1]):
-                return np.array(spectrum)
-            else:
+            if pd.isna(spec_str) or spec_str == '':
                 return None
-        except:
+            
+            # Parse the spectrum string format (usually "mz:intensity mz:intensity ...")
+            pairs = spec_str.strip().split()
+            mz_values = []
+            intensity_values = []
+            
+            for pair in pairs:
+                if ':' in pair:
+                    mz, intensity = pair.split(':')
+                    mz_values.append(float(mz))
+                    intensity_values.append(float(intensity))
+            
+            if len(mz_values) == 0:
+                return None
+                
+            return np.array([mz_values, intensity_values])
+            
+        except Exception as e:
             return None
 
     df['spectrum_parsed'] = df['spectrum'].apply(parse_spectrum)
@@ -53,12 +64,11 @@ def load_msms_refs_file(file_path):
     df['exact_mass'] = pd.to_numeric(df['exact_mass'], errors='coerce')
 
     if not df.empty:
-        print(f"    Reference DataFrame shape: {df.shape}")
-        print(f"    Number of unique InChI keys: {df['inchi_key'].nunique()}")
+        print(f"Successfully loaded {len(df)} reference spectra")
         return df
     else:
-        print("    Reference DataFrame is empty")
-        return None
+        print("No valid reference spectra found")
+        return pd.DataFrame()
 
 def load_metatlas_config(config_path: str) -> Dict[str, Any]:
     """Load and validate metatlas configuration from YAML file with type enforcement."""
@@ -66,142 +76,123 @@ def load_metatlas_config(config_path: str) -> Dict[str, Any]:
         config = yaml.safe_load(f)
     
     # Define expected structure and types
-    expected_schema = {
-        'paths': {
-            'projects_dir': str,
-            'main_database': str,
-            'msms_refs': str,
-            'pubchem_cache': str
-        },
-        'rt_alignment': {
-            'tolerances': {
-                'i': (int, float),
-                'mz': (int, float),
-                'rt': (int, float)
-            },
-            'model': {
-                'polynomial_degree': int,
-                'min_observations_per_compound': int,
-                'min_compounds_for_modeling': int,
-                'r2_threshold': (int, float),
-                'exclude_inchikeys': list
-            }
-        },
-        'analysis_settings': {
-            'default_ppm_error': (int, float),
-            'min_peak_intensity': (int, float),
-            'extra_time': (int, float),
-            'ms2_min_score': (int, float),
-            'ms2_min_matches': int
-        },
-        'database_options': {
-            'overwrite_existing_main_db': bool,
-            'overwrite_existing_project_db': bool,
-            'add_compound_duplicates': bool,
-            'force_pubchem_cache_update': bool
-        },
-        'plot_settings': {
-            'file_color_mapping': dict
-        }
-    }
+    required_sections = ['paths', 'rt_alignment', 'analysis_settings', 'database_options']
     
-    def validate_config_section(config_data: Dict[str, Any], schema: Dict[str, Any], path: str = "") -> None:
-        """Recursively validate configuration against expected schema."""
-        for key, expected_type in schema.items():
-            current_path = f"{path}.{key}" if path else key
-            
-            if key not in config_data:
-                raise ValueError(f"Missing required config key: {current_path}")
-            
-            value = config_data[key]
-            
-            if isinstance(expected_type, dict):
-                # Nested dictionary - recurse
-                if not isinstance(value, dict):
-                    raise TypeError(f"Config key '{current_path}' should be a dictionary, got {type(value).__name__}")
-                validate_config_section(value, expected_type, current_path)
-            
-            elif isinstance(expected_type, tuple):
-                # Multiple allowed types
-                if not isinstance(value, expected_type):
-                    type_names = [t.__name__ for t in expected_type]
-                    raise TypeError(f"Config key '{current_path}' should be one of {type_names}, got {type(value).__name__}")
-            
-            else:
-                # Single type
-                if not isinstance(value, expected_type):
-                    raise TypeError(f"Config key '{current_path}' should be {expected_type.__name__}, got {type(value).__name__}")
-                
-                # Additional validation for specific types
-                if expected_type == list and key == 'exclude_inchikeys':
-                    # Validate that all items in exclude_inchikeys are strings
-                    for i, item in enumerate(value):
-                        if not isinstance(item, str):
-                            raise TypeError(f"Config key '{current_path}[{i}]' should be str, got {type(item).__name__}")
+    # Validate required sections exist
+    for section in required_sections:
+        if section not in config:
+            raise ValueError(f"Missing required configuration section: {section}")
     
-    # Validate the loaded config
-    validate_config_section(config, expected_schema)
+    # Validate and convert data types
+    if 'tolerances' in config['rt_alignment']:
+        tolerances = config['rt_alignment']['tolerances']
+        tolerances['mz'] = float(tolerances.get('mz', 10.0))
+        tolerances['rt'] = float(tolerances.get('rt', 0.5))
+        tolerances['i'] = float(tolerances.get('i', 1000.0))
     
-    print(f"Successfully loaded and validated config from: {config_path}")
+    if 'analysis_settings' in config:
+        settings = config['analysis_settings']
+        settings['default_ppm_error'] = float(settings.get('default_ppm_error', 20.0))
+        settings['extra_time'] = float(settings.get('extra_time', 0.1))
+    
     return config
 
 def get_provenance():
+    """Get provenance information for database records."""
     return {
-        "timestamp": datetime.now().isoformat(),
-        "analyst": getpass.getuser()
+        "analyst": getpass.getuser(),
+        "timestamp": datetime.now().isoformat()
     }
 
 def load_compound_input(file_path: str) -> pd.DataFrame:
-    """Load compound data from a CSV or TSV file."""
-    print(f"Loading input data from: {file_path}")
-    delimiter = '\t' if file_path.endswith(('.tsv', '.tab', '.txt')) else ','
-    df = pd.read_csv(file_path, sep=delimiter)
+    """Load compound input file (TSV/CSV) and validate required columns."""
+    file_path = Path(file_path)
     
-    check_missing_columns(df, ['inchi_key', 'label'])
-
-    print(f"    Loaded {len(df)} rows from input table")
+    if not file_path.exists():
+        raise FileNotFoundError(f"Compound input file not found: {file_path}")
+    
+    # Try to read as TSV first, then CSV
+    try:
+        df = pd.read_csv(file_path, sep='\t')
+    except:
+        try:
+            df = pd.read_csv(file_path)
+        except Exception as e:
+            raise ValueError(f"Could not read file {file_path}: {e}")
+    
+    # Check for required columns
+    required_columns = ['inchi_key', 'label']
+    check_missing_columns(df, required_columns)
+    
+    print(f"Loaded {len(df)} compounds from {file_path}")
     return df
 
 def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
-    """Detect the chromatography method from the input DataFrame."""
-    chrom = df['chromatography'].dropna()
-    if chrom.empty:
-        raise ValueError("No chromatography information found.")
-    if len(chrom.unique()) > 1:
-        raise ValueError(f"Multiple chromatography methods found: {chrom.unique()}")
-    return chrom.iloc[0]
+    """Detect chromatography type from atlas input data."""
+    if 'chromatography' in df.columns:
+        chrom_values = df['chromatography'].dropna().unique()
+        if len(chrom_values) > 0:
+            return str(chrom_values[0])
+    
+    # Try to infer from compound names or other columns
+    compound_names = ' '.join(df.get('label', df.get('compound_name', [''])).astype(str))
+    if 'HILIC' in compound_names.upper():
+        return 'HILIC'
+    elif 'C18' in compound_names.upper():
+        return 'C18'
+    
+    return 'Unknown'
 
 def detect_atlas_input_polarity(df: pd.DataFrame) -> str:
-    """Detect the polarity from the input DataFrame."""
-    pol = df['polarity'].dropna()
-    if pol.empty:
-        raise ValueError("No polarity information found.")
-    if len(pol.unique()) > 1:
-        raise ValueError(f"Multiple polarities found: {pol.unique()}")
-    return pol.iloc[0]
+    """Detect polarity from atlas input data."""
+    if 'polarity' in df.columns:
+        pol_values = df['polarity'].dropna().unique()
+        if len(pol_values) > 0:
+            return str(pol_values[0])
+    
+    # Try to infer from adduct information
+    if 'adduct' in df.columns:
+        adducts = ' '.join(df['adduct'].dropna().astype(str))
+        if '+' in adducts and '[M+H]+' in adducts:
+            return 'positive'
+        elif '-' in adducts and '[M-H]-' in adducts:
+            return 'negative'
+    
+    return 'positive'  # Default
 
 def check_missing_columns(df: pd.DataFrame, required_columns: list) -> None:
+    """Check for missing required columns and raise error if any are missing."""
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
 def load_atlas_input(file_path: str) -> pd.DataFrame:
-    """Load compound data from a CSV or TSV file."""
-    print(f"Loading input data from: {file_path}")
-    delimiter = '\t' if file_path.endswith(('.tsv', '.tab', '.txt')) else ','
-    df = pd.read_csv(file_path, sep=delimiter)
-
-    if 'label' not in df.columns:
-        print("    Missing 'label' column, so adding it by copying 'inchi_key' column")
-        df['label'] = df['inchi_key']
-
-    check_missing_columns(df, ['inchi_key', 'chromatography', 'polarity', 'rt_peak', 'mz', 'adduct', 'label'])
-
-    detected_chrom = detect_atlas_input_chromatography(df)
-    detected_pol = detect_atlas_input_polarity(df)
-
-    print(f"    Detected chromatography: {detected_chrom}")
-    print(f"    Detected polarity: {detected_pol}")
-
-    print(f"    Loaded {len(df)} rows from input table")
+    """Load atlas input file and validate required columns."""
+    file_path = Path(file_path)
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Atlas input file not found: {file_path}")
+    
+    # Try to read as TSV first, then CSV
+    try:
+        df = pd.read_csv(file_path, sep='\t')
+    except:
+        try:
+            df = pd.read_csv(file_path)
+        except Exception as e:
+            raise ValueError(f"Could not read file {file_path}: {e}")
+    
+    # Check for required columns for atlas creation
+    required_columns = ['inchi_key', 'label', 'rt_peak', 'mz', 'adduct']
+    check_missing_columns(df, required_columns)
+    
+    # Add default values for optional columns
+    if 'rt_min' not in df.columns:
+        df['rt_min'] = df['rt_peak'] - 0.5
+    if 'rt_max' not in df.columns:
+        df['rt_max'] = df['rt_peak'] + 0.5
+    if 'mz_tolerance' not in df.columns:
+        df['mz_tolerance'] = 5.0
+    
+    print(f"Loaded {len(df)} atlas entries from {file_path}")
     return df
