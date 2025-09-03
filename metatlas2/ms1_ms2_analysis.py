@@ -844,7 +844,7 @@ def extract_eic_and_ms2_data_with_hits(input_data_list: List[Dict], atlas_df: pd
         eics, ms2_data_with_hits = _extract_data_sequential(
             input_data_list, compound_metadata, reference_df, config
         )
-    
+
     print(f"\nExtraction complete:")
     print(f"  EIC data: {len(eics)} files")
     print(f"  MS2 data with hits: {len(ms2_data_with_hits)} files")
