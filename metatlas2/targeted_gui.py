@@ -51,12 +51,13 @@ def get_current_rt_bounds(compound_metadata):
     
     return (current_rt_min, current_rt_max, current_rt_peak)
 
-def write_ms2_title(compound_metadata, ms2_info, ms2_data_type, ms2_file):
+def write_ms2_title(compound_metadata, ms2_info, ms2_data_type, ms2_file, current_compound_index=None):
     """Create MS2 title and subheadings"""
     
     # Create MS2 title (exact same format as original)
     name = compound_metadata['original_atlas_data']['compound_name']
-    index = 1
+    # Use current_compound_index if provided, otherwise default to 1
+    index = current_compound_index + 1 if current_compound_index is not None else 1
     heading = f"{name} {index}"
 
     if ms2_data_type == 'hits' and ms2_info is not None:
@@ -75,7 +76,7 @@ def write_ms2_title(compound_metadata, ms2_info, ms2_data_type, ms2_file):
         subheading1 = 'No MS2 data available'
 
     if ms2_file:
-        subheading2 = f'Experimental: {ms2_file}'
+        subheading2 = f'File: {ms2_file}'
     else:
         subheading2 = 'No file data'
 
@@ -83,9 +84,15 @@ def write_ms2_title(compound_metadata, ms2_info, ms2_data_type, ms2_file):
 
     return ms2_title
 
-def write_eic_title(compound_metadata):
+def write_eic_title(compound_metadata, current_compound_index=None):
     # Create EIC title (exact same format as original)
     eic_title_parts = []
+    
+    # Add compound index to the beginning if provided
+    if current_compound_index is not None:
+        name = compound_metadata['original_atlas_data']['compound_name']
+        index = current_compound_index + 1
+        eic_title_parts.append(f'{name} {index}')
     
     # Basic info
     if compound_metadata['original_atlas_data']['adduct']:
@@ -140,16 +147,32 @@ def write_eic_title(compound_metadata):
 
 def create_targeted_analysis_plot(compound_metadata, 
                                   height=600, file_color_dict=None, 
-                                  ms2_data_type=None, ms2_plot_data=None):
+                                  ms2_data_type=None, ms2_plot_data=None,
+                                  initial_render=False, current_compound_index=None):
     """
     Create the plot using pre-calculated metadata and selected MS2 spectra.
     Args:
         ms2_plot_data: tuple (has_hits, has_data, selected_query, selected_ref)
+        initial_render: if True, update EIC x-axis bounds based on RT bounds
     """
 
     current_rt_min, current_rt_max, current_rt_peak = get_current_rt_bounds(compound_metadata)
-    x_min = current_rt_min - 1.0
-    x_max = current_rt_max + 1.0
+    
+    # Only update x-axis bounds on initial render (compound navigation)
+    # Otherwise, keep the existing x-axis bounds to maintain slider alignment
+    if initial_render:
+        x_min = current_rt_min - 1.0
+        x_max = current_rt_max + 1.0
+        # Store the x-axis bounds in metadata for consistency
+        compound_metadata['_plot_x_bounds'] = (x_min, x_max)
+    else:
+        # Use stored bounds if available, otherwise calculate from current RT bounds
+        if '_plot_x_bounds' in compound_metadata:
+            x_min, x_max = compound_metadata['_plot_x_bounds']
+        else:
+            x_min = current_rt_min - 1.0
+            x_max = current_rt_max + 1.0
+            compound_metadata['_plot_x_bounds'] = (x_min, x_max)
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -184,6 +207,8 @@ def create_targeted_analysis_plot(compound_metadata,
             name='Empty'
         ), row=ms2_row, col=1)
         
+        # Set y-range for MS2 plot - handle empty plot case
+        y_range = [-1000, 1000]
     elif ms2_data_type == 'hits':
         # Plot query (top) with hover info
         mz_vals = selected_query.get('mz', [])
@@ -248,54 +273,58 @@ def create_targeted_analysis_plot(compound_metadata,
             ), row=ms2_row, col=1)
         
         ms2_title = write_ms2_title(compound_metadata, selected_ref, ms2_data_type, selected_file)
-        
+        # Set y-range for MS2 plot to show both positive and negative
+        if exp_max_intensity > 0:
+            y_range = [-exp_max_intensity * 1.1, exp_max_intensity * 1.1]
+        else:
+            y_range = [-1000, 1000]
     elif ms2_data_type == 'extracted':
         # Plot only experimental spectrum (top) with hover info
         mz_vals = selected_query.get('mz', [])
         pmz = selected_query.get('precursor_mz', 0.0)
         intensity_vals = selected_query.get('intensity', [])
+        colors = ['red'] * len(mz_vals)
+        
         if len(mz_vals) > 0 and len(intensity_vals) > 0:
             max_mz = np.max(mz_vals)
             exp_max_intensity = max(exp_max_intensity, np.max(intensity_vals))
             
-            # Create stick plot for experimental spectrum
-            x_coords = []
-            y_coords = []
-            for mz, intensity in zip(mz_vals, intensity_vals):
-                x_coords.extend([mz, mz, None])
-                y_coords.extend([0, intensity, None])
-            
-            fig.add_trace(go.Scatter(
-                x=x_coords, y=y_coords, mode='lines',
-                line=dict(color='blue', width=2),
-                showlegend=False, hoverinfo='skip', name='Experimental'
-            ), row=ms2_row, col=1)
+            # Create stick plot for experimental spectrum with per-stick color
+            for mz, intensity, color in zip(mz_vals, intensity_vals, colors):
+                fig.add_trace(go.Scatter(
+                    x=[mz, mz],
+                    y=[0, intensity],
+                    mode='lines',
+                    line=dict(color=color, width=2),
+                    showlegend=False, hoverinfo='skip', name='Experimental'
+                ), row=ms2_row, col=1)
             
             # Add invisible markers at peak tops for hover interaction
             fig.add_trace(go.Scatter(
                 x=list(mz_vals), y=list(intensity_vals),
                 mode='markers',
-                marker=dict(size=8, color='blue', opacity=0.01),
+                marker=dict(size=1, color="red", opacity=0.01),
                 showlegend=False, name='Experimental Peaks',
                 hovertemplate='m/z: %{x:.4f}<br>Intensity: %{y:.0f}<extra>Experimental</extra>'
             ), row=ms2_row, col=1)
         
         ms2_title = write_ms2_title(compound_metadata, selected_query, ms2_data_type, selected_file)
+        # Set y-range for MS2 plot to start at 0 and go to max intensity
+        if exp_max_intensity > 0:
+            y_range = [0, exp_max_intensity * 1.1]
+        else:
+            y_range = [0, 1000]
+    else:
+        raise ValueError(f"Unknown MS2 data type: {ms2_data_type}")
 
     # Configure MS2 subplot
     fig.update_xaxes(
         title_text="m/z",
         showgrid=False,
-        range=[0, max_mz*1.1] if max_mz > 0 else [0, 500],
+        range=[0, max_mz*1.1] if 'max_mz' in locals() and max_mz > 0 else [0, 500],
         row=ms2_row, col=1
     )
     
-    # Set y-range for MS2 plot - handle empty plot case
-    if exp_max_intensity > 0:
-        y_range = [-exp_max_intensity * 1.1, exp_max_intensity * 1.1]
-    else:
-        y_range = [-1000, 1000]  # Default range for empty plot
-        
     fig.update_yaxes(
         title_text="Intensity",
         showgrid=False,
@@ -336,6 +365,11 @@ def create_targeted_analysis_plot(compound_metadata,
     fig.add_vline(x=current_rt_min, line_dash="dot", line_color="green", line_width=2, row=eic_row, col=1)
     fig.add_vline(x=current_rt_max, line_dash="dot", line_color="green", line_width=2, row=eic_row, col=1)
 
+    # Add RT reference lines from original atlas
+    fig.add_vline(x=compound_metadata['original_atlas_data']['rt_peak'], line_dash="dash", line_color="gray", line_width=3, row=eic_row, col=1)
+    fig.add_vline(x=compound_metadata['original_atlas_data']['rt_min'], line_dash="dot", line_color="gray", line_width=2, row=eic_row, col=1)
+    fig.add_vline(x=compound_metadata['original_atlas_data']['rt_max'], line_dash="dot", line_color="gray", line_width=2, row=eic_row, col=1)
+
     # Add suggested RT bounds as two light green vlines if available
     suggested_data = compound_metadata.get('suggested_rt_bounds_data', None)
     if suggested_data is not None:
@@ -374,7 +408,7 @@ def create_targeted_analysis_plot(compound_metadata,
                     showexponent="all"
     )
     
-    eic_title = write_eic_title(compound_metadata)
+    eic_title = write_eic_title(compound_metadata, current_compound_index)
 
     # Adjusted annotation positions
     fig.add_annotation(
@@ -423,18 +457,18 @@ def create_targeted_analysis_plot(compound_metadata,
             x=0.02, xanchor="left", y=0.02, yanchor="bottom",
             bgcolor="rgba(255,255,255,0.8)", bordercolor="gray", borderwidth=1
         ),
-        # MS2 plot buttons (top left)
-        dict(
-            type="buttons", direction="right",
-            buttons=[
-                dict(args=[{f"yaxis{ms2_row}.type": "linear", f"yaxis{ms2_row}.autorange": True}], 
-                        label="Lin", method="relayout"),
-                dict(args=[{f"yaxis{ms2_row}.type": "log", f"yaxis{ms2_row}.autorange": True}], 
-                        label="Log", method="relayout")
-            ],
-            x=0.02, xanchor="left", y=0.65, yanchor="bottom",  # Positioned for MS2 plot
-            bgcolor="rgba(255,255,255,0.8)", bordercolor="gray", borderwidth=1
-        )
+        # # MS2 plot buttons (top left)
+        # dict(
+        #     type="buttons", direction="right",
+        #     buttons=[
+        #         dict(args=[{f"yaxis{ms2_row}.type": "linear", f"yaxis{ms2_row}.autorange": True}], 
+        #                 label="Lin", method="relayout"),
+        #         dict(args=[{f"yaxis{ms2_row}.type": "log", f"yaxis{ms2_row}.autorange": True}], 
+        #                 label="Log", method="relayout")
+        #     ],
+        #     x=0.02, xanchor="left", y=0.65, yanchor="bottom",  # Positioned for MS2 plot
+        #     bgcolor="rgba(255,255,255,0.8)", bordercolor="gray", borderwidth=1
+        # )
     ]
     
     fig.update_layout(updatemenus=updatemenus)
@@ -530,6 +564,31 @@ def create_gui(compound_metadata, atlas_df, config):
     # Create placeholder for slider that will be replaced dynamically
     slider_container = widgets.HBox([], layout=widgets.Layout(justify_content='center', width='73%', margin='-110px 0 0 0'))
 
+    # Add analyst notes text box
+    analyst_notes_box = widgets.Text(
+        value='',
+        placeholder='Enter analyst notes...',
+        description='Analyst Notes:',
+        disabled=False,
+        layout=widgets.Layout(width='100%', height='30px'),
+        style={'description_width': '100px'}
+    )
+
+    # Add ID notes text box
+    id_notes_box = widgets.Text(
+        value='',
+        placeholder='Enter ID notes...',
+        description='ID Notes:',
+        disabled=False,
+        layout=widgets.Layout(width='100%', height='30px'),
+        style={'description_width': '100px'}
+    )
+    
+    identification_notes_display = widgets.HTML(
+        value='',
+        layout=widgets.Layout(width='100%', height='auto', margin='5px 0px')
+    )
+
     def on_rt_slider_change(change):
         """Callback that fires whenever the user drags the slider."""
         if updating[0]:
@@ -590,13 +649,23 @@ def create_gui(compound_metadata, atlas_df, config):
         for file_name in file_names:
             file_data = ms2_files_data[file_name]
             
-            # Get the best hit info for this file
+            # Check both best_hit and best_ms2 for RT data
             best_hit = file_data.get('best_hit', {})
-            rt_measured = best_hit.get('rt_measured', 0)
+            best_ms2 = file_data.get('best_ms2', {})
+            
+            rt_measured = None
+            if best_hit and 'rt_measured' in best_hit:
+                rt_measured = best_hit.get('rt_measured', 0)
+            elif best_ms2 and 'rt' in best_ms2:
+                rt_measured = best_ms2.get('rt', 0)
             
             # Only include files where MS2 data falls within current RT bounds
-            if rt_min <= rt_measured <= rt_max:
-                score = best_hit.get('score', 0.0)
+            if rt_measured is not None and rt_min <= rt_measured <= rt_max:
+                # Prioritize score from best_hit, fallback to intensity from best_ms2
+                if best_hit:
+                    score = best_hit.get('score', 0.0)
+                else:
+                    score = best_ms2.get('intensity_peak', 0.0)
                 files_in_rt_window.append((file_name, score))
         
         # If no files have MS2 data in the current RT window, return None
@@ -612,66 +681,101 @@ def create_gui(compound_metadata, atlas_df, config):
         selected_file = sorted_file_names[idx]
         file_data = ms2_files_data[selected_file]
         
-        # Get the best hit for this file
+        # Check if we have a best_hit (with reference data)
         best_hit = file_data.get('best_hit', {})
-        if not best_hit:
-            return None, None, None, selected_file
-        
-        # Extract spectrum data
-        qry_spectrum = best_hit.get('qry_spectrum', None)
-        ref_spectrum = best_hit.get('ref_spectrum', None)
-        
-        # Check if we have any spectrum data
-        if qry_spectrum is None and ref_spectrum is None:
-            return None, None, None, selected_file
-        
-        query_spec = None
-        ref_spec = None
-        
-        # Process query spectrum if available
-        if qry_spectrum is not None and len(qry_spectrum) >= 2:
-            qry_mz = np.array(qry_spectrum[0])
-            qry_intensity = np.array(qry_spectrum[1])
+        if best_hit:  # best_hit is not empty
+            # Extract spectrum data from best_hit
+            qry_spectrum = best_hit.get('qry_spectrum', None)
+            ref_spectrum = best_hit.get('ref_spectrum', None)
             
-            # Get fragment colors (default to blue if not available)
-            qry_colors = best_hit.get('qry_frag_colors', ['blue'] * len(qry_mz))
+            # Check if we have any spectrum data
+            if qry_spectrum is None and ref_spectrum is None:
+                return None, None, None, selected_file
             
+            query_spec = None
+            ref_spec = None
+            
+            # Process query spectrum if available
+            if qry_spectrum is not None and len(qry_spectrum) >= 2:
+                qry_mz = np.array(qry_spectrum[0])
+                qry_intensity = np.array(qry_spectrum[1])
+
+                # Get fragment colors (default to red if not available)
+                qry_colors = best_hit.get('qry_frag_colors', ['red'] * len(qry_mz))
+                
+                query_spec = {
+                    'mz': qry_mz,
+                    'intensity': qry_intensity,
+                    'precursor_mz': best_hit.get('mz_measured', 0.0),
+                    'rt': best_hit.get('rt_measured', 0.0),
+                    'qry_frag_colors': qry_colors
+                }
+            
+            # Process reference spectrum if available
+            if ref_spectrum is not None and len(ref_spectrum) >= 2:
+                ref_mz = np.array(ref_spectrum[0])
+                ref_intensity = np.array(ref_spectrum[1])
+                
+                # Get fragment colors (use same as query if available, otherwise red)
+                ref_colors = best_hit.get('qry_frag_colors', ['red'] * len(ref_mz))
+                
+                ref_spec = {
+                    'mz': ref_mz,
+                    'intensity': ref_intensity,
+                    'score': best_hit.get('score', 0.0),
+                    'database': best_hit.get('database', 'N/A'),
+                    'num_matches': best_hit.get('num_matches', 0),
+                    'ref_id': best_hit.get('ref_id', 'N/A'),
+                    'mz_measured': best_hit.get('mz_measured', 0.0),
+                    'mz_theoretical': best_hit.get('mz_theoretical', 0.0),
+                    'rt_measured': best_hit.get('rt_measured', 0.0),
+                    'qry_frag_colors': ref_colors
+                }
+            
+            # Determine data type
+            if query_spec is not None and ref_spec is not None:
+                return 'hits', query_spec, ref_spec, selected_file
+            elif query_spec is not None:
+                return 'extracted', query_spec, None, selected_file
+            else:
+                return None, None, None, selected_file
+                
+        else:  # best_hit is empty, use best_ms2
+            best_ms2 = file_data.get('best_ms2', {})
+            if not best_ms2:
+                return None, None, None, selected_file
+            
+            # Extract spectrum data from best_ms2
+            spectrum_data = best_ms2.get('spectrum', None)
+            if spectrum_data is None or len(spectrum_data) < 2:
+                return None, None, None, selected_file
+            
+            # Parse spectrum format
+            try:
+                if isinstance(spectrum_data, (list, tuple)) and len(spectrum_data) == 2:
+                    mz_values = np.array(spectrum_data[0])
+                    intensity_values = np.array(spectrum_data[1])
+                elif isinstance(spectrum_data, np.ndarray) and spectrum_data.shape[0] == 2:
+                    mz_values = np.array(spectrum_data[0])
+                    intensity_values = np.array(spectrum_data[1])
+                else:
+                    return None, None, None, selected_file
+            except:
+                return None, None, None, selected_file
+            
+            if len(mz_values) == 0 or len(intensity_values) == 0:
+                return None, None, None, selected_file
+            
+            # Create query spec for experimental data only
             query_spec = {
-                'mz': qry_mz,
-                'intensity': qry_intensity,
-                'precursor_mz': best_hit.get('mz_measured', 0.0),
-                'rt': best_hit.get('rt_measured', 0.0),
-                'qry_frag_colors': qry_colors
+                'mz': mz_values,
+                'intensity': intensity_values,
+                'precursor_mz': best_ms2.get('precursor_mz', 0.0),
+                'rt': best_ms2.get('rt', 0.0),
+                'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
             }
-        
-        # Process reference spectrum if available
-        if ref_spectrum is not None and len(ref_spectrum) >= 2:
-            ref_mz = np.array(ref_spectrum[0])
-            ref_intensity = np.array(ref_spectrum[1])
             
-            # Get fragment colors (use same as query if available, otherwise red)
-            ref_colors = best_hit.get('qry_frag_colors', ['red'] * len(ref_mz))
-            
-            ref_spec = {
-                'mz': ref_mz,
-                'intensity': ref_intensity,
-                'score': best_hit.get('score', 0.0),
-                'database': best_hit.get('database', 'N/A'),
-                'num_matches': best_hit.get('num_matches', 0),
-                'ref_id': best_hit.get('ref_id', 'N/A'),
-                'mz_measured': best_hit.get('mz_measured', 0.0),
-                'mz_theoretical': best_hit.get('mz_theoretical', 0.0),
-                'rt_measured': best_hit.get('rt_measured', 0.0),
-                'qry_frag_colors': ref_colors
-            }
-        
-        # Determine data type
-        if query_spec is not None and ref_spec is not None:
-            return 'hits', query_spec, ref_spec, selected_file
-        elif query_spec is not None:
             return 'extracted', query_spec, None, selected_file
-        else:
-            return None, None, None, selected_file
 
     def update_annotation_widgets():
         """Update annotation radio buttons to reflect current compound's values"""
@@ -682,7 +786,9 @@ def create_gui(compound_metadata, atlas_df, config):
         # Set radio button values from metadata WITHOUT removing observers
         current_ms2_notes = meta['new_atlas_data'].get('ms2_notes', ms2_options[0])
         current_ms1_notes = meta['new_atlas_data'].get('ms1_notes', ms1_options[0])
-        
+        current_analyst_notes = meta['new_atlas_data'].get('analyst_notes', '')
+        current_id_notes = meta['new_atlas_data'].get('identification_notes', '')
+
         # Temporarily disable updating flag to prevent recursion
         temp_updating = updating[0]
         updating[0] = True
@@ -690,6 +796,8 @@ def create_gui(compound_metadata, atlas_df, config):
         try:
             ms2_radio.value = current_ms2_notes
             ms1_radio.value = current_ms1_notes
+            analyst_notes_box.value = current_analyst_notes
+            id_notes_box.value = current_id_notes
         finally:
             updating[0] = temp_updating
 
@@ -717,7 +825,31 @@ def create_gui(compound_metadata, atlas_df, config):
         # Update metadata
         meta['new_atlas_data']['ms1_notes'] = change['new']
 
-    def create_plot_only():
+    def on_analyst_notes_change(change):
+        """Handle analyst notes changes"""
+        if updating[0]:
+            return
+            
+        compound_inchi, compound_name, meta = get_current_compound()
+        if compound_inchi is None or meta is None:
+            return
+        
+        # Update metadata immediately
+        meta['new_atlas_data']['analyst_notes'] = change['new']
+
+    def on_id_notes_change(change):
+        """Handle ID notes changes"""
+        if updating[0]:
+            return
+
+        compound_inchi, compound_name, meta = get_current_compound()
+        if compound_inchi is None or meta is None:
+            return
+
+        # Update metadata immediately
+        meta['new_atlas_data']['identification_notes'] = change['new']
+
+    def create_plot_only(initial_render=False):
         """
         ONLY create and display the plot - no other side effects.
         """
@@ -742,8 +874,15 @@ def create_gui(compound_metadata, atlas_df, config):
         for file_name in ms2_files_data.keys():
             file_data = ms2_files_data[file_name]
             best_hit = file_data.get('best_hit', {})
-            rt_measured = best_hit.get('rt_measured', 0)
-            if rt_min <= rt_measured <= rt_max:
+            best_ms2 = file_data.get('best_ms2', {})
+            
+            rt_measured = None
+            if best_hit and 'rt_measured' in best_hit:
+                rt_measured = best_hit.get('rt_measured', 0)
+            elif best_ms2 and 'rt' in best_ms2:
+                rt_measured = best_ms2.get('rt', 0)
+            
+            if rt_measured is not None and rt_min <= rt_measured <= rt_max:
                 files_in_rt_window.append(file_name)
         
         total_files_in_window = len(files_in_rt_window)
@@ -753,12 +892,13 @@ def create_gui(compound_metadata, atlas_df, config):
         else:
             ms2_counter_label.value = "No MS2 data"
 
-        # Create and show plot with fixed height
         fig = create_targeted_analysis_plot(
             compound_metadata=meta,
             file_color_dict=file_color_dict,
             ms2_data_type=ms2_data_type,
-            ms2_plot_data=(query_spec, ref_spec, ms2_file)
+            ms2_plot_data=(query_spec, ref_spec, ms2_file),
+            initial_render=initial_render,
+            current_compound_index=current_compound_index[0]
         )
 
         if fig is not None:
@@ -784,6 +924,8 @@ def create_gui(compound_metadata, atlas_df, config):
                 meta['new_atlas_data']['ms2_notes'] = ms2_options[0]
             if 'ms1_notes' not in meta['new_atlas_data']:
                 meta['new_atlas_data']['ms1_notes'] = ms1_options[0]
+            if 'analyst_notes' not in meta['new_atlas_data']:
+                meta['new_atlas_data']['analyst_notes'] = ''
             
             # Get current RT bounds - this is the SINGLE SOURCE OF TRUTH
             rt_min, rt_max, rt_peak = get_current_rt_bounds(meta)
@@ -800,8 +942,8 @@ def create_gui(compound_metadata, atlas_df, config):
                 min=slider_min,
                 max=slider_max,
                 step=slider_step,
-                description='RT window',
-                continuous_update=False,
+                description='RT',
+                continuous_update=True,
                 layout=widgets.Layout(width='95%'),
                 slider_style='continuous',
                 readout=True
@@ -817,7 +959,7 @@ def create_gui(compound_metadata, atlas_df, config):
             # Update all UI elements WITHOUT any observers active
             update_annotation_widgets()
             update_dropdown_value()  # Update dropdown to match current compound
-            create_plot_only()
+            create_plot_only(initial_render=True)  # Use initial_render=True for compound navigation
             
         finally:
             updating[0] = False
@@ -856,8 +998,15 @@ def create_gui(compound_metadata, atlas_df, config):
         for file_name in ms2_files_data.keys():
             file_data = ms2_files_data[file_name]
             best_hit = file_data.get('best_hit', {})
-            rt_measured = best_hit.get('rt_measured', 0)
-            if rt_min <= rt_measured <= rt_max:
+            best_ms2 = file_data.get('best_ms2', {})
+            
+            rt_measured = None
+            if best_hit and 'rt_measured' in best_hit:
+                rt_measured = best_hit.get('rt_measured', 0)
+            elif best_ms2 and 'rt' in best_ms2:
+                rt_measured = best_ms2.get('rt', 0)
+            
+            if rt_measured is not None and rt_min <= rt_measured <= rt_max:
                 files_in_rt_window.append(file_name)
         
         total_files_in_window = len(files_in_rt_window)
@@ -868,7 +1017,7 @@ def create_gui(compound_metadata, atlas_df, config):
         # Bounds checking for files within RT window only
         if 0 <= new_idx < total_files_in_window:
             current_ms2_file_index[0] = new_idx
-            create_plot_only()
+            create_plot_only(initial_render=False)  # Don't update x-axis bounds for MS2 navigation
 
     def on_reset(button):
         """Reset current compound to original RT bounds"""
@@ -989,6 +1138,8 @@ def create_gui(compound_metadata, atlas_df, config):
     # Add annotation observers only once and never remove them
     ms2_radio.observe(on_ms2_annotation_change, names='value')
     ms1_radio.observe(on_ms1_annotation_change, names='value')
+    analyst_notes_box.observe(on_analyst_notes_change, names='value')
+    id_notes_box.observe(on_id_notes_change, names='value')
 
     # Create layout structure
     nav_row = widgets.HBox([prev_button, counter_label, next_button], layout=widgets.Layout(justify_content='center'))
@@ -1021,9 +1172,12 @@ def create_gui(compound_metadata, atlas_df, config):
     
     container = widgets.VBox([
         nav_box, 
+        analyst_notes_box,
+        id_notes_box,
         plot_and_radios,
         slider_container,
         button_row,
+        identification_notes_display
     ], layout=widgets.Layout(width='100%', align_items='flex-start', height='fit-content'))
     
     # Add helper methods

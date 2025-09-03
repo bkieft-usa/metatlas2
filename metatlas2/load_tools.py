@@ -189,7 +189,6 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
     """Load compound data from a CSV or TSV file."""
     print(f"Loading input data from: {file_path}")
     delimiter = '\t' if file_path.endswith(('.tsv', '.tab', '.txt')) else ','
-    print(f"    Detected delimiter: {delimiter}")
     df = pd.read_csv(file_path, sep=delimiter)
 
     if 'label' not in df.columns:

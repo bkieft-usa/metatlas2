@@ -38,7 +38,7 @@ import metatlas2.load_tools as ldt
 
 def run_targeted_analysis_workflow(project_db_path: str, 
                                     target_atlas_uid: str, 
-                                    config: Dict) -> Tuple[pd.DataFrame, Dict, Dict, pd.DataFrame]: 
+                                    config: Dict) -> Tuple[pd.DataFrame, Dict, Dict]: 
     """ Execute the complete targeted analysis workflow.
     Returns:
         Tuple of (atlas_df, eics, ms2_data_with_hits)
@@ -46,7 +46,6 @@ def run_targeted_analysis_workflow(project_db_path: str,
     print("Setting up targeted analysis database...")
 
     main_db_path = config["paths"]["main_database"]
-    msms_refs_path = Path(config["paths"]["msms_refs"])
     analysis_settings = config["analysis_settings"]
 
     print("Loading target atlas...")
@@ -78,18 +77,10 @@ def run_targeted_analysis_workflow(project_db_path: str,
     )
     print(f"Created {len(input_data_list)} input dictionaries")
 
-    print("Extracting EIC and MS2 data...")
-    eics, ms2_data = msa.extract_eic_and_ms2_data(input_data_list, atlas_df_ft)
-
-    if Path(msms_refs_path).exists():
-        reference_df = ldt.load_msms_refs_file(msms_refs_path)
-        if reference_df is not None:
-            ms2_data_with_hits = msa.process_ms2_hits(ms2_data, reference_df, config)
-        else:
-            ms2_data_with_hits = ms2_data
-    else:
-        print(f"MSMS reference file not found at {msms_refs_path}")
-        print("Continuing without MS2 reference analysis")
+    print("Extracting EIC and MS2 data with hits...")
+    eics, ms2_data_with_hits = msa.extract_eic_and_ms2_data_with_hits(
+        input_data_list, atlas_df_ft, config
+    )
 
     return atlas_df_ft, eics, ms2_data_with_hits
 
@@ -97,9 +88,7 @@ def set_up_gui_data(eics, atlas_df_ft, ms2_data_with_hits):
     """Return a dict keyed by InChI‑key with all EIC & MS2 info ready for plotting."""
     isomer_dict = build_isomer_dict(atlas_df_ft)
     metadata = {}
-    for _, row in tqdm(atlas_df_ft.iterrows(),
-                       total=len(atlas_df_ft),
-                       desc="Processing compounds"):
+    for _, row in atlas_df_ft.iterrows():
         compound_inchi = row["inchi_key"]
         atlas_entry = make_atlas_entry(row, isomer_dict)
         eic_rows = collect_eic_rows(compound_inchi, eics)
@@ -112,7 +101,7 @@ def set_up_gui_data(eics, atlas_df_ft, ms2_data_with_hits):
             best_eic,
             avg_eic,
             suggested_rt_bounds,
-            ms2_data["files"],
+            ms2_data,
             best_ms2,
             avg_ms2,
         )
@@ -156,6 +145,8 @@ def make_atlas_entry(row: pd.Series,
         "isomers": isomer_dict.get(row["inchi_key"], []),
         "ms2_notes": "no selection",
         "ms1_notes": "keep",
+        "identification_notes": row.get("identification_notes", ""),
+        "analyst_notes": row.get("analyst_notes", "")
     }
 
 def collect_eic_rows(compound_inchi: str,
@@ -241,16 +232,33 @@ def collect_ms2(
 ) -> Dict[str, Any]:
     """
     Return a dict with:
-      - 'files': {file_name: {summary info for MS2 hits}}
+      - 'files': {file_name: {summary info for MS2 datapoints and hits}}
       - 'all_hits': flat list of reference hits for summary
+      - 'all_ms2_entries': flat list of all MS2 entries for fallback best selection
     """
     files: Dict[str, Dict[str, Any]] = {}
     all_hits: List[Dict[str, Any]] = []
+    all_ms2_entries: List[Dict[str, Any]] = []  # Add this to track all MS2 entries
+    
     for file_path, ms2_datapoints in ms2_data_with_hits.items():
         file_name = Path(file_path).name
         file_hits: List[Dict[str, Any]] = []
+        file_ms2_entries = []
+        
+        # Collect ALL MS2 datapoints for this compound, regardless of hits
         for datum in ms2_datapoints:
             if datum.get("inchi_key") == compound_inchi:
+                # Make sure intensity_peak is calculated properly
+                spectrum = datum.get("spectrum", None)
+                if spectrum is not None:
+                    datum['intensity_peak'] = max(spectrum[1])
+                else:
+                    datum['intensity_peak'] = 0.0
+                datum['filename'] = file_name
+                file_ms2_entries.append(datum)
+                all_ms2_entries.append(datum)  # Add to global list
+                
+                # Process hits if they exist
                 for hit in datum.get("hits", []):
                     ref = hit.get("msv_ref_aligned")
                     qry = hit.get("msv_query_aligned")
@@ -290,14 +298,28 @@ def collect_ms2(
                     }
                     file_hits.append(ms2_information)
                     all_hits.append(ms2_information)
-        if file_hits:
-            # Only keep summary info for each file
-            best_hit = max(file_hits, key=lambda h: h.get("score", 0.0))
-            files[file_name] = {
+        
+        # Include file information if there are ANY MS2 entries (with or without hits)
+        if file_ms2_entries:
+            file_info = {
+                "num_ms2_entries": len(file_ms2_entries),
                 "num_hits": len(file_hits),
-                "best_hit": best_hit,
+                "ms2_entries": file_ms2_entries  # Include all MS2 datapoints
             }
-    return {"files": files, "all_hits": all_hits}
+            
+            # Add best hit info if hits exist
+            if file_hits:
+                best_hit = max(file_hits, key=lambda h: h.get("score", 0.0))
+                file_info["best_hit"] = best_hit
+            else:
+                file_info["best_hit"] = {}
+
+            file_info["best_ms2"] = max(file_ms2_entries, key=lambda d: d.get("intensity_peak", 0.0))
+
+            files[file_name] = file_info
+    
+    # Make sure we're returning all_ms2_entries in the dictionary
+    return {"files": files, "all_hits": all_hits, "all_ms2_entries": all_ms2_entries}
 
 def _frag_match_colors(
     ref_mz: np.ndarray,
@@ -348,18 +370,66 @@ def summarize_ms2(all_hits: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[
     avg_ms2 = {"avg_score": float(np.mean([h.get("score", 0.0) for h in all_hits]))}
     return best_ms2, avg_ms2
 
-
 def assemble_compound_block(
     atlas_entry: Dict[str, Any],
     eic_dict: Dict[str, Dict[str, Any]],
     best_eic: Dict[str, Any],
     avg_eic: Dict[str, Any],
     suggested_rt_bounds: Dict[str, Any] | None,
-    ms2_files_data: Dict[str, Any],
+    ms2_data: Dict[str, Any],  # Now receives the full ms2_data dict
     best_ms2: Dict[str, Any],
     avg_ms2: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Create the nested dict that lives under a single InChI‑key."""
+    
+    # Enhanced best MS2 selection logic - now accessing the correct data
+    all_hits = ms2_data.get("all_hits", [])
+    all_ms2_entries = ms2_data.get("all_ms2_entries", [])
+    
+    enhanced_best_ms2 = {}
+    
+    if all_hits:
+        # Use existing best_ms2 from hits (highest score)
+        enhanced_best_ms2 = best_ms2.copy()
+        enhanced_best_ms2["selection_method"] = "reference_hit"
+    elif all_ms2_entries:
+        # No hits, select best by intensity from all MS2 entries
+        best_entry = max(all_ms2_entries, key=lambda d: d.get("intensity_peak", 0.0))
+        enhanced_best_ms2 = {
+            "file_peak": best_entry.get("filename", ""),
+            "database": None,
+            "ref_id": None,
+            "rt_peak": best_entry.get("rt", 0.0),
+            "intensity_peak": best_entry.get("intensity_peak", 0.0),
+            "mz_peak": best_entry.get("precursor_mz", 0.0),
+            "score": None,
+            "num_matches": None,
+            "ref_frags": None,
+            "data_frags": len(best_entry.get("spectrum", [[], []])[0]),
+            "frags_matching": [],
+            "qry_spectrum": best_entry.get("spectrum", []),
+            "ref_spectrum": [],
+            "selection_method": "highest_intensity"
+        }
+    else:
+        # No MS2 data at all
+        enhanced_best_ms2 = {
+            "file_peak": None,
+            "database": None,
+            "ref_id": None,
+            "rt_peak": None,
+            "intensity_peak": None,
+            "mz_peak": None,
+            "score": None,
+            "num_matches": None,
+            "ref_frags": None,
+            "data_frags": None,
+            "frags_matching": [],
+            "qry_spectrum": [],
+            "ref_spectrum": [],
+            "selection_method": "none"
+        }
+    
     return {
         "original_atlas_data": atlas_entry.copy(),
         "new_atlas_data": atlas_entry.copy(),
@@ -367,9 +437,9 @@ def assemble_compound_block(
         "eic_data": eic_dict,
         "best_eic": best_eic,
         "avg_eic": avg_eic,
-        "best_ms2": best_ms2,
+        "best_ms2": enhanced_best_ms2,  # Use enhanced version
         "avg_ms2": avg_ms2,
-        "ms2_data": ms2_files_data,
+        "ms2_data": ms2_data["files"],  # Store only the files part in ms2_data for compatibility
     }
 
 def create_post_analysis_atlas(project_db_path, analysis_atlas_uid, plot_data, config):

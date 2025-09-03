@@ -1,7 +1,7 @@
 paths:
   projects_dir: /Users/BKieft/Metabolomics/metatlas2/data/test_data/projects
   main_database: /Users/BKieft/Metabolomics/metatlas2/data/databases/metatlas.duckdb
-  msms_refs: /Users/BKieft/Metabolomics/metatlas2/data/databases/msms_refs/msms_refs.tab
+  msms_refs: /Users/BKieft/Metabolomics/metatlas2/data/databases/msms_refs/msms_refs_no_inosine15n.tab
   pubchem_cache: /Users/BKieft/Metabolomics/metatlas2/data/databases/pubchem_cache/pubchem_global_cache.pkl
 
 rt_alignment:
@@ -21,7 +21,7 @@ analysis_settings:
   default_ppm_error: 5.0
   min_peak_intensity: 100000.0
   extra_time: 0.0
-  ms2_min_score: 0.01
+  ms2_min_score: 0.0
   ms2_min_matches: 2
 
 database_options:
