@@ -235,7 +235,7 @@ class CompoundDataCollection:
                     all_scores.append(hit.score)
         return np.mean(all_scores) if all_scores else 0.0
 
-class ExperimentDataCollection:
+class ProjectDataCollection:
     """Collection of all compound data for an experiment."""
     
     def __init__(self):
@@ -291,46 +291,101 @@ class ExperimentDataCollection:
             'total_ms2_spectra': self.total_ms2_count
         }
 
-# Convenience functions for filtering and analysis
-def filter_compounds_by_rt_error(experiment_data: ExperimentDataCollection, max_rt_error: float) -> List[CompoundDataCollection]:
-    """Filter compounds where best EIC has RT error within threshold."""
-    filtered = []
-    for compound in experiment_data.compounds.values():
-        best_eic = compound.best_eic_by_intensity
-        if best_eic and abs(best_eic.rt_error) <= max_rt_error:
-            filtered.append(compound)
-    return filtered
-
-def filter_compounds_by_score(experiment_data: ExperimentDataCollection, min_score: float) -> List[CompoundDataCollection]:
-    """Filter compounds where best MS2 hit has score above threshold."""
-    filtered = []
-    for compound in experiment_data.compounds.values():
-        best_ms2 = compound.best_ms2_by_score
-        if best_ms2 and best_ms2.best_hit and best_ms2.best_hit.score >= min_score:
-            filtered.append(compound)
-    return filtered
-
-def get_summary_dataframe(experiment_data: ExperimentDataCollection) -> pd.DataFrame:
-    """Create a summary DataFrame for all compounds."""
-    rows = []
-    for compound in experiment_data.compounds.values():
-        best_eic = compound.best_eic_by_intensity
-        best_ms2 = compound.best_ms2_by_score
-        best_hit = best_ms2.best_hit if best_ms2 else None
-        
-        row = {
-            'inchi_key': compound.inchi_key,
-            'eic_files': len(compound.files_with_eic_data),
-            'ms2_files': len(compound.files_with_ms2_data),
-            'total_spectra': len(compound.ms2_spectra),
-            'spectra_with_hits': len(compound.get_spectra_with_hits()),
-            'best_eic_intensity': best_eic.intensity_peak if best_eic else 0,
-            'best_eic_rt_error': best_eic.rt_error if best_eic else np.nan,
-            'best_eic_ppm_error': best_eic.ppm_error if best_eic else np.nan,
-            'best_hit_score': best_hit.score if best_hit else 0,
-            'best_hit_database': best_hit.database if best_hit else '',
-            'average_hit_score': compound.get_average_hit_score()
-        }
-        rows.append(row)
+@dataclass
+class AnalystModifications:
+    """Track all user modifications to compounds during GUI interaction."""
     
-    return pd.DataFrame(rows)
+    # RT modifications per compound
+    rt_modifications: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    
+    # Annotation modifications per compound
+    annotation_modifications: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    
+    # Track which compounds have been modified
+    modified_compounds: set = field(default_factory=set)
+    
+    def update_rt_bounds(self, inchi_key: str, rt_min: float, rt_max: float, rt_peak: float):
+        """Update RT bounds for a compound and mark as modified."""
+        self.rt_modifications[inchi_key] = {
+            'rt_min': rt_min,
+            'rt_max': rt_max,
+            'rt_peak': rt_peak
+        }
+        self.modified_compounds.add(inchi_key)
+    
+    def update_annotations(self, inchi_key: str, ms1_notes: str = None, ms2_notes: str = None, 
+                          analyst_notes: str = None, identification_notes: str = None):
+        """Update annotations for a compound and mark as modified."""
+        if inchi_key not in self.annotation_modifications:
+            self.annotation_modifications[inchi_key] = {}
+        
+        if ms1_notes is not None:
+            self.annotation_modifications[inchi_key]['ms1_notes'] = ms1_notes
+            self.modified_compounds.add(inchi_key)
+        
+        if ms2_notes is not None:
+            self.annotation_modifications[inchi_key]['ms2_notes'] = ms2_notes
+            self.modified_compounds.add(inchi_key)
+        
+        if analyst_notes is not None:
+            self.annotation_modifications[inchi_key]['analyst_notes'] = analyst_notes
+            self.modified_compounds.add(inchi_key)
+        
+        if identification_notes is not None:
+            self.annotation_modifications[inchi_key]['identification_notes'] = identification_notes
+            self.modified_compounds.add(inchi_key)
+    
+    def get_rt_bounds(self, inchi_key: str) -> Optional[Dict[str, float]]:
+        """Get RT bounds for a compound, or None if not modified."""
+        return self.rt_modifications.get(inchi_key)
+    
+    def get_annotations(self, inchi_key: str) -> Dict[str, str]:
+        """Get annotations for a compound."""
+        return self.annotation_modifications.get(inchi_key, {})
+    
+    def is_modified(self, inchi_key: str) -> bool:
+        """Check if a compound has been modified."""
+        return inchi_key in self.modified_compounds
+    
+    def reset_compound(self, inchi_key: str):
+        """Reset all modifications for a compound."""
+        if inchi_key in self.rt_modifications:
+            del self.rt_modifications[inchi_key]
+        if inchi_key in self.annotation_modifications:
+            del self.annotation_modifications[inchi_key]
+        self.modified_compounds.discard(inchi_key)
+    
+    def get_modified_compounds(self) -> List[str]:
+        """Get list of all modified compound InChI keys."""
+        return list(self.modified_compounds)
+    
+    def to_plot_data_format(self, original_metadata: Dict) -> Dict:
+        """Convert to the format expected by existing functions."""
+        plot_data = {}
+        
+        for inchi_key, compound_meta in original_metadata.items():
+            # Start with original data
+            plot_data[inchi_key] = {
+                'original_atlas_data': compound_meta['original_atlas_data'].copy(),
+                'new_atlas_data': compound_meta['original_atlas_data'].copy(),  # Start with original
+                'suggested_rt_bounds_data': compound_meta.get('suggested_rt_bounds_data'),
+                'eic_data': compound_meta.get('eic_data', {}),
+                'best_eic': compound_meta.get('best_eic', {}),
+                'avg_eic': compound_meta.get('avg_eic', {}),
+                'best_ms2': compound_meta.get('best_ms2', {}),
+                'avg_ms2': compound_meta.get('avg_ms2', {}),
+                'ms2_data': compound_meta.get('ms2_data', {}),
+                'is_modified': self.is_modified(inchi_key)
+            }
+            
+            # Apply RT modifications
+            rt_mods = self.get_rt_bounds(inchi_key)
+            if rt_mods:
+                plot_data[inchi_key]['new_atlas_data'].update(rt_mods)
+            
+            # Apply annotation modifications
+            annotation_mods = self.get_annotations(inchi_key)
+            if annotation_mods:
+                plot_data[inchi_key]['new_atlas_data'].update(annotation_mods)
+        
+        return plot_data

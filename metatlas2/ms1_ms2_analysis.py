@@ -25,14 +25,17 @@ from scipy.ndimage import gaussian_filter1d
 
 from typing import Dict, List, Optional, Any, Tuple
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas')
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-from metatlas.io import feature_tools as ft
+import metatlas2.feature_tools as ftt
 import metatlas2.lcmsruns_tools as lrt
 import metatlas2.database_interact as dbi
 import metatlas2.targeted_analysis as tga
 import metatlas2.load_tools as ldt
-import metatlas2.data_classes as dc
+import metatlas2.data_classes as dcl
+import metatlas2.logging_config as lcf
+
+# Initialize logger properly at module level
+logger = lcf.get_logger('ms1_ms2_analysis')
 
 def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, config: Dict[str, Any]) -> Tuple[pd.DataFrame, Dict]:
     """
@@ -47,7 +50,7 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
     Returns:
         Tuple of (qc_compound_data, matching_stats)
     """
-    print("Loading QC files and atlas compounds from databases...")
+    logger.info("Loading QC files and atlas compounds from databases...")
 
     # Define thresholds
     database_path = config['paths']['main_database']
@@ -61,20 +64,10 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
     if qc_compounds.empty or qc_compounds is None:
         raise ValueError(f"No compounds found for QC atlas UID: {qc_atlas_uid}")
     
-    print(f"Found {len(qc_files_df)} QC files and {len(qc_compounds)} QC compounds")
-    
-    # Debug: Print some compound information
-    print(f"Sample compounds from atlas:")
-    for i, (_, row) in enumerate(qc_compounds.head(3).iterrows()):
-        print(f"  {i+1}: {row.get('compound_name', 'No name')} - {row.get('chromatography', 'No chrom')}/{row.get('polarity', 'No pol')} - RT: {row.get('rt_peak', 'No RT')} - m/z: {row.get('mz', 'No mz')}")
-    
-    # Debug: Print some file information
-    print(f"Sample QC files:")
-    for i, (_, row) in enumerate(qc_files_df.head(3).iterrows()):
-        print(f"  {i+1}: {Path(row['file_path']).name} - {row.get('chromatography', 'No chrom')}/{row.get('polarity', 'No pol')}")
+    logger.info(f"Found {len(qc_files_df)} QC files and {len(qc_compounds)} QC compounds")
     
     # Extract all MS1 data from all QC files
-    print("Extracting MS1 data from QC files...")
+    logger.info("Extracting MS1 data from QC files...")
     all_ms1_data = []
     
     for _, file_row in tqdm(qc_files_df.iterrows(), total=len(qc_files_df), desc="Extracting MS1 data"):
@@ -92,7 +85,7 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
             elif polarity.lower() == "negative":
                 ms1_keys_to_try = ["ms1_neg"]
             else:
-                print(f"  Warning: Unknown polarity '{polarity}' for file {Path(file_path).name}")
+                logger.warning(f"  Warning: Unknown polarity '{polarity}' for file {Path(file_path).name}")
                 continue
             
             file_has_data = False
@@ -101,7 +94,6 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
                     ms1_data = lrt.read_hdf_file(file_path, desired_key=ms1_key)
                     
                     if ms1_data is not None and len(ms1_data) > 0:
-                        # Add metadata
                         ms1_data['file_path'] = file_path
                         ms1_data['filename'] = os.path.basename(file_path)
                         ms1_data['chromatography'] = chromatography
@@ -112,7 +104,6 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
                         if 'i' in ms1_data.columns:
                             initial_count = len(ms1_data)
                             ms1_data = ms1_data[ms1_data['i'] >= metadata['i']]
-                            print(f"  Intensity filter: {initial_count} -> {len(ms1_data)} peaks (threshold: {metadata['i']})")
                         
                         # Filter by RT range
                         if 'rt' in ms1_data.columns and len(ms1_data) > 0:
@@ -121,18 +112,18 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
                         
                         if len(ms1_data) > 0:
                             all_ms1_data.append(ms1_data)
-                            print(f"  Extracted {len(ms1_data)} peaks from {os.path.basename(file_path)} ({ms1_key})")
+                            logger.info(f"  Extracted {len(ms1_data)} peaks from {os.path.basename(file_path)} ({ms1_key})")
                             file_has_data = True
                 
                 except Exception as e:
-                    print(f"  Warning: Could not extract {ms1_key} from {Path(file_path).name}: {e}")
+                    logger.warning(f"  Warning: Could not extract {ms1_key} from {Path(file_path).name}: {e}")
                     continue
             
             if not file_has_data:
-                print(f"  Warning: No MS1 data extracted from {Path(file_path).name}")
+                logger.warning(f"  Warning: No MS1 data extracted from {Path(file_path).name}")
                     
         except Exception as e:
-            print(f"  Warning: Failed to process {Path(file_path).name}: {e}")
+            logger.warning(f"  Warning: Failed to process {Path(file_path).name}: {e}")
             continue
     
     if not all_ms1_data:
@@ -140,22 +131,13 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
     
     # Combine all MS1 data
     combined_ms1_data = pd.concat(all_ms1_data, ignore_index=True)
-    print(f"Total MS1 peaks extracted: {len(combined_ms1_data):,}")
-    
-    # Debug: Show data polarity distribution
-    if 'data_polarity' in combined_ms1_data.columns:
-        polarity_counts = combined_ms1_data['data_polarity'].value_counts()
-        print(f"MS1 data polarity distribution: {dict(polarity_counts)}")
-
-    if 'chromatography' in combined_ms1_data.columns:
-        chromatography_counts = combined_ms1_data['chromatography'].value_counts()
-        print(f"MS1 data chromatography distribution: {dict(chromatography_counts)}")
+    logger.info(f"Total MS1 peaks extracted: {len(combined_ms1_data):,}")
 
     # Match QC compounds to extracted peaks
-    print("\nMatching QC compounds to extracted peaks...")
+    logger.info("Matching QC compounds to extracted peaks...")
     compound_matches = []
     
-    # Debug counters
+    # Log counters
     compounds_processed = 0
     compounds_with_matches = 0
     
@@ -171,11 +153,6 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
             compound_chromatography = "HILIC"
         compound_polarity = compound['polarity']
         
-        # Debug: Print compound being processed
-        if compounds_processed <= 3:
-            print(f"  Processing compound {compounds_processed}: {compound_name}")
-            print(f"    Target: {compound_chromatography}/{compound_polarity}, m/z={target_mz:.4f}, RT={atlas_rt_peak:.2f}")
-        
         # Calculate tolerances
         mz_tolerance = metadata['mz']
         mz_tolerance_da = target_mz * mz_tolerance / 1e6
@@ -187,7 +164,6 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
         # Filter MS1 data for this compound
         # Match chromatography exactly
         ms1_subset = combined_ms1_data[combined_ms1_data['chromatography'] == compound_chromatography]
-        print(f"    After chromatography filter ({compound_chromatography}): {len(ms1_subset)} peaks")
         
         # Handle polarity matching - fix the logic here
         if compound_polarity.upper() == "FPS":
@@ -199,7 +175,6 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
                 (ms1_subset['data_polarity'] == compound_polarity.lower()) |
                 (ms1_subset['file_polarity'].str.upper() == "FPS")
             ]
-        print(f"    After polarity filter ({compound_polarity}): {len(ms1_subset)} peaks")
         
         # Apply m/z and RT filters
         matching_peaks = ms1_subset[
@@ -208,9 +183,7 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
             (ms1_subset['rt'] >= rt_min_search) &
             (ms1_subset['rt'] <= rt_max_search)
         ].copy()
-        
-        print(f"    After m/z and RT filters: {len(matching_peaks)} peaks")
-        
+                
         if len(matching_peaks) > 0:
             compounds_with_matches += 1
             
@@ -242,7 +215,7 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
                     'mz_tolerance_used': mz_tolerance
                 })
     
-    print(f"\nProcessed {compounds_processed} compounds, {compounds_with_matches} had matches")
+    logger.info(f"Processed {compounds_processed} compounds, {compounds_with_matches} had matches")
     
     # Create results
     if compound_matches:
@@ -258,31 +231,31 @@ def extract_and_match_qc_compounds(project_db_path: str, qc_atlas_uid: str, conf
             'total_peaks_extracted': len(combined_ms1_data)
         }
         
-        print(f"\nMatching completed:")
-        print(f"  Compounds with matches: {matching_stats['compounds_with_matches']}/{matching_stats['total_compounds']}")
-        print(f"  Total compound-file matches: {matching_stats['total_matches']}")
-        print(f"  Mean m/z error: {qc_compound_data['mz_error_ppm'].mean():.2f} ± {qc_compound_data['mz_error_ppm'].std():.2f} ppm")
-        print(f"  Mean RT difference: {qc_compound_data['rt_difference'].mean():.3f} ± {qc_compound_data['rt_difference'].std():.3f} min")
+        logger.info(f"Matching completed:")
+        logger.info(f"  Compounds with matches: {matching_stats['compounds_with_matches']}/{matching_stats['total_compounds']}")
+        logger.info(f"  Total compound-file matches: {matching_stats['total_matches']}")
+        logger.info(f"  Mean m/z error: {qc_compound_data['mz_error_ppm'].mean():.2f} ± {qc_compound_data['mz_error_ppm'].std():.2f} ppm")
+        logger.info(f"  Mean RT difference: {qc_compound_data['rt_difference'].mean():.3f} ± {qc_compound_data['rt_difference'].std():.3f} min")
         
         return qc_compound_data, matching_stats
     else:
-        print("No compound matches found. Check Atlas compound definitions, m/z tolerance, RT window settings, and QC file data quality")
-        print(f"\nDebugging information:")
-        print(f"  Total compounds to match: {len(qc_compounds)}")
-        print(f"  Total MS1 peaks available: {len(combined_ms1_data):,}")
-        print(f"  m/z tolerance: {metadata['mz']} ppm")
-        print(f"  RT tolerance: {metadata['rt']} min")
-        print(f"  Intensity threshold: {metadata['i']}")
+        logger.warning("No compound matches found. Check Atlas compound definitions, m/z tolerance, RT window settings, and QC file data quality")
+        logger.warning(f"Debugging information:")
+        logger.warning(f"  Total compounds to match: {len(qc_compounds)}")
+        logger.warning(f"  Total MS1 peaks available: {len(combined_ms1_data):,}")
+        logger.warning(f"  m/z tolerance: {metadata['mz']} ppm")
+        logger.warning(f"  RT tolerance: {metadata['rt']} min")
+        logger.warning(f"  Intensity threshold: {metadata['i']}")
         
         # Show some sample data ranges
         if len(combined_ms1_data) > 0:
-            print(f"  MS1 data m/z range: {combined_ms1_data['mz'].min():.4f} - {combined_ms1_data['mz'].max():.4f}")
-            print(f"  MS1 data RT range: {combined_ms1_data['rt'].min():.2f} - {combined_ms1_data['rt'].max():.2f}")
-            print(f"  MS1 data intensity range: {combined_ms1_data['i'].min():.0f} - {combined_ms1_data['i'].max():.0f}")
+            logger.warning(f"  MS1 data m/z range: {combined_ms1_data['mz'].min():.4f} - {combined_ms1_data['mz'].max():.4f}")
+            logger.warning(f"  MS1 data RT range: {combined_ms1_data['rt'].min():.2f} - {combined_ms1_data['rt'].max():.2f}")
+            logger.warning(f"  MS1 data intensity range: {combined_ms1_data['i'].min():.0f} - {combined_ms1_data['i'].max():.0f}")
         
         # Show compound target ranges
-        print(f"  Compound m/z range: {qc_compounds['mz'].min():.4f} - {qc_compounds['mz'].max():.4f}")
-        print(f"  Compound RT range: {qc_compounds['rt_peak'].min():.2f} - {qc_compounds['rt_peak'].max():.2f}")
+        logger.warning(f"  Compound m/z range: {qc_compounds['mz'].min():.4f} - {qc_compounds['mz'].max():.4f}")
+        logger.warning(f"  Compound RT range: {qc_compounds['rt_peak'].min():.2f} - {qc_compounds['rt_peak'].max():.2f}")
         
         raise ValueError("No compound matches found")
 
@@ -291,52 +264,51 @@ def calculate_mz_tolerance_range(mz: float, tolerance_ppm: float) -> Tuple[float
     tolerance_da = mz * tolerance_ppm / 1e6
     return mz - tolerance_da, mz + tolerance_da
 
-def find_peaks_in_rt_window(ms1_data: pd.DataFrame, target_mz: float, 
-                           mz_tolerance_ppm: float, rt_data: Dict[str, float], 
-                           rt_window: float = 0.5) -> pd.DataFrame:
-    """
-    Find peaks within m/z tolerance and RT window.
+# def find_peaks_in_rt_window(ms1_data: pd.DataFrame, target_mz: float, 
+#                            mz_tolerance_ppm: float, rt_data: Dict[str, float], 
+#                            rt_window: float = 0.5) -> pd.DataFrame:
+#     """
+#     Find peaks within m/z tolerance and RT window.
     
-    Args:
-        ms1_data: MS1 data DataFrame
-        target_mz: Target m/z value
-        mz_tolerance_ppm: m/z tolerance in ppm
-        rt_data: RT data dictionary with 'center', 'min' and 'max' keys
-        rt_window: RT window around center (minutes)
+#     Args:
+#         ms1_data: MS1 data DataFrame
+#         target_mz: Target m/z value
+#         mz_tolerance_ppm: m/z tolerance in ppm
+#         rt_data: RT data dictionary with 'center', 'min' and 'max' keys
+#         rt_window: RT window around center (minutes)
     
-    Returns:
-        DataFrame of matching peaks
-    """
-    # Calculate m/z range
-    mz_min, mz_max = calculate_mz_tolerance_range(target_mz, mz_tolerance_ppm)
+#     Returns:
+#         DataFrame of matching peaks
+#     """
+#     # Calculate m/z range
+#     mz_min, mz_max = calculate_mz_tolerance_range(target_mz, mz_tolerance_ppm)
     
-    # Calculate RT range
-    rt_min = rt_data['min'] - rt_window
-    rt_max = rt_data['max'] + rt_window
-    print(mz_min, mz_max, rt_min, rt_max)
-    display(ms1_data)
-    # Filter peaks
-    matching_peaks = ms1_data[
-        (ms1_data['mz'] >= mz_min) & 
-        (ms1_data['mz'] <= mz_max) & 
-        (ms1_data['rt'] >= rt_min) & 
-        (ms1_data['rt'] <= rt_max)
-    ].copy()
-    display(matching_peaks)
-    if len(matching_peaks) > 0:
-        # Calculate m/z error
-        matching_peaks['mz_error_ppm'] = (
-            (matching_peaks['mz'] - target_mz) / target_mz * 1e6
-        )
-        # Calculate RT difference
-        rt_diff = matching_peaks['rt'] - rt_center
-        if abs(rt_diff).any() > 1:
-            print(f"RT difference exceeds threshold for {len(matching_peaks)} peaks")
-        matching_peaks['rt_difference'] = rt_diff
+#     # Calculate RT range
+#     rt_min = rt_data['min'] - rt_window
+#     rt_max = rt_data['max'] + rt_window
 
-    return matching_peaks
+#     # Filter peaks
+#     matching_peaks = ms1_data[
+#         (ms1_data['mz'] >= mz_min) & 
+#         (ms1_data['mz'] <= mz_max) & 
+#         (ms1_data['rt'] >= rt_min) & 
+#         (ms1_data['rt'] <= rt_max)
+#     ].copy()
 
-def align_ms_arrays(query_mz, query_intensity, ref_mz, ref_intensity, mz_tolerance=0.005, intensity_tolerance=1000):
+#     if len(matching_peaks) > 0:
+#         # Calculate m/z error
+#         matching_peaks['mz_error_ppm'] = (
+#             (matching_peaks['mz'] - target_mz) / target_mz * 1e6
+#         )
+#         # Calculate RT difference
+#         rt_diff = matching_peaks['rt'] - rt_center
+#         if abs(rt_diff).any() > 1:
+#             logger.info(f"RT difference exceeds threshold for {len(matching_peaks)} peaks")
+#         matching_peaks['rt_difference'] = rt_diff
+
+#     return matching_peaks
+
+def align_ms_arrays(query_mz, query_intensity, ref_mz, ref_intensity, mz_tolerance=0.005, intensity_tolerance=100):
     """
     Align MS2 vectors using the metatlas approach for consistent fragment matching.
     Produces aligned arrays for query and reference spectra, matching fragments within mz_tolerance
@@ -347,8 +319,8 @@ def align_ms_arrays(query_mz, query_intensity, ref_mz, ref_intensity, mz_toleran
         query_intensity: Query spectrum intensities (array-like)
         ref_mz: Reference spectrum m/z values (array-like)
         ref_intensity: Reference spectrum intensities (array-like)
-        mz_tolerance: m/z tolerance for matching (default: 0.005)
-        intensity_tolerance: minimum intensity for counting a match (default: 1000)
+        mz_tolerance: m/z tolerance for matching
+        intensity_tolerance: minimum intensity for counting a match
 
     Returns:
         tuple: (aligned_query_mz, aligned_query_intensity, aligned_ref_mz, aligned_ref_intensity, num_matches)
@@ -395,12 +367,12 @@ def align_ms_arrays(query_mz, query_intensity, ref_mz, ref_intensity, mz_toleran
     return (np.array(aligned_mz), np.array(aligned_query_intensity),
             np.array(aligned_mz), np.array(aligned_ref_intensity), num_matches)
 
-def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame, config: Dict) -> dc.ExperimentDataCollection:
+def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame, config: Dict) -> dcl.ProjectDataCollection:
     """
     Extract EIC and MS2 data using class-based structure.
     
     Returns:
-        ExperimentDataCollection containing all compound data
+        ProjectDataCollection containing all compound data
     """
     # Load reference database
     msms_refs_path = Path(config["paths"]["msms_refs"])
@@ -408,12 +380,12 @@ def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame
     if msms_refs_path.exists():
         reference_df = ldt.load_msms_refs_file(msms_refs_path)
         if reference_df is not None:
-            print(f"Loaded {len(reference_df)} reference spectra for MS2 matching")
+            logger.info(f"Loaded {len(reference_df)} reference spectra for MS2 matching")
         else:
-            print("MS2 reference file found but could not be loaded")
+            logger.info("MS2 reference file found but could not be loaded")
     else:
-        print(f"MS2 reference file not found at {msms_refs_path}")
-        print("All MS2 datapoints will be preserved but without reference hits")
+        logger.info(f"MS2 reference file not found at {msms_refs_path}")
+        logger.info("All MS2 datapoints will be preserved but without reference hits")
     
     # Create compound metadata mapping
     compound_metadata = {}
@@ -429,40 +401,40 @@ def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame
         }
     
     # Initialize experiment data collection
-    experiment_data = dc.ExperimentDataCollection()
+    experiment_data = dcl.ProjectDataCollection()
     
-    print(f"Extracting data from {len(input_data_list)} files...")
+    logger.info(f"Extracting data from {len(input_data_list)} files...")
     
     # Determine number of workers for parallel processing
     max_workers = min(mp.cpu_count(), len(input_data_list), 8)
     
     if max_workers > 1 and len(input_data_list) > 1:
-        print(f"Using parallel processing with {max_workers} workers...")
+        logger.info(f"Using parallel processing with {max_workers} workers...")
         experiment_data = _extract_data_parallel(
             input_data_list, compound_metadata, reference_df, config, max_workers
         )
     else:
-        print("Using sequential processing...")
+        logger.info("Using sequential processing...")
         experiment_data = _extract_data_sequential(
             input_data_list, compound_metadata, reference_df, config
         )
     
     # Print summary
     summary = experiment_data.compounds_summary
-    print(f"\nExtraction complete:")
-    print(f"  Total compounds: {summary['total_compounds']}")
-    print(f"  Compounds with EIC data: {summary['compounds_with_eic']}")
-    print(f"  Compounds with MS2 data: {summary['compounds_with_ms2']}")
-    print(f"  Compounds with MS2 hits: {summary['compounds_with_hits']}")
-    print(f"  Total EIC traces: {summary['total_eic_traces']}")
-    print(f"  Total MS2 spectra: {summary['total_ms2_spectra']}")
+    logger.info(f"Extraction complete:")
+    logger.info(f"  Total compounds: {summary['total_compounds']}")
+    logger.info(f"  Compounds with EIC data: {summary['compounds_with_eic']}")
+    logger.info(f"  Compounds with MS2 data: {summary['compounds_with_ms2']}")
+    logger.info(f"  Compounds with MS2 hits: {summary['compounds_with_hits']}")
+    logger.info(f"  Total EIC traces: {summary['total_eic_traces']}")
+    logger.info(f"  Total MS2 spectra: {summary['total_ms2_spectra']}")
     
     return experiment_data
 
 def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dict, 
-                           reference_df: Optional[pd.DataFrame], config: Dict) -> dc.ExperimentDataCollection:
+                           reference_df: Optional[pd.DataFrame], config: Dict) -> dcl.ProjectDataCollection:
     """Extract data using sequential processing."""
-    experiment_data = dc.ExperimentDataCollection()
+    experiment_data = dcl.ProjectDataCollection()
     
     for i, file_input in enumerate(tqdm(input_data_list, desc="Processing files")):
         file_path = file_input['lcmsrun']
@@ -470,11 +442,11 @@ def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dic
         
         try:
             # Extract data
-            data = ft.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
+            data = ftt.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
             
             # Process EIC data
             if not data['ms1_data'].empty:
-                adduct_eics = ft.group_duplicates(data['ms1_data'], 'label', make_string=False)
+                adduct_eics = ftt.group_duplicates(data['ms1_data'], 'label', make_string=False)
                 
                 if not adduct_eics.empty and 'label' in adduct_eics.columns:
                     for _, eic_row in adduct_eics.iterrows():
@@ -498,7 +470,7 @@ def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dic
                             rt_peak = intensity_peak = mz_peak = 0.0
                         
                         # Create EIC object
-                        eic = dc.EICData(
+                        eic = dcl.EICData(
                             inchi_key=metadata['inchi_key'],
                             compound_uid=metadata['compound_uid'],
                             label=label,
@@ -520,7 +492,7 @@ def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dic
             
             # Process MS2 data
             if not data['ms2_data'].empty:
-                ms2_summary = ft.calculate_ms2_summary(data['ms2_data'])
+                ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
                 
                 if not ms2_summary.empty:
                     for _, ms2_row in ms2_summary.iterrows():
@@ -539,7 +511,7 @@ def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dic
                         intensity_values = np.array(spectrum_data[1])
                         
                         # Create MS2 spectrum object
-                        spectrum = dc.MS2Spectrum(
+                        spectrum = dcl.MS2Spectrum(
                             inchi_key=metadata['inchi_key'],
                             compound_uid=metadata['compound_uid'],
                             label=label,
@@ -564,20 +536,14 @@ def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dic
                         
                         experiment_data.add_ms2_spectrum(spectrum)
             
-            # Progress info
-            if (i + 1) % 10 == 0:  # Print every 10 files
-                eic_count = sum(len(c.eic_data) for c in experiment_data.compounds.values())
-                ms2_count = sum(len(c.ms2_spectra) for c in experiment_data.compounds.values())
-                print(f"  Processed {i+1}/{len(input_data_list)} files - EIC: {eic_count}, MS2: {ms2_count}")
-            
         except Exception as e:
-            print(f"  Error processing {filename}: {e}")
+            logger.error(f"  Error processing {filename}: {e}")
             continue
     
     return experiment_data
 
 def _extract_data_parallel(input_data_list: List[Dict], compound_metadata: Dict, 
-                         reference_df: Optional[pd.DataFrame], config: Dict, max_workers: int) -> dc.ExperimentDataCollection:
+                         reference_df: Optional[pd.DataFrame], config: Dict, max_workers: int) -> dcl.ProjectDataCollection:
     """Extract data using parallel processing."""
     
     # Prepare arguments for each worker
@@ -586,7 +552,7 @@ def _extract_data_parallel(input_data_list: List[Dict], compound_metadata: Dict,
         worker_args.append((i, file_input, compound_metadata, reference_df, config))
     
     # Process files in parallel
-    experiment_data = dc.ExperimentDataCollection()
+    experiment_data = dcl.ProjectDataCollection()
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = []
@@ -609,28 +575,28 @@ def _extract_data_parallel(input_data_list: List[Dict], compound_metadata: Dict,
                 
                 if (i + 1) % 10 == 0:  # Print every 10 files
                     file_name = Path(file_path).name
-                    print(f"  Completed {i+1}/{len(input_data_list)}: {file_name}")
+                    logger.info(f"  Completed {i+1}/{len(input_data_list)}: {file_name}")
                     
             except Exception as e:
-                print(f"  Error in parallel processing: {e}")
-    
+                logger.error(f"  Error in parallel processing: {e}")
+
     return experiment_data
 
 def _process_single_file(file_index: int, file_input: Dict, compound_metadata: Dict, 
-                       reference_df: Optional[pd.DataFrame], config: Dict) -> Tuple[str, List[dc.EICData], List[dc.MS2Spectrum]]:
+                       reference_df: Optional[pd.DataFrame], config: Dict) -> Tuple[str, List[dcl.EICData], List[dcl.MS2Spectrum]]:
     """Process a single file for EIC and MS2 data extraction."""
     file_path = file_input['lcmsrun']
     filename = Path(file_path).name
     
     # Extract data
-    data = ft.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
+    data = ftt.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
     
     eic_objects = []
     ms2_objects = []
     
     # Process EIC data
     if not data['ms1_data'].empty:
-        adduct_eics = ft.group_duplicates(data['ms1_data'], 'label', make_string=False)
+        adduct_eics = ftt.group_duplicates(data['ms1_data'], 'label', make_string=False)
         
         if not adduct_eics.empty and 'label' in adduct_eics.columns:
             for _, eic_row in adduct_eics.iterrows():
@@ -654,7 +620,7 @@ def _process_single_file(file_index: int, file_input: Dict, compound_metadata: D
                     rt_peak = intensity_peak = mz_peak = 0.0
                 
                 # Create EIC object
-                eic = dc.EICData(
+                eic = dcl.EICData(
                     inchi_key=metadata['inchi_key'],
                     compound_uid=metadata['compound_uid'],
                     label=label,
@@ -676,7 +642,7 @@ def _process_single_file(file_index: int, file_input: Dict, compound_metadata: D
     
     # Process MS2 data
     if not data['ms2_data'].empty:
-        ms2_summary = ft.calculate_ms2_summary(data['ms2_data'])
+        ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
         
         if not ms2_summary.empty:
             for _, ms2_row in ms2_summary.iterrows():
@@ -695,7 +661,7 @@ def _process_single_file(file_index: int, file_input: Dict, compound_metadata: D
                 intensity_values = np.array(spectrum_data[1])
                 
                 # Create MS2 spectrum object
-                spectrum = dc.MS2Spectrum(
+                spectrum = dcl.MS2Spectrum(
                     inchi_key=metadata['inchi_key'],
                     compound_uid=metadata['compound_uid'],
                     label=label,
@@ -722,7 +688,7 @@ def _process_single_file(file_index: int, file_input: Dict, compound_metadata: D
     
     return file_path, eic_objects, ms2_objects
 
-def _find_hits_for_spectrum(spectrum: dc.MS2Spectrum, reference_df: pd.DataFrame, config: Dict) -> List[dc.MS2Hit]:
+def _find_hits_for_spectrum(spectrum: dcl.MS2Spectrum, reference_df: pd.DataFrame, config: Dict) -> List[dcl.MS2Hit]:
     """Find reference hits for an MS2Spectrum object."""
     if not spectrum.inchi_key:
         return []
@@ -777,7 +743,7 @@ def _find_hits_for_spectrum(spectrum: dc.MS2Spectrum, reference_df: pd.DataFrame
         try:
             (aligned_query_mz, aligned_query_intensity,
              aligned_ref_mz, aligned_ref_intensity, _) = align_ms_arrays(
-                spectrum.mz_values, spectrum.intensity_values, ref_mz, ref_intensity, 0.005
+                spectrum.mz_values, spectrum.intensity_values, ref_mz, ref_intensity
             )
             
             # Calculate fragment colors for visualization
@@ -799,7 +765,7 @@ def _find_hits_for_spectrum(spectrum: dc.MS2Spectrum, reference_df: pd.DataFrame
             matched_fragments = []
         
         # Create hit object
-        hit = dc.MS2Hit(
+        hit = dcl.MS2Hit(
             database=ref_row.get('database', 'unknown'),
             ref_id=str(ref_row.get('id', '')),
             score=score,
@@ -839,7 +805,7 @@ def prepare_feature_tools_inputs(atlas_df: pd.DataFrame, h5_files: List[str],
         polarity = atlas_df['polarity'].iloc[0] if not atlas_df['polarity'].empty else 'positive'
 
     # Use setup_file_slicing_parameters to prepare inputs
-    input_data_list = ft.setup_file_slicing_parameters(
+    input_data_list = ftt.setup_file_slicing_parameters(
         atlas=atlas_df,
         filenames=h5_files,
         extra_time=extra_time,

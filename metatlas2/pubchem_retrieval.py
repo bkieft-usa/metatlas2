@@ -10,6 +10,10 @@ from tqdm.notebook import tqdm
 
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 import metatlas2.load_tools as ldt
+import metatlas2.logging_config as lcf
+
+# Initialize logger properly at module level
+logger = lcf.get_logger('pubchem_retrieval')
 
 def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
     """Get comprehensive compound data from PubChem using InChI key."""
@@ -68,7 +72,7 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
         return compound_data
         
     except Exception as e:
-        print(f"Error retrieving PubChem data for {inchi_key}: {e}")
+        logger.error(f"Error retrieving PubChem data for {inchi_key}: {e}")
         return None
 
 def filter_synonym_list(synonyms: List[str]) -> str:
@@ -111,12 +115,12 @@ def load_or_create_pubchem_cache(cache_filename: str, use_cache: bool = True) ->
         try:
             with open(cache_file, 'rb') as f:
                 cache = pickle.load(f)
-            print(f"Loaded global PubChem cache with {len(cache)} entries from {cache_file}")
+            logger.info(f"Loaded global PubChem cache with {len(cache)} entries from {cache_file}")
             return cache
         except Exception as e:
-            print(f"Error loading cache: {e}. Creating new cache.")
+            logger.error(f"Error loading cache: {e}. Creating new cache.")
     
-    print("Creating new global PubChem cache")
+    logger.info("Creating new global PubChem cache")
     return {}
 
 def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
@@ -125,9 +129,9 @@ def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
     try:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache, f)
-        print(f"Saved global PubChem cache with {len(cache)} entries to {cache_file}")
+        logger.info(f"Saved global PubChem cache with {len(cache)} entries to {cache_file}")
     except Exception as e:
-        print(f"Error saving cache: {e}")
+        logger.error(f"Error saving cache: {e}")
 
 def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
     """Retrieve PubChem information for compounds and update global cache."""
@@ -145,19 +149,19 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
     if force_cache_update:
         compounds_to_fetch = list(unique_inchi_keys)
         compounds_in_cache = []
-        print(f"Force update enabled - will query all {len(compounds_to_fetch)} compounds")
+        logger.info(f"Force update enabled - will query all {len(compounds_to_fetch)} compounds")
     else:
         # Normal mode: only query compounds not in cache
         compounds_to_fetch = [key for key in unique_inchi_keys if key not in pubchem_cache]
         compounds_in_cache = [key for key in unique_inchi_keys if key in pubchem_cache]
-        print(f"Compounds already in cache: {len(compounds_in_cache)}")
-        print(f"Compounds needing PubChem lookup: {len(compounds_to_fetch)}")
+        logger.info(f"Compounds already in cache: {len(compounds_in_cache)}")
+        logger.info(f"Compounds needing PubChem lookup: {len(compounds_to_fetch)}")
 
     if compounds_to_fetch:
-        print(f"\nFetching PubChem data for {len(compounds_to_fetch)} compounds...")
+        logger.info(f"Fetching PubChem data for {len(compounds_to_fetch)} compounds...")
         if force_cache_update:
-            print("Force update mode: updating existing cache entries")
-        print("This may take several minutes depending on the number of compounds.")
+            logger.info("Force update mode: updating existing cache entries")
+        logger.info("This may take several minutes depending on the number of compounds.")
         
         # Track how many were actually updated
         new_entries = 0
@@ -178,7 +182,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
                 else:
                     new_entries += 1
             else:
-                print(f"No PubChem data found for {inchi_key}")
+                logger.warning(f"No PubChem data found for {inchi_key}")
 
             # Be respectful to PubChem API
             time.sleep(0.25)
@@ -188,12 +192,12 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
         
         # Report what was done
         if force_cache_update:
-            print(f"Force update completed: {updated_entries} entries updated, {new_entries} entries added")
+            logger.info(f"Force update completed: {updated_entries} entries updated, {new_entries} entries added")
         else:
-            print(f"Cache update completed: {new_entries} new entries added")
+            logger.info(f"Cache update completed: {new_entries} new entries added")
         
     else:
-        print("All compounds already in cache!")
+        logger.info("All compounds already in cache!")
 
     successful_retrievals = [k for k, v in pubchem_cache.items() 
                             if v.get('pubchem_cid') and v.get('pubchem_cid') != '']
@@ -201,10 +205,10 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
                         if not v.get('pubchem_cid') or v.get('pubchem_cid') == '']
                         
     if failed_retrievals:
-        print(f"\nSome compounds not found in PubChem: {failed_retrievals}...")
-        print("These will be created with minimal information from the input table.")
+        logger.warning(f"Some compounds not found in PubChem: {failed_retrievals}...")
+        logger.warning("These will be created with minimal information from the input table.")
 
-    print(f"\nPubChem data retrieval complete!")
-    print(f"    Total compounds in global cache: {len(pubchem_cache)}")
-    print(f"    Successful PubChem retrievals in cache: {len(successful_retrievals)}")
-    print(f"    Failed retrievals in cache: {len(failed_retrievals)}")
+    logger.info(f"PubChem data retrieval complete!")
+    logger.info(f"    Total compounds in global cache: {len(pubchem_cache)}")
+    logger.info(f"    Successful PubChem retrievals in cache: {len(successful_retrievals)}")
+    logger.info(f"    Failed retrievals in cache: {len(failed_retrievals)}")

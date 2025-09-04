@@ -2,11 +2,18 @@ import glob
 import os
 import re
 import h5py
+import sys
 import pandas as pd
 import numpy as np
 from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
+
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
+import metatlas2.logging_config as lcf
+
+# Initialize logger properly at module level
+logger = lcf.get_logger('lcmsrun_tools')
 
 def get_project_files(project_path: str) -> dict:
     """
@@ -27,7 +34,7 @@ def get_project_files(project_path: str) -> dict:
     if not h5_files:
         raise ValueError(f"No .h5 files found in {project_path}")
     
-    print(f"Found {len(h5_files)} .h5 files in {project_path}")
+    logger.info(f"Found {len(h5_files)} .h5 files in {project_path}")
     
     # Initialize nested dictionary
     files_by_group = {}
@@ -107,7 +114,7 @@ def read_hdf_file(filename, desired_key=None):
                         return data
                 return None
     except Exception as e:
-        print(f"Error reading {filename}: {e}")
+        logger.info(f"Error reading {filename}: {e}")
         return None
 
 def combine_dfs_across_files(file_list: List[str], key: str) -> pd.DataFrame:
@@ -129,7 +136,7 @@ def combine_dfs_across_files(file_list: List[str], key: str) -> pd.DataFrame:
             if df is not None and not df.empty:
                 combined_df = pd.concat([combined_df, df], ignore_index=True)
         except Exception as e:
-            print(f"Error processing file {file}: {e}")
+            logger.info(f"Error processing file {file}: {e}")
     
     return combined_df
 
@@ -206,7 +213,7 @@ def save_dataframe_to_hdf(df: pd.DataFrame, file_path: str, key: str, mode: str 
         with pd.HDFStore(file_path, mode) as store:
             store.put(key, df, format='table', data_columns=True)
     except Exception as e:
-        print(f"Error saving DataFrame to {file_path}: {e}")
+        logger.info(f"Error saving DataFrame to {file_path}: {e}")
 
 def load_dataframe_from_hdf(file_path: str, key: str) -> pd.DataFrame:
     """
@@ -223,5 +230,5 @@ def load_dataframe_from_hdf(file_path: str, key: str) -> pd.DataFrame:
         with pd.HDFStore(file_path, 'r') as store:
             return store[key]
     except Exception as e:
-        print(f"Error loading DataFrame from {file_path}: {e}")
+        logger.info(f"Error loading DataFrame from {file_path}: {e}")
         return pd.DataFrame()

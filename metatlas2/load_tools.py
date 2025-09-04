@@ -6,6 +6,10 @@ import getpass
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Union
+import metatlas2.logging_config as lcf
+
+# Initialize logger properly at module level
+logger = lcf.get_logger('load_tools')
 
 def load_msms_refs_file(file_path):
     """
@@ -20,35 +24,24 @@ def load_msms_refs_file(file_path):
                                 'inchi_key', 'inchi', 'smiles']
     """
     
-    print(f"Loading reference spectra from {file_path}...")
+    logger.info(f"Loading reference spectra from {file_path}...")
 
-    # Read the tab-separated file
-    df = pd.read_csv(file_path, sep='\t')
+    # Read the tab-separated file with explicit column names
+    df = pd.read_csv(file_path, sep='\t', header=None, names=[
+        'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy', 
+        'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id', 
+        'experiment', 'instrument', 'formula', 'exact_mass', 'inchi_key', 'inchi', 'smiles'
+    ])
 
-    # Convert spectrum strings to numpy arrays
+    # Convert spectrum strings to numpy arrays using ast.literal_eval
     def parse_spectrum(spec_str):
-        """Parse spectrum string into numpy array format."""
         try:
-            if pd.isna(spec_str) or spec_str == '':
+            spectrum = ast.literal_eval(spec_str)
+            if len(spectrum) == 2 and len(spectrum[0]) == len(spectrum[1]):
+                return np.array(spectrum)
+            else:
                 return None
-            
-            # Parse the spectrum string format (usually "mz:intensity mz:intensity ...")
-            pairs = spec_str.strip().split()
-            mz_values = []
-            intensity_values = []
-            
-            for pair in pairs:
-                if ':' in pair:
-                    mz, intensity = pair.split(':')
-                    mz_values.append(float(mz))
-                    intensity_values.append(float(intensity))
-            
-            if len(mz_values) == 0:
-                return None
-                
-            return np.array([mz_values, intensity_values])
-            
-        except Exception as e:
+        except:
             return None
 
     df['spectrum_parsed'] = df['spectrum'].apply(parse_spectrum)
@@ -64,11 +57,12 @@ def load_msms_refs_file(file_path):
     df['exact_mass'] = pd.to_numeric(df['exact_mass'], errors='coerce')
 
     if not df.empty:
-        print(f"Successfully loaded {len(df)} reference spectra")
+        logger.info(f"    Reference DataFrame shape: {df.shape}")
+        logger.info(f"    Number of unique InChI keys: {df['inchi_key'].nunique()}")
         return df
     else:
-        print("No valid reference spectra found")
-        return pd.DataFrame()
+        logger.info("    Reference DataFrame is empty")
+        return None
 
 def load_metatlas_config(config_path: str) -> Dict[str, Any]:
     """Load and validate metatlas configuration from YAML file with type enforcement."""
@@ -124,7 +118,7 @@ def load_compound_input(file_path: str) -> pd.DataFrame:
     required_columns = ['inchi_key', 'label']
     check_missing_columns(df, required_columns)
     
-    print(f"Loaded {len(df)} compounds from {file_path}")
+    logger.info(f"Loaded {len(df)} compounds from {file_path}")
     return df
 
 def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
@@ -194,5 +188,5 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
     if 'mz_tolerance' not in df.columns:
         df['mz_tolerance'] = 5.0
     
-    print(f"Loaded {len(df)} atlas entries from {file_path}")
+    logger.info(f"Loaded {len(df)} atlas entries from {file_path}")
     return df

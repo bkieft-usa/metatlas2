@@ -11,7 +11,7 @@ import pickle
 import re
 import os
 import glob
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 from tqdm.notebook import tqdm
 import time
 import duckdb
@@ -35,23 +35,84 @@ sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
 import metatlas2.database_interact as dbi
 import metatlas2.ms1_ms2_analysis as msa
 import metatlas2.load_tools as ldt
-import metatlas2.data_classes as dc
+import metatlas2.data_classes as dcl
+import metatlas2.logging_config as lcf
+import metatlas2.checkpoint_manager as chk
+
+# Initialize logger properly at module level
+logger = lcf.get_logger('targeted_analysis')
 
 def run_targeted_analysis_workflow(project_db_path: str, 
-                                  target_atlas_uid: str, 
-                                  config: Dict) -> Tuple[pd.DataFrame, dc.ExperimentDataCollection]: 
+                                    target_atlas_uid: str, 
+                                    config: Dict,
+                                    use_cache: Union[bool, str] = True) -> Tuple[pd.DataFrame, dcl.ProjectDataCollection, Optional[chk.CheckpointManager]]: 
     """
-    Execute the complete targeted analysis workflow using data classes.
+    Execute the complete targeted analysis workflow with checkpoint support.
+    
+    Args:
+        project_db_path: Path to project database
+        target_atlas_uid: UID of the target atlas
+        config: Configuration dictionary
+        use_cache: Cache behavior control:
+                  - True: Use most recent cache if available, otherwise run fresh
+                  - False: Always run fresh analysis
+                  - str (datetime): Use cache matching this timestamp
     
     Returns:
-        Tuple of (atlas_df, experiment_data)
+        Tuple of (atlas_df, experiment_data, checkpoint_manager)
     """
-    print("Setting up targeted analysis...")
+    logger.info("Setting up targeted analysis database...")
 
+    # Create checkpoint manager
+    checkpoint_manager = chk.CheckpointManager(project_db_path, target_atlas_uid)
+    
+    # Handle cache parameter
+    if use_cache is False:
+        logger.info("Cache disabled, running fresh analysis...")
+    elif use_cache is True:
+        if checkpoint_manager.has_checkpoint():
+            try:
+                logger.info("Found existing checkpoint, attempting to load most recent...")
+                project_data, atlas_df, plot_data, modifications, metadata = checkpoint_manager.load_session()
+                
+                # Verify the checkpoint is compatible
+                if metadata.get('analysis_atlas_uid') == target_atlas_uid:
+                    logger.info(f"Loaded session from {metadata['timestamp']}")
+                    logger.info(f"Session has {metadata['total_compounds']} compounds, {metadata['modified_compounds']} modified")
+                    return atlas_df, project_data, checkpoint_manager
+                else:
+                    logger.warning("Checkpoint atlas UID doesn't match, running fresh analysis")
+            except Exception as e:
+                logger.error(f"Failed to load checkpoint: {e}, running fresh analysis")
+        else:
+            logger.info("No checkpoint found, running fresh analysis...")
+    elif isinstance(use_cache, str):
+        # Try to load specific timestamp
+        try:
+            checkpoint_info = checkpoint_manager.get_checkpoint_info()
+            if checkpoint_info["exists"]:
+                saved_timestamp = checkpoint_info["metadata"]["timestamp"]
+                if saved_timestamp == use_cache:
+                    logger.info(f"Loading checkpoint from specific timestamp: {use_cache}")
+                    project_data, atlas_df, plot_data, modifications, metadata = checkpoint_manager.load_session()
+                    return atlas_df, project_data, checkpoint_manager
+                else:
+                    logger.warning(f"Requested timestamp {use_cache} doesn't match saved timestamp {saved_timestamp}")
+                    logger.info("Running fresh analysis...")
+            else:
+                logger.warning(f"No checkpoint found for timestamp {use_cache}")
+                logger.info("Running fresh analysis...")
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint for timestamp {use_cache}: {e}")
+            logger.info("Running fresh analysis...")
+    else:
+        raise ValueError(f"Invalid use_cache parameter: {use_cache}. Must be True, False, or datetime string.")
+
+    # Run fresh analysis
     main_db_path = config["paths"]["main_database"]
     analysis_settings = config["analysis_settings"]
 
-    print("Loading target atlas...")
+    logger.info("Loading target atlas...")
     atlas_df_ft = dbi.get_atlas_compounds_with_metadata(
         project_db_path=project_db_path, 
         main_db_path=main_db_path, 
@@ -61,231 +122,335 @@ def run_targeted_analysis_workflow(project_db_path: str,
     if len(atlas_df_ft) == 0:
         raise ValueError(f"No compounds found in RT-corrected atlas")
 
-    print(f"Created Atlas dataframe with {len(atlas_df_ft)} compounds")
+    logger.info(f"Created Atlas dataframe with {len(atlas_df_ft)} compounds")
 
-    print("Loading experimental files from project database...")
+    logger.info("Loading experimental files from project database...")
     project_files = dbi.get_experimental_files_from_db(project_db_path)
 
     if len(project_files) == 0:
         raise ValueError("No experimental files found in project database")
 
-    print(f"Found {len(project_files)} experimental files")
+    logger.info(f"Found {len(project_files)} experimental files")
 
-    print("Preparing inputs for feature extraction...")
+    logger.info("Preparing inputs for feature extraction...")
     input_data_list = msa.prepare_feature_tools_inputs(
         atlas_df=atlas_df_ft,
         h5_files=project_files,
         ppm_tolerance=analysis_settings["default_ppm_error"],
         extra_time=analysis_settings["extra_time"]
     )
-    print(f"Created {len(input_data_list)} input dictionaries")
+    logger.info(f"Created {len(input_data_list)} input dictionaries")
 
-    print("Extracting EIC and MS2 data...")
+    logger.info("Extracting EIC and MS2 data with hits...")
     experiment_data = msa.extract_eic_and_ms2_data(
         input_data_list, atlas_df_ft, config
     )
 
-    return atlas_df_ft, experiment_data
+    # Save initial checkpoint for fresh analysis
+    plot_data = set_up_gui_data(experiment_data, atlas_df_ft)
+    empty_modifications = dcl.AnalystModifications()
+    
+    checkpoint_manager.save_session(
+        experiment_data, 
+        atlas_df_ft, 
+        plot_data, 
+        empty_modifications,
+        timestamp=datetime.now().isoformat()
+    )
 
-def convert_experiment_data_to_gui_format(experiment_data: dc.ExperimentDataCollection, 
-                                        atlas_df: pd.DataFrame) -> Dict:
-    """
-    Convert class-based experiment data to GUI-compatible format.
-    This replaces the legacy nested dictionary approach.
-    """
-    print("Converting experiment data to GUI format...")
-    
-    # Build isomer dictionary from atlas
-    isomer_dict = build_isomer_dict(atlas_df)
-    
+    return atlas_df_ft, experiment_data, checkpoint_manager
+
+def set_up_gui_data(experiment_data: dcl.ProjectDataCollection, atlas_df_ft: pd.DataFrame):
+    """Return a dict keyed by InChI‑key with all EIC & MS2 info ready for plotting."""
+    isomer_dict = build_isomer_dict(atlas_df_ft)
     metadata = {}
     
-    for inchi_key, compound_collection in experiment_data.compounds.items():
-        # Find atlas entry for this compound
-        atlas_row = atlas_df[atlas_df['inchi_key'] == inchi_key]
-        if atlas_row.empty:
-            continue
+    for _, row in atlas_df_ft.iterrows():
+        compound_inchi = row["inchi_key"]
+        atlas_entry = make_atlas_entry(row, isomer_dict)
         
-        atlas_row = atlas_row.iloc[0]
-        atlas_entry = make_atlas_entry(atlas_row, isomer_dict)
-        
-        # Convert EIC data
-        eic_dict = {}
-        for eic in compound_collection.eic_data:
-            eic_dict[eic.filename] = {
-                "rt_vals": eic.rt_values,
-                "i_vals": eic.intensity_values,
-                "mz_vals": eic.mz_values,
-                "intensity_peak": eic.intensity_peak,
-                "rt_peak": eic.rt_peak,
-                "mz_peak": eic.mz_peak,
-                "ppm_diff": eic.ppm_error,
-                "rt_diff": eic.rt_error,
-            }
-        
-        # Calculate best and average EIC
-        best_eic = {}
-        avg_eic = {}
-        if compound_collection.eic_data:
-            best = compound_collection.best_eic_by_intensity
-            if best:
-                best_eic = {
-                    "file_peak": best.filename,
-                    "rt_peak": best.rt_peak,
-                    "intensity_peak": best.intensity_peak,
-                    "mz_peak": best.mz_peak,
-                    "ppm_diff": best.ppm_error,
-                    "rt_diff": best.rt_error,
-                }
-            
-            # Calculate averages
-            avg_eic = {
-                "rt_peak": np.mean([eic.rt_peak for eic in compound_collection.eic_data]),
-                "intensity_peak": np.mean([eic.intensity_peak for eic in compound_collection.eic_data]),
-                "mz_peak": np.mean([eic.mz_peak for eic in compound_collection.eic_data]),
-            }
-        
-        # Calculate suggested RT bounds from EIC data
-        suggested_rt_bounds = None
-        if eic_dict:
-            suggested_rt_bounds = suggest_rt_bounds_from_eic(
-                eic_dict,
-                atlas_entry["rt_peak"],
-                atlas_entry["rt_min"],
-                atlas_entry["rt_max"],
+        # Get compound data from experiment_data
+        compound_data = experiment_data.get_compound(compound_inchi)
+        if compound_data is None:
+            # Create empty data structures for compounds with no data
+            eic_dict = {}
+            best_eic = {}
+            avg_eic = {}
+            suggested_rt_bounds = None
+            ms2_data = {"files": {}, "all_hits": [], "all_ms2_entries": []}
+            best_ms2 = {}
+            avg_ms2 = {"avg_score": 0.0}
+        else:
+            # Convert class-based data to GUI format
+            eic_dict, best_eic, avg_eic, suggested_rt_bounds = convert_eic_data_to_gui_format(
+                compound_data, atlas_entry
             )
+            ms2_data = convert_ms2_data_to_gui_format(compound_data, atlas_entry)
+            best_ms2, avg_ms2 = summarize_ms2_from_classes(compound_data)
         
-        # Convert MS2 data to GUI format
-        ms2_files_data = {}
-        all_hits = []
+        metadata[compound_inchi] = assemble_compound_block(
+            atlas_entry,
+            eic_dict,
+            best_eic,
+            avg_eic,
+            suggested_rt_bounds,
+            ms2_data,
+            best_ms2,
+            avg_ms2,
+        )
+    return metadata
+
+def convert_eic_data_to_gui_format(compound_data: dcl.CompoundDataCollection, 
+                                   atlas_data: Dict[str, Any]) -> Tuple[
+    Dict[str, Dict[str, Any]],  # eic_dict
+    Dict[str, Any],             # best_eic
+    Dict[str, Any],             # avg_eic
+    Dict[str, Any] | None,      # suggested_rt_bounds
+]:
+    """Convert class-based EIC data to GUI format."""
+    if not compound_data.eic_data:
+        return {}, {}, {}, None
+    
+    # Build eic_dict from EICData objects
+    eic_dict = {}
+    for eic in compound_data.eic_data:
+        eic_dict[eic.filename] = {
+            "rt_vals": eic.rt_values,
+            "i_vals": eic.intensity_values,
+            "mz_vals": eic.mz_values,
+            "intensity_peak": eic.intensity_peak,
+            "rt_peak": eic.rt_peak,
+            "mz_peak": eic.mz_peak,
+            "ppm_diff": eic.ppm_error,
+            "rt_diff": eic.rt_error,
+        }
+    
+    # Get best EIC (highest intensity)
+    best_eic_obj = compound_data.best_eic_by_intensity
+    if best_eic_obj:
+        best_eic = {
+            "file_peak": best_eic_obj.filename,
+            "rt_peak": best_eic_obj.rt_peak,
+            "intensity_peak": best_eic_obj.intensity_peak,
+            "mz_peak": best_eic_obj.mz_peak,
+            "ppm_diff": best_eic_obj.ppm_error,
+            "rt_diff": best_eic_obj.rt_error,
+        }
+    else:
+        best_eic = {}
+    
+    # Calculate average EIC
+    if compound_data.eic_data:
+        avg_eic = {
+            "rt_peak": np.mean([eic.rt_peak for eic in compound_data.eic_data]),
+            "intensity_peak": np.mean([eic.intensity_peak for eic in compound_data.eic_data]),
+            "mz_peak": np.mean([eic.mz_peak for eic in compound_data.eic_data]),
+        }
+    else:
+        avg_eic = {}
+    
+    # Generate suggested RT bounds
+    suggested_rt_bounds = suggest_rt_bounds_from_eic_objects(
+        compound_data.eic_data,
+        atlas_data["rt_peak"],
+        atlas_data["rt_min"],
+        atlas_data["rt_max"],
+    )
+    
+    return eic_dict, best_eic, avg_eic, suggested_rt_bounds
+
+def convert_ms2_data_to_gui_format(compound_data: dcl.CompoundDataCollection, 
+                                   atlas_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert class-based MS2 data to GUI format for compatibility."""
+    files_data = {}
+    all_hits = []
+    all_ms2_entries = []
+    
+    # Group spectra by file
+    spectra_by_file = {}
+    for spectrum in compound_data.ms2_spectra:
+        if spectrum.filename not in spectra_by_file:
+            spectra_by_file[spectrum.filename] = []
+        spectra_by_file[spectrum.filename].append(spectrum)
+    
+    for filename, spectra in spectra_by_file.items():
+        file_hits = []
+        file_ms2_entries = []
         
-        # Group MS2 spectra by file
-        for spectrum in compound_collection.ms2_spectra:
-            if spectrum.filename not in ms2_files_data:
-                ms2_files_data[spectrum.filename] = {
-                    "best_hit": {},
-                    "best_ms2": {},
-                    "num_ms2_entries": 0,
-                    "num_hits": 0
-                }
+        for spectrum in spectra:
+            # Convert spectrum to entry format
+            ms2_entry = {
+                "inchi_key": spectrum.inchi_key,
+                "spectrum": [spectrum.mz_values.tolist(), spectrum.intensity_values.tolist()],
+                "intensity_peak": spectrum.max_intensity,
+                "rt": spectrum.rt,
+                "precursor_mz": spectrum.precursor_mz,
+                "filename": spectrum.filename
+            }
+            file_ms2_entries.append(ms2_entry)
+            all_ms2_entries.append(ms2_entry)
             
-            ms2_files_data[spectrum.filename]["num_ms2_entries"] += 1
-            
-            # Convert best hit for this spectrum
-            if spectrum.has_hits:
-                best_hit = spectrum.best_hit
-                hit_data = {
-                    "filename": spectrum.filename,
-                    "score": best_hit.score,
-                    "database": best_hit.database,
-                    "ref_id": best_hit.ref_id,
-                    "rt_theoretical": spectrum.atlas_rt_peak,
+            # Process hits
+            for hit in spectrum.hits:
+                hit_info = {
+                    "filename": filename,
+                    "score": hit.score,
+                    "database": hit.database,
+                    "ref_id": hit.ref_id,
+                    "rt_theoretical": atlas_data.get("rt_peak", 0.0),
                     "rt_measured": spectrum.rt,
-                    "num_matches": best_hit.num_matches,
-                    "ref_frags": len(best_hit.ref_mz_values),
+                    "num_matches": hit.num_matches,
+                    "ref_frags": len(hit.ref_mz_values),
                     "data_frags": len(spectrum.mz_values),
-                    "mz_theoretical": best_hit.ref_precursor_mz,
+                    "mz_theoretical": hit.ref_precursor_mz,
                     "mz_measured": spectrum.precursor_mz,
-                    "ppm_diff": abs(spectrum.precursor_mz - best_hit.ref_precursor_mz) / best_hit.ref_precursor_mz * 1e6 if best_hit.ref_precursor_mz > 0 else 0,
+                    "ppm_diff": abs(hit.ref_precursor_mz - spectrum.precursor_mz) / spectrum.precursor_mz * 1e6 if spectrum.precursor_mz > 0 else 0,
                     "qry_intensity_peak": spectrum.max_intensity,
                     "qry_mz_peak": spectrum.mz_values[np.argmax(spectrum.intensity_values)] if len(spectrum.intensity_values) > 0 else 0,
-                    "qry_frag_matches": best_hit.matched_fragments,
-                    "qry_frag_colors": best_hit.fragment_colors,
-                    "qry_spectrum": [spectrum.mz_values, spectrum.intensity_values],
-                    "ref_spectrum": [best_hit.ref_mz_values, best_hit.ref_intensity_values]
+                    "qry_frag_matches": hit.matched_fragments,
+                    "qry_frag_colors": hit.fragment_colors,
+                    "qry_spectrum": [hit.query_mz_aligned.tolist(), hit.query_intensity_aligned.tolist()],
+                    "ref_spectrum": [hit.ref_mz_aligned.tolist(), hit.ref_intensity_aligned.tolist()]
                 }
-                
-                # Update file best hit if this is better
-                current_best = ms2_files_data[spectrum.filename]["best_hit"]
-                if not current_best or hit_data["score"] > current_best.get("score", 0):
-                    ms2_files_data[spectrum.filename]["best_hit"] = hit_data
-                
-                ms2_files_data[spectrum.filename]["num_hits"] += len(spectrum.hits)
-                all_hits.append(hit_data)
+                file_hits.append(hit_info)
+                all_hits.append(hit_info)
+        
+        if file_ms2_entries:
+            file_info = {
+                "num_ms2_entries": len(file_ms2_entries),
+                "num_hits": len(file_hits),
+                "ms2_entries": file_ms2_entries
+            }
             
-            # Update best MS2 for file based on intensity
-            current_best_ms2 = ms2_files_data[spectrum.filename]["best_ms2"]
-            if not current_best_ms2 or spectrum.precursor_intensity > current_best_ms2.get("precursor_intensity", 0):
-                ms2_files_data[spectrum.filename]["best_ms2"] = {
-                    "filename": spectrum.filename,
-                    "rt": spectrum.rt,
-                    "precursor_mz": spectrum.precursor_mz,
-                    "precursor_intensity": spectrum.precursor_intensity,
-                    "spectrum": [spectrum.mz_values, spectrum.intensity_values],
-                    "intensity_peak": spectrum.max_intensity
-                }
-        
-        # Calculate best and average MS2
-        best_ms2, avg_ms2 = summarize_ms2(all_hits)
-        
-        # Enhanced best MS2 selection logic
-        enhanced_best_ms2 = {}
-        if all_hits:
-            # Use existing best_ms2 from hits (highest score)
-            enhanced_best_ms2 = best_ms2.copy()
-            enhanced_best_ms2["selection_method"] = "reference_hit"
-        elif compound_collection.ms2_spectra:
-            # No hits, select best by intensity
-            best_spectrum = compound_collection.best_ms2_by_intensity
-            enhanced_best_ms2 = {
-                "file_peak": best_spectrum.filename,
+            # Add best hit info if hits exist
+            if file_hits:
+                best_hit = max(file_hits, key=lambda h: h.get("score", 0.0))
+                file_info["best_hit"] = best_hit
+            else:
+                file_info["best_hit"] = {}
+            
+            # Add best MS2 by intensity
+            best_ms2 = max(file_ms2_entries, key=lambda d: d.get("intensity_peak", 0.0))
+            file_info["best_ms2"] = best_ms2
+            
+            files_data[filename] = file_info
+    
+    return {"files": files_data, "all_hits": all_hits, "all_ms2_entries": all_ms2_entries}
+
+def summarize_ms2_from_classes(compound_data: dcl.CompoundDataCollection) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Generate best_ms2 and avg_ms2 summaries from class-based data."""
+    # Get all hits from all spectra
+    all_hits = []
+    for spectrum in compound_data.ms2_spectra:
+        for hit in spectrum.hits:
+            all_hits.append(hit)
+    
+    if not all_hits:
+        # No hits, try to find best by intensity
+        best_ms2_spectrum = compound_data.best_ms2_by_intensity
+        if best_ms2_spectrum:
+            best_ms2 = {
+                "file_peak": best_ms2_spectrum.filename,
                 "database": None,
                 "ref_id": None,
-                "rt_peak": best_spectrum.rt,
-                "intensity_peak": best_spectrum.precursor_intensity,
-                "mz_peak": best_spectrum.precursor_mz,
+                "rt_peak": best_ms2_spectrum.rt,
+                "intensity_peak": best_ms2_spectrum.max_intensity,
+                "mz_peak": best_ms2_spectrum.precursor_mz,
                 "score": None,
                 "num_matches": None,
                 "ref_frags": None,
-                "data_frags": len(best_spectrum.mz_values),
+                "data_frags": len(best_ms2_spectrum.mz_values),
                 "frags_matching": [],
-                "qry_spectrum": [best_spectrum.mz_values, best_spectrum.intensity_values],
+                "qry_spectrum": [best_ms2_spectrum.mz_values.tolist(), best_ms2_spectrum.intensity_values.tolist()],
                 "ref_spectrum": [],
                 "selection_method": "highest_intensity"
             }
         else:
-            # No MS2 data at all
-            enhanced_best_ms2 = {
-                "file_peak": None,
-                "database": None,
-                "ref_id": None,
-                "rt_peak": None,
-                "intensity_peak": None,
-                "mz_peak": None,
-                "score": None,
-                "num_matches": None,
-                "ref_frags": None,
-                "data_frags": None,
-                "frags_matching": [],
-                "qry_spectrum": [],
-                "ref_spectrum": [],
-                "selection_method": "none"
-            }
+            best_ms2 = {"selection_method": "none"}
         
-        # Assemble compound metadata in GUI format
-        metadata[inchi_key] = {
-            "original_atlas_data": atlas_entry.copy(),
-            "new_atlas_data": atlas_entry.copy(),
-            "suggested_rt_bounds_data": suggested_rt_bounds,
-            "eic_data": eic_dict,
-            "best_eic": best_eic,
-            "avg_eic": avg_eic,
-            "best_ms2": enhanced_best_ms2,
-            "avg_ms2": avg_ms2,
-            "ms2_data": ms2_files_data,
+        avg_ms2 = {"avg_score": 0.0}
+        return best_ms2, avg_ms2
+    
+    # Find best hit by score
+    best_hit = max(all_hits, key=lambda h: h.score)
+    best_spectrum = None
+    for spectrum in compound_data.ms2_spectra:
+        if best_hit in spectrum.hits:
+            best_spectrum = spectrum
+            break
+    
+    if best_spectrum:
+        best_ms2 = {
+            "file_peak": best_spectrum.filename,
+            "database": best_hit.database,
+            "ref_id": best_hit.ref_id,
+            "rt_peak": best_spectrum.rt,
+            "intensity_peak": best_spectrum.max_intensity,
+            "mz_peak": best_spectrum.precursor_mz,
+            "score": best_hit.score,
+            "num_matches": best_hit.num_matches,
+            "ref_frags": len(best_hit.ref_mz_values),
+            "data_frags": len(best_spectrum.mz_values),
+            "frags_matching": best_hit.matched_fragments,
+            "qry_spectrum": [best_hit.query_mz_aligned.tolist(), best_hit.query_intensity_aligned.tolist()],
+            "ref_spectrum": [best_hit.ref_mz_aligned.tolist(), best_hit.ref_intensity_aligned.tolist()],
+            "selection_method": "reference_hit"
+        }
+    else:
+        best_ms2 = {"selection_method": "none"}
+    
+    # Calculate average score
+    avg_score = np.mean([hit.score for hit in all_hits])
+    avg_ms2 = {"avg_score": float(avg_score)}
+    
+    return best_ms2, avg_ms2
+
+def suggest_rt_bounds_from_eic_objects(
+    eic_data: List[dcl.EICData],
+    atlas_rt_peak: float,
+    atlas_rt_min: float,
+    atlas_rt_max: float
+) -> Optional[Dict[str, float]]:
+    """
+    Compute RT bounds from EICData objects instead of dict format.
+    """
+    if not eic_data:
+        return None
+    
+    # Convert to the format expected by the original function
+    eic_dict = {}
+    for eic in eic_data:
+        eic_dict[eic.filename] = {
+            "rt_vals": eic.rt_values,
+            "i_vals": eic.intensity_values,
+            "intensity_peak": eic.intensity_peak
         }
     
-    print(f"Converted {len(metadata)} compounds to GUI format")
-    return metadata
+    # Use the existing function
+    return suggest_rt_bounds_from_eic(eic_dict, atlas_rt_peak, atlas_rt_min, atlas_rt_max)
 
 def build_isomer_dict(atlas_df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
-    """Return a dict: inchi_key → list of isomer dicts (empty list if none)."""
+    """Return a dict: inchi_key → list of isomer dicts (empty list if none).
+    Isomers are defined as:
+      - mz or exact_mass within 0.005
+      - OR inchi_key prefix (before '-') identical
+    """
     isomer_dict: Dict[str, List[Dict[str, Any]]] = {}
     for _, row in atlas_df.iterrows():
         mz = row["mz"]
-        tol = row.get("mz_tolerance_ppm", 10.0) * 1e-3
-        mask = np.isclose(atlas_df["mz"], mz, atol=tol)
-        isomers = atlas_df[mask & (atlas_df["inchi_key"] != row["inchi_key"])]
+        exact_mass = row.get("exact_mass", None)
+        inchi_prefix = row["inchi_key"].split("-")[0]
+        def is_isomer(r):
+            if r["inchi_key"] == row["inchi_key"]:
+                return False
+            mz_close = abs(r["mz"] - mz) <= 0.005
+            mass_close = (
+                exact_mass is not None and r.get("exact_mass", None) is not None and
+                abs(r["exact_mass"] - exact_mass) <= 0.005
+            )
+            prefix_match = r["inchi_key"].split("-")[0] == inchi_prefix
+            return mz_close or mass_close or prefix_match
+        isomers = atlas_df[atlas_df.apply(is_isomer, axis=1)]
         isomer_dict[row["inchi_key"]] = [
             {
                 "inchi_key": r["inchi_key"],
@@ -613,45 +778,71 @@ def assemble_compound_block(
         "ms2_data": ms2_data["files"],  # Store only the files part in ms2_data for compatibility
     }
 
-def create_post_analysis_atlas(project_db_path, analysis_atlas_uid, plot_data, config):
+def create_post_analysis_atlas(project_db_path, analysis_atlas_uid, gui_container, config):
     """
-    Clone the ANALYSIS_ATLAS_UID atlas and amend it based on the RT bounds and annotations in plot_data.
+    Clone the ANALYSIS_ATLAS_UID atlas and amend it based on analyst modifications.
+    Updated to work with AnalystModifications class.
 
     Args:
         project_db_path (str): Path to the project database.
         analysis_atlas_uid (str): UID of the atlas to clone.
-        plot_data (dict): Dictionary keyed by InChI key with updated RT bounds and annotations.
+        gui_container: GUI container with get_modifications() method
         config (dict): Metatlas config.
 
     Returns:
         str: UID of the new amended atlas.
     """
-    # Prepare compound_updates dict keyed by compound_uid
+    # Get the AnalystModifications object directly
+    analyst_modifications = gui_container.get_modifications()
+    
+    # Get original compound metadata for reference
+    original_metadata = gui_container.metadata
+    
+    # Prepare compound updates directly from AnalystModifications
     main_db_path = config["paths"]["main_database"]
     atlas_df = dbi.get_atlas_compounds_with_metadata(
         project_db_path=project_db_path,
         main_db_path=main_db_path,
         atlas_uid=analysis_atlas_uid
     )
+    
     compound_updates = {}
-    for inchi_key, meta in plot_data.items():
-        new_data = meta.get('new_atlas_data', {})
-        ms2_notes = new_data.get('ms2_notes', None)
-        ms1_notes = new_data.get('ms1_notes', None)
-        rt_min = new_data.get('rt_min', None)
-        rt_max = new_data.get('rt_max', None)
-        rt_peak = new_data.get('rt_peak', None)
-        # Find the compound row in the atlas
+    for inchi_key in analyst_modifications.get_modified_compounds():
+        # Get RT modifications
+        rt_mods = analyst_modifications.get_rt_bounds(inchi_key)
+        
+        # Get annotation modifications
+        annotation_mods = analyst_modifications.get_annotations(inchi_key)
+        
+        # Find the compound row(s) in the atlas
         compound_rows = atlas_df[atlas_df['inchi_key'] == inchi_key]
         for _, row in compound_rows.iterrows():
             compound_uid = row['compound_uid']
-            compound_updates[compound_uid] = {
-                'rt_min': rt_min,
-                'rt_max': rt_max,
-                'rt_peak': rt_peak,
-                'ms2_notes': ms2_notes,
-                'ms1_notes': ms1_notes
-            }
+            
+            # Prepare update dict
+            update_dict = {}
+            
+            # Add RT updates if they exist
+            if rt_mods:
+                update_dict.update({
+                    'rt_min': rt_mods['rt_min'],
+                    'rt_max': rt_mods['rt_max'],
+                    'rt_peak': rt_mods['rt_peak']
+                })
+            
+            # Add annotation updates if they exist
+            if annotation_mods:
+                if 'ms2_notes' in annotation_mods:
+                    update_dict['ms2_notes'] = annotation_mods['ms2_notes']
+                if 'ms1_notes' in annotation_mods:
+                    update_dict['ms1_notes'] = annotation_mods['ms1_notes']
+                if 'analyst_notes' in annotation_mods:
+                    update_dict['analyst_notes'] = annotation_mods['analyst_notes']
+                if 'identification_notes' in annotation_mods:
+                    update_dict['identification_notes'] = annotation_mods['identification_notes']
+            
+            compound_updates[compound_uid] = update_dict
+    
     # Use consolidated function to clone and amend atlas
     new_atlas_uid = dbi.clone_and_modify_atlas(
         project_db_path,
@@ -661,6 +852,7 @@ def create_post_analysis_atlas(project_db_path, analysis_atlas_uid, plot_data, c
         compound_updates,
         use_experimental_table=False
     )
+    
     return new_atlas_uid
 
 def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
