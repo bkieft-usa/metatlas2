@@ -37,7 +37,7 @@ import load_tools as ldt
 import data_classes as dcl
 import logging_config as lcf
 import simple_cache as scache
-import spectrum_handlers as sph
+#import spectrum_handlers as sph
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_analysis')
@@ -530,116 +530,101 @@ def summarize_eic(
     )
     return eic_dict, best_eic, avg_eic, suggested_rt_bounds
 
-def collect_ms2(
-    compound_inchi: str,
-    ms2_data_with_hits: Dict[str, List[Dict[str, Any]]],
-    atlas_data: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Return a dict with MS2 file information and hits using standardized spectrum handling.
-    """
-    files: Dict[str, Dict[str, Any]] = {}
-    all_hits: List[Dict[str, Any]] = []
-    all_ms2_entries: List[Dict[str, Any]] = []
+# def collect_ms2(
+#     compound_inchi: str,
+#     ms2_data_with_hits: Dict[str, List[Dict[str, Any]]],
+#     atlas_data: Dict[str, Any],
+# ) -> Dict[str, Any]:
+#     """
+#     Return a dict with MS2 file information and hits using standardized spectrum handling.
+#     """
+#     files: Dict[str, Dict[str, Any]] = {}
+#     all_hits: List[Dict[str, Any]] = []
+#     all_ms2_entries: List[Dict[str, Any]] = []
     
-    for file_path, ms2_datapoints in ms2_data_with_hits.items():
-        file_name = Path(file_path).name
-        file_hits: List[Dict[str, Any]] = []
-        file_ms2_entries = []
+#     for file_path, ms2_datapoints in ms2_data_with_hits.items():
+#         file_name = Path(file_path).name
+#         file_hits: List[Dict[str, Any]] = []
+#         file_ms2_entries = []
         
-        # Collect ALL MS2 datapoints for this compound
-        for datum in ms2_datapoints:
-            if datum.get("inchi_key") == compound_inchi:
-                # Calculate intensity_peak properly
-                spectrum = datum.get("spectrum", None)
-                if spectrum is not None:
-                    _, intensities = sph.convert_legacy_spectrum_data(spectrum)
-                    datum['intensity_peak'] = np.max(intensities) if len(intensities) > 0 else 0.0
-                else:
-                    datum['intensity_peak'] = 0.0
-                datum['filename'] = file_name
-                file_ms2_entries.append(datum)
-                all_ms2_entries.append(datum)
+#         # Collect ALL MS2 datapoints for this compound
+#         for datum in ms2_datapoints:
+#             if datum.get("inchi_key") == compound_inchi:
+#                 # Calculate intensity_peak properly
+#                 spectrum = datum.get("spectrum", None)
+#                 if spectrum is not None:
+#                     _, intensities = sph.convert_legacy_spectrum_data(spectrum)
+#                     datum['intensity_peak'] = np.max(intensities) if len(intensities) > 0 else 0.0
+#                 else:
+#                     datum['intensity_peak'] = 0.0
+#                 datum['filename'] = file_name
+#                 file_ms2_entries.append(datum)
+#                 all_ms2_entries.append(datum)
                 
-                # Process hits using standardized spectrum handling
-                for hit in datum.get("hits", []):
-                    ref_spectrum = hit.get("msv_ref_aligned")
-                    qry_spectrum = hit.get("msv_query_aligned")
+#                 # Process hits using standardized spectrum handling
+#                 for hit in datum.get("hits", []):
+#                     ref_spectrum = hit.get("msv_ref_aligned")
+#                     qry_spectrum = hit.get("msv_query_aligned")
                     
-                    if ref_spectrum is None or qry_spectrum is None:
-                        continue
+#                     if ref_spectrum is None or qry_spectrum is None:
+#                         continue
                     
-                    # Convert spectrum data using standardized function
-                    ref_mz, ref_int = sph.convert_legacy_spectrum_data(ref_spectrum)
-                    qry_mz, qry_int = sph.convert_legacy_spectrum_data(qry_spectrum)
+#                     # Convert spectrum data using standardized function
+#                     ref_mz, ref_int = sph.convert_legacy_spectrum_data(ref_spectrum)
+#                     qry_mz, qry_int = sph.convert_legacy_spectrum_data(qry_spectrum)
                     
-                    if len(ref_mz) == 0 or len(qry_mz) == 0:
-                        continue
+#                     if len(ref_mz) == 0 or len(qry_mz) == 0:
+#                         continue
                     
-                    # Use standardized spectrum comparison
-                    match = sph.align_spectra_for_comparison(qry_mz, qry_int, ref_mz, ref_int)
+#                     # Use standardized spectrum comparison
+#                     match = sph.align_spectra_for_comparison(qry_mz, qry_int, ref_mz, ref_int)
                     
-                    ms2_information = {
-                        "filename": file_name,
-                        "score": hit.get("score", 0.0),
-                        "database": hit.get("database", None),
-                        "ref_id": hit.get("id", None),
-                        "rt_theoretical": atlas_data.get("rt_peak", 0.0),
-                        "rt_measured": hit.get("msms_scan", 0.0),
-                        "num_matches": match.num_matched_fragments,
-                        "ref_frags": match.total_ref_fragments,
-                        "data_frags": match.total_query_fragments,
-                        "mz_theoretical": hit.get("precursor_mz", 0.0),
-                        "mz_measured": hit.get("measured_precursor_mz", 0.0),
-                        "ppm_diff": (
-                            abs(hit.get("precursor_mz", 0.0) - hit.get("measured_precursor_mz", 0.0))
-                            / hit.get("measured_precursor_mz", 1.0) * 1e6
-                        ),
-                        "qry_intensity_peak": np.max(qry_int) if len(qry_int) > 0 else 0,
-                        "qry_mz_peak": qry_mz[np.argmax(qry_int)] if len(qry_int) > 0 else 0,
-                        "qry_frag_matches": match.matched_mz_values,
-                        "qry_frag_colors": match.matched_colors,
-                        "qry_spectrum": [qry_mz.tolist(), qry_int.tolist()],
-                        "ref_spectrum": [ref_mz.tolist(), ref_int.tolist()]
-                    }
-                    file_hits.append(ms2_information)
-                    all_hits.append(ms2_information)
+#                     ms2_information = {
+#                         "filename": file_name,
+#                         "score": hit.get("score", 0.0),
+#                         "database": hit.get("database", None),
+#                         "ref_id": hit.get("id", None),
+#                         "rt_theoretical": atlas_data.get("rt_peak", 0.0),
+#                         "rt_measured": hit.get("msms_scan", 0.0),
+#                         "num_matches": match.num_matched_fragments,
+#                         "ref_frags": match.total_ref_fragments,
+#                         "data_frags": match.total_query_fragments,
+#                         "mz_theoretical": hit.get("precursor_mz", 0.0),
+#                         "mz_measured": hit.get("measured_precursor_mz", 0.0),
+#                         "ppm_diff": (
+#                             abs(hit.get("precursor_mz", 0.0) - hit.get("measured_precursor_mz", 0.0))
+#                             / hit.get("measured_precursor_mz", 1.0) * 1e6
+#                         ),
+#                         "qry_intensity_peak": np.max(qry_int) if len(qry_int) > 0 else 0,
+#                         "qry_mz_peak": qry_mz[np.argmax(qry_int)] if len(qry_int) > 0 else 0,
+#                         "qry_frag_matches": match.matched_mz_values,
+#                         "qry_frag_colors": match.matched_colors,
+#                         "qry_spectrum": [qry_mz.tolist(), qry_int.tolist()],
+#                         "ref_spectrum": [ref_mz.tolist(), ref_int.tolist()]
+#                     }
+#                     file_hits.append(ms2_information)
+#                     all_hits.append(ms2_information)
         
-        # Include file information if there are ANY MS2 entries (with or without hits)
-        if file_ms2_entries:
-            file_info = {
-                "num_ms2_entries": len(file_ms2_entries),
-                "num_hits": len(file_hits),
-                "ms2_entries": file_ms2_entries
-            }
+#         # Include file information if there are ANY MS2 entries (with or without hits)
+#         if file_ms2_entries:
+#             file_info = {
+#                 "num_ms2_entries": len(file_ms2_entries),
+#                 "num_hits": len(file_hits),
+#                 "ms2_entries": file_ms2_entries
+#             }
             
-            # Add best hit info if hits exist
-            if file_hits:
-                best_hit = max(file_hits, key=lambda h: h.get("score", 0.0))
-                file_info["best_hit"] = best_hit
-            else:
-                file_info["best_hit"] = {}
+#             # Add best hit info if hits exist
+#             if file_hits:
+#                 best_hit = max(file_hits, key=lambda h: h.get("score", 0.0))
+#                 file_info["best_hit"] = best_hit
+#             else:
+#                 file_info["best_hit"] = {}
 
-            file_info["best_ms2"] = max(file_ms2_entries, key=lambda d: d.get("intensity_peak", 0.0))
+#             file_info["best_ms2"] = max(file_ms2_entries, key=lambda d: d.get("intensity_peak", 0.0))
 
-            files[file_name] = file_info
+#             files[file_name] = file_info
     
-    return {"files": files, "all_hits": all_hits, "all_ms2_entries": all_ms2_entries}
-
-def _frag_match_colors(
-    ref_mz: np.ndarray,
-    ref_int: np.ndarray,
-    qry_mz: np.ndarray,
-    qry_int: np.ndarray,
-) -> Tuple[List[float], List[str]]:
-    """
-    DEPRECATED: Use spectrum_handlers.align_spectra_for_comparison instead.
-    Keeping for backward compatibility with existing plotting code.
-    """
-    # Use standardized spectrum comparison
-    match = sph.align_spectra_for_comparison(qry_mz, qry_int, ref_mz, ref_int)
-    
-    return match.matched_mz_values, match.matched_colors
+#     return {"files": files, "all_hits": all_hits, "all_ms2_entries": all_ms2_entries}
 
 def summarize_ms2(all_hits: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Return best_ms2 dict and avg_ms2 dict (empty if no hits)."""
