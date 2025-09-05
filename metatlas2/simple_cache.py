@@ -391,7 +391,7 @@ def _generate_analysis_metadata(project_analysis, timestamp: str, atlas_uid: str
     # Count compounds with different types of data
     compounds_with_eic = sum(1 for c in project_analysis.compounds.values() if c.eic_data_files)
     compounds_with_ms2 = sum(1 for c in project_analysis.compounds.values() 
-                           if c.ms2_data_files and c.ms2_data_files.get('files'))
+                           if c.ms2_data_files)  # Simple check: any MS2 files exist
     modified_compounds = sum(1 for c in project_analysis.compounds.values() 
                            if c.is_rt_modified or c.is_annotation_modified)
     
@@ -404,7 +404,7 @@ def _generate_analysis_metadata(project_analysis, timestamp: str, atlas_uid: str
     
     # Calculate data statistics
     total_eic_files = sum(len(c.eic_data_files) for c in project_analysis.compounds.values())
-    total_ms2_files = sum(len(c.ms2_data_files.get('files', {})) for c in project_analysis.compounds.values())
+    total_ms2_files = sum(len(c.ms2_data_files) for c in project_analysis.compounds.values())
     
     return {
         'timestamp': timestamp,

@@ -631,7 +631,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
                                                                                 rt_max)
 
         # Update MS2 counter label - count only files within RT window
-        ms2_files_data = compound.ms2_data_files.get('files', {})
+        ms2_files_data = compound.ms2_data_files  # Fixed: direct access, not nested under 'files'
         files_in_rt_window = []
         for file_name in ms2_files_data.keys():
             file_data = ms2_files_data[file_name]
@@ -641,8 +641,8 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             rt_measured = None
             if best_hit and 'rt_measured' in best_hit:
                 rt_measured = best_hit.get('rt_measured', 0)
-            elif best_ms2 and 'rt' in best_ms2:
-                rt_measured = best_ms2.get('rt', 0)
+            elif best_ms2 and 'rt_peak' in best_ms2:  # Fixed: should be 'rt_peak' not 'rt'
+                rt_measured = best_ms2.get('rt_peak', 0)
             
             if rt_measured is not None and rt_min <= rt_measured <= rt_max:
                 files_in_rt_window.append(file_name)
@@ -752,7 +752,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         rt_max = compound.rt_max
         
         # Count files within current RT window
-        ms2_files_data = compound.ms2_data_files.get('files', {})
+        ms2_files_data = compound.ms2_data_files  # Fixed: direct access, not nested under 'files'
         files_in_rt_window = []
         for file_name in ms2_files_data.keys():
             file_data = ms2_files_data[file_name]
@@ -762,8 +762,8 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             rt_measured = None
             if best_hit and 'rt_measured' in best_hit:
                 rt_measured = best_hit.get('rt_measured', 0)
-            elif best_ms2 and 'rt' in best_ms2:
-                rt_measured = best_ms2.get('rt', 0)
+            elif best_ms2 and 'rt_peak' in best_ms2:  # Fixed: should be 'rt_peak' not 'rt'
+                rt_measured = best_ms2.get('rt_peak', 0)
             
             if rt_measured is not None and rt_min <= rt_measured <= rt_max:
                 files_in_rt_window.append(file_name)
@@ -936,7 +936,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         Updated to work with CompoundData structure and properly filter by RT bounds.
         """
         # Get MS2 files data using CompoundData structure
-        ms2_files_data = compound.ms2_data_files.get('files', {})
+        ms2_files_data = compound.ms2_data_files
         if not ms2_files_data:
             return None, None, None, None
         
@@ -957,8 +957,8 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             rt_measured = None
             if best_hit and 'rt_measured' in best_hit:
                 rt_measured = best_hit.get('rt_measured', 0)
-            elif best_ms2 and 'rt' in best_ms2:
-                rt_measured = best_ms2.get('rt', 0)
+            elif best_ms2 and 'rt_peak' in best_ms2:
+                rt_measured = best_ms2.get('rt_peak', 0)
             
             # Only include files where MS2 data falls within current RT bounds
             if rt_measured is not None and rt_min <= rt_measured <= rt_max:
@@ -985,67 +985,36 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         # Check if we have a best_hit (with reference data)
         best_hit = file_data.get('best_hit', {})
         if best_hit:  # best_hit is not empty
-            # Extract spectrum data from best_hit
-            qry_spectrum = best_hit.get('qry_spectrum', None)
-            ref_spectrum = best_hit.get('ref_spectrum', None)
+            # Use hit data - need to reconstruct spectrum from hit data
+            query_spec = {
+                'mz': np.array(best_hit.get('qry_spectrum', [[], []])[0]),
+                'intensity': np.array(best_hit.get('qry_spectrum', [[], []])[1]),
+                'precursor_mz': best_hit.get('mz_measured', 0.0),
+                'rt': best_hit.get('rt_measured', 0.0),
+                'qry_frag_colors': best_hit.get('fragment_colors', ['red'] * len(best_hit.get('qry_spectrum', [[], []])[0]))
+            }
             
-            # Check if we have any spectrum data
-            if qry_spectrum is None and ref_spectrum is None:
-                return None, None, None, selected_file
+            ref_spec = {
+                'mz': np.array(best_hit.get('ref_spectrum', [[], []])[0]),
+                'intensity': np.array(best_hit.get('ref_spectrum', [[], []])[1]),
+                'score': best_hit.get('score', 0.0),
+                'database': best_hit.get('database', 'N/A'),
+                'num_matches': best_hit.get('num_matches', 0),
+                'ref_id': best_hit.get('ref_id', 'N/A'),
+                'mz_measured': best_hit.get('mz_measured', 0.0),
+                'mz_theoretical': best_hit.get('ref_precursor_mz', 0.0),
+                'rt_measured': best_hit.get('rt_measured', 0.0),
+                'qry_frag_colors': best_hit.get('fragment_colors', ['red'] * len(best_hit.get('ref_spectrum', [[], []])[0]))
+            }
             
-            query_spec = None
-            
-            # Process query spectrum if available
-            if qry_spectrum is not None and len(qry_spectrum) >= 2:
-                qry_mz = np.array(qry_spectrum[0])
-                qry_intensity = np.array(qry_spectrum[1])
-
-                # Get fragment colors (default to red if not available)
-                qry_colors = best_hit.get('qry_frag_colors', ['red'] * len(qry_mz))
-                
-                query_spec = {
-                    'mz': qry_mz,
-                    'intensity': qry_intensity,
-                    'precursor_mz': best_hit.get('mz_measured', 0.0),
-                    'rt': best_hit.get('rt_measured', 0.0),
-                    'qry_frag_colors': qry_colors
-                }
-            
-            # Process reference spectrum if available
-            if ref_spectrum is not None and len(ref_spectrum) >= 2:
-                ref_mz = np.array(ref_spectrum[0])
-                ref_intensity = np.array(ref_spectrum[1])
-                
-                # Get fragment colors (use same as query if available, otherwise red)
-                ref_colors = best_hit.get('qry_frag_colors', ['red'] * len(ref_mz))
-                
-                ref_spec = {
-                    'mz': ref_mz,
-                    'intensity': ref_intensity,
-                    'score': best_hit.get('score', 0.0),
-                    'database': best_hit.get('database', 'N/A'),
-                    'num_matches': best_hit.get('num_matches', 0),
-                    'ref_id': best_hit.get('ref_id', 'N/A'),
-                    'mz_measured': best_hit.get('mz_measured', 0.0),
-                    'mz_theoretical': best_hit.get('mz_theoretical', 0.0),
-                    'rt_measured': best_hit.get('rt_measured', 0.0),
-                    'qry_frag_colors': ref_colors
-                }
-            
-            # Determine data type
-            if query_spec is not None and ref_spec is not None:
-                return 'hits', query_spec, ref_spec, selected_file
-            elif query_spec is not None:
-                return 'extracted', query_spec, None, selected_file
-            else:
-                return None, None, None, selected_file
+            return 'hits', query_spec, ref_spec, selected_file
                 
         else:  # best_hit is empty, use best_ms2
             best_ms2 = file_data.get('best_ms2', {})
             if not best_ms2:
                 return None, None, None, selected_file
             
-            # Extract spectrum data from best_ms2
+            # Extract spectrum data from best_ms2 
             spectrum_data = best_ms2.get('spectrum', None)
             if spectrum_data is None or len(spectrum_data) < 2:
                 return None, None, None, selected_file
@@ -1071,50 +1040,67 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
                 'mz': mz_values,
                 'intensity': intensity_values,
                 'precursor_mz': best_ms2.get('precursor_mz', 0.0),
-                'rt': best_ms2.get('rt', 0.0),
+                'rt': best_ms2.get('rt_peak', 0.0),
                 'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
             }
             
             return 'extracted', query_spec, None, selected_file
 
     def update_annotation_widgets():
-        """Update annotation radio buttons to reflect current compound's values"""
+        """Update annotation widgets to reflect current compound's annotations without triggering observers."""
         compound = get_current_compound()
         if compound is None:
             return
-
-        # Temporarily disable updating flag to prevent recursion
+        
+        # Temporarily disable updating to prevent recursion
         temp_updating = updating[0]
         updating[0] = True
-        
         try:
-            ms2_radio.value = compound.ms2_notes
-            ms1_radio.value = compound.ms1_notes
+            # Update MS2 radio button
+            if compound.ms2_notes in ms2_options:
+                ms2_radio.value = compound.ms2_notes
+            else:
+                ms2_radio.value = ms2_options[0]  # Default to 'no selection'
+            
+            # Update MS1 radio button
+            if compound.ms1_notes in ms1_options:
+                ms1_radio.value = compound.ms1_notes
+            else:
+                ms1_radio.value = ms1_options[0]  # Default to 'keep'
+            
+            # Update text boxes
             analyst_notes_box.value = compound.analyst_notes
             id_notes_box.value = compound.identification_notes
+            
+            # Update identification notes display
+            if compound.identification_notes:
+                identification_notes_display.value = f"<b>Current ID Notes:</b> {compound.identification_notes}"
+            else:
+                identification_notes_display.value = "<b>Current ID Notes:</b> None"
+                
         finally:
             updating[0] = temp_updating
 
-    def on_ms2_annotation_change(change):
-        """Handle MS2 annotation changes"""
+    def on_ms2_radio_change(change):
+        """Handle MS2 radio button changes"""
         if updating[0]:
             return
             
         compound = get_current_compound()
         if compound is None:
             return
-                
-        # Update using CompoundData method
+        
+        # Update compound annotation using CompoundData method
         compound.update_annotations(ms2_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
-
+        project_analysis.update_cache_metadata('annotation_modified')
+        
         # Trigger auto-save check
         auto_save_if_needed()
 
-    def on_ms1_annotation_change(change):
-        """Handle MS1 annotation changes"""
+    def on_ms1_radio_change(change):
+        """Handle MS1 radio button changes"""
         if updating[0]:
             return
             
@@ -1122,17 +1108,17 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
         
-        # Update using CompoundData method
+        # Update compound annotation using CompoundData method
         compound.update_annotations(ms1_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
-
+        project_analysis.update_cache_metadata('annotation_modified')
+        
         # Trigger auto-save check
         auto_save_if_needed()
 
     def on_analyst_notes_change(change):
-        """Handle analyst notes changes"""
+        """Handle analyst notes text box changes"""
         if updating[0]:
             return
             
@@ -1140,171 +1126,102 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
         
-        # Update using CompoundData method
+        # Update compound annotation using CompoundData method
         compound.update_annotations(analyst_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
-
+        project_analysis.update_cache_metadata('annotation_modified')
+        
         # Trigger auto-save check
         auto_save_if_needed()
 
     def on_id_notes_change(change):
-        """Handle ID notes changes"""
+        """Handle identification notes text box changes"""
         if updating[0]:
             return
-
+            
         compound = get_current_compound()
         if compound is None:
             return
-
-        # Update using CompoundData method
+        
+        # Update compound annotation using CompoundData method
         compound.update_annotations(identification_notes=change['new'])
         
+        # Update identification notes display
+        if change['new']:
+            identification_notes_display.value = f"<b>Current ID Notes:</b> {change['new']}"
+        else:
+            identification_notes_display.value = "<b>Current ID Notes:</b> None"
+        
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
-
+        project_analysis.update_cache_metadata('annotation_modified')
+        
         # Trigger auto-save check
         auto_save_if_needed()
-    
-    # Add manual save button
-    manual_save_button = widgets.Button(
-        description="Save Session", 
-        button_style='info', 
-        layout=widgets.Layout(width='150px')
-    )
-    
-    def on_manual_save(button):
-        """Manual save handler for ProjectAnalysis"""
-        if project_dir:
-            try:
-                # Save ProjectAnalysis to progress cache
-                timestamp = scache.save_progress_checkpoint(project_analysis, project_dir, project_analysis.atlas_uid, "gui_progress")
-                button.description = f"Saved {timestamp[-8:-3]}"
-                last_save_time[0] = time.time()
-                
-                # Reset button text after 2 seconds
-                import threading
-                def reset_button():
-                    time.sleep(2)
-                    button.description = "Save Session"
-                threading.Thread(target=reset_button).start()
-            except Exception as e:
-                logger.error(f"Manual save failed: {e}")
-                button.description = "Save Failed"
-    
-    manual_save_button.on_click(on_manual_save)
 
-    # Connect all event handlers to their widgets
+    # Attach observers to annotation widgets
+    ms2_radio.observe(on_ms2_radio_change, names='value')
+    ms1_radio.observe(on_ms1_radio_change, names='value')
+    analyst_notes_box.observe(on_analyst_notes_change, names='value')
+    id_notes_box.observe(on_id_notes_change, names='value')
+
+    # Attach observers to navigation buttons
     prev_button.on_click(lambda b: on_navigation(-1))
     next_button.on_click(lambda b: on_navigation(1))
     ms2_prev_button.on_click(lambda b: on_ms2_navigation(-1))
     ms2_next_button.on_click(lambda b: on_ms2_navigation(1))
     reset_button.on_click(on_reset)
     accept_suggestions_button.on_click(on_accept_suggestions)
-    
-    # Connect annotation widgets to their handlers
-    ms2_radio.observe(on_ms2_annotation_change, names='value')
-    ms1_radio.observe(on_ms1_annotation_change, names='value')
-    analyst_notes_box.observe(on_analyst_notes_change, names='value')
-    id_notes_box.observe(on_id_notes_change, names='value')
     compound_dropdown.observe(on_dropdown_change, names='value')
-    
-    # Create layout structure
-    nav_row = widgets.HBox([prev_button, counter_label, next_button], layout=widgets.Layout(justify_content='center'))
-    
-    # Add dropdown to navigation - put it in its own row for better layout
-    dropdown_row = widgets.HBox([compound_dropdown], layout=widgets.Layout(justify_content='center', margin='5px 0'))
-    
-    # MS2 browser row
-    ms2_nav_row = widgets.HBox([ms2_prev_button, ms2_counter_label, ms2_next_button], layout=widgets.Layout(justify_content='center'))
 
-    # Combine all navigation elements horizontally
-    nav_box = widgets.HBox([
-        nav_row,
-        dropdown_row,
-        ms2_nav_row
-    ], layout=widgets.Layout(width='100%', align_items='center'))
-        
-    # Create the main plot and radio button container
-    plot_and_radios = widgets.HBox([
+    # Original layout structure
+    left_layout = widgets.VBox([
+        widgets.HBox([
+            prev_button, 
+            counter_label, 
+            next_button,
+            widgets.HTML(value="&nbsp;&nbsp;&nbsp;"),
+            compound_dropdown
+        ]),
+        widgets.HBox([
+            ms2_prev_button,
+            ms2_counter_label, 
+            ms2_next_button
+        ]),
+        widgets.HBox([
+            reset_button,
+            accept_suggestions_button
+        ]),
         plot_output,
-        widgets.VBox([
-            widgets.Box([ms2_radio], layout=widgets.Layout(margin='50px 0 50px 0')),
-            ms1_radio
-        ], layout=widgets.Layout(width='30%', justify_content='flex-start'))
-    ], layout=widgets.Layout(width='100%'))
+        slider_container
+    ])
     
-    # Create metadata rows
-    button_row = widgets.HBox([reset_button, accept_suggestions_button, manual_save_button], 
-                             layout=widgets.Layout(justify_content='center', margin='0 0 0 0'))
-    
-    container = widgets.VBox([
-        nav_box, 
+    right_layout = widgets.VBox([
+        widgets.HTML(value="<h3>Annotations</h3>"),
+        ms2_radio,
+        ms1_radio,
+        widgets.HTML(value="<hr>"),
         analyst_notes_box,
         id_notes_box,
-        plot_and_radios,
-        slider_container,
-        button_row,
         identification_notes_display
-    ], layout=widgets.Layout(width='100%', align_items='flex-start', height='fit-content'))
+    ])
     
-    # Add helper methods for backwards compatibility
-    container.get_plot_data = lambda: project_analysis.generate_plot_data()
-    container.get_project_analysis = lambda: project_analysis
+    # Main layout - original structure
+    gui_layout = widgets.HBox([left_layout, right_layout])
     
-    # Initialize with the first compound
+    # Initialize the GUI
     full_update()
     
-    return container
-
-# Create a wrapper function for backwards compatibility
-def create_gui_from_plot_data(compound_metadata, config, project_db_path=None):
-    """
-    DEPRECATED: Backwards compatibility wrapper.
-    Convert plot_data format to ProjectAnalysis and call new create_gui.
-    """
-    logger.warning("create_gui_from_plot_data is deprecated. Use create_gui with ProjectAnalysis directly.")
+    # Display the GUI
+    display(gui_layout)
     
-    # Create minimal ProjectAnalysis from plot_data for compatibility
-    project_analysis = dcl.ProjectAnalysis(
-        project_db_path=project_db_path or "",
-        atlas_uid="legacy"
-    )
+    # Save initial state
+    if project_dir:
+        try:
+            scache.save_progress_checkpoint(project_analysis, project_dir, project_analysis.atlas_uid, "gui_initialized")
+            logger.info("Saved initial GUI state to cache")
+        except Exception as e:
+            logger.error(f"Failed to save initial GUI state: {e}")
     
-    # Convert plot_data to CompoundData objects
-    for inchi_key, plot_data in compound_metadata.items():
-        original_data = plot_data.get('original_atlas_data', {})
-        
-        compound = dcl.CompoundData(
-            compound_uid=original_data.get('compound_uid', ''),
-            inchi_key=inchi_key,
-            compound_name=original_data.get('compound_name', ''),
-            formula=original_data.get('formula', ''),
-            mz=original_data.get('mz', 0.0),
-            adduct=original_data.get('adduct', ''),
-            polarity=original_data.get('polarity', ''),
-            chromatography=original_data.get('chromatography', ''),
-            mz_tolerance=original_data.get('mz_tolerance', 5.0),
-            original_rt_peak=original_data.get('rt_peak', 0.0),
-            original_rt_min=original_data.get('rt_min', 0.0),
-            original_rt_max=original_data.get('rt_max', 0.0),
-            rt_peak=original_data.get('rt_peak', 0.0),
-            rt_min=original_data.get('rt_min', 0.0),
-            rt_max=original_data.get('rt_max', 0.0)
-        )
-        
-        # Add experimental data
-        eic_data = plot_data.get('eic_data', {})
-        for filename, eic_dict in eic_data.items():
-            compound.add_eic_data(filename, eic_dict)
-        
-        ms2_data = plot_data.get('ms2_data', {})
-        if ms2_data:
-            compound.ms2_data_files = ms2_data
-            compound._update_best_ms2()
-        
-        project_analysis.compounds[inchi_key] = compound
-    
-    project_dir = str(Path(project_db_path).parent) if project_db_path else None
-    return create_gui(project_analysis, config, project_dir)
+    # Return ProjectAnalysis directly instead of GUIInterface
+    return project_analysis

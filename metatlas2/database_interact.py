@@ -1375,19 +1375,7 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
                                                    output_path: str = None, include_missing_compounds: bool = False) -> pd.DataFrame:
     """
     Generate a comprehensive targeted analysis report matching the specified Excel format.
-    Updated to work with simplified class-based data structures.
-    
-    Args:
-        project_db_path: Path to project database
-        config: Configuration dictionary with database paths
-        analysis_uid: UID of the targeted analysis
-        atlas_dataframe: Optional atlas DataFrame to include missing compounds
-        post_analysis_atlas_uid: UID of post-analysis atlas
-        output_path: Optional path to save Excel file
-        include_missing_compounds: Whether to include compounds from atlas that weren't detected
-    
-    Returns:
-        pd.DataFrame with comprehensive report data
+    Updated to work with consistent per-file MS2 data structure.
     """
     main_db_path = config["paths"]["main_database"]
     
@@ -1430,7 +1418,7 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
                     # Find isomers using simplified approach
                     isomer_info = _find_overlapping_compounds_simple(conn_main, row, base_summary)
                     
-                    # Build the report row
+                    # Build the report row with consistent field names
                     report_row = {
                         'index': idx,
                         'identified_metabolite': compound_name,
@@ -1475,10 +1463,9 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
                     logger.error(f"Error processing compound {compound_name} ({inchi_key}): {e}")
                     continue
     
-    # Create DataFrame
+    # Create DataFrame and sort
     report_df = pd.DataFrame(report_rows)
     
-    # Sort by MS1 retention time (rt_theoretical) low to high
     if not report_df.empty:
         # Convert rt_peak_theoretical to numeric for proper sorting
         report_df['rt_peak_theoretical_num'] = pd.to_numeric(report_df['rt_peak_theoretical'], errors='coerce')
@@ -1487,7 +1474,7 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
         report_df = report_df.reset_index(drop=True)
         report_df['index'] = range(len(report_df))
     
-    # Save to Excel if path provided with grouped headers
+    # Save to Excel if path provided
     if output_path is not None and not report_df.empty:
         try:
             _save_report_with_grouped_headers(report_df, output_path, post_analysis_atlas_uid)
@@ -1938,6 +1925,8 @@ def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: st
             ))
             
             association_order += 1
+    
+   
     
     logger.info(f"Created atlas '{atlas_name}' with UID: {atlas_uid}")
     logger.info(f"  Added {association_order} compound associations")

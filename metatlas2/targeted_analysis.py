@@ -121,7 +121,7 @@ def run_targeted_analysis_workflow(project_db_path: str,
     logger.info(f"Created {len(input_data_list)} input dictionaries for feature extraction")
 
     logger.info("Extracting EIC and MS2 data with hits...")
-    experimental_data = msa.extract_eic_and_ms2_data(input_data_list, config)
+    experimental_data = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config)
 
     # Add experimental data to project analysis using simplified format
     project_analysis.add_experimental_data_simple(experimental_data)
@@ -129,29 +129,9 @@ def run_targeted_analysis_workflow(project_db_path: str,
     # Save data extraction checkpoint
     scache.save_progress_checkpoint(project_analysis, project_dir, target_atlas_uid, "data_extracted")
 
-    # Generate isomers and suggested RT bounds for each compound
-    isomer_dict = build_isomer_dict(atlas_dataframe)
-    for inchi_key, compound in project_analysis.compounds.items():
-        # Add isomers
-        compound.isomers = isomer_dict.get(inchi_key, [])
-        
-        # Generate suggested RT bounds if EIC data exists
-        if compound.eic_data_files:
-            eic_dict = {}
-            for filename, eic_data in compound.eic_data_files.items():
-                eic_dict[filename] = {
-                    "rt_vals": eic_data.get("rt_vals", []),
-                    "i_vals": eic_data.get("i_vals", []),
-                    "intensity_peak": eic_data.get("intensity_peak", 0.0)
-                }
-            
-            suggested_bounds = suggest_rt_bounds_from_eic(
-                eic_dict,
-                compound.original_rt_peak,
-                compound.original_rt_min,
-                compound.original_rt_max
-            )
-            compound.suggested_rt_bounds = suggested_bounds
+    # Apply post-processing features independently
+    apply_isomer_detection(project_analysis, atlas_dataframe)
+    apply_rt_bounds_suggestions(project_analysis)
 
     # Save final analysis cache (ready for GUI)
     data_timestamp = scache.save_analysis_cache(
@@ -160,6 +140,14 @@ def run_targeted_analysis_workflow(project_db_path: str,
         target_atlas_uid
     )
     logger.info(f"Saved complete analysis cache with timestamp: {data_timestamp}")
+
+    logger.info(f"Analysis complete:")
+    logger.info(f"  Total compounds: {len(project_analysis.compounds)}")
+
+    # Get analysis summary
+    summary = project_analysis.get_analysis_summary()
+    logger.info(f"  Compounds with EIC data: {summary['compounds_with_eic']}")
+    logger.info(f"  Compounds with MS2 data: {summary['compounds_with_ms2']}")
 
     return atlas_dataframe, project_analysis
 
@@ -593,3 +581,247 @@ def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
         return x
     cumsum = np.cumsum(np.insert(x, 0, 0.0))
     return (cumsum[window:] - cumsum[:-window]) / float(window)
+
+def apply_isomer_detection(project_analysis: dcl.ProjectAnalysis, atlas_dataframe: pd.DataFrame):
+    """
+    Apply isomer detection to all compounds in the project analysis.
+    Separated for independent testing and debugging.
+    """
+    logger.info("Applying isomer detection...")
+    
+    # Generate isomers dictionary
+    isomer_dict = build_isomer_dict(atlas_dataframe)
+        
+    # Debug: Show some examples
+    compounds_with_isomers = 0
+    for inchi_key, isomers in isomer_dict.items():
+        if isomers:
+            compounds_with_isomers += 1
+    
+    logger.info(f"Found {compounds_with_isomers} compounds with isomers")
+    
+    # Apply to compounds
+    for inchi_key, compound in project_analysis.compounds.items():
+        compound.isomers = isomer_dict.get(inchi_key, [])
+
+def apply_rt_bounds_suggestions(project_analysis: dcl.ProjectAnalysis):
+    """
+    Apply RT bounds suggestions to all compounds with EIC data.
+    Separated for independent testing and debugging.
+    """
+    logger.info("Applying RT bounds suggestions...")
+    
+    compounds_processed = 0
+    compounds_with_suggestions = 0
+    
+    for inchi_key, compound in project_analysis.compounds.items():
+        if compound.eic_data_files:
+            compounds_processed += 1
+            
+            # Prepare EIC data for RT bounds calculation
+            eic_dict = {}
+            for filename, eic_data in compound.eic_data_files.items():
+                eic_dict[filename] = {
+                    "rt_vals": eic_data.get("rt_vals", []),
+                    "i_vals": eic_data.get("i_vals", []),
+                    "intensity_peak": eic_data.get("intensity_peak", 0.0)
+                }
+            
+            # Calculate suggested bounds
+            suggested_bounds = suggest_rt_bounds_from_eic(
+                eic_dict,
+                compound.original_rt_peak,
+                compound.original_rt_min,
+                compound.original_rt_max
+            )
+            
+            if suggested_bounds:
+                compounds_with_suggestions += 1
+                compound.suggested_rt_bounds = suggested_bounds
+    
+    logger.info(f"Processed {compounds_processed} compounds with EIC data")
+    logger.info(f"Generated RT suggestions for {compounds_with_suggestions} compounds")
+
+def test_isomer_detection(atlas_dataframe: pd.DataFrame, target_inchi_key: str = None) -> Dict[str, List[Dict]]:
+    """
+    Test isomer detection functionality independently.
+    
+    Args:
+        atlas_dataframe: Atlas DataFrame to analyze
+        target_inchi_key: Optional specific compound to analyze, or None for all
+    
+    Returns:
+        Dictionary of isomer results
+    """
+    logger.info("Testing isomer detection...")
+    
+    isomer_dict = build_isomer_dict(atlas_dataframe)
+    
+    if target_inchi_key:
+        # Test specific compound
+        if target_inchi_key in isomer_dict:
+            compound_name = atlas_dataframe[atlas_dataframe['inchi_key'] == target_inchi_key]['compound_name'].iloc[0]
+            isomers = isomer_dict[target_inchi_key]
+            
+            logger.info(f"Isomer analysis for {compound_name} ({target_inchi_key}):")
+            logger.info(f"  Found {len(isomers)} isomers")
+            
+            for iso in isomers:
+                logger.info(f"  - {iso['compound_name']} ({iso['inchi_key']})")
+                logger.info(f"    RT: {iso['rt']:.2f} min, m/z: {iso['mz']:.4f}")
+            
+            return {target_inchi_key: isomers}
+        else:
+            logger.warning(f"Compound {target_inchi_key} not found in atlas")
+            return {}
+    else:
+        # Analyze all compounds
+        compounds_with_isomers = sum(1 for isomers in isomer_dict.values() if isomers)
+        total_isomers = sum(len(isomers) for isomers in isomer_dict.values())
+        
+        logger.info(f"Isomer detection summary:")
+        logger.info(f"  Total compounds: {len(isomer_dict)}")
+        logger.info(f"  Compounds with isomers: {compounds_with_isomers}")
+        logger.info(f"  Total isomer relationships: {total_isomers}")
+        
+        # Show top examples
+        sorted_compounds = sorted(
+            [(k, v) for k, v in isomer_dict.items() if v],
+            key=lambda x: len(x[1]),
+            reverse=True
+        )
+        
+        logger.info(f"Top compounds with most isomers:")
+        for i, (inchi_key, isomers) in enumerate(sorted_compounds[:5]):
+            compound_name = atlas_dataframe[atlas_dataframe['inchi_key'] == inchi_key]['compound_name'].iloc[0]
+            logger.info(f"  {i+1}. {compound_name}: {len(isomers)} isomers")
+        
+        return isomer_dict
+
+def test_rt_bounds_suggestion(project_analysis: dcl.ProjectAnalysis, target_inchi_key: str = None) -> Dict[str, Dict]:
+    """
+    Test RT bounds suggestion functionality independently.
+    
+    Args:
+        project_analysis: ProjectAnalysis object with EIC data
+        target_inchi_key: Optional specific compound to analyze, or None for all
+    
+    Returns:
+        Dictionary of RT bounds results
+    """
+    logger.info("Testing RT bounds suggestion...")
+    
+    results = {}
+    
+    if target_inchi_key:
+        # Test specific compound
+        if target_inchi_key in project_analysis.compounds:
+            compound = project_analysis.compounds[target_inchi_key]
+            
+            if compound.eic_data_files:
+                logger.info(f"RT bounds analysis for {compound.compound_name} ({target_inchi_key}):")
+                logger.info(f"  EIC data from {len(compound.eic_data_files)} files")
+                
+                # Prepare EIC data
+                eic_dict = {}
+                for filename, eic_data in compound.eic_data_files.items():
+                    eic_dict[filename] = {
+                        "rt_vals": eic_data.get("rt_vals", []),
+                        "i_vals": eic_data.get("i_vals", []),
+                        "intensity_peak": eic_data.get("intensity_peak", 0.0)
+                    }
+                
+                # Calculate bounds
+                suggested_bounds = suggest_rt_bounds_from_eic(
+                    eic_dict,
+                    compound.original_rt_peak,
+                    compound.original_rt_min,
+                    compound.original_rt_max
+                )
+                
+                if suggested_bounds:
+                    logger.info(f"  Original RT bounds: {compound.original_rt_min:.2f} - {compound.original_rt_max:.2f} (peak: {compound.original_rt_peak:.2f})")
+                    logger.info(f"  Suggested RT bounds: {suggested_bounds['rt_min']:.2f} - {suggested_bounds['rt_max']:.2f} (peak: {suggested_bounds['rt_peak']:.2f})")
+                    logger.info(f"  Confidence: {suggested_bounds['confidence']:.3f}")
+                    
+                    # Calculate differences
+                    rt_shift = suggested_bounds['rt_peak'] - compound.original_rt_peak
+                    width_change = (suggested_bounds['rt_max'] - suggested_bounds['rt_min']) - (compound.original_rt_max - compound.original_rt_min)
+                    
+                    logger.info(f"  RT peak shift: {rt_shift:+.3f} min")
+                    logger.info(f"  Width change: {width_change:+.3f} min")
+                else:
+                    logger.info(f"  No RT bounds suggestion generated")
+                
+                results[target_inchi_key] = {
+                    'original': {
+                        'rt_min': compound.original_rt_min,
+                        'rt_max': compound.original_rt_max,
+                        'rt_peak': compound.original_rt_peak
+                    },
+                    'suggested': suggested_bounds,
+                    'num_files': len(compound.eic_data_files)
+                }
+            else:
+                logger.info(f"  No EIC data available for {compound.compound_name}")
+        else:
+            logger.warning(f"Compound {target_inchi_key} not found in project analysis")
+    else:
+        # Analyze all compounds
+        compounds_with_eic = 0
+        compounds_with_suggestions = 0
+        
+        for inchi_key, compound in project_analysis.compounds.items():
+            if compound.eic_data_files:
+                compounds_with_eic += 1
+                
+                # Prepare EIC data
+                eic_dict = {}
+                for filename, eic_data in compound.eic_data_files.items():
+                    eic_dict[filename] = {
+                        "rt_vals": eic_data.get("rt_vals", []),
+                        "i_vals": eic_data.get("i_vals", []),
+                        "intensity_peak": eic_data.get("intensity_peak", 0.0)
+                    }
+                
+                # Calculate bounds
+                suggested_bounds = suggest_rt_bounds_from_eic(
+                    eic_dict,
+                    compound.original_rt_peak,
+                    compound.original_rt_min,
+                    compound.original_rt_max
+                )
+                
+                if suggested_bounds:
+                    compounds_with_suggestions += 1
+                    results[inchi_key] = {
+                        'compound_name': compound.compound_name,
+                        'original': {
+                            'rt_min': compound.original_rt_min,
+                            'rt_max': compound.original_rt_max,
+                            'rt_peak': compound.original_rt_peak
+                        },
+                        'suggested': suggested_bounds,
+                        'num_files': len(compound.eic_data_files)
+                    }
+        
+        logger.info(f"RT bounds suggestion summary:")
+        logger.info(f"  Compounds with EIC data: {compounds_with_eic}")
+        logger.info(f"  Compounds with RT suggestions: {compounds_with_suggestions}")
+        
+        # Show examples with highest confidence
+        if results:
+            sorted_results = sorted(
+                results.items(),
+                key=lambda x: x[1]['suggested']['confidence'] if x[1]['suggested'] else 0,
+                reverse=True
+            )
+            
+            logger.info(f"Top RT suggestions by confidence:")
+            for i, (inchi_key, result) in enumerate(sorted_results[:5]):
+                suggested = result['suggested']
+                logger.info(f"  {i+1}. {result['compound_name']}: confidence {suggested['confidence']:.3f}")
+                rt_shift = suggested['rt_peak'] - result['original']['rt_peak']
+                logger.info(f"      RT shift: {rt_shift:+.3f} min")
+    
+    return results

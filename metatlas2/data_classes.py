@@ -3,7 +3,13 @@ from typing import List, Dict, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
 import json
+import sys
 from pathlib import Path
+
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import logging_config as lcf
+
+logger = lcf.get_logger('targeted_gui')
 
 @dataclass
 class CompoundData:
@@ -181,48 +187,53 @@ class CompoundData:
         if not self.ms2_data_files:
             return
         
-        # Look for best hit first
+        # Use consistent per-file structure: {filename: {ms2_entries: [], all_hits: [], best_hit: {}, best_ms2: {}}}
         best_score = 0.0
         best_hit_data = None
         
         for filename, ms2_data in self.ms2_data_files.items():
-            best_hit = ms2_data.get('best_hit', {})
-            if best_hit and best_hit.get('score', 0.0) > best_score:
-                best_score = best_hit.get('score', 0.0)
-                best_hit_data = best_hit
-                self.best_ms2_file = filename
-                self.best_ms2_selection_method = "reference_hit"
+            if isinstance(ms2_data, dict):
+                # Check for best hit in this file
+                best_hit = ms2_data.get('best_hit', {})
+                if best_hit and best_hit.get('score', 0.0) > best_score:
+                    best_score = best_hit.get('score', 0.0)
+                    best_hit_data = best_hit
+                    self.best_ms2_file = filename
+                    self.best_ms2_selection_method = "reference_hit"
         
         if best_hit_data:
             self.best_ms2_database = best_hit_data.get('database', '')
             self.best_ms2_ref_id = best_hit_data.get('ref_id', '')
+            self.best_ms2_score = best_hit_data.get('score', 0.0)
+            self.best_ms2_num_matches = best_hit_data.get('num_matches', 0)
+            self.best_ms2_matched_fragments = best_hit_data.get('matched_fragments', [])
+            # Extract additional fields from improved hit data
+            self.best_ms2_ref_frags = best_hit_data.get('ref_frags', 0)
+            self.best_ms2_data_frags = best_hit_data.get('data_frags', 0)
             self.best_ms2_rt = best_hit_data.get('rt_measured', 0.0)
             self.best_ms2_intensity = best_hit_data.get('qry_intensity_peak', 0.0)
             self.best_ms2_mz = best_hit_data.get('mz_measured', 0.0)
-            self.best_ms2_score = best_hit_data.get('score', 0.0)
-            self.best_ms2_num_matches = best_hit_data.get('num_matches', 0)
-            self.best_ms2_ref_frags = best_hit_data.get('ref_frags', 0)
-            self.best_ms2_data_frags = best_hit_data.get('data_frags', 0)
-            self.best_ms2_matched_fragments = best_hit_data.get('qry_frag_matches', [])
         else:
             # No hits, find best by intensity
             best_intensity = 0.0
             for filename, ms2_data in self.ms2_data_files.items():
-                best_ms2 = ms2_data.get('best_ms2', {})
-                intensity = best_ms2.get('intensity_peak', 0.0)
-                if intensity > best_intensity:
-                    best_intensity = intensity
-                    self.best_ms2_file = filename
-                    self.best_ms2_rt = best_ms2.get('rt', 0.0)
-                    self.best_ms2_intensity = intensity
-                    self.best_ms2_mz = best_ms2.get('precursor_mz', 0.0)
-                    self.best_ms2_selection_method = "highest_intensity"
+                if isinstance(ms2_data, dict):
+                    best_ms2 = ms2_data.get('best_ms2', {})
+                    intensity = best_ms2.get('intensity_peak', 0.0)
+                    if intensity > best_intensity:
+                        best_intensity = intensity
+                        self.best_ms2_file = filename
+                        self.best_ms2_rt = best_ms2.get('rt_peak', 0.0)
+                        self.best_ms2_intensity = intensity
+                        self.best_ms2_mz = best_ms2.get('precursor_mz', 0.0)
+                        self.best_ms2_selection_method = "highest_intensity"
         
-        # Calculate average score
+        # Calculate average score from all files
         all_scores = []
         for ms2_data in self.ms2_data_files.values():
-            for hit in ms2_data.get('all_hits', []):
-                all_scores.append(hit.get('score', 0.0))
+            if isinstance(ms2_data, dict):
+                for hit in ms2_data.get('all_hits', []):
+                    all_scores.append(hit.get('score', 0.0))
         
         self.avg_ms2_score = np.mean(all_scores) if all_scores else 0.0
     
@@ -396,29 +407,10 @@ class ProjectAnalysis:
                 for filename, eic_data in eic_files.items():
                     compound.add_eic_data(filename, eic_data)
                 
-                # Add MS2 data directly from simplified format
+                # Add MS2 data using consistent per-file structure
                 ms2_files = compound_experimental_data.get('ms2_files', {})
-                if ms2_files:
-                    # Aggregate all hits and entries across files
-                    all_hits = []
-                    all_ms2_entries = []
-                    
-                    for filename, file_data in ms2_files.items():
-                        all_hits.extend(file_data.get('all_hits', []))
-                        all_ms2_entries.extend(file_data.get('ms2_entries', []))
-                    
-                    # Store aggregated data
-                    compound.ms2_data_files = {
-                        "files": ms2_files,
-                        "all_hits": all_hits,
-                        "all_ms2_entries": all_ms2_entries
-                    }
-                    
-                    # Update MS2 files count
-                    compound.ms2_files_with_data = len([f for f in ms2_files.values() if f.get('ms2_entries')])
-                    
-                    # Trigger updates to best/avg calculations
-                    compound._update_best_ms2()
+                for filename, file_data in ms2_files.items():
+                    compound.add_ms2_data(filename, file_data)
         
         self.update_cache_metadata('added_experimental_data')
 
@@ -464,7 +456,7 @@ class ProjectAnalysis:
         """Get summary statistics for this analysis."""
         compounds_with_eic = sum(1 for c in self.compounds.values() if c.eic_data_files)
         compounds_with_ms2 = sum(1 for c in self.compounds.values() 
-                               if c.ms2_data_files and c.ms2_data_files.get('files'))
+                               if c.ms2_data_files)
         modified_compounds = sum(1 for c in self.compounds.values() 
                                if c.is_rt_modified or c.is_annotation_modified)
         
