@@ -12,344 +12,411 @@ import logging_config as lcf
 
 logger = lcf.get_logger('simple_cache')
 
-def save_data_cache(atlas_df: pd.DataFrame, 
-                   project_data: Any, 
-                   plot_data: Dict[str, Any], 
-                   project_dir: str, 
-                   atlas_uid: str,
-                   timestamp: Optional[str] = None) -> str:
-    """Save data cache (atlas_dataframe, project_data, plot_data) to cache directory."""
+def save_analysis_cache(project_analysis, project_dir: str, atlas_uid: str) -> str:
+    """
+    Save ProjectAnalysis object to cache with comprehensive metadata.
+    This is the main caching function for the new simplified workflow.
     
-    if timestamp is None:
-        timestamp = datetime.now().isoformat()
+    Args:
+        project_analysis: ProjectAnalysis object containing all analysis data
+        project_dir: Project directory path
+        atlas_uid: Atlas UID for organizing caches
     
-    # Clean timestamp for filesystem
-    clean_timestamp = timestamp.replace(':', '-').replace('.', '-')
+    Returns:
+        str: timestamp of saved cache
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Create cache directory
-    cache_dir = Path(project_dir) / "cache" / "data_cache" / clean_timestamp
+    # Create organized cache directory structure
+    cache_dir = Path(project_dir) / "cache" / "analysis" / atlas_uid
     cache_dir.mkdir(parents=True, exist_ok=True)
     
+    cache_file = cache_dir / f"project_analysis_{timestamp}.pkl"
+    metadata_file = cache_dir / f"metadata_{timestamp}.json"
+    
     try:
-        # Save the three main data products
-        with open(cache_dir / "atlas_dataframe.pkl", 'wb') as f:
-            pickle.dump(atlas_df, f, protocol=pickle.HIGHEST_PROTOCOL)
+        # Save ProjectAnalysis object
+        with open(cache_file, 'wb') as f:
+            pickle.dump(project_analysis, f, protocol=pickle.HIGHEST_PROTOCOL)
         
-        with open(cache_dir / "project_data.pkl", 'wb') as f:
-            pickle.dump(project_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-        
-        with open(cache_dir / "plot_data.pkl", 'wb') as f:
-            pickle.dump(plot_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        # Generate comprehensive metadata
+        metadata = _generate_analysis_metadata(project_analysis, timestamp, atlas_uid)
         
         # Save metadata
-        metadata = {
-            'timestamp': timestamp,
-            'atlas_uid': atlas_uid,
-            'total_compounds': len(atlas_df),
-            'cache_type': 'data',
-            'version': '1.0'
-        }
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
         
-        with open(cache_dir / "metadata.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
+        # Create/update latest symlink for easy access
+        latest_file = cache_dir / "project_analysis_latest.pkl"
+        latest_metadata = cache_dir / "metadata_latest.json"
         
-        logger.info(f"Data cache saved to {cache_dir}")
+        if latest_file.exists():
+            latest_file.unlink()
+        if latest_metadata.exists():
+            latest_metadata.unlink()
+            
+        latest_file.symlink_to(cache_file.name)
+        latest_metadata.symlink_to(metadata_file.name)
+        
+        logger.info(f"Analysis cache saved: {cache_file}")
+        logger.info(f"  Compounds: {metadata['total_compounds']}")
+        logger.info(f"  EIC data: {metadata['compounds_with_eic']}")
+        logger.info(f"  MS2 data: {metadata['compounds_with_ms2']}")
+        logger.info(f"  Modified: {metadata['modified_compounds']}")
+        
         return timestamp
         
     except Exception as e:
-        logger.error(f"Failed to save data cache: {e}")
+        logger.error(f"Failed to save analysis cache: {e}")
         raise
 
-def load_data_cache(project_dir: str, 
-                   use_cache_setting: Any, 
-                   atlas_uid: str) -> Optional[Tuple[pd.DataFrame, Any, Dict[str, Any]]]:
-    """Load data cache based on use_cache_setting."""
+def load_analysis_cache(project_dir: str, use_cache, atlas_uid: str):
+    """
+    Load ProjectAnalysis object from cache.
     
-    cache_base_dir = Path(project_dir) / "cache" / "data_cache"
+    Args:
+        project_dir: Project directory path
+        use_cache: Cache setting (True for latest, timestamp string for specific, False to skip)
+        atlas_uid: Atlas UID for organizing caches
     
-    if not cache_base_dir.exists():
-        logger.info("No data cache directory found")
+    Returns:
+        ProjectAnalysis object or None if not found/failed
+    """
+    if use_cache is False:
+        return None
+    
+    cache_dir = Path(project_dir) / "cache" / "analysis" / atlas_uid
+    
+    if not cache_dir.exists():
+        logger.info(f"No analysis cache directory found for atlas {atlas_uid}")
         return None
     
     # Determine which cache to load
-    target_timestamp = None
-    if use_cache_setting is True:
-        # Load most recent
-        timestamps = list_available_data_cache_timestamps(project_dir, atlas_uid)
-        if timestamps:
-            target_timestamp = timestamps[-1]  # Most recent
-    elif isinstance(use_cache_setting, str):
-        # Load specific timestamp
-        target_timestamp = use_cache_setting
-    else:
-        return None
+    cache_file = None
+    metadata_file = None
     
-    if not target_timestamp:
-        logger.info("No suitable data cache found")
-        return None
-    
-    # Clean timestamp for filesystem
-    clean_timestamp = target_timestamp.replace(':', '-').replace('.', '-')
-    cache_dir = cache_base_dir / clean_timestamp
-    
-    if not cache_dir.exists():
-        logger.warning(f"Data cache directory not found: {cache_dir}")
-        return None
-    
-    try:
-        # Validate metadata
-        with open(cache_dir / "metadata.json", 'r') as f:
-            metadata = json.load(f)
+    if use_cache is True:
+        # Load latest cache
+        cache_file = cache_dir / "project_analysis_latest.pkl"
+        metadata_file = cache_dir / "metadata_latest.json"
         
-        if metadata.get('atlas_uid') != atlas_uid:
-            logger.warning(f"Cache atlas UID mismatch: expected {atlas_uid}, got {metadata.get('atlas_uid')}")
+        if not cache_file.exists():
+            logger.info("No latest analysis cache found")
             return None
-        
-        # Load data
-        with open(cache_dir / "atlas_dataframe.pkl", 'rb') as f:
-            atlas_df = pickle.load(f)
-        
-        with open(cache_dir / "project_data.pkl", 'rb') as f:
-            project_data = pickle.load(f)
-        
-        with open(cache_dir / "plot_data.pkl", 'rb') as f:
-            plot_data = pickle.load(f)
-        
-        logger.info(f"Loaded data cache from {target_timestamp}")
-        return atlas_df, project_data, plot_data
-        
-    except Exception as e:
-        logger.error(f"Failed to load data cache: {e}")
-        return None
-
-def save_gui_cache(gui_obj: Any, 
-                  project_dir: str, 
-                  cache_type: str = "progress",
-                  timestamp: Optional[str] = None) -> str:
-    """Save essential GUI data (AnalystModifications) to cache directory as JSON."""
-    
-    if timestamp is None:
-        timestamp = datetime.now().isoformat()
-    
-    # Clean timestamp for filesystem
-    clean_timestamp = timestamp.replace(':', '-').replace('.', '-')
-    
-    # Create cache directory
-    cache_dir = Path(project_dir) / "cache" / "gui_cache" / cache_type / clean_timestamp
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        # Extract AnalystModifications from GUI object
-        if hasattr(gui_obj, 'get_modifications'):
-            modifications = gui_obj.get_modifications()
-        else:
-            raise ValueError("GUI object does not have get_modifications() method")
-        
-        # Convert AnalystModifications to JSON-serializable format
-        modifications_data = {
-            'rt_modifications': modifications.rt_modifications,
-            'annotation_modifications': modifications.annotation_modifications,
-            'modified_compounds': list(modifications.modified_compounds)
-        }
-        
-        # Save modifications as JSON
-        with open(cache_dir / "analyst_modifications.json", 'w') as f:
-            json.dump(modifications_data, f, indent=2)
-        
-        # Save metadata
-        metadata = {
-            'timestamp': timestamp,
-            'cache_type': cache_type,
-            'version': '1.0',
-            'modified_compounds_count': len(modifications.modified_compounds)
-        }
-        
-        with open(cache_dir / "metadata.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        logger.info(f"GUI cache ({cache_type}) saved to {cache_dir}")
-        return timestamp
-        
-    except Exception as e:
-        logger.error(f"Failed to save GUI cache: {e}")
-        raise
-
-def load_gui_cache(project_dir: str, 
-                  use_cache_setting: Any, 
-                  cache_type: str = "complete") -> Optional[Any]:
-    """Load AnalystModifications from cache and return a simple container."""
-    
-    cache_base_dir = Path(project_dir) / "cache" / "gui_cache" / cache_type
-    
-    if not cache_base_dir.exists():
-        logger.info(f"No GUI cache directory found for {cache_type}")
-        return None
-    
-    # Determine which cache to load
-    target_timestamp = None
-    if use_cache_setting is True:
-        # Load most recent
-        timestamps = list_available_gui_cache_timestamps(project_dir, cache_type)
-        if timestamps:
-            target_timestamp = timestamps[-1]  # Most recent
-    elif isinstance(use_cache_setting, str):
+            
+    elif isinstance(use_cache, str):
         # Load specific timestamp
-        target_timestamp = use_cache_setting
+        cache_file = cache_dir / f"project_analysis_{use_cache}.pkl"
+        metadata_file = cache_dir / f"metadata_{use_cache}.json"
+        
+        if not cache_file.exists():
+            logger.warning(f"Analysis cache not found for timestamp: {use_cache}")
+            return None
     else:
         return None
     
-    if not target_timestamp:
-        logger.info(f"No suitable GUI cache found for {cache_type}")
+    try:
+        # Validate metadata first
+        if metadata_file.exists():
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            logger.info(f"Loading analysis cache from {metadata['timestamp']}")
+            logger.info(f"  Cache contains {metadata['total_compounds']} compounds")
+            logger.info(f"  Analysis stage: {metadata.get('analysis_stage', 'unknown')}")
+        
+        # Load ProjectAnalysis object
+        with open(cache_file, 'rb') as f:
+            project_analysis = pickle.load(f)
+        
+        logger.info("Analysis cache loaded successfully")
+        return project_analysis
+        
+    except Exception as e:
+        logger.error(f"Failed to load analysis cache: {e}")
         return None
+
+def list_analysis_caches(project_dir: str, atlas_uid: str) -> List[Dict[str, Any]]:
+    """
+    List all available analysis caches for an atlas with their metadata.
     
-    # Clean timestamp for filesystem
-    clean_timestamp = target_timestamp.replace(':', '-').replace('.', '-')
-    cache_dir = cache_base_dir / clean_timestamp
+    Returns:
+        List of cache info dictionaries
+    """
+    cache_dir = Path(project_dir) / "cache" / "analysis" / atlas_uid
     
     if not cache_dir.exists():
-        logger.warning(f"GUI cache directory not found: {cache_dir}")
+        return []
+    
+    caches = []
+    
+    # Find all metadata files
+    for metadata_file in cache_dir.glob("metadata_*.json"):
+        if metadata_file.name == "metadata_latest.json":
+            continue  # Skip symlink
+            
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            # Check if corresponding cache file exists
+            timestamp = metadata['timestamp']
+            cache_file = cache_dir / f"project_analysis_{timestamp}.pkl"
+            
+            if cache_file.exists():
+                cache_info = {
+                    'timestamp': timestamp,
+                    'file_size_mb': cache_file.stat().st_size / (1024 * 1024),
+                    'total_compounds': metadata.get('total_compounds', 0),
+                    'compounds_with_eic': metadata.get('compounds_with_eic', 0),
+                    'compounds_with_ms2': metadata.get('compounds_with_ms2', 0),
+                    'modified_compounds': metadata.get('modified_compounds', 0),
+                    'analysis_stage': metadata.get('analysis_stage', 'unknown'),
+                    'cache_file': str(cache_file),
+                    'metadata': metadata
+                }
+                caches.append(cache_info)
+                
+        except Exception as e:
+            logger.warning(f"Failed to read cache metadata from {metadata_file}: {e}")
+            continue
+    
+    # Sort by timestamp (newest first)
+    caches.sort(key=lambda x: x['timestamp'], reverse=True)
+    return caches
+
+def save_progress_checkpoint(project_analysis, project_dir: str, atlas_uid: str, stage: str) -> str:
+    """
+    Save a progress checkpoint during analysis.
+    
+    Args:
+        project_analysis: ProjectAnalysis object
+        project_dir: Project directory
+        atlas_uid: Atlas UID
+        stage: Analysis stage identifier (e.g., 'data_extracted', 'rt_bounds_set', 'annotations_added')
+    
+    Returns:
+        str: timestamp of checkpoint
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create checkpoint directory
+    checkpoint_dir = Path(project_dir) / "cache" / "checkpoints" / atlas_uid
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    checkpoint_file = checkpoint_dir / f"checkpoint_{stage}_{timestamp}.pkl"
+    metadata_file = checkpoint_dir / f"checkpoint_{stage}_{timestamp}.json"
+    
+    try:
+        # Save checkpoint
+        with open(checkpoint_file, 'wb') as f:
+            pickle.dump(project_analysis, f, protocol=pickle.HIGHEST_PROTOCOL)
+        
+        # Save checkpoint metadata
+        metadata = _generate_analysis_metadata(project_analysis, timestamp, atlas_uid)
+        metadata['analysis_stage'] = stage
+        metadata['checkpoint_type'] = 'progress'
+        
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        
+        # Update latest checkpoint for this stage
+        latest_file = checkpoint_dir / f"checkpoint_{stage}_latest.pkl"
+        latest_metadata = checkpoint_dir / f"checkpoint_{stage}_latest.json"
+        
+        if latest_file.exists():
+            latest_file.unlink()
+        if latest_metadata.exists():
+            latest_metadata.unlink()
+            
+        latest_file.symlink_to(checkpoint_file.name)
+        latest_metadata.symlink_to(metadata_file.name)
+        
+        logger.info(f"Progress checkpoint saved: {stage} at {timestamp}")
+        return timestamp
+        
+    except Exception as e:
+        logger.error(f"Failed to save progress checkpoint: {e}")
+        raise
+
+def load_progress_checkpoint(project_dir: str, atlas_uid: str, stage: str):
+    """
+    Load the latest progress checkpoint for a specific stage.
+    
+    Args:
+        project_dir: Project directory
+        atlas_uid: Atlas UID
+        stage: Analysis stage identifier
+    
+    Returns:
+        ProjectAnalysis object or None
+    """
+    checkpoint_dir = Path(project_dir) / "cache" / "checkpoints" / atlas_uid
+    
+    if not checkpoint_dir.exists():
+        logger.info(f"No checkpoint directory found for atlas {atlas_uid}")
+        return None
+    
+    checkpoint_file = checkpoint_dir / f"checkpoint_{stage}_latest.pkl"
+    
+    if not checkpoint_file.exists():
+        logger.info(f"No checkpoint found for stage: {stage}")
         return None
     
     try:
-        # Load AnalystModifications data
-        with open(cache_dir / "analyst_modifications.json", 'r') as f:
-            modifications_data = json.load(f)
+        with open(checkpoint_file, 'rb') as f:
+            project_analysis = pickle.load(f)
         
-        # Create a simple container with the cached modifications
-        gui_container = ModificationsContainer(modifications_data)
-        
-        logger.info(f"Loaded GUI cache ({cache_type}) from {target_timestamp}")
-        return gui_container
+        logger.info(f"Loaded progress checkpoint for stage: {stage}")
+        return project_analysis
         
     except Exception as e:
-        logger.error(f"Failed to load GUI cache: {e}")
+        logger.error(f"Failed to load progress checkpoint: {e}")
         return None
 
-def list_available_data_cache_timestamps(project_dir: str, atlas_uid: str) -> List[str]:
-    """List available data cache timestamps for a specific atlas."""
+def cleanup_old_caches(project_dir: str, atlas_uid: str = None, keep_last_n: int = 5):
+    """
+    Clean up old cache files, keeping only the most recent N caches.
     
-    cache_base_dir = Path(project_dir) / "cache" / "data_cache"
-    
-    if not cache_base_dir.exists():
-        return []
-    
-    timestamps = []
-    for cache_dir in cache_base_dir.iterdir():
-        if cache_dir.is_dir():
-            try:
-                with open(cache_dir / "metadata.json", 'r') as f:
-                    metadata = json.load(f)
-                
-                if metadata.get('atlas_uid') == atlas_uid:
-                    timestamps.append(metadata['timestamp'])
-            except:
-                continue
-    
-    timestamps.sort()
-    return timestamps
-
-def list_available_gui_cache_timestamps(project_dir: str, cache_type: str) -> List[str]:
-    """List available GUI cache timestamps for a specific cache type."""
-    
-    cache_base_dir = Path(project_dir) / "cache" / "gui_cache" / cache_type
+    Args:
+        project_dir: Project directory
+        atlas_uid: Specific atlas UID to clean, or None for all atlases
+        keep_last_n: Number of recent caches to keep
+    """
+    cache_base_dir = Path(project_dir) / "cache"
     
     if not cache_base_dir.exists():
-        return []
+        return
     
-    timestamps = []
-    for cache_dir in cache_base_dir.iterdir():
-        if cache_dir.is_dir():
-            try:
-                with open(cache_dir / "metadata.json", 'r') as f:
-                    metadata = json.load(f)
-                
-                timestamps.append(metadata['timestamp'])
-            except:
-                continue
+    # Define cache directories to clean
+    cache_dirs = []
     
-    timestamps.sort()
-    return timestamps
-
-def cleanup_old_caches(project_dir: str, keep_last_n: int = 5):
-    """Clean up old cache directories, keeping only the most recent N."""
+    if atlas_uid:
+        # Clean specific atlas
+        cache_dirs.extend([
+            cache_base_dir / "analysis" / atlas_uid,
+            cache_base_dir / "checkpoints" / atlas_uid
+        ])
+    else:
+        # Clean all atlases
+        analysis_dir = cache_base_dir / "analysis"
+        checkpoints_dir = cache_base_dir / "checkpoints"
+        
+        if analysis_dir.exists():
+            cache_dirs.extend([d for d in analysis_dir.iterdir() if d.is_dir()])
+        if checkpoints_dir.exists():
+            cache_dirs.extend([d for d in checkpoints_dir.iterdir() if d.is_dir()])
     
-    cache_dirs = [
-        Path(project_dir) / "cache" / "data_cache",
-        Path(project_dir) / "cache" / "gui_cache" / "progress",
-        Path(project_dir) / "cache" / "gui_cache" / "complete"
-    ]
+    total_deleted = 0
+    total_size_freed = 0
     
     for cache_dir in cache_dirs:
         if not cache_dir.exists():
             continue
         
-        # Get all subdirectories sorted by modification time
-        subdirs = [d for d in cache_dir.iterdir() if d.is_dir()]
-        subdirs.sort(key=lambda d: d.stat().st_mtime)
+        # Get all cache files (not symlinks)
+        cache_files = []
+        for pkl_file in cache_dir.glob("*.pkl"):
+            if not pkl_file.is_symlink():
+                cache_files.append(pkl_file)
         
-        # Delete old ones
-        to_delete = subdirs[:-keep_last_n] if len(subdirs) > keep_last_n else []
+        # Sort by modification time (oldest first)
+        cache_files.sort(key=lambda f: f.stat().st_mtime)
         
-        for old_dir in to_delete:
+        # Delete old ones, keeping the most recent N
+        to_delete = cache_files[:-keep_last_n] if len(cache_files) > keep_last_n else []
+        
+        for old_file in to_delete:
             try:
-                import shutil
-                shutil.rmtree(old_dir)
-                logger.info(f"Deleted old cache: {old_dir}")
+                # Also delete corresponding metadata file
+                timestamp = old_file.stem.split('_')[-1]
+                metadata_file = cache_dir / f"metadata_{timestamp}.json"
+                
+                file_size = old_file.stat().st_size
+                old_file.unlink()
+                total_deleted += 1
+                total_size_freed += file_size
+                
+                if metadata_file.exists():
+                    metadata_file.unlink()
+                
             except Exception as e:
-                logger.error(f"Failed to delete old cache {old_dir}: {e}")
+                logger.error(f"Failed to delete old cache {old_file}: {e}")
+    
+    if total_deleted > 0:
+        logger.info(f"Cleanup complete: deleted {total_deleted} cache files, freed {total_size_freed / (1024*1024):.1f} MB")
 
-def has_existing_gui_cache(project_dir: str, cache_type: str = "progress") -> bool:
-    """Check if any GUI cache exists for the given cache type."""
-    cache_base_dir = Path(project_dir) / "cache" / "gui_cache" / cache_type
+def get_cache_status(project_dir: str, atlas_uid: str) -> Dict[str, Any]:
+    """
+    Get comprehensive cache status for an atlas.
     
-    if not cache_base_dir.exists():
-        return False
+    Returns:
+        Dictionary with cache information
+    """
+    cache_info = {
+        'atlas_uid': atlas_uid,
+        'has_latest_cache': False,
+        'total_caches': 0,
+        'total_checkpoints': 0,
+        'latest_cache_info': None,
+        'available_stages': [],
+        'cache_size_mb': 0
+    }
     
-    # Check if any valid cache directories exist
-    timestamps = list_available_gui_cache_timestamps(project_dir, cache_type)
-    return len(timestamps) > 0
+    # Check analysis caches
+    analysis_caches = list_analysis_caches(project_dir, atlas_uid)
+    cache_info['total_caches'] = len(analysis_caches)
+    
+    if analysis_caches:
+        cache_info['has_latest_cache'] = True
+        cache_info['latest_cache_info'] = analysis_caches[0]  # Most recent
+        cache_info['cache_size_mb'] = sum(c['file_size_mb'] for c in analysis_caches)
+    
+    # Check checkpoint stages
+    checkpoint_dir = Path(project_dir) / "cache" / "checkpoints" / atlas_uid
+    if checkpoint_dir.exists():
+        stages = set()
+        for pkl_file in checkpoint_dir.glob("checkpoint_*_latest.pkl"):
+            if pkl_file.is_symlink():
+                stage = pkl_file.stem.replace('checkpoint_', '').replace('_latest', '')
+                stages.add(stage)
+        cache_info['available_stages'] = sorted(stages)
+        cache_info['total_checkpoints'] = len(stages)
+    
+    return cache_info
 
-class ModificationsContainer:
-    """Simple container for AnalystModifications."""
+def _generate_analysis_metadata(project_analysis, timestamp: str, atlas_uid: str) -> Dict[str, Any]:
+    """Generate comprehensive metadata for ProjectAnalysis cache."""
     
-    def __init__(self, modifications_data: Dict[str, Any]):
-        # Import here to avoid circular imports
-        from metatlas2.data_classes import AnalystModifications
-        
-        # Reconstruct AnalystModifications object from JSON data
-        self._modifications = AnalystModifications()
-        self._modifications.rt_modifications = modifications_data.get('rt_modifications', {})
-        self._modifications.annotation_modifications = modifications_data.get('annotation_modifications', {})
-        self._modifications.modified_compounds = set(modifications_data.get('modified_compounds', []))
-        
-        # Store empty metadata (can be set externally if needed)
-        self.metadata = {}
+    # Count compounds with different types of data
+    compounds_with_eic = sum(1 for c in project_analysis.compounds.values() if c.eic_data_files)
+    compounds_with_ms2 = sum(1 for c in project_analysis.compounds.values() 
+                           if c.ms2_data_files and c.ms2_data_files.get('files'))
+    modified_compounds = sum(1 for c in project_analysis.compounds.values() 
+                           if c.is_rt_modified or c.is_annotation_modified)
     
-    def get_modifications(self):
-        """Return the AnalystModifications object."""
-        return self._modifications
+    # Determine analysis stage based on data completeness
+    analysis_stage = "initialized"
+    if compounds_with_eic > 0 or compounds_with_ms2 > 0:
+        analysis_stage = "data_extracted"
+    if modified_compounds > 0:
+        analysis_stage = "modified"
     
-    def get_plot_data(self):
-        """Generate plot data format from modifications (requires metadata to be set)."""
-        if not self.metadata:
-            raise ValueError("Metadata must be set before calling get_plot_data()")
-        return self._modifications.to_plot_data_format(self.metadata)
-
-def validate_cached_modifications(modifications: Any, compound_metadata: Dict) -> bool:
-    """Validate that cached modifications are compatible with current compound metadata."""
-    try:
-        cached_compounds = set(modifications.modified_compounds)
-        current_compounds = set(compound_metadata.keys())
-        
-        # Check if all cached modifications refer to compounds that still exist
-        invalid_compounds = cached_compounds - current_compounds
-        if invalid_compounds:
-            logger.warning(f"Cached modifications contain {len(invalid_compounds)} compounds not in current dataset")
-            return False
-        
-        logger.info(f"Cached modifications validated: {len(cached_compounds)} modified compounds")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to validate cached modifications: {e}")
-        return False
+    # Calculate data statistics
+    total_eic_files = sum(len(c.eic_data_files) for c in project_analysis.compounds.values())
+    total_ms2_files = sum(len(c.ms2_data_files.get('files', {})) for c in project_analysis.compounds.values())
+    
+    return {
+        'timestamp': timestamp,
+        'atlas_uid': atlas_uid,
+        'project_db_path': project_analysis.project_db_path,
+        'total_compounds': len(project_analysis.compounds),
+        'compounds_with_eic': compounds_with_eic,
+        'compounds_with_ms2': compounds_with_ms2,
+        'modified_compounds': modified_compounds,
+        'analysis_stage': analysis_stage,
+        'total_eic_files': total_eic_files,
+        'total_ms2_files': total_ms2_files,
+        'cache_version': '2.0',
+        'cache_type': 'project_analysis'
+    }

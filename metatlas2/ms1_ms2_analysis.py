@@ -266,14 +266,15 @@ def calculate_mz_tolerance_range(mz: float, tolerance_ppm: float) -> Tuple[float
     return mz - tolerance_da, mz + tolerance_da
 
 
-def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame, config: Dict) -> dcl.ProjectDataCollection:
+def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame, config: Dict) -> Dict[str, Dict]:
     """
-    Extract EIC and MS2 data using class-based structure.
+    Extract EIC and MS2 data using simplified approach - returns raw data only.
+    ProjectAnalysis will handle object creation and management.
     
     Returns:
-        ProjectDataCollection containing all compound data
+        Dict keyed by inchi_key containing simple experimental data structures
     """
-    # Load reference database
+    # Load reference database for MS2 matching
     msms_refs_path = Path(config["paths"]["msms_refs"])
     reference_df = None
     if msms_refs_path.exists():
@@ -286,514 +287,554 @@ def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame
         logger.info(f"MS2 reference file not found at {msms_refs_path}")
         logger.info("All MS2 datapoints will be preserved but without reference hits")
     
-    # Create compound metadata mapping
-    compound_metadata = {}
-    for _, row in atlas_df.iterrows():
-        compound_metadata[row['label']] = {
-            'inchi_key': row.get('inchi_key', ''),
-            'compound_uid': row.get('compound_uid', ''),
-            'adduct': row.get('adduct', ''),
-            'mz': row.get('mz', 0.0),
-            'rt_min': row.get('rt_min', 0.0),
-            'rt_max': row.get('rt_max', 0.0),
-            'rt_peak': row.get('rt_peak', 0.0)
-        }
-    
-    # Initialize experiment data collection
-    experiment_data = dcl.ProjectDataCollection()
-    
     logger.info(f"Extracting data from {len(input_data_list)} files...")
     
-    # Determine number of workers for parallel processing
+    # Extract experimental data using simplified approach
+    experimental_data = _extract_experimental_data_simple(input_data_list, reference_df, config)
+    
+    # Print summary
+    logger.info(f"Extraction complete:")
+    logger.info(f"  Total compounds with data: {len(experimental_data)}")
+    compounds_with_eic = sum(1 for data in experimental_data.values() if data.get('eic_files'))
+    compounds_with_ms2 = sum(1 for data in experimental_data.values() if data.get('ms2_files'))
+    logger.info(f"  Compounds with EIC data: {compounds_with_eic}")
+    logger.info(f"  Compounds with MS2 data: {compounds_with_ms2}")
+    
+    return experimental_data
+
+def _extract_experimental_data_simple(input_data_list: List[Dict], reference_df: Optional[pd.DataFrame], 
+                                     config: Dict) -> Dict[str, Dict]:
+    """
+    Extract experimental data in simplified format - pure data extraction only.
+    
+    Returns:
+        Dict keyed by inchi_key containing experimental data
+    """
+    experimental_data = {}
+    
+    # Determine processing approach
     max_workers = min(mp.cpu_count(), len(input_data_list), 8)
     
     if max_workers > 1 and len(input_data_list) > 1:
         logger.info(f"Using parallel processing with {max_workers} workers...")
-        experiment_data = _extract_data_parallel(
-            input_data_list, compound_metadata, reference_df, config, max_workers
-        )
+        experimental_data = _extract_data_parallel_simple(input_data_list, reference_df, config, max_workers)
     else:
         logger.info("Using sequential processing...")
-        experiment_data = _extract_data_sequential(
-            input_data_list, compound_metadata, reference_df, config
-        )
+        experimental_data = _extract_data_sequential_simple(input_data_list, reference_df, config)
     
-    # Print summary
-    summary = experiment_data.compounds_summary
-    logger.info(f"Extraction complete:")
-    logger.info(f"  Total compounds: {summary['total_compounds']}")
-    logger.info(f"  Compounds with EIC data: {summary['compounds_with_eic']}")
-    logger.info(f"  Compounds with MS2 data: {summary['compounds_with_ms2']}")
-    logger.info(f"  Compounds with MS2 hits: {summary['compounds_with_hits']}")
-    logger.info(f"  Total EIC traces: {summary['total_eic_traces']}")
-    logger.info(f"  Total MS2 spectra: {summary['total_ms2_spectra']}")
-    
-    return experiment_data
+    return experimental_data
 
-def _extract_data_sequential(input_data_list: List[Dict], compound_metadata: Dict, 
-                           reference_df: Optional[pd.DataFrame], config: Dict) -> dcl.ProjectDataCollection:
-    """Extract data using sequential processing."""
-    experiment_data = dcl.ProjectDataCollection()
+def _extract_data_sequential_simple(input_data_list: List[Dict], reference_df: Optional[pd.DataFrame], 
+                                   config: Dict) -> Dict[str, Dict]:
+    """Extract data sequentially - returns only raw data dictionaries."""
+    experimental_data = {}
     
     for i, file_input in enumerate(tqdm(input_data_list, desc="Processing files")):
         file_path = file_input['lcmsrun']
         filename = Path(file_path).name
         
         try:
-            # Extract data
+            # Extract raw data using feature_tools
+            logger.info(f"Processing file {i+1}/{len(input_data_list)}: {filename}")
+            logger.info(f"File input keys: {list(file_input.keys())}")
+            logger.info(f"Atlas DF columns: {list(file_input['atlas'].columns)}")  # Changed from 'atlas_df'
+            
             data = ftt.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
             
-            # Process EIC data
+            # Process EIC data - simple data only
             if not data['ms1_data'].empty:
                 adduct_eics = ftt.group_duplicates(data['ms1_data'], 'label', make_string=False)
                 
                 if not adduct_eics.empty and 'label' in adduct_eics.columns:
                     for _, eic_row in adduct_eics.iterrows():
-                        label = eic_row['label']
-                        metadata = compound_metadata.get(label, {})
-                        
-                        if not metadata.get('inchi_key'):
+                        inchi_key = eic_row.get('inchi_key', '')
+                        if not inchi_key:
                             continue
                         
-                        # Calculate peak values
-                        intensities = eic_row.get('i', np.array([]))
-                        rts = eic_row.get('rt', np.array([]))
-                        mzs = eic_row.get('mz', np.array([]))
+                        # Initialize simple data structure
+                        if inchi_key not in experimental_data:
+                            experimental_data[inchi_key] = {
+                                'eic_files': {},
+                                'ms2_files': {}
+                            }
                         
-                        if len(intensities) > 0 and len(rts) > 0:
-                            max_idx = np.argmax(intensities)
-                            rt_peak = rts[max_idx]
-                            intensity_peak = intensities[max_idx]
-                            mz_peak = mzs[max_idx] if len(mzs) > 0 else 0.0
-                        else:
-                            rt_peak = intensity_peak = mz_peak = 0.0
-                        
-                        # Create EIC object
-                        eic = dcl.EICData(
-                            inchi_key=metadata['inchi_key'],
-                            compound_uid=metadata['compound_uid'],
-                            label=label,
-                            adduct=metadata['adduct'],
-                            filename=filename,
-                            file_path=file_path,
-                            rt_values=rts,
-                            mz_values=mzs,
-                            intensity_values=intensities,
-                            rt_peak=rt_peak,
-                            mz_peak=mz_peak,
-                            intensity_peak=intensity_peak,
-                            atlas_rt_min=metadata['rt_min'],
-                            atlas_rt_max=metadata['rt_max'],
-                            atlas_rt_peak=metadata['rt_peak'],
-                            atlas_mz=metadata['mz']
-                        )
-                        experiment_data.add_eic_data(eic)
+                        # Extract simple EIC values
+                        eic_data = _extract_simple_eic_data(eic_row, filename)
+                        if eic_data:
+                            experimental_data[inchi_key]['eic_files'][filename] = eic_data
             
-            # Process MS2 data
+            # Process MS2 data - simple data only
             if not data['ms2_data'].empty:
                 ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
                 
                 if not ms2_summary.empty:
                     for _, ms2_row in ms2_summary.iterrows():
-                        label = ms2_row.get('label', '')
-                        metadata = compound_metadata.get(label, {})
-                        
-                        if not metadata.get('inchi_key'):
+                        inchi_key = ms2_row.get('inchi_key', '')
+                        if not inchi_key:
                             continue
                         
-                        # Parse spectrum data
-                        spectrum_data = ms2_row.get('spectrum', [[], []])
-                        if len(spectrum_data) != 2 or len(spectrum_data[0]) == 0:
-                            continue
+                        # Initialize simple data structure
+                        if inchi_key not in experimental_data:
+                            experimental_data[inchi_key] = {
+                                'eic_files': {},
+                                'ms2_files': {}
+                            }
                         
-                        mz_values = np.array(spectrum_data[0])
-                        intensity_values = np.array(spectrum_data[1])
-                        
-                        # Create MS2 spectrum object
-                        spectrum = dcl.MS2Spectrum(
-                            inchi_key=metadata['inchi_key'],
-                            compound_uid=metadata['compound_uid'],
-                            label=label,
-                            adduct=metadata['adduct'],
-                            filename=filename,
-                            file_path=file_path,
-                            precursor_mz=ms2_row.get('precursor_mz', 0.0),
-                            precursor_intensity=ms2_row.get('precursor_intensity', 0.0),
-                            rt=ms2_row.get('rt', 0.0),
-                            mz_values=mz_values,
-                            intensity_values=intensity_values,
-                            atlas_rt_min=metadata['rt_min'],
-                            atlas_rt_max=metadata['rt_max'],
-                            atlas_rt_peak=metadata['rt_peak'],
-                            atlas_mz=metadata['mz']
-                        )
-                        
-                        # Find hits if reference database available
-                        if reference_df is not None:
-                            hits = _find_hits_for_spectrum(spectrum, reference_df, config)
-                            spectrum.hits = hits
-                        
-                        experiment_data.add_ms2_spectrum(spectrum)
+                        # Extract simple MS2 data
+                        ms2_data = _extract_simple_ms2_data(ms2_row, filename, reference_df, config)
+                        if ms2_data:
+                            if filename not in experimental_data[inchi_key]['ms2_files']:
+                                experimental_data[inchi_key]['ms2_files'][filename] = {
+                                    "ms2_entries": [],
+                                    "all_hits": []
+                                }
+                            
+                            experimental_data[inchi_key]['ms2_files'][filename]["ms2_entries"].append(ms2_data['entry'])
+                            experimental_data[inchi_key]['ms2_files'][filename]["all_hits"].extend(ms2_data['hits'])
+            
+            logger.info(f"  File {filename} processed successfully: {len([k for k in experimental_data.keys()])} compounds found")
             
         except Exception as e:
             logger.error(f"  Error processing {filename}: {e}")
             continue
     
-    return experiment_data
+    # Post-process to add summary statistics
+    for inchi_key, compound_data in experimental_data.items():
+        _add_summary_statistics(compound_data)
+    
+    return experimental_data
 
-def _extract_data_parallel(input_data_list: List[Dict], compound_metadata: Dict, 
-                         reference_df: Optional[pd.DataFrame], config: Dict, max_workers: int) -> dcl.ProjectDataCollection:
-    """Extract data using parallel processing."""
-    
-    # Prepare arguments for each worker
-    worker_args = []
-    for i, file_input in enumerate(input_data_list):
-        worker_args.append((i, file_input, compound_metadata, reference_df, config))
-    
-    # Process files in parallel
-    experiment_data = dcl.ProjectDataCollection()
-    
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
-        for args in worker_args:
-            future = executor.submit(_process_single_file, *args)
-            futures.append(future)
-        
-        # Collect results with progress bar
-        for i, future in enumerate(tqdm(futures, desc="Processing files in parallel")):
-            try:
-                file_path, eic_objects, ms2_objects = future.result()
-                
-                # Add EIC objects to experiment data
-                for eic in eic_objects:
-                    experiment_data.add_eic_data(eic)
-                
-                # Add MS2 objects to experiment data
-                for spectrum in ms2_objects:
-                    experiment_data.add_ms2_spectrum(spectrum)
-                
-                if (i + 1) % 10 == 0:  # Print every 10 files
-                    file_name = Path(file_path).name
-                    logger.info(f"  Completed {i+1}/{len(input_data_list)}: {file_name}")
-                    
-            except Exception as e:
-                logger.error(f"  Error in parallel processing: {e}")
-
-    return experiment_data
-
-def _process_single_file(file_index: int, file_input: Dict, compound_metadata: Dict, 
-                       reference_df: Optional[pd.DataFrame], config: Dict) -> Tuple[str, List[dcl.EICData], List[dcl.MS2Spectrum]]:
-    """Process a single file for EIC and MS2 data extraction."""
-    file_path = file_input['lcmsrun']
-    filename = Path(file_path).name
-    
-    # Extract data
-    data = ftt.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
-    
-    eic_objects = []
-    ms2_objects = []
-    
-    # Process EIC data
-    if not data['ms1_data'].empty:
-        adduct_eics = ftt.group_duplicates(data['ms1_data'], 'label', make_string=False)
-        
-        if not adduct_eics.empty and 'label' in adduct_eics.columns:
-            for _, eic_row in adduct_eics.iterrows():
-                label = eic_row['label']
-                metadata = compound_metadata.get(label, {})
-                
-                if not metadata.get('inchi_key'):
-                    continue
-                
-                # Calculate peak values
-                intensities = eic_row.get('i', np.array([]))
-                rts = eic_row.get('rt', np.array([]))
-                mzs = eic_row.get('mz', np.array([]))
-                
-                if len(intensities) > 0 and len(rts) > 0:
-                    max_idx = np.argmax(intensities)
-                    rt_peak = rts[max_idx]
-                    intensity_peak = intensities[max_idx]
-                    mz_peak = mzs[max_idx] if len(mzs) > 0 else 0.0
-                else:
-                    rt_peak = intensity_peak = mz_peak = 0.0
-                
-                # Create EIC object
-                eic = dcl.EICData(
-                    inchi_key=metadata['inchi_key'],
-                    compound_uid=metadata['compound_uid'],
-                    label=label,
-                    adduct=metadata['adduct'],
-                    filename=filename,
-                    file_path=file_path,
-                    rt_values=rts,
-                    mz_values=mzs,
-                    intensity_values=intensities,
-                    rt_peak=rt_peak,
-                    mz_peak=mz_peak,
-                    intensity_peak=intensity_peak,
-                    atlas_rt_min=metadata['rt_min'],
-                    atlas_rt_max=metadata['rt_max'],
-                    atlas_rt_peak=metadata['rt_peak'],
-                    atlas_mz=metadata['mz']
-                )
-                eic_objects.append(eic)
-    
-    # Process MS2 data
-    if not data['ms2_data'].empty:
-        ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
-        
-        if not ms2_summary.empty:
-            for _, ms2_row in ms2_summary.iterrows():
-                label = ms2_row.get('label', '')
-                metadata = compound_metadata.get(label, {})
-                
-                if not metadata.get('inchi_key'):
-                    continue
-                
-                # Parse spectrum data
-                spectrum_data = ms2_row.get('spectrum', [[], []])
-                if len(spectrum_data) != 2 or len(spectrum_data[0]) == 0:
-                    continue
-                
-                mz_values = np.array(spectrum_data[0])
-                intensity_values = np.array(spectrum_data[1])
-                
-                # Create MS2 spectrum object
-                spectrum = dcl.MS2Spectrum(
-                    inchi_key=metadata['inchi_key'],
-                    compound_uid=metadata['compound_uid'],
-                    label=label,
-                    adduct=metadata['adduct'],
-                    filename=filename,
-                    file_path=file_path,
-                    precursor_mz=ms2_row.get('precursor_mz', 0.0),
-                    precursor_intensity=ms2_row.get('precursor_intensity', 0.0),
-                    rt=ms2_row.get('rt', 0.0),
-                    mz_values=mz_values,
-                    intensity_values=intensity_values,
-                    atlas_rt_min=metadata['rt_min'],
-                    atlas_rt_max=metadata['rt_max'],
-                    atlas_rt_peak=metadata['rt_peak'],
-                    atlas_mz=metadata['mz']
-                )
-                
-                # Find hits if reference database available
-                if reference_df is not None:
-                    hits = _find_hits_for_spectrum(spectrum, reference_df, config)
-                    spectrum.hits = hits
-                
-                ms2_objects.append(spectrum)
-    
-    return file_path, eic_objects, ms2_objects
-
-def _align_spectra_for_comparison(query_mz: np.ndarray, query_intensity: np.ndarray,
-                                ref_mz: np.ndarray, ref_intensity: np.ndarray,
-                                mz_tolerance: float = 0.005, 
-                                intensity_threshold: float = 100) -> Dict:
-    """
-    Align query and reference spectra for comparison and scoring.
-    
-    Args:
-        query_mz: Query spectrum m/z values
-        query_intensity: Query spectrum intensities
-        ref_mz: Reference spectrum m/z values  
-        ref_intensity: Reference spectrum intensities
-        mz_tolerance: m/z tolerance for matching peaks
-        intensity_threshold: Minimum intensity for counting matches
-    
-    Returns:
-        Dict with all comparison results
-    """
-    # Convert to numpy arrays and validate
-    query_mz = np.asarray(query_mz, dtype=np.float64)
-    query_intensity = np.asarray(query_intensity, dtype=np.float64)
-    ref_mz = np.asarray(ref_mz, dtype=np.float64)
-    ref_intensity = np.asarray(ref_intensity, dtype=np.float64)
-    
-    if len(query_mz) != len(query_intensity):
-        raise ValueError("query_mz and query_intensity must have same length")
-    if len(ref_mz) != len(ref_intensity):
-        raise ValueError("ref_mz and ref_intensity must have same length")
-    
-    # Get all unique m/z values for alignment grid
-    all_mz = np.concatenate([query_mz, ref_mz])
-    unique_mz = np.unique(np.round(all_mz, 10))  # Round to avoid floating point issues
-    
-    # Initialize aligned arrays
-    aligned_query_intensity = []
-    aligned_ref_intensity = []
-    matched_mz_values = []
-    matched_colors = []
-    num_matched_fragments = 0
-    
-    for mz in unique_mz:
-        # Find matching peaks within tolerance
-        query_matches = np.where(np.abs(query_mz - mz) <= mz_tolerance)[0]
-        ref_matches = np.where(np.abs(ref_mz - mz) <= mz_tolerance)[0]
-        
-        # Take max intensity if multiple matches within tolerance
-        query_intensity_at_mz = np.max(query_intensity[query_matches]) if len(query_matches) > 0 else 0.0
-        ref_intensity_at_mz = np.max(ref_intensity[ref_matches]) if len(ref_matches) > 0 else 0.0
-        
-        aligned_query_intensity.append(query_intensity_at_mz)
-        aligned_ref_intensity.append(ref_intensity_at_mz)
-        
-        # Determine if this is a match and assign color
-        if query_intensity_at_mz > intensity_threshold and ref_intensity_at_mz > intensity_threshold:
-            matched_colors.append('green')
-            matched_mz_values.append(mz)
-            num_matched_fragments += 1
-        else:
-            matched_colors.append('red')
-    
-    # Calculate similarity score using cosine similarity
-    similarity_score = _calculate_cosine_similarity(query_mz, query_intensity, ref_mz, ref_intensity)
-
-    aligned_and_scored = {
-        "ref_mz": ref_mz,
-        "ref_intensity": ref_intensity,
-        "query_mz": query_mz,
-        "query_intensity": query_intensity,
-        "aligned_query_mz": unique_mz,
-        "aligned_query_intensity": np.array(aligned_query_intensity),
-        "aligned_ref_mz": unique_mz,
-        "aligned_ref_intensity": np.array(aligned_ref_intensity),
-        "similarity_score": similarity_score,
-        "matching_fragments": matched_mz_values,
-        "num_matched_fragments": num_matched_fragments,
-        "fragment_colors": matched_colors
-    }
-
-    return aligned_and_scored
-
-
-def _calculate_cosine_similarity(query_mz: np.ndarray, query_intensity: np.ndarray,
-                               ref_mz: np.ndarray, ref_intensity: np.ndarray,
-                               tolerance: float = 0.005) -> float:
-    """
-    Calculate cosine similarity between two spectra using matchms.
-    
-    Args:
-        query_mz: Query spectrum m/z values
-        query_intensity: Query spectrum intensities  
-        ref_mz: Reference spectrum m/z values
-        ref_intensity: Reference spectrum intensities
-        tolerance: m/z tolerance for matching
-    
-    Returns:
-        Cosine similarity score (0.0 to 1.0)
-    """
+def _extract_simple_eic_data(eic_row: pd.Series, filename: str) -> Optional[Dict]:
+    """Extract simple EIC data from a row - pure data extraction."""
     try:
-        # Filter out zero intensities and ensure arrays are positive
-        query_mask = query_intensity > 0
-        ref_mask = ref_intensity > 0
+        intensities = eic_row.get('i', np.array([]))
+        rts = eic_row.get('rt', np.array([]))
+        mzs = eic_row.get('mz', np.array([]))
         
-        if not np.any(query_mask) or not np.any(ref_mask):
-            return 0.0
+        if len(intensities) == 0 or len(rts) == 0:
+            return None
         
-        query_mz_filtered = query_mz[query_mask]
-        query_intensity_filtered = query_intensity[query_mask]
-        ref_mz_filtered = ref_mz[ref_mask]
-        ref_intensity_filtered = ref_intensity[ref_mask]
+        # Find peak values
+        max_idx = np.argmax(intensities)
+        rt_peak = rts[max_idx]
+        intensity_peak = intensities[max_idx]
+        mz_peak = mzs[max_idx] if len(mzs) > 0 else 0.0
         
-        # Create matchms Spectrum objects with proper metadata
-        query_spectrum = Spectrum(
-            mz=query_mz_filtered, 
-            intensities=query_intensity_filtered,
-            metadata={'precursor_mz': float(np.median(query_mz_filtered))}
-        )
-        ref_spectrum = Spectrum(
-            mz=ref_mz_filtered, 
-            intensities=ref_intensity_filtered,
-            metadata={'precursor_mz': float(np.median(ref_mz_filtered))}
-        )
+        # Calculate simple errors
+        atlas_rt_peak = eic_row.get('rt_peak', 0.0)
+        atlas_mz = eic_row.get('mz', 0.0)
+        ppm_error = abs(mz_peak - atlas_mz) / atlas_mz * 1e6 if atlas_mz > 0 else 0.0
+        rt_error = rt_peak - atlas_rt_peak
         
-        # Calculate cosine similarity - correct calling syntax
-        cosine_hungarian = CosineHungarian(tolerance=tolerance)
-        score = cosine_hungarian(query_spectrum, ref_spectrum)
-        logger.info(f"Cosine similarity score between query and reference spectra: {score}")
-
-        return float(score)
-    
+        result = {
+            "rt_vals": rts.tolist() if hasattr(rts, 'tolist') else list(rts),
+            "i_vals": intensities.tolist() if hasattr(intensities, 'tolist') else list(intensities),
+            "mz_vals": mzs.tolist() if hasattr(mzs, 'tolist') else list(mzs),
+            "intensity_peak": float(intensity_peak),
+            "rt_peak": float(rt_peak),
+            "mz_peak": float(mz_peak),
+            "ppm_diff": float(ppm_error),
+            "rt_diff": float(rt_error),
+        }
+        
+        return result
+        
     except Exception as e:
-        # If similarity calculation fails, return 0.0
-        return 0.0
+        logger.error(f"Error extracting EIC data for {filename}: {e}")
+        return None
 
-def _find_hits_for_spectrum(spectrum: dcl.MS2Spectrum, reference_df: pd.DataFrame, config: Dict) -> List[dcl.MS2Hit]:
-    """Find reference hits for an MS2Spectrum object using standardized spectrum handlers."""
-    if not spectrum.inchi_key:
+def _extract_simple_ms2_data(ms2_row: pd.Series, filename: str, reference_df: Optional[pd.DataFrame], 
+                            config: Dict) -> Optional[Dict]:
+    """Extract simple MS2 data from a row - pure data extraction."""
+    try:
+        inchi_key = ms2_row.get('inchi_key', '')
+        
+        # Parse spectrum data
+        spectrum_data = ms2_row.get('spectrum', [[], []])
+        if len(spectrum_data) != 2 or len(spectrum_data[0]) == 0:
+            return None
+        
+        mz_values = np.array(spectrum_data[0])
+        intensity_values = np.array(spectrum_data[1])
+        
+        # Create simple MS2 entry
+        ms2_entry = {
+            "inchi_key": inchi_key,
+            "spectrum": [mz_values.tolist(), intensity_values.tolist()],
+            "intensity_peak": float(np.max(intensity_values)) if len(intensity_values) > 0 else 0.0,
+            "rt": float(ms2_row.get('rt', 0.0)),
+            "precursor_mz": float(ms2_row.get('precursor_mz', 0.0)),
+            "filename": filename
+        }
+        
+        # Find hits if reference database available
+        hits = []
+        if reference_df is not None:
+            hits = _find_simple_hits(inchi_key, mz_values, intensity_values, reference_df, config)
+        
+        return {
+            'entry': ms2_entry,
+            'hits': hits
+        }
+        
+    except Exception as e:
+        logger.error(f"Error extracting MS2 data for {filename}: {e}")
+        return None
+
+def _find_simple_hits(inchi_key: str, mz_values: np.ndarray, intensity_values: np.ndarray, 
+                     reference_df: pd.DataFrame, config: Dict) -> List[Dict]:
+    """Find reference hits - returns simple hit dictionaries."""
+    if not inchi_key:
         return []
     
     # Find matching reference spectra
-    matching_refs = reference_df[reference_df['inchi_key'] == spectrum.inchi_key]
+    matching_refs = reference_df[reference_df['inchi_key'] == inchi_key]
     if matching_refs.empty:
         return []
     
     hits = []
     
     for _, ref_row in matching_refs.iterrows():
-        ref_spectrum_data = ref_row.get('spectrum', None)
-        if ref_spectrum_data is None:
+        try:
+            ref_spectrum_data = ref_row.get('spectrum', None)
+            if ref_spectrum_data is None or len(ref_spectrum_data) != 2:
+                continue
+            
+            # Simple spectrum comparison
+            match_data = _simple_spectrum_comparison(
+                mz_values, intensity_values,
+                np.array(ref_spectrum_data[0]), np.array(ref_spectrum_data[1])
+            )
+
+            # Create simple hit data
+            hit_data = {
+                'database': str(ref_row.get('database', 'unknown')),
+                'ref_id': str(ref_row.get('id', '')),
+                'score': float(match_data.get('similarity_score', 0.0)),
+                'num_matches': int(match_data.get('num_matched_fragments', 0)),
+                'ref_name': str(ref_row.get('name', 'Unknown')),
+                'ref_precursor_mz': float(ref_row.get('precursor_mz', 0.0)),
+                'ref_mz_values': match_data.get('ref_mz', []),
+                'ref_intensity_values': match_data.get('ref_intensity', []),
+                'matched_fragments': match_data.get('matching_fragments', []),
+                'fragment_colors': match_data.get('fragment_colors', [])
+            }
+
+            hits.append(hit_data)
+            
+        except Exception as e:
+            logger.error(f"Error processing reference hit: {e}")
             continue
-        
-        # Use standardized spectrum comparison for alignment and fragment matching
-        match_data = _align_spectra_for_comparison(
-            spectrum.mz_values, spectrum.intensity_values,
-            ref_spectrum_data[0], ref_spectrum_data[1]
-        )
-
-        hit_data = {
-            'database': ref_row.get('database', 'unknown'),
-            'ref_id': str(ref_row.get('id', '')),
-            'score': match_data.get('similarity_score', 0.0),
-            'num_matches': match_data.get('num_matched_fragments', 0),
-            'ref_name': ref_row.get('name', 'Unknown'),
-            'ref_precursor_mz': ref_row.get('precursor_mz', 0.0),
-            'ref_mz_values': match_data.get('ref_mz', []),
-            'ref_intensity_values': match_data.get('ref_intensity', []),
-            'query_mz_aligned': match_data.get('aligned_query_mz', []),
-            'query_intensity_aligned': match_data.get('aligned_query_intensity', []),
-            'ref_mz_aligned': match_data.get('aligned_ref_mz', []),
-            'ref_intensity_aligned': match_data.get('aligned_ref_intensity', []),
-            'matched_fragments': match_data.get('matching_fragments', []),
-            'fragment_colors': match_data.get('fragment_colors', [])
-        }
-
-        # Create hit object
-        hit = dcl.MS2Hit(**hit_data)
-        hits.append(hit)
     
     return hits
 
-def prepare_feature_tools_inputs(atlas_df: pd.DataFrame, h5_files: List[str], 
-                                ppm_tolerance: float = 20, extra_time: float = 0.1) -> List[Dict]:
+def _simple_spectrum_comparison(query_mz: np.ndarray, query_intensity: np.ndarray,
+                               ref_mz: np.ndarray, ref_intensity: np.ndarray) -> Dict:
+    """Simple spectrum comparison - returns basic similarity metrics."""
+    try:
+        # Basic fragment matching with simple tolerance
+        mz_tolerance = 0.02  # 20 ppm at m/z 1000
+        
+        matched_fragments = []
+        fragment_colors = []
+        
+        for i, qmz in enumerate(query_mz):
+            # Find matching reference peaks
+            mz_diffs = np.abs(ref_mz - qmz)
+            match_idx = np.where(mz_diffs <= mz_tolerance)[0]
+            
+            if len(match_idx) > 0:
+                # Take closest match
+                best_match = match_idx[np.argmin(mz_diffs[match_idx])]
+                matched_fragments.append(float(qmz))
+                fragment_colors.append('red')  # Simple coloring
+        
+        # Calculate simple similarity score
+        num_matches = len(matched_fragments)
+        total_possible = min(len(query_mz), len(ref_mz))
+        similarity_score = num_matches / max(total_possible, 1) if total_possible > 0 else 0.0
+        
+        return {
+            'similarity_score': similarity_score,
+            'num_matched_fragments': num_matches,
+            'matching_fragments': matched_fragments,
+            'fragment_colors': fragment_colors,
+            'ref_mz': ref_mz.tolist(),
+            'ref_intensity': ref_intensity.tolist()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in spectrum comparison: {e}")
+        return {
+            'similarity_score': 0.0,
+            'num_matched_fragments': 0,
+            'matching_fragments': [],
+            'fragment_colors': [],
+            'ref_mz': [],
+            'ref_intensity': []
+        }
+
+def _add_summary_statistics(compound_data: Dict):
+    """Add summary statistics to compound data - simple calculations only."""
+    try:
+        # Add EIC summary statistics
+        eic_files = compound_data.get('eic_files', {})
+        if eic_files:
+            # Simple file counting
+            compound_data['total_files_detected'] = len(eic_files)
+        
+        # Add MS2 summary statistics
+        ms2_files = compound_data.get('ms2_files', {})
+        if ms2_files:
+            # Count files with MS2 data
+            files_with_data = len([f for f in ms2_files.values() if f.get('ms2_entries')])
+            compound_data['ms2_files_with_data'] = files_with_data
+            
+            # Find best hit and best MS2 across all files
+            all_hits = []
+            all_entries = []
+            
+            for file_data in ms2_files.values():
+                all_hits.extend(file_data.get('all_hits', []))
+                all_entries.extend(file_data.get('ms2_entries', []))
+            
+            # Add file-level best hit and best MS2
+            for filename, file_data in ms2_files.items():
+                hits = file_data.get('all_hits', [])
+                entries = file_data.get('ms2_entries', [])
+                
+                # Best hit by score
+                if hits:
+                    best_hit = max(hits, key=lambda h: h.get('score', 0.0))
+                    file_data['best_hit'] = best_hit
+                    file_data['num_hits'] = len(hits)
+                else:
+                    file_data['best_hit'] = {}
+                    file_data['num_hits'] = 0
+                
+                # Best MS2 by intensity
+                if entries:
+                    best_ms2 = max(entries, key=lambda e: e.get('intensity_peak', 0.0))
+                    file_data['best_ms2'] = best_ms2
+                    file_data['num_ms2_entries'] = len(entries)
+                else:
+                    file_data['best_ms2'] = {}
+                    file_data['num_ms2_entries'] = 0
+        
+    except Exception as e:
+        logger.error(f"Error adding summary statistics: {e}")
+
+def _extract_data_parallel_simple(input_data_list: List[Dict], reference_df: Optional[pd.DataFrame], 
+                                 config: Dict, max_workers: int) -> Dict[str, Dict]:
+    """Extract data in parallel - returns simple data structures only."""
+    
+    logger.info(f"Setting up {max_workers} workers for parallel processing...")
+    
+    # Process files in parallel
+    experimental_data = {}
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for i, file_input in enumerate(input_data_list):
+            # Pass file_input directly rather than as part of a tuple
+            future = executor.submit(_process_single_file_simple, i, file_input, reference_df, config)
+            futures.append(future)
+        
+        # Collect results with progress bar
+        for i, future in enumerate(tqdm(futures, desc="Processing files in parallel")):
+            try:
+                file_path, file_experimental_data = future.result()
+                
+                # Merge file data into experimental_data - simple merging
+                for inchi_key, compound_data in file_experimental_data.items():
+                    if inchi_key not in experimental_data:
+                        experimental_data[inchi_key] = {
+                            'eic_files': {},
+                            'ms2_files': {}
+                        }
+                    
+                    # Merge EIC files
+                    if 'eic_files' in compound_data:
+                        experimental_data[inchi_key]['eic_files'].update(compound_data['eic_files'])
+                    
+                    # Merge MS2 files
+                    if 'ms2_files' in compound_data:
+                        experimental_data[inchi_key]['ms2_files'].update(compound_data['ms2_files'])
+                
+                # Log progress
+                if len(file_experimental_data) > 0:
+                    logger.info(f"  Completed {i+1}/{len(input_data_list)}: {Path(file_path).name} - {len(file_experimental_data)} compounds")
+                else:
+                    logger.warning(f"  Completed {i+1}/{len(input_data_list)}: {Path(file_path).name} - No data extracted")
+                    
+            except Exception as e:
+                logger.error(f"  Error in parallel processing for file {i+1}: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                continue
+
+    # Post-process to add summary statistics
+    for inchi_key, compound_data in experimental_data.items():
+        _add_summary_statistics(compound_data)
+    
+    logger.info(f"Parallel processing complete: {len(experimental_data)} compounds with data")
+    return experimental_data
+
+def _process_single_file_simple(file_index: int, file_input: Dict, reference_df: Optional[pd.DataFrame], 
+                               config: Dict) -> Tuple[str, Dict[str, Dict]]:
+    """Process a single file - returns simple data structures only."""
+    file_path = file_input['lcmsrun']
+    filename = Path(file_path).name
+    
+    try:
+        # Log what we received to debug
+        logger.debug(f"Worker {file_index}: Processing {filename}")
+        logger.debug(f"Worker {file_index}: file_input keys: {list(file_input.keys())}")
+        logger.debug(f"Worker {file_index}: atlas shape: {file_input['atlas'].shape}")  # Changed from 'atlas_df'
+        logger.debug(f"Worker {file_index}: atlas columns: {list(file_input['atlas'].columns)}")  # Changed from 'atlas_df'
+        
+        # Extract raw data
+        data = ftt.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
+        
+        file_experimental_data = {}
+        
+        # Process EIC data - simple extraction only
+        if not data['ms1_data'].empty:
+            adduct_eics = ftt.group_duplicates(data['ms1_data'], 'label', make_string=False)
+            
+            if not adduct_eics.empty and 'label' in adduct_eics.columns:
+                for idx, eic_row in adduct_eics.iterrows():
+                    inchi_key = eic_row.get('inchi_key', '')
+                    if not inchi_key:
+                        continue
+                    
+                    # Initialize simple data structure
+                    if inchi_key not in file_experimental_data:
+                        file_experimental_data[inchi_key] = {
+                            'eic_files': {},
+                            'ms2_files': {}
+                        }
+                    
+                    # Extract simple EIC data
+                    eic_data = _extract_simple_eic_data(eic_row, filename)
+                    if eic_data:
+                        file_experimental_data[inchi_key]['eic_files'][filename] = eic_data
+        
+        # Process MS2 data - simple extraction only
+        if not data['ms2_data'].empty:
+            ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
+            
+            if not ms2_summary.empty:
+                for idx, ms2_row in ms2_summary.iterrows():
+                    inchi_key = ms2_row.get('inchi_key', '')
+                    if not inchi_key:
+                        continue
+                    
+                    # Initialize simple data structure
+                    if inchi_key not in file_experimental_data:
+                        file_experimental_data[inchi_key] = {
+                            'eic_files': {},
+                            'ms2_files': {}
+                        }
+                    
+                    # Extract simple MS2 data
+                    ms2_data = _extract_simple_ms2_data(ms2_row, filename, reference_df, config)
+                    if ms2_data:
+                        if filename not in file_experimental_data[inchi_key]['ms2_files']:
+                            file_experimental_data[inchi_key]['ms2_files'][filename] = {
+                                "ms2_entries": [],
+                                "all_hits": []
+                            }
+                        
+                        file_experimental_data[inchi_key]['ms2_files'][filename]["ms2_entries"].append(ms2_data['entry'])
+                        file_experimental_data[inchi_key]['ms2_files'][filename]["all_hits"].extend(ms2_data['hits'])
+        
+        logger.debug(f"Worker {file_index}: Extracted data for {len(file_experimental_data)} compounds")
+        return file_path, file_experimental_data
+        
+    except Exception as e:
+        # Log the error but return empty data structure
+        logger.error(f"Worker {file_index}: Error processing {filename}: {e}")
+        import traceback
+        logger.error(f"Worker {file_index}: Traceback: {traceback.format_exc()}")
+        return file_path, {}
+
+def prepare_feature_tools_inputs(
+    atlas_df: pd.DataFrame,
+    h5_files: List[str],
+    ppm_tolerance: float = 5.0,
+    extra_time: float = 1.0
+) -> List[Dict]:
     """
-    Prepare input parameters for feature_tools.get_data() function using setup_file_slicing_parameters
+    Prepare input dictionaries for feature extraction.
+    Simplified to focus on data preparation only.
     
     Args:
-        atlas_df: Atlas DataFrame with required columns
-        h5_files: List of H5 file paths
-        ppm_tolerance: m/z tolerance in ppm (default: 20)
-        extra_time: Additional time window in minutes (default: 0.1)
+        atlas_df: DataFrame containing atlas compounds
+        h5_files: List of HDF5 file paths
+        ppm_tolerance: m/z tolerance in ppm
+        extra_time: Extra RT window in minutes
     
     Returns:
-        List of input dictionaries for feature_tools.get_data()
+        List of input dictionaries for feature_tools
     """
-    # Auto-detect polarity from atlas
-    polarity = 'positive'
-    if 'polarity' in atlas_df.columns:
-        polarity = atlas_df['polarity'].iloc[0] if not atlas_df['polarity'].empty else 'positive'
-
-    # Use setup_file_slicing_parameters to prepare inputs
-    input_data_list = ftt.setup_file_slicing_parameters(
-        atlas=atlas_df,
-        filenames=h5_files,
-        extra_time=extra_time,
-        ppm_tolerance=ppm_tolerance,
-        polarity=polarity,
-        project_dir=False,  # Don't save intermediate files
-        overwrite=True
-    )
+    logger.info(f"Preparing feature extraction inputs for {len(h5_files)} files...")
     
+    # Ensure atlas_df has all required columns for feature_tools
+    required_columns = ['inchi_key', 'compound_name', 'label', 'mz', 'rt_peak', 'rt_min', 'rt_max', 
+                       'adduct', 'polarity', 'chromatography', 'mz_tolerance']
+    
+    # Check for missing columns and add defaults if needed
+    atlas_df_copy = atlas_df.copy()
+    
+    for col in required_columns:
+        if col not in atlas_df_copy.columns:
+            if col == 'label':
+                atlas_df_copy['label'] = atlas_df_copy.get('compound_name', 'Unknown')
+            elif col == 'polarity':
+                # Try to infer from existing columns or use a default
+                atlas_df_copy['polarity'] = atlas_df_copy.get('polarity', 'positive')
+            elif col == 'chromatography':
+                atlas_df_copy['chromatography'] = atlas_df_copy.get('chromatography', 'HILIC')
+            elif col == 'mz_tolerance':
+                atlas_df_copy['mz_tolerance'] = atlas_df_copy.get('mz_tolerance', ppm_tolerance)
+            else:
+                logger.warning(f"Missing required column '{col}' in atlas DataFrame")
+                atlas_df_copy[col] = ''
+    
+    # Validate that we have the essential data
+    essential_columns = ['inchi_key', 'mz', 'rt_peak']
+    missing_essential = [col for col in essential_columns if col not in atlas_df_copy.columns or atlas_df_copy[col].isna().all()]
+    
+    if missing_essential:
+        raise ValueError(f"Atlas DataFrame is missing essential columns: {missing_essential}")
+    
+    # Extract atlas-level metadata for feature_tools
+    atlas_polarity = atlas_df_copy['polarity'].iloc[0] if not atlas_df_copy.empty else 'positive'
+    atlas_chromatography = atlas_df_copy['chromatography'].iloc[0] if not atlas_df_copy.empty else 'HILIC'
+    
+    logger.info(f"Atlas DataFrame prepared with {len(atlas_df_copy)} compounds and columns: {list(atlas_df_copy.columns)}")
+    logger.info(f"Atlas polarity: {atlas_polarity}, chromatography: {atlas_chromatography}")
+    
+    # Create input list for feature_tools
+    input_data_list = []
+    
+    for file_path in h5_files:
+        try:
+            # Create input dictionary with correct key names for feature_tools
+            file_input = {
+                'lcmsrun': file_path,
+                'atlas': atlas_df_copy,
+                'polarity': atlas_polarity,
+                'chromatography': atlas_chromatography,
+                'ppm_tolerance': ppm_tolerance,
+                'extra_time': extra_time
+            }
+            input_data_list.append(file_input)
+            
+        except Exception as e:
+            logger.error(f"Error preparing input for {Path(file_path).name}: {e}")
+            continue
+    
+    logger.info(f"Prepared {len(input_data_list)} input dictionaries")
     return input_data_list

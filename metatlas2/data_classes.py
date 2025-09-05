@@ -2,459 +2,486 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
+import json
 from pathlib import Path
 
 @dataclass
-class EICData:
-    """Represents extracted ion chromatogram data for a single compound in a file."""
-    inchi_key: str
+class CompoundData:
+    """Flat class representing all compound data throughout targeted analysis workflow."""
+    
+    # Core identifiers
     compound_uid: str
-    label: str
-    adduct: str
-    filename: str
-    file_path: str
-    
-    # Chromatographic data
-    rt_values: np.ndarray
-    mz_values: np.ndarray
-    intensity_values: np.ndarray
-    
-    # Peak information
-    rt_peak: float
-    mz_peak: float
-    intensity_peak: float
-    
-    # Atlas reference data
-    atlas_rt_min: float = 0.0
-    atlas_rt_max: float = 0.0
-    atlas_rt_peak: float = 0.0
-    atlas_mz: float = 0.0
-    
-    def __post_init__(self):
-        """Calculate derived properties."""
-        self.rt_values = np.asarray(self.rt_values)
-        self.mz_values = np.asarray(self.mz_values)
-        self.intensity_values = np.asarray(self.intensity_values)
-    
-    @property
-    def ppm_error(self) -> float:
-        """Calculate PPM error from atlas m/z."""
-        if self.atlas_mz > 0:
-            return abs(self.mz_peak - self.atlas_mz) / self.atlas_mz * 1e6
-        return 0.0
-    
-    @property
-    def rt_error(self) -> float:
-        """Calculate RT error from atlas RT."""
-        return self.rt_peak - self.atlas_rt_peak
-    
-    def is_within_rt_window(self, rt_min: float, rt_max: float) -> bool:
-        """Check if peak RT is within specified window."""
-        return rt_min <= self.rt_peak <= rt_max
-    
-    def get_intensity_in_rt_range(self, rt_min: float, rt_max: float) -> float:
-        """Get maximum intensity within RT range."""
-        mask = (self.rt_values >= rt_min) & (self.rt_values <= rt_max)
-        if np.any(mask):
-            return np.max(self.intensity_values[mask])
-        return 0.0
-
-@dataclass
-class MS2Hit:
-    """Represents a reference database match for an MS2 spectrum with standardized data."""
-    database: str
-    ref_id: str
-    score: float
-    num_matches: int
-    
-    # Reference spectrum data
-    ref_name: str
-    ref_precursor_mz: float
-    ref_mz_values: np.ndarray
-    ref_intensity_values: np.ndarray
-    
-    # Aligned spectra for comparison (consistent length)
-    query_mz_aligned: np.ndarray
-    query_intensity_aligned: np.ndarray
-    ref_mz_aligned: np.ndarray
-    ref_intensity_aligned: np.ndarray
-    
-    # Fragment matching info (standardized)
-    matched_fragments: List[float] = field(default_factory=list)
-    fragment_colors: List[str] = field(default_factory=list)
-    
-    def __post_init__(self):
-        """Convert arrays to numpy and validate consistency."""
-        self.ref_mz_values = np.asarray(self.ref_mz_values)
-        self.ref_intensity_values = np.asarray(self.ref_intensity_values)
-        self.query_mz_aligned = np.asarray(self.query_mz_aligned)
-        self.query_intensity_aligned = np.asarray(self.query_intensity_aligned)
-        self.ref_mz_aligned = np.asarray(self.ref_mz_aligned)
-        self.ref_intensity_aligned = np.asarray(self.ref_intensity_aligned)
-        
-        # Validate aligned arrays have consistent lengths
-        aligned_lengths = [
-            len(self.query_mz_aligned),
-            len(self.query_intensity_aligned), 
-            len(self.ref_mz_aligned),
-            len(self.ref_intensity_aligned)
-        ]
-        if len(set(aligned_lengths)) > 1:
-            raise ValueError("All aligned arrays must have the same length")
-        
-        # Validate fragment colors match aligned array length
-        if len(self.fragment_colors) > 0 and len(self.fragment_colors) != aligned_lengths[0]:
-            raise ValueError("Fragment colors length must match aligned array length")
-    
-    @property
-    def is_valid_hit(self) -> bool:
-        """Check if this is a valid hit with meaningful data."""
-        return (self.score > 0 and 
-                self.num_matches > 0 and 
-                len(self.ref_mz_values) > 0 and
-                len(self.query_mz_aligned) > 0)
-    
-    @property
-    def total_ref_fragments(self) -> int:
-        """Total number of fragments in reference spectrum."""
-        return len(self.ref_mz_values)
-    
-    @property
-    def total_query_fragments(self) -> int:
-        """Total number of fragments in query spectrum (from aligned data)."""
-        return np.sum(self.query_intensity_aligned > 0)
-    
-    @property
-    def match_ratio(self) -> float:
-        """Ratio of matched fragments to total query fragments."""
-        total_query = self.total_query_fragments
-        return self.num_matches / max(total_query, 1)
-
-@dataclass
-class MS2Spectrum:
-    """Represents a single MS2 spectrum with associated metadata and hits."""
     inchi_key: str
-    compound_uid: str
-    label: str
-    adduct: str
-    filename: str
-    file_path: str
+    compound_name: str
     
-    # Spectrum data
-    precursor_mz: float
-    precursor_intensity: float
-    rt: float
-    mz_values: np.ndarray
-    intensity_values: np.ndarray
+    # Chemical properties (immutable from database)
+    formula: str = ""
+    mz: float = 0.0
+    adduct: str = ""
+    polarity: str = ""
+    chromatography: str = ""
+    mz_tolerance: float = 5.0
     
-    # Reference hits
-    hits: List[MS2Hit] = field(default_factory=list)
+    # Original atlas RT data (immutable reference)
+    original_rt_peak: float = 0.0
+    original_rt_min: float = 0.0
+    original_rt_max: float = 0.0
     
-    # Atlas reference data
-    atlas_rt_min: float = 0.0
-    atlas_rt_max: float = 0.0
-    atlas_rt_peak: float = 0.0
-    atlas_mz: float = 0.0
+    # Current RT data (modifiable during analysis)
+    rt_peak: float = 0.0
+    rt_min: float = 0.0
+    rt_max: float = 0.0
+    
+    # Analysis annotations (modifiable)
+    ms1_notes: str = "keep"
+    ms2_notes: str = "no selection"
+    analyst_notes: str = ""
+    identification_notes: str = ""
+    
+    # Best EIC results (populated during analysis)
+    best_eic_file: str = ""
+    best_eic_rt: float = 0.0
+    best_eic_mz: float = 0.0
+    best_eic_intensity: float = 0.0
+    best_eic_ppm_error: float = 0.0
+    best_eic_rt_error: float = 0.0
+    
+    # Average EIC results
+    avg_eic_rt: float = 0.0
+    avg_eic_intensity: float = 0.0
+    avg_eic_mz: float = 0.0
+    
+    # Best MS2 results
+    best_ms2_file: str = ""
+    best_ms2_database: str = ""
+    best_ms2_ref_id: str = ""
+    best_ms2_rt: float = 0.0
+    best_ms2_intensity: float = 0.0
+    best_ms2_mz: float = 0.0
+    best_ms2_score: float = 0.0
+    best_ms2_num_matches: int = 0
+    best_ms2_ref_frags: int = 0
+    best_ms2_data_frags: int = 0
+    best_ms2_matched_fragments: List[float] = field(default_factory=list)
+    best_ms2_selection_method: str = "none"
+    
+    # Average MS2 results
+    avg_ms2_score: float = 0.0
+    
+    # Detection summary
+    total_files_detected: int = 0
+    ms2_files_with_data: int = 0
+    
+    # Raw data storage (for GUI compatibility)
+    eic_data_files: Dict[str, Dict] = field(default_factory=dict)
+    ms2_data_files: Dict[str, Dict] = field(default_factory=dict)
+    suggested_rt_bounds: Optional[Dict] = None
+    isomers: List[Dict] = field(default_factory=list)
+    
+    # Workflow state tracking
+    is_rt_modified: bool = False
+    is_annotation_modified: bool = False
     
     def __post_init__(self):
-        """Convert spectrum arrays to numpy."""
-        self.mz_values = np.asarray(self.mz_values)
-        self.intensity_values = np.asarray(self.intensity_values)
+        """Initialize derived values after creation."""
+        if self.rt_peak == 0.0 and self.original_rt_peak > 0.0:
+            self.rt_peak = self.original_rt_peak
+            self.rt_min = self.original_rt_min
+            self.rt_max = self.original_rt_max
     
-    @property
-    def has_hits(self) -> bool:
-        """Check if spectrum has any reference hits."""
-        return len(self.hits) > 0
+    @classmethod
+    def from_atlas_row(cls, atlas_row: pd.Series) -> 'CompoundData':
+        """Create from atlas DataFrame row."""
+        return cls(
+            compound_uid=atlas_row.get('compound_uid', ''),
+            inchi_key=atlas_row.get('inchi_key', ''),
+            compound_name=atlas_row.get('compound_name', atlas_row.get('label', '')),
+            formula=atlas_row.get('formula', ''),
+            mz=atlas_row.get('mz', 0.0),
+            adduct=atlas_row.get('adduct', ''),
+            polarity=atlas_row.get('polarity', ''),
+            chromatography=atlas_row.get('chromatography', ''),
+            mz_tolerance=atlas_row.get('mz_tolerance', 5.0),
+            original_rt_peak=atlas_row.get('rt_peak', 0.0),
+            original_rt_min=atlas_row.get('rt_min', 0.0),
+            original_rt_max=atlas_row.get('rt_max', 0.0),
+            rt_peak=atlas_row.get('rt_peak', 0.0),
+            rt_min=atlas_row.get('rt_min', 0.0),
+            rt_max=atlas_row.get('rt_max', 0.0)
+        )
     
-    @property
-    def best_hit(self) -> Optional[MS2Hit]:
-        """Get the hit with highest score."""
-        if not self.hits:
-            return None
-        return max(self.hits, key=lambda h: h.score)
+    def add_eic_data(self, filename: str, eic_dict: Dict):
+        """Add EIC data for a file."""
+        self.eic_data_files[filename] = eic_dict
+        self.total_files_detected = len(self.eic_data_files)
+        self._update_best_eic()
     
-    @property
-    def num_fragments(self) -> int:
-        """Number of fragments in spectrum."""
-        return len(self.mz_values)
+    def add_ms2_data(self, filename: str, ms2_dict: Dict):
+        """Add MS2 data for a file."""
+        self.ms2_data_files[filename] = ms2_dict
+        if ms2_dict.get('ms2_entries'):
+            self.ms2_files_with_data += 1
+        self._update_best_ms2()
     
-    @property
-    def max_intensity(self) -> float:
-        """Maximum fragment intensity."""
-        return np.max(self.intensity_values) if len(self.intensity_values) > 0 else 0.0
+    def update_rt_bounds(self, rt_min: float, rt_max: float, rt_peak: float):
+        """Update RT bounds and mark as modified."""
+        self.rt_min = rt_min
+        self.rt_max = rt_max
+        self.rt_peak = rt_peak
+        self.is_rt_modified = True
     
-    def get_hits_by_database(self, database: str) -> List[MS2Hit]:
-        """Get all hits from a specific database."""
-        return [hit for hit in self.hits if hit.database == database]
+    def update_annotations(self, ms1_notes: str = None, ms2_notes: str = None, 
+                          analyst_notes: str = None, identification_notes: str = None):
+        """Update annotations and mark as modified."""
+        if ms1_notes is not None:
+            self.ms1_notes = ms1_notes
+            self.is_annotation_modified = True
+        if ms2_notes is not None:
+            self.ms2_notes = ms2_notes
+            self.is_annotation_modified = True
+        if analyst_notes is not None:
+            self.analyst_notes = analyst_notes
+            self.is_annotation_modified = True
+        if identification_notes is not None:
+            self.identification_notes = identification_notes
+            self.is_annotation_modified = True
     
-    def get_hits_above_score(self, min_score: float) -> List[MS2Hit]:
-        """Get hits above a minimum score threshold."""
-        return [hit for hit in self.hits if hit.score >= min_score]
-
-class CompoundDataCollection:
-    """Collection of EIC and MS2 data for a single compound across all files."""
+    def _update_best_eic(self):
+        """Update best EIC statistics from current data."""
+        if not self.eic_data_files:
+            return
+        
+        best_intensity = 0.0
+        best_file = ""
+        
+        for filename, eic_data in self.eic_data_files.items():
+            intensity = eic_data.get('intensity_peak', 0.0)
+            if intensity > best_intensity:
+                best_intensity = intensity
+                best_file = filename
+                self.best_eic_file = filename
+                self.best_eic_rt = eic_data.get('rt_peak', 0.0)
+                self.best_eic_mz = eic_data.get('mz_peak', 0.0)
+                self.best_eic_intensity = intensity
+                self.best_eic_ppm_error = eic_data.get('ppm_diff', 0.0)
+                self.best_eic_rt_error = eic_data.get('rt_diff', 0.0)
+        
+        # Calculate averages
+        if self.eic_data_files:
+            intensities = [d.get('intensity_peak', 0.0) for d in self.eic_data_files.values()]
+            rts = [d.get('rt_peak', 0.0) for d in self.eic_data_files.values()]
+            mzs = [d.get('mz_peak', 0.0) for d in self.eic_data_files.values()]
+            
+            self.avg_eic_intensity = np.mean(intensities)
+            self.avg_eic_rt = np.mean(rts)
+            self.avg_eic_mz = np.mean(mzs)
     
-    def __init__(self, inchi_key: str):
-        self.inchi_key = inchi_key
-        self.eic_data: List[EICData] = []
-        self.ms2_spectra: List[MS2Spectrum] = []
-    
-    def add_eic(self, eic: EICData):
-        """Add EIC data for this compound."""
-        if eic.inchi_key == self.inchi_key:
-            self.eic_data.append(eic)
-    
-    def add_ms2_spectrum(self, spectrum: MS2Spectrum):
-        """Add MS2 spectrum for this compound."""
-        if spectrum.inchi_key == self.inchi_key:
-            self.ms2_spectra.append(spectrum)
-    
-    @property
-    def best_eic_by_intensity(self) -> Optional[EICData]:
-        """Get EIC with highest intensity."""
-        if not self.eic_data:
-            return None
-        return max(self.eic_data, key=lambda e: e.intensity_peak)
-    
-    @property
-    def best_ms2_by_score(self) -> Optional[MS2Spectrum]:
-        """Get MS2 spectrum with best hit score."""
-        spectra_with_hits = [s for s in self.ms2_spectra if s.has_hits]
-        if not spectra_with_hits:
-            return None
-        return max(spectra_with_hits, key=lambda s: s.best_hit.score)
-    
-    @property
-    def best_ms2_by_intensity(self) -> Optional[MS2Spectrum]:
-        """Get MS2 spectrum with highest intensity (fallback when no hits)."""
-        if not self.ms2_spectra:
-            return None
-        return max(self.ms2_spectra, key=lambda s: s.precursor_intensity)
-    
-    @property
-    def files_with_eic_data(self) -> List[str]:
-        """Get list of files with EIC data."""
-        return list(set(eic.filename for eic in self.eic_data))
-    
-    @property
-    def files_with_ms2_data(self) -> List[str]:
-        """Get list of files with MS2 data."""
-        return list(set(spec.filename for spec in self.ms2_spectra))
-    
-    def get_eic_by_file(self, filename: str) -> List[EICData]:
-        """Get EIC data for a specific file."""
-        return [eic for eic in self.eic_data if eic.filename == filename]
-    
-    def get_ms2_by_file(self, filename: str) -> List[MS2Spectrum]:
-        """Get MS2 spectra for a specific file."""
-        return [spec for spec in self.ms2_spectra if spec.filename == filename]
-    
-    def get_spectra_with_hits(self) -> List[MS2Spectrum]:
-        """Get all spectra that have reference hits."""
-        return [spec for spec in self.ms2_spectra if spec.has_hits]
-    
-    def get_ms2_in_rt_window(self, rt_min: float, rt_max: float) -> List[MS2Spectrum]:
-        """Get MS2 spectra within RT window, sorted by score/intensity."""
-        in_window = [spec for spec in self.ms2_spectra if rt_min <= spec.rt <= rt_max]
-        # Sort by score if hits available, otherwise by intensity
-        return sorted(in_window, key=lambda s: s.best_hit.score if s.has_hits else s.precursor_intensity, reverse=True)
-    
-    def get_average_hit_score(self) -> float:
-        """Calculate average score across all hits."""
+    def _update_best_ms2(self):
+        """Update best MS2 statistics from current data."""
+        if not self.ms2_data_files:
+            return
+        
+        # Look for best hit first
+        best_score = 0.0
+        best_hit_data = None
+        
+        for filename, ms2_data in self.ms2_data_files.items():
+            best_hit = ms2_data.get('best_hit', {})
+            if best_hit and best_hit.get('score', 0.0) > best_score:
+                best_score = best_hit.get('score', 0.0)
+                best_hit_data = best_hit
+                self.best_ms2_file = filename
+                self.best_ms2_selection_method = "reference_hit"
+        
+        if best_hit_data:
+            self.best_ms2_database = best_hit_data.get('database', '')
+            self.best_ms2_ref_id = best_hit_data.get('ref_id', '')
+            self.best_ms2_rt = best_hit_data.get('rt_measured', 0.0)
+            self.best_ms2_intensity = best_hit_data.get('qry_intensity_peak', 0.0)
+            self.best_ms2_mz = best_hit_data.get('mz_measured', 0.0)
+            self.best_ms2_score = best_hit_data.get('score', 0.0)
+            self.best_ms2_num_matches = best_hit_data.get('num_matches', 0)
+            self.best_ms2_ref_frags = best_hit_data.get('ref_frags', 0)
+            self.best_ms2_data_frags = best_hit_data.get('data_frags', 0)
+            self.best_ms2_matched_fragments = best_hit_data.get('qry_frag_matches', [])
+        else:
+            # No hits, find best by intensity
+            best_intensity = 0.0
+            for filename, ms2_data in self.ms2_data_files.items():
+                best_ms2 = ms2_data.get('best_ms2', {})
+                intensity = best_ms2.get('intensity_peak', 0.0)
+                if intensity > best_intensity:
+                    best_intensity = intensity
+                    self.best_ms2_file = filename
+                    self.best_ms2_rt = best_ms2.get('rt', 0.0)
+                    self.best_ms2_intensity = intensity
+                    self.best_ms2_mz = best_ms2.get('precursor_mz', 0.0)
+                    self.best_ms2_selection_method = "highest_intensity"
+        
+        # Calculate average score
         all_scores = []
-        for spectrum in self.ms2_spectra:
-            for hit in spectrum.hits:
-                if hit.is_valid_hit:
-                    all_scores.append(hit.score)
-        return np.mean(all_scores) if all_scores else 0.0
+        for ms2_data in self.ms2_data_files.values():
+            for hit in ms2_data.get('all_hits', []):
+                all_scores.append(hit.get('score', 0.0))
+        
+        self.avg_ms2_score = np.mean(all_scores) if all_scores else 0.0
+    
+    def to_plot_data_format(self) -> Dict:
+        """Convert to GUI plot_data format for compatibility."""
+        return {
+            'original_atlas_data': {
+                'compound_name': self.compound_name,
+                'inchi_key': self.inchi_key,
+                'formula': self.formula,
+                'mz': self.mz,
+                'adduct': self.adduct,
+                'polarity': self.polarity,
+                'rt_peak': self.original_rt_peak,
+                'rt_min': self.original_rt_min,
+                'rt_max': self.original_rt_max,
+                'mz_tolerance': self.mz_tolerance,
+                'isomers': self.isomers,
+                'ms1_notes': 'keep',
+                'ms2_notes': 'no selection',
+                'analyst_notes': '',
+                'identification_notes': ''
+            },
+            'new_atlas_data': {
+                'compound_name': self.compound_name,
+                'inchi_key': self.inchi_key,
+                'formula': self.formula,
+                'mz': self.mz,
+                'adduct': self.adduct,
+                'polarity': self.polarity,
+                'rt_peak': self.rt_peak,
+                'rt_min': self.rt_min,
+                'rt_max': self.rt_max,
+                'mz_tolerance': self.mz_tolerance,
+                'isomers': self.isomers,
+                'ms1_notes': self.ms1_notes,
+                'ms2_notes': self.ms2_notes,
+                'analyst_notes': self.analyst_notes,
+                'identification_notes': self.identification_notes
+            },
+            'suggested_rt_bounds_data': self.suggested_rt_bounds,
+            'eic_data': self.eic_data_files,
+            'best_eic': {
+                'file_peak': self.best_eic_file,
+                'rt_peak': self.best_eic_rt,
+                'mz_peak': self.best_eic_mz,
+                'intensity_peak': self.best_eic_intensity,
+                'ppm_diff': self.best_eic_ppm_error,
+                'rt_diff': self.best_eic_rt_error
+            },
+            'avg_eic': {
+                'rt_peak': self.avg_eic_rt,
+                'intensity_peak': self.avg_eic_intensity,
+                'mz_peak': self.avg_eic_mz
+            },
+            'best_ms2': {
+                'file_peak': self.best_ms2_file,
+                'database': self.best_ms2_database,
+                'ref_id': self.best_ms2_ref_id,
+                'rt_peak': self.best_ms2_rt,
+                'intensity_peak': self.best_ms2_intensity,
+                'mz_peak': self.best_ms2_mz,
+                'score': self.best_ms2_score,
+                'num_matches': self.best_ms2_num_matches,
+                'ref_frags': self.best_ms2_ref_frags,
+                'data_frags': self.best_ms2_data_frags,
+                'matched_fragments': self.best_ms2_matched_fragments,
+                'selection_method': self.best_ms2_selection_method
+            },
+            'avg_ms2': {
+                'avg_score': self.avg_ms2_score
+            },
+            'ms2_data': self.ms2_data_files,
+            'is_modified': self.is_rt_modified or self.is_annotation_modified
+        }
+    
+    def to_database_row(self, analysis_uid: str, project_name: str, atlas_uid: str) -> Tuple:
+        """Convert to targeted_analysis table row format."""
+        import load_tools as ldt
+        prov = ldt.get_provenance()
+        
+        return (
+            analysis_uid,
+            project_name, 
+            atlas_uid,
+            self.compound_uid,
+            self.inchi_key,
+            self.compound_name,
+            self.original_rt_peak,
+            self.original_rt_min,
+            self.original_rt_max,
+            self.mz,
+            self.mz_tolerance,
+            self.adduct,
+            json.dumps(self.isomers) if self.isomers else None,
+            self.rt_peak,
+            self.rt_min,
+            self.rt_max,
+            self.is_rt_modified,
+            self.best_eic_file,
+            self.best_eic_rt,
+            self.best_eic_mz,
+            self.best_eic_intensity,
+            self.best_eic_ppm_error,
+            self.best_eic_rt_error,
+            self.avg_eic_rt,
+            self.avg_eic_intensity,
+            self.avg_eic_mz,
+            self.best_ms2_file,
+            self.best_ms2_database,
+            self.best_ms2_ref_id,
+            self.best_ms2_rt,
+            self.best_ms2_intensity,
+            self.best_ms2_mz,
+            self.best_ms2_score,
+            self.best_ms2_num_matches,
+            self.best_ms2_ref_frags,
+            self.best_ms2_data_frags,
+            json.dumps(self.best_ms2_matched_fragments) if self.best_ms2_matched_fragments else None,
+            self.avg_ms2_score,
+            self.total_files_detected,
+            self.ms2_files_with_data,
+            self.best_ms2_score,
+            self.best_ms2_database,
+            self.best_ms2_num_matches or 0,
+            self.ms1_notes,
+            self.ms2_notes,
+            prov["analyst"],
+            prov["timestamp"]
+        )
 
-class ProjectDataCollection:
-    """Collection of all compound data for an experiment."""
+@dataclass
+class ProjectAnalysis:
+    """Flat class managing entire targeted analysis project."""
     
-    def __init__(self):
-        self.compounds: Dict[str, CompoundDataCollection] = {}
+    project_db_path: str
+    atlas_uid: str
+    compounds: Dict[str, CompoundData] = field(default_factory=dict)
     
-    def add_eic_data(self, eic: EICData):
-        """Add EIC data, creating compound collection if needed."""
-        if eic.inchi_key not in self.compounds:
-            self.compounds[eic.inchi_key] = CompoundDataCollection(eic.inchi_key)
-        self.compounds[eic.inchi_key].add_eic(eic)
+    # Add caching metadata
+    _cache_metadata: Dict[str, Any] = field(default_factory=dict, init=False)
     
-    def add_ms2_spectrum(self, spectrum: MS2Spectrum):
-        """Add MS2 spectrum, creating compound collection if needed."""
-        if spectrum.inchi_key not in self.compounds:
-            self.compounds[spectrum.inchi_key] = CompoundDataCollection(spectrum.inchi_key)
-        self.compounds[spectrum.inchi_key].add_ms2_spectrum(spectrum)
+    def __post_init__(self):
+        """Initialize metadata for caching."""
+        self._cache_metadata = {
+            'created_at': pd.Timestamp.now().isoformat(),
+            'last_modified': pd.Timestamp.now().isoformat(),
+            'cache_version': '2.0'
+        }
     
-    def get_compound(self, inchi_key: str) -> Optional[CompoundDataCollection]:
-        """Get compound data collection by inchi_key."""
-        return self.compounds.get(inchi_key)
+    def update_cache_metadata(self, operation: str):
+        """Update cache metadata when analysis is modified."""
+        self._cache_metadata['last_modified'] = pd.Timestamp.now().isoformat()
+        self._cache_metadata['last_operation'] = operation
     
-    def get_compounds_with_eic_data(self) -> List[CompoundDataCollection]:
-        """Get all compounds that have EIC data."""
-        return [comp for comp in self.compounds.values() if comp.eic_data]
+    def load_from_atlas(self, atlas_df: pd.DataFrame):
+        """Load compounds from atlas DataFrame."""
+        for _, row in atlas_df.iterrows():
+            compound = CompoundData.from_atlas_row(row)
+            self.compounds[compound.inchi_key] = compound
+        self.update_cache_metadata('loaded_from_atlas')
     
-    def get_compounds_with_ms2_data(self) -> List[CompoundDataCollection]:
-        """Get all compounds that have MS2 data."""
-        return [comp for comp in self.compounds.values() if comp.ms2_spectra]
+    def add_experimental_data_simple(self, experimental_data: Dict[str, Dict]):
+        """Add experimental data from simplified extraction format."""
+        for inchi_key, compound_experimental_data in experimental_data.items():
+            if inchi_key in self.compounds:
+                compound = self.compounds[inchi_key]
+                
+                # Add EIC data directly from simplified format
+                eic_files = compound_experimental_data.get('eic_files', {})
+                for filename, eic_data in eic_files.items():
+                    compound.add_eic_data(filename, eic_data)
+                
+                # Add MS2 data directly from simplified format
+                ms2_files = compound_experimental_data.get('ms2_files', {})
+                if ms2_files:
+                    # Aggregate all hits and entries across files
+                    all_hits = []
+                    all_ms2_entries = []
+                    
+                    for filename, file_data in ms2_files.items():
+                        all_hits.extend(file_data.get('all_hits', []))
+                        all_ms2_entries.extend(file_data.get('ms2_entries', []))
+                    
+                    # Store aggregated data
+                    compound.ms2_data_files = {
+                        "files": ms2_files,
+                        "all_hits": all_hits,
+                        "all_ms2_entries": all_ms2_entries
+                    }
+                    
+                    # Update MS2 files count
+                    compound.ms2_files_with_data = len([f for f in ms2_files.values() if f.get('ms2_entries')])
+                    
+                    # Trigger updates to best/avg calculations
+                    compound._update_best_ms2()
+        
+        self.update_cache_metadata('added_experimental_data')
+
+    def generate_plot_data(self) -> Dict:
+        """Generate plot_data format for GUI compatibility."""
+        return {inchi_key: compound.to_plot_data_format() 
+                for inchi_key, compound in self.compounds.items()}
     
-    def get_compounds_with_hits(self) -> List[CompoundDataCollection]:
-        """Get all compounds that have MS2 hits."""
-        return [comp for comp in self.compounds.values() if comp.get_spectra_with_hits()]
+    def save_to_database(self, project_name: str, atlas_uid: str) -> str:
+        """Save all results to database and return analysis_uid."""
+        import database_interact as dbi
+        import load_tools as ldt
+        
+        analysis_uid = dbi._generate_uid('analysis')
+        rows = []
+        
+        for compound in self.compounds.values():
+            row = compound.to_database_row(analysis_uid, project_name, atlas_uid)
+            rows.append(row)
+        
+        if rows:
+            with dbi.get_db_connection(self.project_db_path) as conn:
+                insert_sql = '''
+                    INSERT INTO targeted_analysis (
+                        analysis_uid, project_name, atlas_uid, compound_uid, inchi_key, compound_name,
+                        pre_rt_peak, pre_rt_min, pre_rt_max, pre_mz, mz_tolerance, adduct, isomers,
+                        post_rt_peak, post_rt_min, post_rt_max, is_rt_modified,
+                        best_eic_file, best_eic_rt, best_eic_mz, best_eic_intensity, best_eic_ppm_error, best_eic_rt_error,
+                        avg_eic_rt, avg_eic_intensity, avg_eic_mz,
+                        best_ms2_file, best_ms2_database, best_ms2_ref_id, best_ms2_rt_peak, best_ms2_intensity_peak, best_ms2_mz_peak,
+                        best_ms2_score, best_ms2_num_matches, best_ms2_ref_frags, best_ms2_data_frags, best_ms2_matched_fragments,
+                        avg_ms2_score,
+                        total_files_detected, ms2_files_with_data, ms2_best_score, ms2_best_database, ms2_total_matches,
+                        ms1_notes, ms2_notes, analyst, analysis_timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                '''
+                conn.executemany(insert_sql, rows)
+        
+        self.update_cache_metadata('saved_to_database')
+        return analysis_uid
     
-    @property
-    def total_eic_count(self) -> int:
-        """Total number of EIC traces across all compounds."""
-        return sum(len(comp.eic_data) for comp in self.compounds.values())
-    
-    @property
-    def total_ms2_count(self) -> int:
-        """Total number of MS2 spectra across all compounds."""
-        return sum(len(comp.ms2_spectra) for comp in self.compounds.values())
-    
-    @property
-    def compounds_summary(self) -> Dict[str, Any]:
-        """Get summary statistics."""
+    def get_analysis_summary(self) -> Dict[str, Any]:
+        """Get summary statistics for this analysis."""
+        compounds_with_eic = sum(1 for c in self.compounds.values() if c.eic_data_files)
+        compounds_with_ms2 = sum(1 for c in self.compounds.values() 
+                               if c.ms2_data_files and c.ms2_data_files.get('files'))
+        modified_compounds = sum(1 for c in self.compounds.values() 
+                               if c.is_rt_modified or c.is_annotation_modified)
+        
         return {
             'total_compounds': len(self.compounds),
-            'compounds_with_eic': len(self.get_compounds_with_eic_data()),
-            'compounds_with_ms2': len(self.get_compounds_with_ms2_data()),
-            'compounds_with_hits': len(self.get_compounds_with_hits()),
-            'total_eic_traces': self.total_eic_count,
-            'total_ms2_spectra': self.total_ms2_count
+            'compounds_with_eic': compounds_with_eic,
+            'compounds_with_ms2': compounds_with_ms2,
+            'modified_compounds': modified_compounds,
+            'atlas_uid': self.atlas_uid,
+            'project_db_path': self.project_db_path,
+            'cache_metadata': self._cache_metadata.copy()
         }
 
-@dataclass
-class AnalystModifications:
-    """Track all user modifications to compounds during GUI interaction."""
-    
-    # RT modifications per compound
-    rt_modifications: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    
-    # Annotation modifications per compound
-    annotation_modifications: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    
-    # Track which compounds have been modified
-    modified_compounds: set = field(default_factory=set)
-    
-    def update_rt_bounds(self, inchi_key: str, rt_min: float, rt_max: float, rt_peak: float):
-        """Update RT bounds for a compound and mark as modified."""
-        self.rt_modifications[inchi_key] = {
-            'rt_min': rt_min,
-            'rt_max': rt_max,
-            'rt_peak': rt_peak
-        }
-        self.modified_compounds.add(inchi_key)
-    
-    def update_annotations(self, inchi_key: str, ms1_notes: str = None, ms2_notes: str = None, 
-                          analyst_notes: str = None, identification_notes: str = None):
-        """Update annotations for a compound and mark as modified."""
-        if inchi_key not in self.annotation_modifications:
-            self.annotation_modifications[inchi_key] = {}
-        
-        if ms1_notes is not None:
-            self.annotation_modifications[inchi_key]['ms1_notes'] = ms1_notes
-            self.modified_compounds.add(inchi_key)
-        
-        if ms2_notes is not None:
-            self.annotation_modifications[inchi_key]['ms2_notes'] = ms2_notes
-            self.modified_compounds.add(inchi_key)
-        
-        if analyst_notes is not None:
-            self.annotation_modifications[inchi_key]['analyst_notes'] = analyst_notes
-            self.modified_compounds.add(inchi_key)
-        
-        if identification_notes is not None:
-            self.annotation_modifications[inchi_key]['identification_notes'] = identification_notes
-            self.modified_compounds.add(inchi_key)
-    
-    def get_rt_bounds(self, inchi_key: str) -> Optional[Dict[str, float]]:
-        """Get RT bounds for a compound, or None if not modified."""
-        return self.rt_modifications.get(inchi_key)
-    
-    def get_annotations(self, inchi_key: str) -> Dict[str, str]:
-        """Get annotations for a compound."""
-        return self.annotation_modifications.get(inchi_key, {})
-    
-    def is_modified(self, inchi_key: str) -> bool:
-        """Check if a compound has been modified."""
-        return inchi_key in self.modified_compounds
-    
-    def reset_compound(self, inchi_key: str):
-        """Reset all modifications for a compound."""
-        if inchi_key in self.rt_modifications:
-            del self.rt_modifications[inchi_key]
-        if inchi_key in self.annotation_modifications:
-            del self.annotation_modifications[inchi_key]
-        self.modified_compounds.discard(inchi_key)
-    
-    def get_modified_compounds(self) -> List[str]:
-        """Get list of all modified compound InChI keys."""
-        return list(self.modified_compounds)
-    
-    def to_plot_data_format(self, original_metadata: Dict) -> Dict:
-        """Convert to the format expected by existing functions."""
-        plot_data = {}
-        
-        for inchi_key, compound_meta in original_metadata.items():
-            # Start with original data
-            plot_data[inchi_key] = {
-                'original_atlas_data': compound_meta['original_atlas_data'].copy(),
-                'new_atlas_data': compound_meta['original_atlas_data'].copy(),  # Start with original
-                'suggested_rt_bounds_data': compound_meta.get('suggested_rt_bounds_data'),
-                'eic_data': compound_meta.get('eic_data', {}),
-                'best_eic': compound_meta.get('best_eic', {}),
-                'avg_eic': compound_meta.get('avg_eic', {}),
-                'best_ms2': compound_meta.get('best_ms2', {}),
-                'avg_ms2': compound_meta.get('avg_ms2', {}),
-                'ms2_data': compound_meta.get('ms2_data', {}),
-                'is_modified': self.is_modified(inchi_key)
-            }
-            
-            # Apply RT modifications
-            rt_mods = self.get_rt_bounds(inchi_key)
-            if rt_mods:
-                plot_data[inchi_key]['new_atlas_data'].update(rt_mods)
-            
-            # Apply annotation modifications
-            annotation_mods = self.get_annotations(inchi_key)
-            if annotation_mods:
-                plot_data[inchi_key]['new_atlas_data'].update(annotation_mods)
-        
-        return plot_data
-
-@dataclass
-class SpectrumMatch:
-    """Results of comparing query and reference spectra."""
-    # Similarity metrics
-    similarity_score: float
-    num_matched_fragments: int
-    
-    # Fragment counts
-    total_query_fragments: int
-    total_ref_fragments: int
-    
-    # Matched fragment information
-    matched_mz_values: List[float]
-    matched_colors: List[str]  # 'green' for matches, 'red' for non-matches
-    
-    # Original spectra (unaligned)
-    query_mz: np.ndarray
-    query_intensity: np.ndarray
-    ref_mz: np.ndarray
-    ref_intensity: np.ndarray
-    
-    # Aligned spectra (same length for plotting)
-    aligned_mz: np.ndarray
-    aligned_query_intensity: np.ndarray
-    aligned_ref_intensity: np.ndarray
-    
-    @property
-    def match_ratio(self) -> float:
-        """Ratio of matched fragments to total query fragments."""
-        return self.num_matched_fragments / max(self.total_query_fragments, 1)
-    
-    @property
-    def coverage_ratio(self) -> float:
-        """Ratio of matched fragments to total reference fragments."""
-        return self.num_matched_fragments / max(self.total_ref_fragments, 1)
+# REMOVED DEPRECATED CLASSES:
+# - ProjectDataCollection (replaced by ProjectAnalysis)
+# - EICData class (data now stored as simple dictionaries)
+# - MS2Spectrum class (data now stored as simple dictionaries) 
+# - MS2Hit class (data now stored as simple dictionaries)
+# - Complex intermediate data classes that were used for object creation during extraction
+# - AnalystModifications class (functionality moved to CompoundData modification tracking)
