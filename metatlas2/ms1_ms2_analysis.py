@@ -25,14 +25,15 @@ from scipy.ndimage import gaussian_filter1d
 
 from typing import Dict, List, Optional, Any, Tuple
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-import metatlas2.feature_tools as ftt
-import metatlas2.lcmsruns_tools as lrt
-import metatlas2.database_interact as dbi
-import metatlas2.targeted_analysis as tga
-import metatlas2.load_tools as ldt
-import metatlas2.data_classes as dcl
-import metatlas2.logging_config as lcf
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import feature_tools as ftt
+import lcmsruns_tools as lrt
+import database_interact as dbi
+import targeted_analysis as tga
+import load_tools as ldt
+import data_classes as dcl
+import logging_config as lcf
+import spectrum_handlers as sph
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('ms1_ms2_analysis')
@@ -310,62 +311,18 @@ def calculate_mz_tolerance_range(mz: float, tolerance_ppm: float) -> Tuple[float
 
 def align_ms_arrays(query_mz, query_intensity, ref_mz, ref_intensity, mz_tolerance=0.005, intensity_tolerance=100):
     """
-    Align MS2 vectors using the metatlas approach for consistent fragment matching.
-    Produces aligned arrays for query and reference spectra, matching fragments within mz_tolerance
-    and intensity above intensity_tolerance. Non-matching fragments get intensity 0.
-
-    Args:
-        query_mz: Query spectrum m/z values (array-like)
-        query_intensity: Query spectrum intensities (array-like)
-        ref_mz: Reference spectrum m/z values (array-like)
-        ref_intensity: Reference spectrum intensities (array-like)
-        mz_tolerance: m/z tolerance for matching
-        intensity_tolerance: minimum intensity for counting a match
-
-    Returns:
-        tuple: (aligned_query_mz, aligned_query_intensity, aligned_ref_mz, aligned_ref_intensity, num_matches)
+    DEPRECATED: Use spectrum_handlers.align_spectra_for_comparison instead.
+    Keeping for backward compatibility.
     """
-    # Convert to numpy arrays
-    query_mz = np.array(query_mz, dtype=np.float64)
-    query_intensity = np.array(query_intensity, dtype=np.float64)
-    ref_mz = np.array(ref_mz, dtype=np.float64)
-    ref_intensity = np.array(ref_intensity, dtype=np.float64)
-
-    # Check lengths
-    if len(query_mz) != len(query_intensity):
-        raise ValueError("query_mz and query_intensity must have the same length")
-    if len(ref_mz) != len(ref_intensity):
-        raise ValueError("ref_mz and ref_intensity must have the same length")
-
-    # Combine all m/z values and sort
-    all_mz = np.concatenate([query_mz, ref_mz])
-    all_mz_unique = np.unique(np.round(all_mz, 10))  # rounding to avoid floating point issues
-
-    aligned_query_intensity = []
-    aligned_ref_intensity = []
-    aligned_mz = []
-
-    num_matches = 0
-
-    for mz in all_mz_unique:
-        # Find closest query peak within tolerance
-        query_idx = np.where(np.abs(query_mz - mz) <= mz_tolerance)[0]
-        query_val = np.max(query_intensity[query_idx]) if len(query_idx) > 0 else 0.0
-
-        # Find closest ref peak within tolerance
-        ref_idx = np.where(np.abs(ref_mz - mz) <= mz_tolerance)[0]
-        ref_val = np.max(ref_intensity[ref_idx]) if len(ref_idx) > 0 else 0.0
-
-        aligned_mz.append(mz)
-        aligned_query_intensity.append(query_val)
-        aligned_ref_intensity.append(ref_val)
-
-        # Count as match if both intensities above threshold
-        if query_val > intensity_tolerance and ref_val > intensity_tolerance:
-            num_matches += 1
-
-    return (np.array(aligned_mz), np.array(aligned_query_intensity),
-            np.array(aligned_mz), np.array(aligned_ref_intensity), num_matches)
+    # Convert to new function
+    match = sph.align_spectra_for_comparison(
+        np.array(query_mz), np.array(query_intensity),
+        np.array(ref_mz), np.array(ref_intensity),
+        mz_tolerance, intensity_tolerance
+    )
+    
+    return (match.aligned_mz, match.aligned_query_intensity,
+            match.aligned_mz, match.aligned_ref_intensity, match.num_matched_fragments)
 
 def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame, config: Dict) -> dcl.ProjectDataCollection:
     """
@@ -689,7 +646,7 @@ def _process_single_file(file_index: int, file_input: Dict, compound_metadata: D
     return file_path, eic_objects, ms2_objects
 
 def _find_hits_for_spectrum(spectrum: dcl.MS2Spectrum, reference_df: pd.DataFrame, config: Dict) -> List[dcl.MS2Hit]:
-    """Find reference hits for an MS2Spectrum object."""
+    """Find reference hits for an MS2Spectrum object using standardized spectrum handlers."""
     if not spectrum.inchi_key:
         return []
     
@@ -698,11 +655,6 @@ def _find_hits_for_spectrum(spectrum: dcl.MS2Spectrum, reference_df: pd.DataFram
     if matching_refs.empty:
         return []
     
-    cos = CosineHungarian(tolerance=0.005)
-    query_spectrum = Spectrum(mz=spectrum.mz_values, 
-                            intensities=spectrum.intensity_values,
-                            metadata={'precursor_mz': spectrum.precursor_mz})
-    
     hits = []
     
     for _, ref_row in matching_refs.iterrows():
@@ -710,77 +662,28 @@ def _find_hits_for_spectrum(spectrum: dcl.MS2Spectrum, reference_df: pd.DataFram
         if ref_spectrum_data is None:
             continue
         
-        # Parse reference spectrum
-        try:
-            if isinstance(ref_spectrum_data, np.ndarray) and ref_spectrum_data.shape[0] == 2:
-                ref_mz = np.array(ref_spectrum_data[0])
-                ref_intensity = np.array(ref_spectrum_data[1])
-            elif isinstance(ref_spectrum_data, (list, tuple)) and len(ref_spectrum_data) == 2:
-                ref_mz = np.array(ref_spectrum_data[0])
-                ref_intensity = np.array(ref_spectrum_data[1])
-            else:
-                continue
-        except:
-            continue
-        
+        # Convert reference spectrum using standardized function
+        ref_mz, ref_intensity = sph.convert_legacy_spectrum_data(ref_spectrum_data)
         if len(ref_mz) == 0:
             continue
         
-        # Calculate similarity
-        ref_spectrum = Spectrum(mz=ref_mz, 
-                              intensities=ref_intensity,
-                              metadata={'precursor_mz': ref_row.get('precursor_mz', 0.0)})
+        # Use standardized spectrum comparison for alignment and fragment matching
+        match = sph.align_spectra_for_comparison(
+            spectrum.mz_values, spectrum.intensity_values,
+            ref_mz, ref_intensity
+        )
         
-        try:
-            similarity_result = cos.pair(query_spectrum, ref_spectrum)
-            score = float(similarity_result['score'])
-            num_matches = int(similarity_result['matches'])
-        except:
-            score = 0.0
-            num_matches = 0
-        
-        # Align spectra
-        try:
-            (aligned_query_mz, aligned_query_intensity,
-             aligned_ref_mz, aligned_ref_intensity, _) = align_ms_arrays(
-                spectrum.mz_values, spectrum.intensity_values, ref_mz, ref_intensity
-            )
-            
-            # Calculate fragment colors for visualization
-            fragment_colors = []
-            matched_fragments = []
-            for i in range(len(aligned_query_mz)):
-                if aligned_query_intensity[i] > 0 and aligned_ref_intensity[i] > 0:
-                    fragment_colors.append('green')
-                    matched_fragments.append(aligned_query_mz[i])
-                else:
-                    fragment_colors.append('red')
-                    
-        except:
-            aligned_query_mz = spectrum.mz_values
-            aligned_query_intensity = spectrum.intensity_values
-            aligned_ref_mz = ref_mz
-            aligned_ref_intensity = ref_intensity
-            fragment_colors = ['red'] * len(spectrum.mz_values)
-            matched_fragments = []
-        
-        # Create hit object
-        hit = dcl.MS2Hit(
+        # Convert to MS2Hit format
+        hit_data = sph.convert_spectrum_match_to_ms2hit_format(
+            match,
             database=ref_row.get('database', 'unknown'),
             ref_id=str(ref_row.get('id', '')),
-            score=score,
-            num_matches=num_matches,
             ref_name=ref_row.get('name', 'Unknown'),
-            ref_precursor_mz=ref_row.get('precursor_mz', 0.0),
-            ref_mz_values=ref_mz,
-            ref_intensity_values=ref_intensity,
-            query_mz_aligned=aligned_query_mz,
-            query_intensity_aligned=aligned_query_intensity,
-            ref_mz_aligned=aligned_ref_mz,
-            ref_intensity_aligned=aligned_ref_intensity,
-            matched_fragments=matched_fragments,
-            fragment_colors=fragment_colors
+            ref_precursor_mz=ref_row.get('precursor_mz', 0.0)
         )
+        
+        # Create hit object
+        hit = dcl.MS2Hit(**hit_data)
         hits.append(hit)
     
     return hits

@@ -18,6 +18,8 @@ rt_alignment:
       - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
 
 analysis_settings:
+  use_data_cache: false # true, false, or timestamp
+  use_session_cache: false # true, false, or timestamp
   default_ppm_error: 5.0
   min_peak_intensity: 100000.0
   extra_time: 0.0

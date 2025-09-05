@@ -15,10 +15,10 @@ import seaborn as sns
 
 from typing import Dict, Tuple
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-import metatlas2.database_interact as dbi
-import metatlas2.load_tools as ldt
-import metatlas2.logging_config as lcf
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import database_interact as dbi
+import load_tools as ldt
+import logging_config as lcf
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('rt_align_tools')

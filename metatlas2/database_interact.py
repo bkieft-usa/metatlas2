@@ -6,18 +6,24 @@ import sys
 import os
 import json
 import time
+import sys
 from pathlib import Path
 from typing import Dict
 from tqdm.notebook import tqdm
 from typing import Dict, List, Optional, Any, Tuple
 
+import openpyxl
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
 from contextlib import contextmanager
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-import metatlas2.lcmsruns_tools as lrt
-import metatlas2.pubchem_retrieval as pcr
-import metatlas2.load_tools as ldt
-import metatlas2.logging_config as lcf
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import lcmsruns_tools as lrt
+import pubchem_retrieval as pcr
+import load_tools as ldt
+import logging_config as lcf
+import rt_align_tools as rat
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('database_interact')
@@ -532,7 +538,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, config: Dict, input_file_path: s
         if compound_records:
             logger.info(f"Batch inserting {len(compound_records)} compounds...")
             conn.executemany("""
-                INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, compound_records)
 
         # Check for duplicate references and batch insert
@@ -593,21 +599,26 @@ def _prepare_compound_record(row: pd.Series, compound_uid: str, pubchem_cache: D
     # Extract compound data from row
     name = str(row.get('label', row.get('compound_name', 'Unknown')))
     inchi_key = str(row.get('inchi_key', ''))
-    inchi = str(row.get('inchi', '')) if pd.notna(row.get('inchi')) else None
-    smiles = str(row.get('smiles', '')) if pd.notna(row.get('smiles')) else None
-    formula = str(row.get('formula', '')) if pd.notna(row.get('formula')) else None
-    
-    # Handle optional fields
+    pubchem_cache_data = pubchem_cache.get(inchi_key, {})
+
+    inchi = str(pubchem_cache_data.get('inchi', '')) if pd.notna(pubchem_cache_data.get('inchi')) else None
+    smiles = str(pubchem_cache_data.get('smiles', '')) if pd.notna(pubchem_cache_data.get('smiles')) else None
+    formula = str(pubchem_cache_data.get('formula', '')) if pd.notna(pubchem_cache_data.get('formula')) else None
+    mono_isotopic_molecular_weight = pubchem_cache_data.get('mono_isotopic_molecular_weight') if pd.notna(pubchem_cache_data.get('mono_isotopic_molecular_weight')) else None
+    iupac_name = str(pubchem_cache_data.get('iupac_name', '')) if pd.notna(pubchem_cache_data.get('iupac_name')) else None
+    pubchem_cid = str(pubchem_cache_data.get('pubchem_cid', '')) if pd.notna(pubchem_cache_data.get('pubchem_cid')) else None
+    cas_number = str(pubchem_cache_data.get('cas_number', '')) if pd.notna(pubchem_cache_data.get('cas_number')) else None
+    synonyms_val = pubchem_cache_data.get('synonyms', '')
+    if synonyms_val is None or synonyms_val == '':
+        synonyms = None
+    elif isinstance(synonyms_val, (list, tuple, np.ndarray)):
+        synonyms = '; '.join(map(str, synonyms_val))
+    else:
+        synonyms = str(synonyms_val)
     compound_classes = str(row.get('compound_classes', '')) if pd.notna(row.get('compound_classes')) else None
     compound_pathways = str(row.get('compound_pathways', '')) if pd.notna(row.get('compound_pathways')) else None
     compound_tags = str(row.get('compound_tags', '')) if pd.notna(row.get('compound_tags')) else None
-    molecular_weight = row.get('molecular_weight') if pd.notna(row.get('molecular_weight')) else None
-    mono_isotopic_molecular_weight = row.get('mono_isotopic_molecular_weight') if pd.notna(row.get('mono_isotopic_molecular_weight')) else None
-    iupac_name = str(row.get('iupac_name', '')) if pd.notna(row.get('iupac_name')) else None
-    pubchem_cid = str(row.get('pubchem_cid', '')) if pd.notna(row.get('pubchem_cid')) else None
-    cas_number = str(row.get('cas_number', '')) if pd.notna(row.get('cas_number')) else None
-    synonyms = str(row.get('synonyms', '')) if pd.notna(row.get('synonyms')) else None
-    
+
     return (
         compound_uid,
         name,
@@ -618,7 +629,6 @@ def _prepare_compound_record(row: pd.Series, compound_uid: str, pubchem_cache: D
         compound_classes,
         compound_pathways,
         compound_tags,
-        molecular_weight,
         mono_isotopic_molecular_weight,
         iupac_name,
         pubchem_cid,
@@ -817,7 +827,6 @@ def _create_database_tables(conn, db_type: str = "main"):
             compound_classes TEXT,
             compound_pathways TEXT,
             compound_tags TEXT,
-            molecular_weight DOUBLE,
             mono_isotopic_molecular_weight DOUBLE,
             iupac_name TEXT,
             pubchem_cid VARCHAR,
@@ -1000,7 +1009,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 best_ms2_num_matches INTEGER,
                 best_ms2_ref_frags INTEGER,
                 best_ms2_data_frags INTEGER,
-                best_ms2_frags_matching TEXT,
+                best_ms2_matched_fragments TEXT,
 
                 -- Average MS2
                 avg_ms2_score DOUBLE,
@@ -1308,7 +1317,7 @@ def get_atlas_compounds_with_metadata(project_db_path: str, main_db_path: str, a
                 inchi_key,
                 inchi,
                 formula,
-                mono_isotopic_molecular_weight AS exact_mass
+                mono_isotopic_molecular_weight
             FROM compounds 
             WHERE compound_uid IN ({placeholders})
         """
@@ -1590,7 +1599,7 @@ def deposit_targeted_analysis_from_plot_data(
         best_ms2_num_matches = best_ms2.get('num_matches', None)
         best_ms2_ref_frags = best_ms2.get('ref_frags', None)
         best_ms2_data_frags = best_ms2.get('data_frags', None)
-        best_ms2_frags_matching = best_ms2.get('frags_matching', None)
+        best_ms2_matched_fragments = best_ms2.get('matched_fragments', None)
 
         avg_ms2_score = avg_ms2.get('avg_score', None)
 
@@ -1639,7 +1648,7 @@ def deposit_targeted_analysis_from_plot_data(
             best_ms2_num_matches,
             best_ms2_ref_frags,
             best_ms2_data_frags,
-            best_ms2_frags_matching,
+            best_ms2_matched_fragments,
             avg_ms2_score,
             total_files_detected,
             ms2_files_with_data,
@@ -1662,7 +1671,7 @@ def deposit_targeted_analysis_from_plot_data(
                 best_eic_file, best_eic_rt, best_eic_mz, best_eic_intensity, best_eic_ppm_error, best_eic_rt_error,
                 avg_eic_rt, avg_eic_intensity, avg_eic_mz,
                 best_ms2_file, best_ms2_database, best_ms2_ref_id, best_ms2_rt_peak, best_ms2_intensity_peak, best_ms2_mz_peak,
-                best_ms2_score, best_ms2_num_matches, best_ms2_ref_frags, best_ms2_data_frags, best_ms2_frags_matching,
+                best_ms2_score, best_ms2_num_matches, best_ms2_ref_frags, best_ms2_data_frags, best_ms2_matched_fragments,
                 avg_ms2_score,
                 total_files_detected, ms2_files_with_data, ms2_best_score, ms2_best_database, ms2_total_matches,
                 ms1_notes, ms2_notes, analyst, analysis_timestamp
@@ -1738,7 +1747,8 @@ def generate_targeted_analysis_summary(project_db_path, config, analysis_uid):
     return merged
 
 def generate_comprehensive_targeted_analysis_report(project_db_path: str, config: Dict, 
-                                                   analysis_uid: str, atlas_df_ft: pd.DataFrame,
+                                                   analysis_uid: str, atlas_dataframe: pd.DataFrame,
+                                                   post_analysis_atlas_uid: str,
                                                    output_path: str = None, include_missing_compounds: bool = False) -> pd.DataFrame:
     """
     Generate a comprehensive targeted analysis report matching the specified Excel format.
@@ -1748,7 +1758,7 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
         project_db_path: Path to project database
         config: Configuration dictionary with database paths
         analysis_uid: UID of the targeted analysis
-        atlas_df_ft: Optional atlas DataFrame to include missing compounds
+        atlas_dataframe: Optional atlas DataFrame to include missing compounds
         output_path: Optional path to save Excel file
         include_missing_compounds: Whether to include compounds from atlas that weren't detected
     
@@ -1762,14 +1772,14 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
     
     if base_summary.empty:
         logger.warning(f"No targeted analysis results found for analysis_uid {analysis_uid}")
-        if atlas_df_ft is not None and include_missing_compounds:
+        if atlas_dataframe is not None and include_missing_compounds:
             logger.info("Creating empty rows for all atlas compounds...")
-            base_summary = _create_empty_summary_from_atlas(atlas_df_ft, analysis_uid, config)
+            base_summary = _create_empty_summary_from_atlas(atlas_dataframe, analysis_uid, config)
         else:
             return pd.DataFrame()
-    elif atlas_df_ft is not None and include_missing_compounds:
+    elif atlas_dataframe is not None and include_missing_compounds:
         # Add missing compounds from atlas as empty rows
-        base_summary = _add_missing_compounds_to_summary(base_summary, atlas_df_ft, analysis_uid, config)
+        base_summary = _add_missing_compounds_to_summary(base_summary, atlas_dataframe, analysis_uid, config)
     
     # Connect to both databases
     conn_proj = duckdb.connect(project_db_path)
@@ -1803,7 +1813,7 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
                 'isomer_inchi_keys': isomer_info['inchi_keys'],
                 'formula': row.get('formula', ''),
                 'polarity': row.get('polarity', ''),
-                'exact_mass': row.get('mono_isotopic_molecular_weight', ''),
+                'mono_isotopic_molecular_weight': row.get('mono_isotopic_molecular_weight', ''),
                 'inchi_key': inchi_key,
                 'adduct': row.get('adduct', ''),
                 'msms_quality': msms_quality,
@@ -1821,7 +1831,7 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
                 'best_msms_file': row.get('best_ms2_file', ''),
                 'best_msms_rt': row.get('best_ms2_rt_peak', ''),
                 'best_msms_num_matching_ions': row.get('best_ms2_num_matches', ''),
-                'best_msms_matching_ions': row.get('best_ms2_frags_matching', ''),
+                'best_msms_matching_ions': row.get('best_ms2_matched_fragments', ''),
                 'best_msms_score': row.get('best_ms2_score', ''),
                 'mz_theoretical': row.get('pre_mz', ''),
                 'mz_measured': row.get('best_eic_mz', ''),
@@ -1855,9 +1865,9 @@ def generate_comprehensive_targeted_analysis_report(project_db_path: str, config
         report_df['index'] = range(len(report_df))
     
     # Save to Excel if path provided with grouped headers
-    if output_path and not report_df.empty:
+    if output_path is not None and not report_df.empty:
         try:
-            _save_report_with_grouped_headers(report_df, output_path)
+            _save_report_with_grouped_headers(report_df, output_path, post_analysis_atlas_uid)
             logger.info(f"Report saved to {output_path}")
         except Exception as e:
             logger.error(f"Error saving Excel file: {e}")
@@ -1948,11 +1958,11 @@ def _find_overlapping_compounds(conn_main, current_row: pd.Series, all_compounds
         'inchi_keys': '; '.join(inchi_keys),
     }
 
-def _create_empty_summary_from_atlas(atlas_df_ft: pd.DataFrame, analysis_uid: str, config: Dict) -> pd.DataFrame:
+def _create_empty_summary_from_atlas(atlas_dataframe: pd.DataFrame, analysis_uid: str, config: Dict) -> pd.DataFrame:
     """Create empty targeted analysis summary from atlas compounds"""
     empty_rows = []
     
-    for _, row in atlas_df_ft.iterrows():
+    for _, row in atlas_dataframe.iterrows():
         empty_row = {
             'analysis_uid': analysis_uid,
             'compound_uid': row.get('compound_uid', ''),
@@ -1960,7 +1970,7 @@ def _create_empty_summary_from_atlas(atlas_df_ft: pd.DataFrame, analysis_uid: st
             'compound_name': row.get('compound_name', row.get('label', '')),
             'formula': row.get('formula', ''),
             'polarity': row.get('polarity', ''),
-            'mono_isotopic_molecular_weight': row.get('exact_mass', ''),
+            'mono_isotopic_molecular_weight': row.get('mono_isotopic_molecular_weight', ''),
             'adduct': row.get('adduct', ''),
             'pre_rt_peak': row.get('rt_peak', ''),
             'pre_rt_min': row.get('rt_min', ''),
@@ -1980,38 +1990,29 @@ def _create_empty_summary_from_atlas(atlas_df_ft: pd.DataFrame, analysis_uid: st
             'best_ms2_file': None,
             'best_ms2_rt_peak': None,
             'best_ms2_num_matches': None,
-            'best_ms2_frags_matching': None
+            'best_ms2_matched_fragments': None
         }
         empty_rows.append(empty_row)
     
     return pd.DataFrame(empty_rows)
 
-def _add_missing_compounds_to_summary(base_summary: pd.DataFrame, atlas_df_ft: pd.DataFrame, 
+def _add_missing_compounds_to_summary(base_summary: pd.DataFrame, atlas_dataframe: pd.DataFrame, 
                                      analysis_uid: str, config: Dict) -> pd.DataFrame:
     """Add missing compounds from atlas to existing summary"""
     existing_inchi_keys = set(base_summary['inchi_key'].dropna())
-    atlas_inchi_keys = set(atlas_df_ft['inchi_key'].dropna())
+    atlas_inchi_keys = set(atlas_dataframe['inchi_key'].dropna())
     missing_inchi_keys = atlas_inchi_keys - existing_inchi_keys
     
     if missing_inchi_keys:
         logger.info(f"Adding {len(missing_inchi_keys)} missing compounds from atlas as empty rows")
-        missing_atlas_df = atlas_df_ft[atlas_df_ft['inchi_key'].isin(missing_inchi_keys)]
+        missing_atlas_df = atlas_dataframe[atlas_dataframe['inchi_key'].isin(missing_inchi_keys)]
         empty_summary = _create_empty_summary_from_atlas(missing_atlas_df, analysis_uid, config)
         base_summary = pd.concat([base_summary, empty_summary], ignore_index=True)
     
     return base_summary
 
-def _save_report_with_grouped_headers(report_df: pd.DataFrame, output_path: str):
+def _save_report_with_grouped_headers(report_df: pd.DataFrame, output_path: str, post_analysis_atlas_uid: str):
     """Save report to Excel with grouped column headers"""
-    try:
-        import openpyxl
-        from openpyxl.utils.dataframe import dataframe_to_rows
-        from openpyxl.styles import Font, Alignment, PatternFill
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        logger.warning("openpyxl not available, saving as CSV instead")
-        report_df.to_csv(output_path.replace('.xlsx', '.csv'), index=False)
-        return
     
     # Create workbook and worksheet
     wb = openpyxl.Workbook()
@@ -2021,7 +2022,7 @@ def _save_report_with_grouped_headers(report_df: pd.DataFrame, output_path: str)
     # Define column groups and their ranges
     column_groups = [
         ("Compound Information", ["index", "identified_metabolite", "label", "isomer_compound", 
-                                "isomer_inchi_keys", "formula", "polarity", "exact_mass", "inchi_key", "adduct"]),
+                                "isomer_inchi_keys", "formula", "polarity", "mono_isotopic_molecular_weight", "inchi_key", "adduct"]),
         ("Identification Scores", ["msms_quality", "mz_quality", "rt_quality", "total_score", 
                                  "msi_level"]),
         ("Identification Notes", ["ms1_notes", "ms2_notes", "analyst_notes", "identification_notes"]),
@@ -2099,7 +2100,8 @@ def _save_report_with_grouped_headers(report_df: pd.DataFrame, output_path: str)
         ws.column_dimensions[column_letter].width = adjusted_width
     
     # Save workbook
-    wb.save(output_path)
+    output_file = Path(output_path) / f"targeted_identifications_for_{post_analysis_atlas_uid}.xlsx"
+    wb.save(output_file)
 
 def create_rt_corrected_atlas(
     project_db_path: str,
@@ -2159,10 +2161,9 @@ def create_rt_corrected_atlas(
             original_rt_max = compound['rt_max']
 
             # Apply RT correction using the polynomial model
-            from metatlas2.rt_align_tools import predict_rt_correction
-            corrected_rt_peak = predict_rt_correction([original_rt_peak], best_model)[0]
-            corrected_rt_min = predict_rt_correction([original_rt_min], best_model)[0]
-            corrected_rt_max = predict_rt_correction([original_rt_max], best_model)[0]
+            corrected_rt_peak = rat.predict_rt_correction([original_rt_peak], best_model)[0]
+            corrected_rt_min = rat.predict_rt_correction([original_rt_min], best_model)[0]
+            corrected_rt_max = rat.predict_rt_correction([original_rt_max], best_model)[0]
             rt_shift = corrected_rt_peak - original_rt_peak
 
             # Create new mz_rt_experimental entry

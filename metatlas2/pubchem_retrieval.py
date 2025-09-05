@@ -3,14 +3,15 @@ import pubchempy as pcp
 import pickle
 import time
 import re
+import sys
 from pathlib import Path
 import sys
 from typing import Dict, Any, List
 from tqdm.notebook import tqdm
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-import metatlas2.load_tools as ldt
-import metatlas2.logging_config as lcf
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import load_tools as ldt
+import logging_config as lcf
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('pubchem_retrieval')
@@ -56,7 +57,6 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
             "smiles": smiles if smiles else "",
             "formula": compound.molecular_formula or "",
             "mono_isotopic_molecular_weight": str(compound.monoisotopic_mass) if compound.monoisotopic_mass else "",
-            "molecular_weight": str(compound.molecular_weight) if compound.molecular_weight else "",
             "cas_number": "",
             "pubchem_retrieval_date": timestamp,
             "pubchem_compound_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{compound.cid}" if compound.cid else ""

@@ -9,8 +9,8 @@ from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-import metatlas2.logging_config as lcf
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import logging_config as lcf
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('lcmsrun_tools')

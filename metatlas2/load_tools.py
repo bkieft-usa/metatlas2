@@ -3,10 +3,13 @@ import numpy as np
 import yaml
 import ast
 import getpass
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Union
-import metatlas2.logging_config as lcf
+
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import logging_config as lcf
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('load_tools')
@@ -20,7 +23,7 @@ def load_msms_refs_file(file_path):
         
     Returns:
         DataFrame with columns: ['database', 'id', 'name', 'spectrum', 'collision_energy', 
-                                'precursor_mz', 'polarity', 'adduct', 'formula', 'exact_mass', 
+                                'precursor_mz', 'polarity', 'adduct', 'formula', 'mono_isotopic_molecular_weight', 
                                 'inchi_key', 'inchi', 'smiles']
     """
     
@@ -30,7 +33,7 @@ def load_msms_refs_file(file_path):
     df = pd.read_csv(file_path, sep='\t', header=None, names=[
         'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy', 
         'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id', 
-        'experiment', 'instrument', 'formula', 'exact_mass', 'inchi_key', 'inchi', 'smiles'
+        'experiment', 'instrument', 'formula', 'mono_isotopic_molecular_weight', 'inchi_key', 'inchi', 'smiles'
     ])
 
     # Convert spectrum strings to numpy arrays using ast.literal_eval
@@ -54,7 +57,7 @@ def load_msms_refs_file(file_path):
     # Clean up data types
     df['precursor_mz'] = pd.to_numeric(df['precursor_mz'], errors='coerce')
     df['collision_energy'] = pd.to_numeric(df['collision_energy'], errors='coerce') 
-    df['exact_mass'] = pd.to_numeric(df['exact_mass'], errors='coerce')
+    df['mono_isotopic_molecular_weight'] = pd.to_numeric(df['mono_isotopic_molecular_weight'], errors='coerce')
 
     if not df.empty:
         logger.info(f"    Reference DataFrame shape: {df.shape}")

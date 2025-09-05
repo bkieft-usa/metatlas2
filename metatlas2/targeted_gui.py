@@ -30,21 +30,25 @@ from ipywidgets import Output
 from scipy.signal import find_peaks, peak_widths, peak_prominences
 from scipy.ndimage import gaussian_filter1d
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2')
-import metatlas2.database_interact as dbi
-import metatlas2.ms1_ms2_analysis as msa
-import metatlas2.data_classes as dcl
-import metatlas2.logging_config as lcf
-import metatlas2.checkpoint_manager as chk
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import database_interact as dbi
+import ms1_ms2_analysis as msa
+import data_classes as dcl
+import logging_config as lcf
+import simple_cache as scache
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_gui')
 
-def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
+def create_gui(compound_metadata, config, project_db_path=None):
     """
-    Create an enhanced RT editor with auto-save capability.
+    Create an enhanced RT editor with simple cache auto-save capability.
+    Now loads existing AnalystModifications from cache if available.
     """
     
+    # Remove compounds that do not have EIC data or MS2 data (empty dicts)
+    compound_metadata = {k: v for k, v in compound_metadata.items() if v.get('eic_data') or v.get('ms2_data')}
+
     # Set starting status
     file_color_dict = config['plot_settings']['file_color_mapping'] if 'file_color_mapping' in config['plot_settings'] else None
     compound_list = list(compound_metadata.keys())
@@ -54,11 +58,13 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
     updating = [False]  # Prevent recursive updates
     rt_slider = [None]  # Store slider reference
     
-    # Initialize AnalystModifications to track changes
-    analyst_modifications = dcl.AnalystModifications()
+    # Initialize AnalystModifications - try to load from cache first
+    analyst_modifications = _load_or_create_analyst_modifications(config, project_db_path)
 
-    # Add checkpoint manager reference
-    gui_checkpoint_manager = checkpoint_manager
+    # Get project directory for caching
+    project_dir = str(Path(project_db_path).parent) if project_db_path else None
+    last_save_time = [time.time()]
+    save_interval = 30  # seconds between auto-saves
     
     if not compound_list:
         logger.error("No compounds found in metadata")
@@ -125,7 +131,7 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
     )
 
     # Create placeholder for slider that will be replaced dynamically
-    slider_container = widgets.HBox([], layout=widgets.Layout(justify_content='center', width='73%', margin='-110px 0 0 0'))
+    slider_container = widgets.HBox([], layout=widgets.Layout(justify_content='center', width='75%', margin='-110px 0 0 0'))
 
     # Add analyst notes text box
     analyst_notes_box = widgets.Text(
@@ -612,28 +618,74 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
         return fig
 
     def auto_save_if_needed():
-        """Auto-save session if changes have been made and enough time has passed."""
-        if (gui_checkpoint_manager and 
-            gui_checkpoint_manager.should_auto_save() and 
-            len(analyst_modifications.modified_compounds) > 0):
+        """Auto-save AnalystModifications if changes have been made and enough time has passed."""
+        if (project_dir and 
+            len(analyst_modifications.modified_compounds) > 0 and
+            time.time() - last_save_time[0] > save_interval):
             
             try:
-                # Get current plot data
-                plot_data = analyst_modifications.to_plot_data_format(compound_metadata)
-                
-                # Get project data from container if available
-                project_data = getattr(container, '_project_data', None)
-                
-                if project_data:
-                    gui_checkpoint_manager.save_session(
-                        project_data,
-                        atlas_df,
-                        plot_data,
-                        analyst_modifications
-                    )
-                    logger.info("Auto-saved session")
+                # Save current AnalystModifications to progress cache
+                scache.save_gui_cache(container, project_dir, "progress")
+                last_save_time[0] = time.time()
+                logger.info("Auto-saved AnalystModifications to progress cache")
             except Exception as e:
                 logger.error(f"Auto-save failed: {e}")
+
+    def create_plot_only(initial_render=False):
+        """
+        ONLY create and display the plot - no other side effects.
+        """
+        compound_inchi, compound_name, meta = get_current_compound()
+        if compound_inchi is None or meta is None:
+            return
+
+        plot_output.clear_output(wait=True)
+
+        # Get RT bounds for MS2 filtering
+        rt_min, rt_max, rt_peak = get_current_rt_bounds(meta, compound_inchi)
+
+        # Get MS2 selection info (now filtered by RT bounds and sorted by score)
+        ms2_data_type, query_spec, ref_spec, ms2_file = get_selected_ms2_spectra(meta, 
+                                                                                current_ms2_file_index[0],
+                                                                                rt_min,
+                                                                                rt_max)
+
+        # Update MS2 counter label - count only files within RT window
+        ms2_files_data = meta.get('ms2_data', {})
+        files_in_rt_window = []
+        for file_name in ms2_files_data.keys():
+            file_data = ms2_files_data[file_name]
+            best_hit = file_data.get('best_hit', {})
+            best_ms2 = file_data.get('best_ms2', {})
+            
+            rt_measured = None
+            if best_hit and 'rt_measured' in best_hit:
+                rt_measured = best_hit.get('rt_measured', 0)
+            elif best_ms2 and 'rt' in best_ms2:
+                rt_measured = best_ms2.get('rt', 0)
+            
+            if rt_measured is not None and rt_min <= rt_measured <= rt_max:
+                files_in_rt_window.append(file_name)
+        
+        total_files_in_window = len(files_in_rt_window)
+        if total_files_in_window > 0:
+            current_file_idx = min(current_ms2_file_index[0], total_files_in_window - 1)
+            ms2_counter_label.value = f"MS2 File {current_file_idx + 1} of {total_files_in_window}"
+        else:
+            ms2_counter_label.value = "No MS2 data"
+
+        fig = create_targeted_analysis_plot(
+            compound_metadata=meta,
+            file_color_dict=file_color_dict,
+            ms2_data_type=ms2_data_type,
+            ms2_plot_data=(query_spec, ref_spec, ms2_file),
+            initial_render=initial_render,
+            current_compound_index=current_compound_index[0]
+        )
+
+        if fig is not None:
+            with plot_output:
+                fig.show()
 
     def full_update():
         """
@@ -700,6 +752,9 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
 
             # Do a full update
             full_update()
+            
+            # Trigger auto-save check
+            auto_save_if_needed()
 
     def on_ms2_navigation(direction):
         """Handle MS2 file navigation (filtered by current RT bounds and sorted by score)"""
@@ -799,6 +854,9 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
                 # Do a full update
                 full_update()
                 
+                # Trigger auto-save check
+                auto_save_if_needed()
+                
         except (ValueError, IndexError):
             # If parsing fails, ignore the change
             pass
@@ -870,6 +928,188 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
         # Trigger auto-save check
         auto_save_if_needed()
 
+    def get_current_compound():
+        """Get current compound name and metadata"""
+        idx = current_compound_index[0]
+        if 0 <= idx < len(compound_list):
+            compound_inchi = compound_list[idx]
+            compound_name = compound_metadata[compound_inchi]['original_atlas_data']['compound_name']
+            return compound_inchi, compound_name, compound_metadata[compound_inchi]
+        return None, None, None
+    
+    def reset_ms2_file_index():
+        """Reset MS2 file index to 0 when switching compounds"""
+        current_ms2_file_index[0] = 0
+
+    def get_selected_ms2_spectra(meta, current_ms2_file_index, rt_min, rt_max):
+        """
+        Returns the selected MS2 spectra for plotting and info for the title.
+        Updated to work with new metadata structure and properly filter by RT bounds.
+        """
+        # Get MS2 files data using new structure
+        ms2_files_data = meta.get('ms2_data', {})
+        if not ms2_files_data:
+            return None, None, None, None
+        
+        # Get file names and filter by RT bounds FIRST
+        file_names = list(ms2_files_data.keys())
+        if not file_names:
+            return None, None, None, None
+        
+        # Filter files that have MS2 data within RT bounds and calculate scores
+        files_in_rt_window = []
+        for file_name in file_names:
+            file_data = ms2_files_data[file_name]
+            
+            # Check both best_hit and best_ms2 for RT data
+            best_hit = file_data.get('best_hit', {})
+            best_ms2 = file_data.get('best_ms2', {})
+            
+            rt_measured = None
+            if best_hit and 'rt_measured' in best_hit:
+                rt_measured = best_hit.get('rt_measured', 0)
+            elif best_ms2 and 'rt' in best_ms2:
+                rt_measured = best_ms2.get('rt', 0)
+            
+            # Only include files where MS2 data falls within current RT bounds
+            if rt_measured is not None and rt_min <= rt_measured <= rt_max:
+                # Prioritize score from best_hit, fallback to intensity from best_ms2
+                if best_hit:
+                    score = best_hit.get('score', 0.0)
+                else:
+                    score = best_ms2.get('intensity_peak', 0.0)
+                files_in_rt_window.append((file_name, score))
+        
+        # If no files have MS2 data in the current RT window, return None
+        if not files_in_rt_window:
+            return None, None, None, None
+        
+        # Sort files by score (highest first)
+        files_in_rt_window.sort(key=lambda x: x[1], reverse=True)
+        sorted_file_names = [name for name, score in files_in_rt_window]
+        
+        # Clamp file index to available files within RT window
+        idx = min(current_ms2_file_index, len(sorted_file_names) - 1)
+        selected_file = sorted_file_names[idx]
+        file_data = ms2_files_data[selected_file]
+        
+        # Check if we have a best_hit (with reference data)
+        best_hit = file_data.get('best_hit', {})
+        if best_hit:  # best_hit is not empty
+            # Extract spectrum data from best_hit
+            qry_spectrum = best_hit.get('qry_spectrum', None)
+            ref_spectrum = best_hit.get('ref_spectrum', None)
+            
+            # Check if we have any spectrum data
+            if qry_spectrum is None and ref_spectrum is None:
+                return None, None, None, selected_file
+            
+            query_spec = None
+            ref_spec = None
+            
+            # Process query spectrum if available
+            if qry_spectrum is not None and len(qry_spectrum) >= 2:
+                qry_mz = np.array(qry_spectrum[0])
+                qry_intensity = np.array(qry_spectrum[1])
+
+                # Get fragment colors (default to red if not available)
+                qry_colors = best_hit.get('qry_frag_colors', ['red'] * len(qry_mz))
+                
+                query_spec = {
+                    'mz': qry_mz,
+                    'intensity': qry_intensity,
+                    'precursor_mz': best_hit.get('mz_measured', 0.0),
+                    'rt': best_hit.get('rt_measured', 0.0),
+                    'qry_frag_colors': qry_colors
+                }
+            
+            # Process reference spectrum if available
+            if ref_spectrum is not None and len(ref_spectrum) >= 2:
+                ref_mz = np.array(ref_spectrum[0])
+                ref_intensity = np.array(ref_spectrum[1])
+                
+                # Get fragment colors (use same as query if available, otherwise red)
+                ref_colors = best_hit.get('qry_frag_colors', ['red'] * len(ref_mz))
+                
+                ref_spec = {
+                    'mz': ref_mz,
+                    'intensity': ref_intensity,
+                    'score': best_hit.get('score', 0.0),
+                    'database': best_hit.get('database', 'N/A'),
+                    'num_matches': best_hit.get('num_matches', 0),
+                    'ref_id': best_hit.get('ref_id', 'N/A'),
+                    'mz_measured': best_hit.get('mz_measured', 0.0),
+                    'mz_theoretical': best_hit.get('mz_theoretical', 0.0),
+                    'rt_measured': best_hit.get('rt_measured', 0.0),
+                    'qry_frag_colors': ref_colors
+                }
+            
+            # Determine data type
+            if query_spec is not None and ref_spec is not None:
+                return 'hits', query_spec, ref_spec, selected_file
+            elif query_spec is not None:
+                return 'extracted', query_spec, None, selected_file
+            else:
+                return None, None, None, selected_file
+                
+        else:  # best_hit is empty, use best_ms2
+            best_ms2 = file_data.get('best_ms2', {})
+            if not best_ms2:
+                return None, None, None, selected_file
+            
+            # Extract spectrum data from best_ms2
+            spectrum_data = best_ms2.get('spectrum', None)
+            if spectrum_data is None or len(spectrum_data) < 2:
+                return None, None, None, selected_file
+            
+            # Parse spectrum format
+            try:
+                if isinstance(spectrum_data, (list, tuple)) and len(spectrum_data) == 2:
+                    mz_values = np.array(spectrum_data[0])
+                    intensity_values = np.array(spectrum_data[1])
+                elif isinstance(spectrum_data, np.ndarray) and spectrum_data.shape[0] == 2:
+                    mz_values = np.array(spectrum_data[0])
+                    intensity_values = np.array(spectrum_data[1])
+                else:
+                    return None, None, None, selected_file
+            except:
+                return None, None, None, selected_file
+            
+            if len(mz_values) == 0 or len(intensity_values) == 0:
+                return None, None, None, selected_file
+            
+            # Create query spec for experimental data only
+            query_spec = {
+                'mz': mz_values,
+                'intensity': intensity_values,
+                'precursor_mz': best_ms2.get('precursor_mz', 0.0),
+                'rt': best_ms2.get('rt', 0.0),
+                'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
+            }
+            
+            return 'extracted', query_spec, None, selected_file
+
+    def update_annotation_widgets():
+        """Update annotation radio buttons to reflect current compound's values"""
+        compound_inchi, compound_name, meta = get_current_compound()
+        if compound_inchi is None or meta is None:
+            return
+        
+        # Get current annotations (from modifications or original data)
+        current_annotations = get_current_annotations(compound_inchi)
+
+        # Temporarily disable updating flag to prevent recursion
+        temp_updating = updating[0]
+        updating[0] = True
+        
+        try:
+            ms2_radio.value = current_annotations['ms2_notes']
+            ms1_radio.value = current_annotations['ms1_notes']
+            analyst_notes_box.value = current_annotations['analyst_notes']
+            id_notes_box.value = current_annotations['identification_notes']
+        finally:
+            updating[0] = temp_updating
+
     def on_ms2_annotation_change(change):
         """Handle MS2 annotation changes"""
         if updating[0]:
@@ -932,37 +1172,46 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
     
     # Add manual save button
     manual_save_button = widgets.Button(
-        description="💾 Save Session", 
+        description="Save Session", 
         button_style='info', 
         layout=widgets.Layout(width='150px')
     )
     
     def on_manual_save(button):
-        """Manual save handler"""
-        if gui_checkpoint_manager:
+        """Manual save handler for AnalystModifications"""
+        if project_dir:
             try:
-                plot_data = analyst_modifications.to_plot_data_format(compound_metadata)
-                project_data = getattr(container, '_project_data', None)
+                # Save current AnalystModifications to progress cache
+                timestamp = scache.save_gui_cache(container, project_dir, "progress")
+                button.description = f"Saved {timestamp[-8:-3]}"
+                last_save_time[0] = time.time()
                 
-                if project_data:
-                    timestamp = gui_checkpoint_manager.save_session(
-                        project_data,
-                        atlas_df,
-                        plot_data,
-                        analyst_modifications
-                    )
-                    button.description = f"✅ Saved {timestamp[-8:-3]}"
-                    # Reset button text after 2 seconds
-                    import threading
-                    def reset_button():
-                        time.sleep(2)
-                        button.description = "💾 Save Session"
-                    threading.Thread(target=reset_button).start()
+                # Reset button text after 2 seconds
+                import threading
+                def reset_button():
+                    time.sleep(2)
+                    button.description = "Save Session"
+                threading.Thread(target=reset_button).start()
             except Exception as e:
                 logger.error(f"Manual save failed: {e}")
-                button.description = "❌ Save Failed"
+                button.description = "Save Failed"
     
     manual_save_button.on_click(on_manual_save)
+
+    # Connect all event handlers to their widgets
+    prev_button.on_click(lambda b: on_navigation(-1))
+    next_button.on_click(lambda b: on_navigation(1))
+    ms2_prev_button.on_click(lambda b: on_ms2_navigation(-1))
+    ms2_next_button.on_click(lambda b: on_ms2_navigation(1))
+    reset_button.on_click(on_reset)
+    accept_suggestions_button.on_click(on_accept_suggestions)
+    
+    # Connect annotation widgets to their handlers
+    ms2_radio.observe(on_ms2_annotation_change, names='value')
+    ms1_radio.observe(on_ms1_annotation_change, names='value')
+    analyst_notes_box.observe(on_analyst_notes_change, names='value')
+    id_notes_box.observe(on_id_notes_change, names='value')
+    compound_dropdown.observe(on_dropdown_change, names='value')
     
     # Create layout structure
     nav_row = widgets.HBox([prev_button, counter_label, next_button], layout=widgets.Layout(justify_content='center'))
@@ -1015,6 +1264,43 @@ def create_gui(compound_metadata, atlas_df, config, checkpoint_manager=None):
     
     # Store project data reference in container for auto-save
     container._project_data = None  # Will be set externally
-    container._checkpoint_manager = gui_checkpoint_manager
     
     return container
+
+def _load_or_create_analyst_modifications(config: Dict, project_db_path: Optional[str]) -> dcl.AnalystModifications:
+    """
+    Load existing AnalystModifications from cache or create new instance.
+    
+    Args:
+        config: Configuration dictionary
+        project_db_path: Path to project database
+        
+    Returns:
+        AnalystModifications instance (either loaded from cache or new)
+    """
+    # Check for session cache setting
+    use_session_cache = config.get('analysis_settings', {}).get('use_session_cache', False)
+    
+    if use_session_cache is not False and project_db_path:
+        logger.info("Attempting to load existing AnalystModifications from session cache...")
+        project_dir = str(Path(project_db_path).parent)
+        
+        try:
+            # Try to load from progress cache first (most recent session)
+            cached_gui = scache.load_gui_cache(project_dir, use_session_cache, "progress")
+            if cached_gui is not None:
+                logger.info(f"Loaded AnalystModifications from progress cache with {len(cached_gui.get_modifications().modified_compounds)} modified compounds")
+                return cached_gui.get_modifications()
+            
+            # Fallback to complete cache if no progress cache
+            cached_gui = scache.load_gui_cache(project_dir, use_session_cache, "complete")
+            if cached_gui is not None:
+                logger.info(f"Loaded AnalystModifications from complete cache with {len(cached_gui.get_modifications().modified_compounds)} modified compounds")
+                return cached_gui.get_modifications()
+                
+        except Exception as e:
+            logger.warning(f"Failed to load AnalystModifications from cache: {e}")
+    
+    # Create new instance if no cache or cache loading failed
+    logger.info("Creating new AnalystModifications instance")
+    return dcl.AnalystModifications()

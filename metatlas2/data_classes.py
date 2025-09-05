@@ -61,7 +61,7 @@ class EICData:
 
 @dataclass
 class MS2Hit:
-    """Represents a reference database match for an MS2 spectrum."""
+    """Represents a reference database match for an MS2 spectrum with standardized data."""
     database: str
     ref_id: str
     score: float
@@ -73,29 +73,62 @@ class MS2Hit:
     ref_mz_values: np.ndarray
     ref_intensity_values: np.ndarray
     
-    # Aligned spectra for comparison
+    # Aligned spectra for comparison (consistent length)
     query_mz_aligned: np.ndarray
     query_intensity_aligned: np.ndarray
     ref_mz_aligned: np.ndarray
     ref_intensity_aligned: np.ndarray
     
-    # Fragment matching info
+    # Fragment matching info (standardized)
     matched_fragments: List[float] = field(default_factory=list)
     fragment_colors: List[str] = field(default_factory=list)
     
     def __post_init__(self):
-        """Convert arrays to numpy."""
+        """Convert arrays to numpy and validate consistency."""
         self.ref_mz_values = np.asarray(self.ref_mz_values)
         self.ref_intensity_values = np.asarray(self.ref_intensity_values)
         self.query_mz_aligned = np.asarray(self.query_mz_aligned)
         self.query_intensity_aligned = np.asarray(self.query_intensity_aligned)
         self.ref_mz_aligned = np.asarray(self.ref_mz_aligned)
         self.ref_intensity_aligned = np.asarray(self.ref_intensity_aligned)
+        
+        # Validate aligned arrays have consistent lengths
+        aligned_lengths = [
+            len(self.query_mz_aligned),
+            len(self.query_intensity_aligned), 
+            len(self.ref_mz_aligned),
+            len(self.ref_intensity_aligned)
+        ]
+        if len(set(aligned_lengths)) > 1:
+            raise ValueError("All aligned arrays must have the same length")
+        
+        # Validate fragment colors match aligned array length
+        if len(self.fragment_colors) > 0 and len(self.fragment_colors) != aligned_lengths[0]:
+            raise ValueError("Fragment colors length must match aligned array length")
     
     @property
     def is_valid_hit(self) -> bool:
-        """Check if this is a valid hit (has score and matches)."""
-        return self.score > 0 and self.num_matches > 0
+        """Check if this is a valid hit with meaningful data."""
+        return (self.score > 0 and 
+                self.num_matches > 0 and 
+                len(self.ref_mz_values) > 0 and
+                len(self.query_mz_aligned) > 0)
+    
+    @property
+    def total_ref_fragments(self) -> int:
+        """Total number of fragments in reference spectrum."""
+        return len(self.ref_mz_values)
+    
+    @property
+    def total_query_fragments(self) -> int:
+        """Total number of fragments in query spectrum (from aligned data)."""
+        return np.sum(self.query_intensity_aligned > 0)
+    
+    @property
+    def match_ratio(self) -> float:
+        """Ratio of matched fragments to total query fragments."""
+        total_query = self.total_query_fragments
+        return self.num_matches / max(total_query, 1)
 
 @dataclass
 class MS2Spectrum:
@@ -389,3 +422,39 @@ class AnalystModifications:
                 plot_data[inchi_key]['new_atlas_data'].update(annotation_mods)
         
         return plot_data
+
+@dataclass
+class SpectrumMatch:
+    """Results of comparing query and reference spectra."""
+    # Similarity metrics
+    similarity_score: float
+    num_matched_fragments: int
+    
+    # Fragment counts
+    total_query_fragments: int
+    total_ref_fragments: int
+    
+    # Matched fragment information
+    matched_mz_values: List[float]
+    matched_colors: List[str]  # 'green' for matches, 'red' for non-matches
+    
+    # Original spectra (unaligned)
+    query_mz: np.ndarray
+    query_intensity: np.ndarray
+    ref_mz: np.ndarray
+    ref_intensity: np.ndarray
+    
+    # Aligned spectra (same length for plotting)
+    aligned_mz: np.ndarray
+    aligned_query_intensity: np.ndarray
+    aligned_ref_intensity: np.ndarray
+    
+    @property
+    def match_ratio(self) -> float:
+        """Ratio of matched fragments to total query fragments."""
+        return self.num_matched_fragments / max(self.total_query_fragments, 1)
+    
+    @property
+    def coverage_ratio(self) -> float:
+        """Ratio of matched fragments to total reference fragments."""
+        return self.num_matched_fragments / max(self.total_ref_fragments, 1)
