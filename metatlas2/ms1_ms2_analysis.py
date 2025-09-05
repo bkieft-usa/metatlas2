@@ -265,8 +265,7 @@ def calculate_mz_tolerance_range(mz: float, tolerance_ppm: float) -> Tuple[float
     tolerance_da = mz * tolerance_ppm / 1e6
     return mz - tolerance_da, mz + tolerance_da
 
-
-def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame, config: Dict) -> Dict[str, Dict]:
+def extract_eic_and_ms2_data(input_data_list: List[Dict], config: Dict) -> Dict[str, Dict]:
     """
     Extract EIC and MS2 data using simplified approach - returns raw data only.
     ProjectAnalysis will handle object creation and management.
@@ -276,19 +275,8 @@ def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_df: pd.DataFrame
     """
     # Load reference database for MS2 matching
     msms_refs_path = Path(config["paths"]["msms_refs"])
-    reference_df = None
-    if msms_refs_path.exists():
-        reference_df = ldt.load_msms_refs_file(msms_refs_path)
-        if reference_df is not None:
-            logger.info(f"Loaded {len(reference_df)} reference spectra for MS2 matching")
-        else:
-            logger.info("MS2 reference file found but could not be loaded")
-    else:
-        logger.info(f"MS2 reference file not found at {msms_refs_path}")
-        logger.info("All MS2 datapoints will be preserved but without reference hits")
-    
-    logger.info(f"Extracting data from {len(input_data_list)} files...")
-    
+    reference_df = ldt.load_msms_refs_file(msms_refs_path)
+        
     # Extract experimental data using simplified approach
     experimental_data = _extract_experimental_data_simple(input_data_list, reference_df, config)
     
@@ -313,14 +301,14 @@ def _extract_experimental_data_simple(input_data_list: List[Dict], reference_df:
     experimental_data = {}
     
     # Determine processing approach
-    max_workers = min(mp.cpu_count(), len(input_data_list), 8)
+    #max_workers = min(mp.cpu_count(), len(input_data_list), 8)
     
-    if max_workers > 1 and len(input_data_list) > 1:
-        logger.info(f"Using parallel processing with {max_workers} workers...")
-        experimental_data = _extract_data_parallel_simple(input_data_list, reference_df, config, max_workers)
-    else:
-        logger.info("Using sequential processing...")
-        experimental_data = _extract_data_sequential_simple(input_data_list, reference_df, config)
+    # if max_workers > 1 and len(input_data_list) > 1:
+    #     logger.info(f"Using parallel processing with {max_workers} workers...")
+    #     experimental_data = _extract_data_parallel_simple(input_data_list, reference_df, config, max_workers)
+    # else:
+    #     logger.info("Using sequential processing...")
+    experimental_data = _extract_data_sequential_simple(input_data_list, reference_df, config)
     
     return experimental_data
 
@@ -334,20 +322,20 @@ def _extract_data_sequential_simple(input_data_list: List[Dict], reference_df: O
         filename = Path(file_path).name
         
         try:
-            # Extract raw data using feature_tools
-            logger.info(f"Processing file {i+1}/{len(input_data_list)}: {filename}")
-            logger.info(f"File input keys: {list(file_input.keys())}")
-            logger.info(f"Atlas DF columns: {list(file_input['atlas'].columns)}")  # Changed from 'atlas_df'
-            
             data = ftt.get_data(file_input, save_file=False, return_data=True, ms1_feature_filter=False)
             
             # Process EIC data - simple data only
             if not data['ms1_data'].empty:
+                logger.info(f"Processing EIC data for {filename} with {len(data['ms1_data'])} points...")
                 adduct_eics = ftt.group_duplicates(data['ms1_data'], 'label', make_string=False)
-                
+                logger.info(f"  Found {len(adduct_eics)} unique adduct groups in EIC data")
+                logger.info(f"  Adduct groups: {adduct_eics['label'].unique()}")
+                logger.info(f"  Adduct group columns: {adduct_eics.columns.tolist()}")
+
                 if not adduct_eics.empty and 'label' in adduct_eics.columns:
                     for _, eic_row in adduct_eics.iterrows():
                         inchi_key = eic_row.get('inchi_key', '')
+                        logger.info(f"  Processing EIC for inchi_key: {inchi_key}")
                         if not inchi_key:
                             continue
                         
@@ -359,12 +347,14 @@ def _extract_data_sequential_simple(input_data_list: List[Dict], reference_df: O
                             }
                         
                         # Extract simple EIC values
+                        logger.info(display(eic_row))
                         eic_data = _extract_simple_eic_data(eic_row, filename)
                         if eic_data:
                             experimental_data[inchi_key]['eic_files'][filename] = eic_data
             
             # Process MS2 data - simple data only
             if not data['ms2_data'].empty:
+                logger.info(f"Processing MS2 data for {filename} with {len(data['ms2_data'])} points...")
                 ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
                 
                 if not ms2_summary.empty:
@@ -789,31 +779,20 @@ def prepare_feature_tools_inputs(
     
     for col in required_columns:
         if col not in atlas_df_copy.columns:
-            if col == 'label':
-                atlas_df_copy['label'] = atlas_df_copy.get('compound_name', 'Unknown')
-            elif col == 'polarity':
-                # Try to infer from existing columns or use a default
-                atlas_df_copy['polarity'] = atlas_df_copy.get('polarity', 'positive')
-            elif col == 'chromatography':
-                atlas_df_copy['chromatography'] = atlas_df_copy.get('chromatography', 'HILIC')
-            elif col == 'mz_tolerance':
-                atlas_df_copy['mz_tolerance'] = atlas_df_copy.get('mz_tolerance', ppm_tolerance)
-            else:
-                logger.warning(f"Missing required column '{col}' in atlas DataFrame")
-                atlas_df_copy[col] = ''
-    
-    # Validate that we have the essential data
-    essential_columns = ['inchi_key', 'mz', 'rt_peak']
-    missing_essential = [col for col in essential_columns if col not in atlas_df_copy.columns or atlas_df_copy[col].isna().all()]
-    
-    if missing_essential:
-        raise ValueError(f"Atlas DataFrame is missing essential columns: {missing_essential}")
+            logger.error(f"Atlas DataFrame is missing required column: {col}")
+            raise ValueError(f"Atlas DataFrame is missing required column: {col}")
     
     # Extract atlas-level metadata for feature_tools
-    atlas_polarity = atlas_df_copy['polarity'].iloc[0] if not atlas_df_copy.empty else 'positive'
-    atlas_chromatography = atlas_df_copy['chromatography'].iloc[0] if not atlas_df_copy.empty else 'HILIC'
-    
-    logger.info(f"Atlas DataFrame prepared with {len(atlas_df_copy)} compounds and columns: {list(atlas_df_copy.columns)}")
+    atlas_polarity = atlas_df_copy['polarity'].iloc[0]
+    atlas_chromatography = atlas_df_copy['chromatography'].iloc[0]
+
+    atlas_df_copy['group_index'] = ftt.group_consecutive(atlas_df_copy['mz'].values[:],
+                                             stepsize=ppm_tolerance,
+                                             do_ppm=True)
+    atlas_df_copy['extra_time'] = extra_time
+    atlas_df_copy['ppm_tolerance'] = ppm_tolerance
+
+    logger.info(f"Atlas DataFrame prepared with {len(atlas_df_copy)} compounds")
     logger.info(f"Atlas polarity: {atlas_polarity}, chromatography: {atlas_chromatography}")
     
     # Create input list for feature_tools
@@ -821,7 +800,6 @@ def prepare_feature_tools_inputs(
     
     for file_path in h5_files:
         try:
-            # Create input dictionary with correct key names for feature_tools
             file_input = {
                 'lcmsrun': file_path,
                 'atlas': atlas_df_copy,

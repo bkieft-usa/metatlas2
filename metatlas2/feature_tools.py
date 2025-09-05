@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
+import sys
 from scipy import interpolate
 import pymzml
 import time
@@ -9,105 +10,110 @@ from six.moves import range
 from six.moves import zip
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-def setup_file_slicing_parameters(atlas,filenames,extra_time=0.1,ppm_tolerance=20,polarity='positive',project_dir=False,base_dir = '/project/projectdirs/metatlas/projects/',overwrite=True):
-    """
-    Make parameters that have to be setup to run the fast feature finding process.
+sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+import logging_config as lcf
 
-    This function is called first when doing feature selection. It standardizes
-    all necessary inputs and files so downstream functions get a consistent place
-    to work.
+logger = lcf.get_logger('ms1_ms2_analysis')
 
-    Args:
-        atlas (pandas dataframe): with [label,mz,rt_min,rt_max,rt_peak]. optional
-        parameters are fine too.
+# def setup_file_slicing_parameters(atlas,filenames,extra_time=0.1,ppm_tolerance=20,polarity='positive',project_dir=False,base_dir = '/project/projectdirs/metatlas/projects/',overwrite=True):
+#     """
+#     Make parameters that have to be setup to run the fast feature finding process.
 
-        filenames (list): full paths to hdf5 files
+#     This function is called first when doing feature selection. It standardizes
+#     all necessary inputs and files so downstream functions get a consistent place
+#     to work.
 
-        extra_time (float): default=0.1 Time to get in addition to rt-min/max window (for making nice EICs)
-        custom is to store metatlas hdf5 files in minutes, but always double check
+#     Args:
+#         atlas (pandas dataframe): with [label,mz,rt_min,rt_max,rt_peak]. optional
+#         parameters are fine too.
 
-        ppm_tolerance (float): default=20 Calibration is sometimes a problem. 20
-        is safe.
+#         filenames (list): full paths to hdf5 files
 
-        polarity (str): default='positive' or 'negative'
+#         extra_time (float): default=0.1 Time to get in addition to rt-min/max window (for making nice EICs)
+#         custom is to store metatlas hdf5 files in minutes, but always double check
 
-        project_dir (bool/str): default=False if user doesn't want to save their results
-        or "path to output files"
+#         ppm_tolerance (float): default=20 Calibration is sometimes a problem. 20
+#         is safe.
 
-        only relevant if project_dir is not False
-        base_dir (str): '/project/projectdirs/metatlas/projects/'
-        other paths that have been tried, but only a few percent faster than project:
-            scratch_dir = os.environ['SCRATCH']
-            scratch_dir = os.environ['DW_JOB_STRIPED']
+#         polarity (str): default='positive' or 'negative'
 
-    Returns:
-        input_data list(dict): a list of python dictionaries with the following attributes
-        for each lcmsrun to process:
-            outfile (str): path to output hdf5 file of feature signals
-            lcmsrun (str): lcmsrun to process
-            atlas (pandas dataframe): atlas with necessary attributes for feature slicing,
-            polarity (str): passthrough of input polarity string
+#         project_dir (bool/str): default=False if user doesn't want to save their results
+#         or "path to output files"
+
+#         only relevant if project_dir is not False
+#         base_dir (str): '/project/projectdirs/metatlas/projects/'
+#         other paths that have been tried, but only a few percent faster than project:
+#             scratch_dir = os.environ['SCRATCH']
+#             scratch_dir = os.environ['DW_JOB_STRIPED']
+
+#     Returns:
+#         input_data list(dict): a list of python dictionaries with the following attributes
+#         for each lcmsrun to process:
+#             outfile (str): path to output hdf5 file of feature signals
+#             lcmsrun (str): lcmsrun to process
+#             atlas (pandas dataframe): atlas with necessary attributes for feature slicing,
+#             polarity (str): passthrough of input polarity string
 
 
-    """
+#     """
 
-    """
-    setup atlas table and define extra_time and ppm_tolerance in the atlas
-    for compound atlases, label isn't stritly necessary add it if not provided
-    """
-    if not 'label' in atlas.columns:
-        atlas['label'] = list(range(atlas.shape[0]))
+#     """
+#     setup atlas table and define extra_time and ppm_tolerance in the atlas
+#     for compound atlases, label isn't stritly necessary add it if not provided
+#     """
+#     if not 'label' in atlas.columns:
+#         atlas['label'] = list(range(atlas.shape[0]))
 
-    atlas['extra_time'] = extra_time
-    atlas['ppm_tolerance'] = ppm_tolerance
+#     atlas['extra_time'] = extra_time
+#     atlas['ppm_tolerance'] = ppm_tolerance
 
-    """
-    Group together m/z values that are within ppm_tolerance.
-    This gives an index to acknowledge that there are multiple features with nearly
-    equal m/z.  Assigning it here speeds up the file slicing and feature selection
-    down the road.
-    """
-    atlas['group_index'] = group_consecutive(atlas['mz'].values[:],
-                                             stepsize=ppm_tolerance,
-                                             do_ppm=True)
+#     """
+#     Group together m/z values that are within ppm_tolerance.
+#     This gives an index to acknowledge that there are multiple features with nearly
+#     equal m/z.  Assigning it here speeds up the file slicing and feature selection
+#     down the road.
+#     """
+#     atlas['group_index'] = group_consecutive(atlas['mz'].values[:],
+#                                              stepsize=ppm_tolerance,
+#                                              do_ppm=True)
 
-    """
-    define output directory
-    """
-    if project_dir is not False: #user doesn't want to save their results
-        output_dir = os.path.join(base_dir,project_dir)
-        if not os.path.isdir(output_dir):
-            os.mkdir(output_dir)
+#     """
+#     define output directory
+#     """
+#     if project_dir is not False: #user doesn't want to save their results
+#         output_dir = os.path.join(base_dir,project_dir)
+#         if not os.path.isdir(output_dir):
+#             os.mkdir(output_dir)
 
-    """
-    get lcmsruns to process and build fullpath to output files
-    """
+#     """
+#     get lcmsruns to process and build fullpath to output files
+#     """
 
-    """
-    setup input dictionary that will be the get_data input for each file
-    """
-    input_data = []
-    for i,f in enumerate(filenames):
-        #strip off the path and extension from the filename
-        file_frag = ''.join(os.path.basename(f).split('.')[:-1])
-        if len(file_frag)>0:
-            output_filename = '%s_features.h5'%file_frag
-            if project_dir is not False: #user doesn't want to save their results
-                outfile = os.path.join(output_dir,output_filename)
-            else:
-                outfile = None
-            input_data.append({'outfile':outfile,'lcmsrun':f,'atlas':atlas,'polarity':polarity}) # 'ppm_tolerance':ppm_tolerance,'extra_time':extra_time,,'start_time':time.time() 'file_index':i,
+#     """
+#     setup input dictionary that will be the get_data input for each file
+#     """
+#     input_data = []
+#     for i,f in enumerate(filenames):
+#         #strip off the path and extension from the filename
+#         file_frag = ''.join(os.path.basename(f).split('.')[:-1])
+#         if len(file_frag)>0:
+#             output_filename = '%s_features.h5'%file_frag
+#             if project_dir is not False: #user doesn't want to save their results
+#                 outfile = os.path.join(output_dir,output_filename)
+#             else:
+#                 outfile = None
+#             input_data.append({'outfile':outfile,'lcmsrun':f,'atlas':atlas,'polarity':polarity}) # 'ppm_tolerance':ppm_tolerance,'extra_time':extra_time,,'start_time':time.time() 'file_index':i,
 
-    """
-    wipe out all the files and put the atlas in each one
-    """
-    if overwrite==True:
-        for i in input_data:
-            if i['outfile'] is not None: #user doesn't want to save their results
-                with pd.HDFStore(i['outfile'],mode='w',complib='zlib',complevel=9) as f:
-                    f.put('atlas',atlas,data_columns=True)
+#     """
+#     wipe out all the files and put the atlas in each one
+#     """
+#     if overwrite==True:
+#         for i in input_data:
+#             if i['outfile'] is not None: #user doesn't want to save their results
+#                 with pd.HDFStore(i['outfile'],mode='w',complib='zlib',complevel=9) as f:
+#                     f.put('atlas',atlas,data_columns=True)
 
-    return input_data
+#     return input_data
 
 
 def group_consecutive(data,stepsize=10.0,do_ppm=True):
@@ -168,34 +174,14 @@ def map_mzgroups_to_data(mz_atlas,mz_group_indices,mz_data):
     return mz_group_indices[idx]
 
 
-def df_container_from_metatlas_file(filename,desired_key=None):
+def read_hdf_file(filename,desired_key=None):
     """
     Inputs:
     filename: hdf filename from which to extract desired key
     desired_key: optional key, typically "ms1_pos", "ms2_neg", etc.
-
-    Outputs:
-    df_container: a dataframe holding the information for the desired key (e.g., m/z, rt, intensity)
     """
-    df_container = {}
-
     if desired_key is not None:
-
         return pd.read_hdf(filename,desired_key)
-    
-    ## This does not work currently!!
-    else:
-
-        pd_h5_file = pd.HDFStore(filename, 'r')
-        keys = list(pd_h5_file.keys())
-        pd_h5_file.close()
-
-        for k in keys:
-            if ('ms' in k) and not ('_mz' in k):
-                new_df = pd.read_hdf(filename,k)
-                df_container[k[1:]] = new_df
-
-    return df_container
 
 
 def df_container_from_mzml_file(filename: str, desired_key: str) -> pd.DataFrame:
@@ -292,7 +278,7 @@ def get_atlas_data_from_file(filename,atlas,desired_key='ms1_pos'):
     Dataframe of new raw data where unmatched features have been dropped
 
     """
-    msdata = df_container_from_metatlas_file(filename,desired_key=desired_key)
+    msdata = read_hdf_file(filename,desired_key=desired_key)
 
     if 'ms2' in desired_key:
         # throw away all the intensity duplication here to make merging faster
@@ -310,49 +296,10 @@ def get_atlas_data_from_file(filename,atlas,desired_key='ms1_pos'):
         # keep in mind we don't have intensity or scan attributes
         df = df[['label','rt','in_feature']]
         # you've got to add it back in; so reload original file
-        msdata = df_container_from_metatlas_file(filename,desired_key=desired_key)
+        msdata = read_hdf_file(filename,desired_key=desired_key)
         # This will merge back into the MSMS data the missing intensity and scan attributes
         mcols = ['rt','i','mz','precursor_MZ','precursor_intensity','collision_energy']
         df = pd.merge(df,msdata[mcols],left_on='rt',right_on='rt',how='left')
-        return df.reset_index(drop=True)
-    else:
-        df = df[['label','rt','mz','i','in_feature']]
-        return df.reset_index(drop=True)
-    
-    
-def get_atlas_data_from_mzml(filename, atlas, desired_key='ms1_pos'):#,bundle=True,make_string=False):
-    """
-    Inputs:
-    filename: mzml filename containing raw data
-    atlas: atlas to which raw data will be mapped (after running group_consecutive() to get group_index column)
-    desired_key: ms mode
-
-    Outputs:
-    Dataframe of new raw data where unmatched features have been dropped
-
-    """
-    
-    msdata = df_container_from_mzml_file(filename, desired_key)
-
-    if 'ms2' in desired_key:
-        # throw away all the intensity duplication here to make merging faster
-        # this has the expense of having to remerge it later.
-        unfiltered_msdata = msdata.copy()
-        msdata = msdata[['rt','precursor_MZ']].drop_duplicates('rt')
-        msdata = msdata.rename(columns={'precursor_MZ':'mz'})
-
-    msdata['group_index'] = map_mzgroups_to_data(atlas['mz'].values[:],
-                               atlas['group_index'].values[:],
-                               msdata['mz'].values[:])
-    
-    df = filter_raw_data_using_atlas(atlas, msdata)
-
-    if 'ms2' in desired_key:
-        # keep in mind we don't have intensity or scan attributes
-        df = df[['label','rt','in_feature']]
-        # This will merge back into the MSMS data the missing intensity and scan attributes
-        mcols = ['rt','i','mz','precursor_MZ','precursor_intensity','collision_energy']
-        df = pd.merge(df,unfiltered_msdata[mcols],left_on='rt',right_on='rt',how='left')
         return df.reset_index(drop=True)
     else:
         df = df[['label','rt','mz','i','in_feature']]
@@ -474,6 +421,9 @@ def get_data(input_data,return_data=False,save_file=True,ms1_feature_filter=True
             f.put('ms2_data',d,data_columns=True)
 
     if return_data is True:
+        logger.info(f"Returning data dictionary for {input_data['lcmsrun']}")
+        logger.info(f"  with {out_data['ms1_data'].shape[0]} MS1 points")
+        logger.info(f"  with {out_data['ms2_data'].shape[0]} MS2 points")
         return out_data
 
 

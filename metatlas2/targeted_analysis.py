@@ -118,12 +118,10 @@ def run_targeted_analysis_workflow(project_db_path: str,
         ppm_tolerance=analysis_settings["default_ppm_error"],
         extra_time=analysis_settings["extra_time"]
     )
-    logger.info(f"Created {len(input_data_list)} input dictionaries")
+    logger.info(f"Created {len(input_data_list)} input dictionaries for feature extraction")
 
     logger.info("Extracting EIC and MS2 data with hits...")
-    experimental_data = msa.extract_eic_and_ms2_data(
-        input_data_list, atlas_dataframe, config
-    )
+    experimental_data = msa.extract_eic_and_ms2_data(input_data_list, config)
 
     # Add experimental data to project analysis using simplified format
     project_analysis.add_experimental_data_simple(experimental_data)
@@ -595,10 +593,3 @@ def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
         return x
     cumsum = np.cumsum(np.insert(x, 0, 0.0))
     return (cumsum[window:] - cumsum[:-window]) / float(window)
-
-# REMOVED DEPRECATED FUNCTIONS:
-# - create_post_analysis_atlas() (kept for backwards compatibility with deprecation warning)
-# - run_post_analysis_workflow() (kept for backwards compatibility with deprecation warning)
-# - All conversion functions that were used for plot_data formatting
-# - Complex dictionary building functions
-# - Legacy GUI setup functions
