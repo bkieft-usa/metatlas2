@@ -61,10 +61,11 @@ def get_files_by_type_from_db(project_db_path: str, file_type: str) -> pd.DataFr
     
     return files_df
 
-def get_atlas_compounds_table(database_path: str, atlas_uid: str) -> pd.DataFrame:
+def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: str = None) -> pd.DataFrame:
     """
     Extract all compound information for a given atlas UID from the database and return as a pandas DataFrame.
     Handles both main database (with mz_rt_references) and project database (with mz_rt_experimental) structures.
+    Uses external database attachment for compound metadata when needed.
     """
 
     with get_db_connection(database_path) as conn:
@@ -76,38 +77,73 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str) -> pd.DataFram
             WHERE table_name = 'mz_rt_experimental'
         """).fetchone()[0] > 0
         
+        # Attach main database if this is a project database and main_db_path provided
+        if is_project_db and main_db_path:
+            conn.execute(f"ATTACH '{main_db_path}' AS main_db")
+            logger.debug("Attached main database for compound metadata")
+        
         if is_project_db:
-            # Project database query - uses experimental data and limited compound info
-            # Note: In project databases, compounds table might be minimal/empty since 
-            # full compound data is in the main database
-            query = """
-                SELECT
-                    a.atlas_uid,
-                    a.atlas_name,
-                    a.atlas_description,
-                    a.chromatography,
-                    a.polarity,
-                    aca.compound_uid,
-                    COALESCE(c.name, '') AS compound_name,
-                    COALESCE(c.inchi_key, '') AS inchi_key,
-                    COALESCE(c.inchi, '') AS inchi,
-                    mzrt_exp.adduct,
-                    mzrt_exp.mz,
-                    mzrt_exp.rt_peak,
-                    mzrt_exp.rt_min,
-                    mzrt_exp.rt_max,
-                    mzrt_exp.mz_tolerance,
-                    mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
-                    mzrt_exp.rt_correction_applied,
-                    mzrt_exp.rt_shift,
-                    mzrt_exp.source_mz_rt_reference_uid
-                FROM atlases a
-                JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
-                LEFT JOIN compounds c ON aca.compound_uid = c.compound_uid
-                LEFT JOIN mz_rt_experimental mzrt_exp ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
-                WHERE a.atlas_uid = ?
-                ORDER BY aca.association_order, mzrt_exp.rt_peak
-            """
+            # Project database query - uses experimental data with external compound references
+            if main_db_path:
+                # Use attached main database for complete compound info
+                query = """
+                    SELECT
+                        a.atlas_uid,
+                        a.atlas_name,
+                        a.atlas_description,
+                        a.chromatography,
+                        a.polarity,
+                        aca.compound_uid,
+                        COALESCE(main_db.compounds.name, '') AS compound_name,
+                        COALESCE(main_db.compounds.inchi_key, '') AS inchi_key,
+                        COALESCE(main_db.compounds.inchi, '') AS inchi,
+                        mzrt_exp.adduct,
+                        mzrt_exp.mz,
+                        mzrt_exp.rt_peak,
+                        mzrt_exp.rt_min,
+                        mzrt_exp.rt_max,
+                        mzrt_exp.mz_tolerance,
+                        mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
+                        mzrt_exp.rt_correction_applied,
+                        mzrt_exp.rt_shift,
+                        mzrt_exp.source_mz_rt_reference_uid
+                    FROM atlases a
+                    JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+                    LEFT JOIN main_db.compounds ON aca.compound_uid = main_db.compounds.compound_uid
+                    LEFT JOIN mz_rt_experimental mzrt_exp ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
+                    WHERE a.atlas_uid = ?
+                    ORDER BY aca.association_order, mzrt_exp.rt_peak
+                """
+            else:
+                # Fallback to local compounds table (may be incomplete)
+                query = """
+                    SELECT
+                        a.atlas_uid,
+                        a.atlas_name,
+                        a.atlas_description,
+                        a.chromatography,
+                        a.polarity,
+                        aca.compound_uid,
+                        COALESCE(c.name, '') AS compound_name,
+                        COALESCE(c.inchi_key, '') AS inchi_key,
+                        COALESCE(c.inchi, '') AS inchi,
+                        mzrt_exp.adduct,
+                        mzrt_exp.mz,
+                        mzrt_exp.rt_peak,
+                        mzrt_exp.rt_min,
+                        mzrt_exp.rt_max,
+                        mzrt_exp.mz_tolerance,
+                        mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
+                        mzrt_exp.rt_correction_applied,
+                        mzrt_exp.rt_shift,
+                        mzrt_exp.source_mz_rt_reference_uid
+                    FROM atlases a
+                    JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+                    LEFT JOIN compounds c ON aca.compound_uid = c.compound_uid
+                    LEFT JOIN mz_rt_experimental mzrt_exp ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
+                    WHERE a.atlas_uid = ?
+                    ORDER BY aca.association_order, mzrt_exp.rt_peak
+                """
         else:
             # Main database query - uses reference data with full compound info
             query = """
@@ -140,6 +176,10 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str) -> pd.DataFram
             """
         
         df = conn.execute(query, [atlas_uid]).df()
+        
+        # Detach main database if attached
+        if is_project_db and main_db_path:
+            conn.execute("DETACH main_db")
 
     if df.empty:
         logger.warning(f"No compounds found for atlas {atlas_uid}")
@@ -1294,55 +1334,18 @@ def get_atlas_compounds_with_metadata(project_db_path: str, main_db_path: str, a
     """
     Get atlas compounds from project database and enrich with metadata from main database.
     This is specifically for RT-corrected atlases in project databases.
+    Uses external database attachment for compound metadata.
     """
-    # Get basic atlas structure from project database
-    project_df = get_atlas_compounds_table(project_db_path, atlas_uid)
+    # Use the updated get_atlas_compounds_table with external attachment
+    enriched_df = get_atlas_compounds_table(project_db_path, atlas_uid, main_db_path)
     
-    if project_df.empty:
+    if enriched_df.empty:
         return pd.DataFrame()
-    
-    # Get compound UIDs that need metadata
-    compound_uids = project_df['compound_uid'].unique().tolist()
-    
-    # Fetch compound metadata from main database
-    with get_db_connection(main_db_path) as conn_main:
-
-        placeholders = ','.join(['?' for _ in compound_uids])
-        metadata_query = f"""
-            SELECT 
-                compound_uid,
-                name AS compound_name,
-                inchi_key,
-                inchi,
-                formula,
-                mono_isotopic_molecular_weight
-            FROM compounds 
-            WHERE compound_uid IN ({placeholders})
-        """
-        
-        metadata_df = conn_main.execute(metadata_query, compound_uids).df()
-    
-    # Merge project data with metadata
-    enriched_df = project_df.merge(
-        metadata_df, 
-        on='compound_uid', 
-        how='left',
-        suffixes=('', '_meta')
-    )
-    
-    # Update compound_name and other fields with metadata
-    enriched_df['compound_name'] = enriched_df['compound_name_meta'].fillna(enriched_df['compound_name'])
-    enriched_df['inchi_key'] = enriched_df['inchi_key_meta'].fillna(enriched_df['inchi_key'])
-    enriched_df['inchi'] = enriched_df['inchi_meta'].fillna(enriched_df['inchi'])
     
     # Add label column for compatibility with feature_tools
     enriched_df['label'] = enriched_df['compound_name']
     
-    # Clean up duplicate columns
-    cols_to_drop = [col for col in enriched_df.columns if col.endswith('_meta')]
-    enriched_df = enriched_df.drop(columns=cols_to_drop)
-    
-    logger.info(f"Enriched {len(enriched_df)} compounds with metadata from main database")
+    logger.info(f"Retrieved {len(enriched_df)} compounds with metadata using external database attachment")
     
     return enriched_df
 
@@ -1704,6 +1707,7 @@ def _create_database_tables(conn, db_type: str = "main"):
             )
         """)
         
+        # Note: compounds table in project DB is optional since we use external references
         conn.execute("""
             CREATE TABLE IF NOT EXISTS compounds (
                 compound_uid TEXT PRIMARY KEY,
@@ -1747,6 +1751,7 @@ def _create_database_tables(conn, db_type: str = "main"):
             )
         """)
         
+        # Modified: Remove foreign key constraints for external compound references
         conn.execute("""
             CREATE TABLE IF NOT EXISTS atlas_compound_associations (
                 association_uid TEXT PRIMARY KEY,
@@ -1756,8 +1761,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 association_order INTEGER,
                 created_by TEXT,
                 created_date TEXT,
-                FOREIGN KEY (atlas_uid) REFERENCES atlases (atlas_uid),
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
+                FOREIGN KEY (atlas_uid) REFERENCES atlases (atlas_uid)
             )
         """)
         
@@ -1870,7 +1874,7 @@ def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: st
             polarity,
             prov["analyst"],
             prov["timestamp"]
-        ))
+               ))
         
         # Get existing compounds and references
         existing_compounds = {}
@@ -1926,9 +1930,200 @@ def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: st
             
             association_order += 1
     
-   
-    
+       
     logger.info(f"Created atlas '{atlas_name}' with UID: {atlas_uid}")
     logger.info(f"  Added {association_order} compound associations")
     
     return atlas_uid, atlas_name
+
+def create_rt_corrected_atlas(
+    project_db_path: str,
+    source_atlas_uid: str,
+    atlas_info: pd.Series,
+    best_model: dict,
+    target_compounds_df: pd.DataFrame,
+    main_db_path: str = None
+) -> Tuple[str, List[Dict]]:
+    """
+    Create RT-corrected atlas in project database and apply RT correction to compounds.
+    
+    Args:
+        project_db_path: Path to project database
+        source_atlas_uid: UID of source atlas
+        atlas_info: Series containing atlas metadata
+        best_model: RT correction model dictionary
+        target_compounds_df: DataFrame of compounds to correct
+        main_db_path: Path to main database (for external reference)
+    
+    Returns:
+        Tuple of (corrected_atlas_uid, correction_stats)
+    """
+    logger.info("Creating RT-corrected atlas in project database...")
+    
+    # Generate new atlas UID for RT-corrected version
+    corrected_atlas_uid = _generate_uid("rt_atlas")
+    prov = ldt.get_provenance()
+    
+    # Create corrected atlas name
+    corrected_atlas_name = f"{atlas_info['atlas_name']} (RT Corrected)"
+    corrected_atlas_description = f"RT-corrected version of {atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
+    
+    correction_stats = []
+    
+    with get_db_connection(project_db_path) as conn:
+        # Attach main database for external compound references
+        if main_db_path:
+            conn.execute(f"ATTACH '{main_db_path}' AS main_db")
+            logger.debug("Attached main database for compound references")
+        
+        # Create new atlas entry
+        conn.execute("""
+            INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            corrected_atlas_uid,
+            corrected_atlas_name,
+            corrected_atlas_description,
+            atlas_info['chromatography'],
+            atlas_info['polarity'],
+            prov["analyst"],
+            prov["timestamp"]
+        ))
+        
+        # Process each compound and create corrected experimental entries
+        association_order = 0
+        
+        for _, row in target_compounds_df.iterrows():
+            compound_uid = row['compound_uid']
+            original_rt_peak = row.get('rt_peak')
+            
+            if pd.isna(original_rt_peak) or original_rt_peak is None:
+                logger.warning(f"Skipping compound {row.get('compound_name', 'Unknown')} - no RT peak data")
+                continue
+            
+            # Verify compound exists in main database if attached
+            if main_db_path:
+                compound_exists = conn.execute("""
+                    SELECT COUNT(*) FROM main_db.compounds WHERE compound_uid = ?
+                """, [compound_uid]).fetchone()[0] > 0
+                
+                if not compound_exists:
+                    logger.warning(f"Compound {compound_uid} not found in main database, skipping")
+                    continue
+            
+            # Apply RT correction using the model
+            corrected_rt = rat.predict_rt_correction([original_rt_peak], best_model)[0]
+            
+            # Calculate corrected RT window
+            original_window = None
+            if pd.notna(row.get('rt_min')) and pd.notna(row.get('rt_max')):
+                original_window = row['rt_max'] - row['rt_min']
+            else:
+                original_window = 1.0  # Default 1-minute window
+            
+            corrected_rt_min = corrected_rt - original_window / 2
+            corrected_rt_max = corrected_rt + original_window / 2
+            rt_shift = corrected_rt - original_rt_peak
+            
+            # Create new experimental RT/MZ entry
+            exp_uid = _generate_uid("mz_rt_experimental")
+            conn.execute("""
+                INSERT INTO mz_rt_experimental VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                exp_uid,
+                compound_uid,
+                corrected_rt,
+                corrected_rt_min,
+                corrected_rt_max,
+                'keep',  # ms1_notes
+                'no selection',  # ms2_notes
+                row.get('mz'),
+                row.get('mz_tolerance', 5.0),
+                row.get('adduct', ''),
+                atlas_info['chromatography'],
+                atlas_info['polarity'],
+                True,  # rt_correction_applied
+                rt_shift,
+                row.get('mz_rt_reference_uid'),  # source_mz_rt_reference_uid
+                prov["analyst"],
+                prov["timestamp"]
+            ))
+            
+            # Create atlas-compound association
+            assoc_uid = _generate_uid("association")
+            conn.execute("""
+                INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                assoc_uid,
+                corrected_atlas_uid,
+                compound_uid,
+                exp_uid,
+                association_order,
+                prov["analyst"],
+                prov["timestamp"]
+            ))
+            
+            # Track correction statistics
+            correction_stats.append({
+                'compound_name': row.get('compound_name', 'Unknown'),
+                'compound_uid': compound_uid,
+                'mz_rt_reference_uid': row.get('mz_rt_reference_uid'),
+                'mz_rt_experimental_uid': exp_uid,
+                'original_rt': original_rt_peak,
+                'corrected_rt': corrected_rt,
+                'rt_shift': rt_shift
+            })
+            
+            association_order += 1
+        
+        # Detach main database
+        if main_db_path:
+            conn.execute("DETACH main_db")
+    logger.info(f"Created RT-corrected atlas: {corrected_atlas_uid} name: {corrected_atlas_name}")
+    logger.info(f"  Atlas name: {corrected_atlas_name}")
+    logger.info(f"  Corrected {len(correction_stats)} compounds")
+    logger.info(f"  Mean RT shift: {np.mean([stat['rt_shift'] for stat in correction_stats]):.4f} min")
+    return corrected_atlas_uid, correction_stats
+
+def create_rt_alignment_summary(
+    rtc_atlas_name: str,
+    correction_stats: List[Dict],
+    total_compounds: int
+) -> Dict:
+    """
+    Create RT alignment summary dictionary.
+
+    Args:
+        rtc_atlas_name: Name of RT-corrected atlas
+        correction_stats: List of correction statistics
+        total_compounds: Total number of compounds in original atlas
+
+    Returns:
+        Dictionary with alignment summary
+    """
+    if correction_stats:
+        rt_shifts = [stat['rt_shift'] for stat in correction_stats]
+        summary = {
+            'rtc_atlas_name': rtc_atlas_name,
+            'total_compounds': total_compounds,
+            'corrected_compounds': len(correction_stats),
+            'uncorrected_compounds': total_compounds - len(correction_stats),
+            'correction_stats': correction_stats,
+            'mean_correction': np.mean(rt_shifts),
+            'std_correction': np.std(rt_shifts),
+            'min_correction': np.min(rt_shifts),
+            'max_correction': np.max(rt_shifts)
+        }
+    else:
+        summary = {
+            'rtc_atlas_name': rtc_atlas_name,
+            'total_compounds': total_compounds,
+            'corrected_compounds': 0,
+            'uncorrected_compounds': total_compounds,
+            'correction_stats': [],
+            'mean_correction': 0.0,
+            'std_correction': 0.0,
+            'min_correction': 0.0,
+            'max_correction': 0.0
+        }
+    
+    return summary

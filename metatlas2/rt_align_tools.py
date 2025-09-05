@@ -375,13 +375,14 @@ def apply_rt_correction_to_target(
     
     atlas_info = target_atlas_df.iloc[0]
 
-    # Create RT-corrected atlas using database function
+    # Create RT-corrected atlas using database function with external compound references
     corrected_atlas_uid, correction_stats = dbi.create_rt_corrected_atlas(
         project_db_path=project_db_path,
         source_atlas_uid=target_atlas_uid,
         atlas_info=atlas_info,
         best_model=best_model,
-        target_compounds_df=target_compounds_df
+        target_compounds_df=target_compounds_df,
+        main_db_path=database_path  # Pass main database path for external references
     )
     
     # Save RT alignment model to database

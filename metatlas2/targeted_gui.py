@@ -624,33 +624,45 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         rt_max = compound.rt_max
         rt_peak = compound.rt_peak
 
+        print(f"\n=== DEBUG: create_plot_only for {compound.compound_name} ===")
+        print(f"RT bounds: {rt_min:.3f} - {rt_max:.3f}, peak: {rt_peak:.3f}")
+
         # Get MS2 selection info (now filtered by RT bounds and sorted by score)
         ms2_data_type, query_spec, ref_spec, ms2_file = get_selected_ms2_spectra(compound, 
                                                                                 current_ms2_file_index[0],
                                                                                 rt_min,
                                                                                 rt_max)
 
+        print(f"MS2 result: type={ms2_data_type}, file={ms2_file}")
+        print(f"Query spec: {query_spec is not None}")
+        print(f"Ref spec: {ref_spec is not None}")
+
         # Update MS2 counter label - count only files within RT window
-        ms2_files_data = compound.ms2_data_files  # Fixed: direct access, not nested under 'files'
-        files_in_rt_window = []
-        for file_name in ms2_files_data.keys():
-            file_data = ms2_files_data[file_name]
-            best_hit = file_data.get('best_hit', {})
-            best_ms2 = file_data.get('best_ms2', {})
+        ms2_data = compound.ms2_data_files
+        if ms2_data:
+            files_in_rt_window = []
+            for file_name in ms2_data.keys():
+                file_data = ms2_data[file_name]
+                best_hit = file_data.get('best_hit', {})
+                best_ms2 = file_data.get('best_ms2', {})
+                
+                rt_measured = None
+                if best_hit and 'rt_measured' in best_hit:
+                    rt_measured = best_hit.get('rt_measured', 0)
+                elif best_ms2 and 'rt' in best_ms2:
+                    rt_measured = best_ms2.get('rt', 0)
+                elif best_ms2 and 'rt_peak' in best_ms2:
+                    rt_measured = best_ms2.get('rt_peak', 0)
+                
+                if rt_measured is not None and rt_min <= rt_measured <= rt_max:
+                    files_in_rt_window.append(file_name)
             
-            rt_measured = None
-            if best_hit and 'rt_measured' in best_hit:
-                rt_measured = best_hit.get('rt_measured', 0)
-            elif best_ms2 and 'rt_peak' in best_ms2:  # Fixed: should be 'rt_peak' not 'rt'
-                rt_measured = best_ms2.get('rt_peak', 0)
-            
-            if rt_measured is not None and rt_min <= rt_measured <= rt_max:
-                files_in_rt_window.append(file_name)
-        
-        total_files_in_window = len(files_in_rt_window)
-        if total_files_in_window > 0:
-            current_file_idx = min(current_ms2_file_index[0], total_files_in_window - 1)
-            ms2_counter_label.value = f"MS2 File {current_file_idx + 1} of {total_files_in_window}"
+            total_files_in_window = len(files_in_rt_window)
+            if total_files_in_window > 0:
+                current_file_idx = min(current_ms2_file_index[0], total_files_in_window - 1)
+                ms2_counter_label.value = f"MS2 File {current_file_idx + 1} of {total_files_in_window}"
+            else:
+                ms2_counter_label.value = "No MS2 data"
         else:
             ms2_counter_label.value = "No MS2 data"
 
@@ -751,8 +763,18 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         rt_min = compound.rt_min
         rt_max = compound.rt_max
         
+        # Get MS2 data using corrected structure access
+        ms2_data = compound.ms2_data_files
+        if not ms2_data:
+            return
+        
+        # Handle both possible structures
+        if 'files' in ms2_data and isinstance(ms2_data['files'], dict):
+            ms2_files_data = ms2_data['files']
+        else:
+            ms2_files_data = ms2_data
+        
         # Count files within current RT window
-        ms2_files_data = compound.ms2_data_files  # Fixed: direct access, not nested under 'files'
         files_in_rt_window = []
         for file_name in ms2_files_data.keys():
             file_data = ms2_files_data[file_name]
@@ -762,7 +784,9 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             rt_measured = None
             if best_hit and 'rt_measured' in best_hit:
                 rt_measured = best_hit.get('rt_measured', 0)
-            elif best_ms2 and 'rt_peak' in best_ms2:  # Fixed: should be 'rt_peak' not 'rt'
+            elif best_ms2 and 'rt' in best_ms2:
+                rt_measured = best_ms2.get('rt', 0)
+            elif best_ms2 and 'rt_peak' in best_ms2:
                 rt_measured = best_ms2.get('rt_peak', 0)
             
             if rt_measured is not None and rt_min <= rt_measured <= rt_max:
@@ -776,7 +800,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         # Bounds checking for files within RT window only
         if 0 <= new_idx < total_files_in_window:
             current_ms2_file_index[0] = new_idx
-            create_plot_only(initial_render=False)  # Don't update x-axis bounds for MS2 navigation
+            create_plot_only(initial_render=False)
 
     def on_reset(button):
         """Reset current compound to original RT bounds and annotations"""
@@ -933,40 +957,46 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
     def get_selected_ms2_spectra(compound: dcl.CompoundData, current_ms2_file_index, rt_min, rt_max):
         """
         Returns the selected MS2 spectra for plotting and info for the title.
-        Updated to work with CompoundData structure and properly filter by RT bounds.
-        """
-        # Get MS2 files data using CompoundData structure
-        ms2_files_data = compound.ms2_data_files
-        if not ms2_files_data:
-            return None, None, None, None
+        Uses CompoundData structure and filters by RT bounds.
         
-        # Get file names and filter by RT bounds FIRST
-        file_names = list(ms2_files_data.keys())
-        if not file_names:
+        Returns:
+            tuple: (ms2_data_type, query_spec, ref_spec, selected_file)
+                ms2_data_type: 'hits' (with reference) or 'extracted' (experimental only) or None
+                query_spec: dict with experimental spectrum data
+                ref_spec: dict with reference spectrum data (None for 'extracted')
+                selected_file: filename of selected MS2 data
+        """
+        
+        # Get MS2 data from CompoundData structure
+        ms2_data = compound.ms2_data_files
+        if not ms2_data:
             return None, None, None, None
         
         # Filter files that have MS2 data within RT bounds and calculate scores
         files_in_rt_window = []
-        for file_name in file_names:
-            file_data = ms2_files_data[file_name]
-            
-            # Check both best_hit and best_ms2 for RT data
+        for file_name, file_data in ms2_data.items():
+            if not isinstance(file_data, dict):
+                continue
+                
+            # Get RT from best_hit or best_ms2
             best_hit = file_data.get('best_hit', {})
             best_ms2 = file_data.get('best_ms2', {})
             
             rt_measured = None
             if best_hit and 'rt_measured' in best_hit:
-                rt_measured = best_hit.get('rt_measured', 0)
-            elif best_ms2 and 'rt_peak' in best_ms2:
-                rt_measured = best_ms2.get('rt_peak', 0)
+                rt_measured = best_hit.get('rt_measured')
+            elif best_ms2:
+                rt_measured = best_ms2.get('rt') or best_ms2.get('rt_peak')
             
             # Only include files where MS2 data falls within current RT bounds
             if rt_measured is not None and rt_min <= rt_measured <= rt_max:
                 # Prioritize score from best_hit, fallback to intensity from best_ms2
-                if best_hit:
+                if best_hit and 'score' in best_hit:
                     score = best_hit.get('score', 0.0)
-                else:
+                elif best_ms2 and 'intensity_peak' in best_ms2:
                     score = best_ms2.get('intensity_peak', 0.0)
+                else:
+                    score = 0.0
                 files_in_rt_window.append((file_name, score))
         
         # If no files have MS2 data in the current RT window, return None
@@ -980,127 +1010,189 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         # Clamp file index to available files within RT window
         idx = min(current_ms2_file_index, len(sorted_file_names) - 1)
         selected_file = sorted_file_names[idx]
-        file_data = ms2_files_data[selected_file]
+        file_data = ms2_data[selected_file]
         
         # Check if we have a best_hit (with reference data)
         best_hit = file_data.get('best_hit', {})
-        if best_hit:  # best_hit is not empty
-            # Use hit data - need to reconstruct spectrum from hit data
-            query_spec = {
-                'mz': np.array(best_hit.get('qry_spectrum', [[], []])[0]),
-                'intensity': np.array(best_hit.get('qry_spectrum', [[], []])[1]),
-                'precursor_mz': best_hit.get('mz_measured', 0.0),
-                'rt': best_hit.get('rt_measured', 0.0),
-                'qry_frag_colors': best_hit.get('fragment_colors', ['red'] * len(best_hit.get('qry_spectrum', [[], []])[0]))
-            }
-            
-            ref_spec = {
-                'mz': np.array(best_hit.get('ref_spectrum', [[], []])[0]),
-                'intensity': np.array(best_hit.get('ref_spectrum', [[], []])[1]),
-                'score': best_hit.get('score', 0.0),
-                'database': best_hit.get('database', 'N/A'),
-                'num_matches': best_hit.get('num_matches', 0),
-                'ref_id': best_hit.get('ref_id', 'N/A'),
-                'mz_measured': best_hit.get('mz_measured', 0.0),
-                'mz_theoretical': best_hit.get('ref_precursor_mz', 0.0),
-                'rt_measured': best_hit.get('rt_measured', 0.0),
-                'qry_frag_colors': best_hit.get('fragment_colors', ['red'] * len(best_hit.get('ref_spectrum', [[], []])[0]))
-            }
-            
-            return 'hits', query_spec, ref_spec, selected_file
-                
-        else:  # best_hit is empty, use best_ms2
+        
+        if best_hit:  # We have reference hit data
+            return _process_reference_hit(best_hit, selected_file)
+        else:  # Use experimental data only
             best_ms2 = file_data.get('best_ms2', {})
-            if not best_ms2:
+            if best_ms2:
+                return _process_experimental_only(best_ms2, selected_file)
+            else:
                 return None, None, None, selected_file
+
+    def _process_reference_hit(best_hit: dict, selected_file: str):
+        """Process best_hit data that contains both experimental and reference spectra."""
+        
+        # Look for spectrum data fields in best_hit
+        # Try common field names for query (experimental) spectrum
+        qry_spectrum = None
+        for field in ['qry_spectrum', 'query_spectrum', 'experimental_spectrum']:
+            if field in best_hit:
+                qry_spectrum = best_hit[field]
+                break
+        
+        # Try common field names for reference spectrum  
+        ref_spectrum = None
+        for field in ['ref_spectrum', 'reference_spectrum', 'library_spectrum']:
+            if field in best_hit:
+                ref_spectrum = best_hit[field]
+                break
+        
+        # If standard fields not found, look for any spectrum-like data
+        if qry_spectrum is None or ref_spectrum is None:
+            spectrum_fields = []
+            for key, value in best_hit.items():
+                if isinstance(value, (list, tuple, np.ndarray)) and len(value) == 2:
+                    try:
+                        mz_array = np.array(value[0])
+                        int_array = np.array(value[1])
+                        if len(mz_array) > 0 and len(int_array) > 0:
+                            spectrum_fields.append((key, value))
+                    except:
+                        continue
             
-            # Extract spectrum data from best_ms2 
-            spectrum_data = best_ms2.get('spectrum', None)
-            if spectrum_data is None or len(spectrum_data) < 2:
-                return None, None, None, selected_file
-            
-            # Parse spectrum format
+            # Assign first two spectrum fields found
+            if len(spectrum_fields) >= 2:
+                qry_spectrum = spectrum_fields[0][1] if qry_spectrum is None else qry_spectrum
+                ref_spectrum = spectrum_fields[1][1] if ref_spectrum is None else ref_spectrum
+            elif len(spectrum_fields) == 1 and qry_spectrum is None:
+                qry_spectrum = spectrum_fields[0][1]
+        
+        query_spec = None
+        ref_spec = None
+        
+        # Process experimental spectrum
+        if qry_spectrum is not None and len(qry_spectrum) >= 2:
             try:
-                if isinstance(spectrum_data, (list, tuple)) and len(spectrum_data) == 2:
-                    mz_values = np.array(spectrum_data[0])
-                    intensity_values = np.array(spectrum_data[1])
-                elif isinstance(spectrum_data, np.ndarray) and spectrum_data.shape[0] == 2:
-                    mz_values = np.array(spectrum_data[0])
-                    intensity_values = np.array(spectrum_data[1])
-                else:
-                    return None, None, None, selected_file
-            except:
+                qry_mz = np.array(qry_spectrum[0])
+                qry_intensity = np.array(qry_spectrum[1])
+                
+                if len(qry_mz) > 0 and len(qry_intensity) > 0:
+                    # Get fragment colors (default to red if not available)
+                    qry_colors = best_hit.get('qry_frag_colors', ['red'] * len(qry_mz))
+                    
+                    query_spec = {
+                        'mz': qry_mz,
+                        'intensity': qry_intensity,
+                        'precursor_mz': best_hit.get('mz_measured', 0.0),
+                        'rt': best_hit.get('rt_measured', 0.0),
+                        'qry_frag_colors': qry_colors
+                    }
+            except Exception as e:
+                logger.error(f"Error processing query spectrum: {e}")
+        
+        # Process reference spectrum
+        if ref_spectrum is not None and len(ref_spectrum) >= 2:
+            try:
+                ref_mz = np.array(ref_spectrum[0])
+                ref_intensity = np.array(ref_spectrum[1])
+                
+                if len(ref_mz) > 0 and len(ref_intensity) > 0:
+                    # Use same colors as query for consistency
+                    ref_colors = best_hit.get('qry_frag_colors', ['red'] * len(ref_mz))
+                    
+                    ref_spec = {
+                        'mz': ref_mz,
+                        'intensity': ref_intensity,
+                        'score': best_hit.get('score', 0.0),
+                        'database': best_hit.get('database', 'N/A'),
+                        'num_matches': best_hit.get('num_matches', 0),
+                        'ref_id': best_hit.get('ref_id', 'N/A'),
+                        'mz_measured': best_hit.get('mz_measured', 0.0),
+                        'mz_theoretical': best_hit.get('mz_theoretical', 0.0),
+                        'rt_measured': best_hit.get('rt_measured', 0.0),
+                        'qry_frag_colors': ref_colors
+                    }
+            except Exception as e:
+                logger.error(f"Error processing reference spectrum: {e}")
+        
+        # Determine return type based on what we successfully extracted
+        if query_spec is not None and ref_spec is not None:
+            return 'hits', query_spec, ref_spec, selected_file
+        elif query_spec is not None:
+            return 'extracted', query_spec, None, selected_file
+        else:
+            return None, None, None, selected_file
+
+    def _process_experimental_only(best_ms2: dict, selected_file: str):
+        """Process best_ms2 data that contains only experimental spectrum."""
+        
+        # Extract spectrum data from best_ms2
+        spectrum_data = best_ms2.get('spectrum')
+        if spectrum_data is None or len(spectrum_data) < 2:
+            return None, None, None, selected_file
+        
+        # Parse spectrum format
+        try:
+            if isinstance(spectrum_data, (list, tuple)) and len(spectrum_data) == 2:
+                mz_values = np.array(spectrum_data[0])
+                intensity_values = np.array(spectrum_data[1])
+            elif isinstance(spectrum_data, np.ndarray) and spectrum_data.shape[0] == 2:
+                mz_values = np.array(spectrum_data[0])
+                intensity_values = np.array(spectrum_data[1])
+            else:
                 return None, None, None, selected_file
-            
+                
             if len(mz_values) == 0 or len(intensity_values) == 0:
                 return None, None, None, selected_file
-            
-            # Create query spec for experimental data only
-            query_spec = {
-                'mz': mz_values,
-                'intensity': intensity_values,
-                'precursor_mz': best_ms2.get('precursor_mz', 0.0),
-                'rt': best_ms2.get('rt_peak', 0.0),
-                'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
-            }
-            
-            return 'extracted', query_spec, None, selected_file
+                
+        except Exception as e:
+            logger.error(f"Error parsing spectrum data: {e}")
+            return None, None, None, selected_file
+        
+        # Create query spec for experimental data only
+        query_spec = {
+            'mz': mz_values,
+            'intensity': intensity_values,
+            'precursor_mz': best_ms2.get('precursor_mz', 0.0),
+            'rt': best_ms2.get('rt') or best_ms2.get('rt_peak', 0.0),
+            'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
+        }
+        
+        return 'extracted', query_spec, None, selected_file
 
     def update_annotation_widgets():
-        """Update annotation widgets to reflect current compound's annotations without triggering observers."""
+        """Update annotation radio buttons to reflect current compound's values"""
         compound = get_current_compound()
         if compound is None:
             return
-        
-        # Temporarily disable updating to prevent recursion
+
+        # Temporarily disable updating flag to prevent recursion
         temp_updating = updating[0]
         updating[0] = True
+        
         try:
-            # Update MS2 radio button
-            if compound.ms2_notes in ms2_options:
-                ms2_radio.value = compound.ms2_notes
-            else:
-                ms2_radio.value = ms2_options[0]  # Default to 'no selection'
-            
-            # Update MS1 radio button
-            if compound.ms1_notes in ms1_options:
-                ms1_radio.value = compound.ms1_notes
-            else:
-                ms1_radio.value = ms1_options[0]  # Default to 'keep'
-            
-            # Update text boxes
+            ms2_radio.value = compound.ms2_notes
+            ms1_radio.value = compound.ms1_notes
             analyst_notes_box.value = compound.analyst_notes
             id_notes_box.value = compound.identification_notes
-            
-            # Update identification notes display
-            if compound.identification_notes:
-                identification_notes_display.value = f"<b>Current ID Notes:</b> {compound.identification_notes}"
-            else:
-                identification_notes_display.value = "<b>Current ID Notes:</b> None"
-                
         finally:
             updating[0] = temp_updating
 
-    def on_ms2_radio_change(change):
-        """Handle MS2 radio button changes"""
+    def on_ms2_annotation_change(change):
+        """Handle MS2 annotation changes"""
         if updating[0]:
             return
             
         compound = get_current_compound()
         if compound is None:
             return
-        
-        # Update compound annotation using CompoundData method
+                
+        # Update using CompoundData method
         compound.update_annotations(ms2_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotation_modified')
-        
+        project_analysis.update_cache_metadata('annotations_modified')
+
         # Trigger auto-save check
         auto_save_if_needed()
 
-    def on_ms1_radio_change(change):
-        """Handle MS1 radio button changes"""
+    def on_ms1_annotation_change(change):
+        """Handle MS1 annotation changes"""
         if updating[0]:
             return
             
@@ -1108,17 +1200,17 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
         
-        # Update compound annotation using CompoundData method
+        # Update using CompoundData method
         compound.update_annotations(ms1_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotation_modified')
-        
+        project_analysis.update_cache_metadata('annotations_modified')
+
         # Trigger auto-save check
         auto_save_if_needed()
 
     def on_analyst_notes_change(change):
-        """Handle analyst notes text box changes"""
+        """Handle analyst notes changes"""
         if updating[0]:
             return
             
@@ -1126,102 +1218,120 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
         
-        # Update compound annotation using CompoundData method
+        # Update using CompoundData method
         compound.update_annotations(analyst_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotation_modified')
-        
+        project_analysis.update_cache_metadata('annotations_modified')
+
         # Trigger auto-save check
         auto_save_if_needed()
 
     def on_id_notes_change(change):
-        """Handle identification notes text box changes"""
+        """Handle ID notes changes"""
         if updating[0]:
             return
-            
+
         compound = get_current_compound()
         if compound is None:
             return
-        
-        # Update compound annotation using CompoundData method
+
+        # Update using CompoundData method
         compound.update_annotations(identification_notes=change['new'])
         
-        # Update identification notes display
-        if change['new']:
-            identification_notes_display.value = f"<b>Current ID Notes:</b> {change['new']}"
-        else:
-            identification_notes_display.value = "<b>Current ID Notes:</b> None"
-        
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotation_modified')
-        
+        project_analysis.update_cache_metadata('annotations_modified')
+
         # Trigger auto-save check
         auto_save_if_needed()
+    
+    # Add manual save button
+    manual_save_button = widgets.Button(
+        description="Save Session", 
+        button_style='info', 
+        layout=widgets.Layout(width='150px')
+    )
+    
+    def on_manual_save(button):
+        """Manual save handler for ProjectAnalysis"""
+        if project_dir:
+            try:
+                # Save ProjectAnalysis to progress cache
+                timestamp = scache.save_progress_checkpoint(project_analysis, project_dir, project_analysis.atlas_uid, "gui_progress")
+                button.description = f"Saved {timestamp[-8:-3]}"
+                last_save_time[0] = time.time()
+                
+                # Reset button text after 2 seconds
+                import threading
+                def reset_button():
+                    time.sleep(2)
+                    button.description = "Save Session"
+                threading.Thread(target=reset_button).start()
+            except Exception as e:
+                logger.error(f"Manual save failed: {e}")
+                button.description = "Save Failed"
+    
+    manual_save_button.on_click(on_manual_save)
 
-    # Attach observers to annotation widgets
-    ms2_radio.observe(on_ms2_radio_change, names='value')
-    ms1_radio.observe(on_ms1_radio_change, names='value')
-    analyst_notes_box.observe(on_analyst_notes_change, names='value')
-    id_notes_box.observe(on_id_notes_change, names='value')
-
-    # Attach observers to navigation buttons
+    # Connect all event handlers to their widgets
     prev_button.on_click(lambda b: on_navigation(-1))
     next_button.on_click(lambda b: on_navigation(1))
     ms2_prev_button.on_click(lambda b: on_ms2_navigation(-1))
     ms2_next_button.on_click(lambda b: on_ms2_navigation(1))
     reset_button.on_click(on_reset)
     accept_suggestions_button.on_click(on_accept_suggestions)
-    compound_dropdown.observe(on_dropdown_change, names='value')
-
-    # Original layout structure
-    left_layout = widgets.VBox([
-        widgets.HBox([
-            prev_button, 
-            counter_label, 
-            next_button,
-            widgets.HTML(value="&nbsp;&nbsp;&nbsp;"),
-            compound_dropdown
-        ]),
-        widgets.HBox([
-            ms2_prev_button,
-            ms2_counter_label, 
-            ms2_next_button
-        ]),
-        widgets.HBox([
-            reset_button,
-            accept_suggestions_button
-        ]),
-        plot_output,
-        slider_container
-    ])
     
-    right_layout = widgets.VBox([
-        widgets.HTML(value="<h3>Annotations</h3>"),
-        ms2_radio,
-        ms1_radio,
-        widgets.HTML(value="<hr>"),
+    # Connect annotation widgets to their handlers
+    ms2_radio.observe(on_ms2_annotation_change, names='value')
+    ms1_radio.observe(on_ms1_annotation_change, names='value')
+    analyst_notes_box.observe(on_analyst_notes_change, names='value')
+    id_notes_box.observe(on_id_notes_change, names='value')
+    compound_dropdown.observe(on_dropdown_change, names='value')
+    
+    # Create layout structure
+    nav_row = widgets.HBox([prev_button, counter_label, next_button], layout=widgets.Layout(justify_content='center'))
+    
+    # Add dropdown to navigation - put it in its own row for better layout
+    dropdown_row = widgets.HBox([compound_dropdown], layout=widgets.Layout(justify_content='center', margin='5px 0'))
+    
+    # MS2 browser row
+    ms2_nav_row = widgets.HBox([ms2_prev_button, ms2_counter_label, ms2_next_button], layout=widgets.Layout(justify_content='center'))
+
+    # Combine all navigation elements horizontally
+    nav_box = widgets.HBox([
+        nav_row,
+        dropdown_row,
+        ms2_nav_row
+    ], layout=widgets.Layout(width='100%', align_items='center'))
+        
+    # Create the main plot and radio button container
+    plot_and_radios = widgets.HBox([
+        plot_output,
+        widgets.VBox([
+            widgets.Box([ms2_radio], layout=widgets.Layout(margin='50px 0 50px 0')),
+            ms1_radio
+        ], layout=widgets.Layout(width='30%', justify_content='flex-start'))
+    ], layout=widgets.Layout(width='100%'))
+    
+    # Create metadata rows
+    button_row = widgets.HBox([reset_button, accept_suggestions_button, manual_save_button], 
+                             layout=widgets.Layout(justify_content='center', margin='0 0 0 0'))
+    
+    container = widgets.VBox([
+        nav_box, 
         analyst_notes_box,
         id_notes_box,
+        plot_and_radios,
+        slider_container,
+        button_row,
         identification_notes_display
-    ])
+    ], layout=widgets.Layout(width='100%', align_items='flex-start', height='fit-content'))
     
-    # Main layout - original structure
-    gui_layout = widgets.HBox([left_layout, right_layout])
+    # Add helper methods for backwards compatibility
+    container.get_plot_data = lambda: project_analysis.generate_plot_data()
+    container.get_project_analysis = lambda: project_analysis
     
-    # Initialize the GUI
+    # Initialize with the first compound
     full_update()
     
-    # Display the GUI
-    display(gui_layout)
-    
-    # Save initial state
-    if project_dir:
-        try:
-            scache.save_progress_checkpoint(project_analysis, project_dir, project_analysis.atlas_uid, "gui_initialized")
-            logger.info("Saved initial GUI state to cache")
-        except Exception as e:
-            logger.error(f"Failed to save initial GUI state: {e}")
-    
-    # Return ProjectAnalysis directly instead of GUIInterface
-    return project_analysis
+    return container
