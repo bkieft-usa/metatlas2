@@ -469,11 +469,3 @@ class ProjectAnalysis:
             'project_db_path': self.project_db_path,
             'cache_metadata': self._cache_metadata.copy()
         }
-
-# REMOVED DEPRECATED CLASSES:
-# - ProjectDataCollection (replaced by ProjectAnalysis)
-# - EICData class (data now stored as simple dictionaries)
-# - MS2Spectrum class (data now stored as simple dictionaries) 
-# - MS2Hit class (data now stored as simple dictionaries)
-# - Complex intermediate data classes that were used for object creation during extraction
-# - AnalystModifications class (functionality moved to CompoundData modification tracking)

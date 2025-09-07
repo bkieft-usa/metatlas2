@@ -6,8 +6,9 @@ from pathlib import Path
 import duckdb
 from tqdm.notebook import tqdm
 
-from matchms import Spectrum
 from matchms.similarity import CosineHungarian
+from matchms import Spectrum
+from scipy.optimize import linear_sum_assignment
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
@@ -549,6 +550,11 @@ def _extract_simple_ms2_data(ms2_row: pd.Series, filename: str, reference_df: Op
         mz_peak = mz_values[max_idx]
         rt_peak = float(ms2_row.get('rt', 0.0))
         precursor_mz = ms2_row.get('precursor_mz', 0.0)
+        
+        logger.info(ms2_row.keys())
+        # Extract measured values from the MS2 scan
+        mz_measured = float(ms2_row.get('precursor_mz', precursor_mz))  # Use precursor_mz as measured m/z
+        rt_measured = float(ms2_row.get('rt', rt_peak))  # Use rt as measured RT
 
         # Calculate ppm error for precursor
         ppm_error = abs(mz_peak - precursor_mz) / precursor_mz * 1e6 if precursor_mz > 0 else 0.0
@@ -558,16 +564,17 @@ def _extract_simple_ms2_data(ms2_row: pd.Series, filename: str, reference_df: Op
             "spectrum": [mz_values.tolist(), intensity_values.tolist()],
             "intensity_peak": float(intensity_peak),
             "rt_peak": float(rt_peak),
+            "rt_measured": rt_measured,  # Add measured RT
             "mz_peak": float(mz_peak),
+            "mz_measured": mz_measured,  # Add measured m/z
             "precursor_mz": float(precursor_mz),
-            "filename": filename,
             "ppm_diff": float(ppm_error),
         }
 
         # Find hits if reference database available
         hits = []
         if reference_df is not None:
-            hits = _find_simple_hits(inchi_key, mz_values, intensity_values, reference_df, config)
+            hits = _find_simple_hits(ms2_entry, reference_df, config)
 
         return {
             'entry': ms2_entry,
@@ -578,59 +585,85 @@ def _extract_simple_ms2_data(ms2_row: pd.Series, filename: str, reference_df: Op
         logger.error(f"Error extracting MS2 data for {filename}: {e}")
         return None
 
-def _find_simple_hits(inchi_key: str, mz_values: np.ndarray, intensity_values: np.ndarray, 
-                     reference_df: pd.DataFrame, config: Dict) -> List[Dict]:
-    """Find reference hits - returns simple hit dictionaries with proper spectrum alignment."""
+def _find_simple_hits(ms2_entry: Dict, reference_df: pd.DataFrame, config: Dict) -> List[Dict]:
+    """Find reference hits using MatchMS CosineHungarian scoring and proper alignment."""
+    inchi_key = ms2_entry.get("inchi_key", "")
+    mz_values = np.array(ms2_entry.get("spectrum", [[], []])[0])
+    intensity_values = np.array(ms2_entry.get("spectrum", [[], []])[1])
+    mz_measured = ms2_entry.get("mz_measured", 0.0)
+    rt_measured = ms2_entry.get("rt_measured", 0.0)
+
     if not inchi_key:
         return []
     
-    # Find matching reference spectra
+    # Find matching reference spectra by inchi_key
     matching_refs = reference_df[reference_df['inchi_key'] == inchi_key]
     if matching_refs.empty:
         return []
     
     hits = []
     
-    # Preprocess query spectrum
-    query_spectrum = _preprocess_spectrum(mz_values, intensity_values)
-    if query_spectrum is None:
-        return []
+    # Set up MatchMS scoring
+    frag_mz_tolerance = config.get('ms2_matching', {}).get('mz_tolerance_da', 0.05)  # Default 0.05 Da
+    cos = CosineHungarian(tolerance=frag_mz_tolerance)
+    
+    # Create MatchMS query spectrum
+    mms_query = Spectrum(mz=mz_values, intensities=intensity_values, metadata={'precursor_mz': np.nan})
     
     for _, ref_row in matching_refs.iterrows():
         try:
-            ref_spectrum_data = ref_row.get('spectrum', None)
-            if ref_spectrum_data is None or len(ref_spectrum_data) != 2:
+            ref_spectrum = ref_row.get('spectrum', None)
+            if ref_spectrum is None or len(ref_spectrum) != 2:
                 continue
             
-            # Preprocess reference spectrum
-            ref_spectrum = _preprocess_spectrum(
-                np.array(ref_spectrum_data[0]), 
-                np.array(ref_spectrum_data[1])
-            )
-            if ref_spectrum is None:
+            ref_mz = np.array(ref_spectrum[0], dtype=np.float64)
+            ref_intensity = np.array(ref_spectrum[1], dtype=np.float64)
+            
+            if len(ref_mz) == 0 or len(ref_intensity) == 0:
                 continue
             
-            # Perform proper spectrum alignment and scoring
-            match_data = _align_and_score_spectra(query_spectrum, ref_spectrum)
-
-            # Create hit data with proper scoring
+            # Filter reference spectrum to remove peaks above precursor + 2.5 Da
+            precursor_mz = ref_row.get('precursor_mz', 0.0)
+            if precursor_mz > 0:
+                valid_peaks = ref_mz < (precursor_mz + 2.5)
+                ref_mz = ref_mz[valid_peaks]
+                ref_intensity = ref_intensity[valid_peaks]
+            
+            if len(ref_mz) == 0:
+                continue
+            
+            # Create MatchMS reference spectrum
+            mms_ref = Spectrum(mz=ref_mz, intensities=ref_intensity, metadata={'precursor_mz': np.nan})
+            
+            # Calculate MatchMS score
+            mms_comparison = cos.pair(mms_query, mms_ref)
+            score = mms_comparison['score'] if mms_comparison['score'] is not None else 0.0
+            num_matches = mms_comparison['matches'] if mms_comparison['matches'] is not None else 0
+            
+            # Perform custom alignment for plotting
+            query_spectrum_array = np.array([mz_values, intensity_values])
+            ref_spectrum_array = np.array([ref_mz, ref_intensity])
+            alignment_data = _align_spectra_for_plotting(query_spectrum_array, ref_spectrum_array, frag_mz_tolerance)
+            
+            # Create hit data with MatchMS scoring and alignment
             hit_data = {
                 'database': str(ref_row.get('database', 'unknown')),
                 'ref_id': str(ref_row.get('id', '')),
-                'score': float(match_data.get('similarity_score', 0.0)),
-                'num_matches': int(match_data.get('num_matched_fragments', 0)),
+                'score': float(score),
+                'num_matches': int(num_matches),
                 'ref_name': str(ref_row.get('name', 'Unknown')),
-                'ref_precursor_mz': float(ref_row.get('precursor_mz', 0.0)),
-                'ref_mz_values': match_data.get('ref_mz', []),
-                'ref_intensity_values': match_data.get('ref_intensity', []),
-                'matched_fragments': match_data.get('matching_fragments', []),
-                'fragment_colors': match_data.get('fragment_colors', []),
-                'ref_frags': len(ref_spectrum['mz']),
-                'data_frags': len(query_spectrum['mz']),
-                'qry_frag_matches': match_data.get('matched_fragments', []),
-                'qry_intensity_peak': float(np.max(query_spectrum['intensity'])),
-                'rt_measured': float(ref_row.get('rt', 0.0)),
-                'mz_measured': float(ref_row.get('precursor_mz', 0.0))
+                'mz_theoretical': float(precursor_mz),
+                'mz_measured': mz_measured,  # Add measured m/z from MS2 scan
+                'rt_measured': rt_measured,  # Add measured RT from MS2 scan
+                'qry_intensity_peak': float(np.max(intensity_values)) if len(intensity_values) > 0 else 0.0,
+                'ref_frags': len(ref_mz),
+                'data_frags': len(mz_values),
+                'matched_fragments': alignment_data.get('matched_fragments', []),
+                'qry_frag_colors': alignment_data.get('fragment_colors', []),
+                'qry_spectrum': alignment_data.get('query_aligned', []),
+                'ref_spectrum': alignment_data.get('ref_aligned', []),
+                'qry_spectrum_original': [mz_values.tolist(), intensity_values.tolist()],
+                'ref_spectrum_original': [ref_mz.tolist(), ref_intensity.tolist()]
             }
 
             hits.append(hit_data)
@@ -641,200 +674,155 @@ def _find_simple_hits(inchi_key: str, mz_values: np.ndarray, intensity_values: n
     
     return hits
 
-def _preprocess_spectrum(mz_values: np.ndarray, intensity_values: np.ndarray, 
-                        min_intensity_ratio: float = 0.01, max_peaks: int = 100) -> Optional[Dict]:
+def _align_spectra_for_plotting(query_spectrum: np.ndarray, ref_spectrum: np.ndarray, 
+                               frag_mz_tolerance: float) -> Dict:
     """
-    Preprocess spectrum by filtering low-intensity peaks and normalizing.
-    
-    Args:
-        mz_values: Array of m/z values
-        intensity_values: Array of intensity values
-        min_intensity_ratio: Minimum intensity as fraction of base peak
-        max_peaks: Maximum number of peaks to keep
-    
-    Returns:
-        Dict with processed spectrum or None if insufficient peaks
+    Align spectra using Hungarian assignment algorithm for proper mirror plotting.
+    Based on the provided MatchMS workflow.
     """
     try:
-        # Convert to numpy arrays and ensure they're clean
-        mz = np.array(mz_values, dtype=np.float64)
-        intensity = np.array(intensity_values, dtype=np.float64)
+        query_mz = query_spectrum[0]
+        query_intensity = query_spectrum[1]
+        ref_mz = ref_spectrum[0]
+        ref_intensity = ref_spectrum[1]
         
-        # Remove invalid values
-        valid_mask = (~np.isnan(mz)) & (~np.isnan(intensity)) & (intensity > 0) & (mz > 0)
-        mz = mz[valid_mask]
-        intensity = intensity[valid_mask]
+        matched_peaks = _match_peaks(query_spectrum, ref_spectrum, frag_mz_tolerance)
+        matrix_size = max(len(query_mz), len(ref_mz))
+        filtered_coords = _hungarian_assignment(matched_peaks, matrix_size)
+        query_aligned, ref_aligned = _link_aligned_spectra(query_spectrum, ref_spectrum, filtered_coords)
         
-        if len(mz) < 2:
-            return None
-        
-        # Normalize intensities to 0-100 scale
-        max_intensity = np.max(intensity)
-        if max_intensity == 0:
-            return None
-        
-        intensity_normalized = (intensity / max_intensity) * 100
-        
-        # Filter by minimum intensity ratio
-        min_intensity = min_intensity_ratio * 100  # Convert to normalized scale
-        intensity_mask = intensity_normalized >= min_intensity
-        mz = mz[intensity_mask]
-        intensity_normalized = intensity_normalized[intensity_mask]
-        
-        if len(mz) < 2:
-            return None
-        
-        # Sort by intensity (descending) and keep top peaks
-        sorted_indices = np.argsort(intensity_normalized)[::-1]
-        if len(sorted_indices) > max_peaks:
-            sorted_indices = sorted_indices[:max_peaks]
-        
-        # Resort by m/z for final spectrum
-        final_indices = sorted_indices[np.argsort(mz[sorted_indices])]
-        
-        return {
-            'mz': mz[final_indices],
-            'intensity': intensity_normalized[final_indices]
-        }
-        
-    except Exception as e:
-        logger.error(f"Error preprocessing spectrum: {e}")
-        return None
-
-def _align_and_score_spectra(query_spectrum: Dict, ref_spectrum: Dict, 
-                           mz_tolerance_ppm: float = 20.0) -> Dict:
-    """
-    Align and score two spectra using proper fragment matching.
-    
-    Args:
-        query_spectrum: Dict with 'mz' and 'intensity' arrays
-        ref_spectrum: Dict with 'mz' and 'intensity' arrays  
-        mz_tolerance_ppm: m/z tolerance in ppm
-    
-    Returns:
-        Dict with alignment results and scoring
-    """
-    try:
-        query_mz = query_spectrum['mz']
-        query_intensity = query_spectrum['intensity']
-        ref_mz = ref_spectrum['mz']
-        ref_intensity = ref_spectrum['intensity']
-        
-        # Find matching fragments
-        matched_query_indices = []
-        matched_ref_indices = []
+        # Step: Generate fragment colors and matched fragment list based on aligned spectra
+        min_len = min(len(query_aligned[0]), len(ref_aligned[0]))
+        fragment_colors = ["red"] * min_len
         matched_fragments = []
-        fragment_colors = []
-        
-        for i, qmz in enumerate(query_mz):
-            # Calculate ppm tolerance for this m/z
-            mz_tolerance_da = qmz * mz_tolerance_ppm / 1e6
-            
-            # Find reference peaks within tolerance
-            mz_diffs = np.abs(ref_mz - qmz)
-            within_tolerance = mz_diffs <= mz_tolerance_da
-            
-            if np.any(within_tolerance):
-                # Take the closest match
-                closest_idx = np.argmin(mz_diffs)
-                if within_tolerance[closest_idx]:
-                    matched_query_indices.append(i)
-                    matched_ref_indices.append(closest_idx)
-                    matched_fragments.append(float(qmz))
-                    
-                    # Color based on intensity agreement
-                    query_int = query_intensity[i]
-                    ref_int = ref_intensity[closest_idx]
-                    intensity_ratio = min(query_int, ref_int) / max(query_int, ref_int)
-                    
-                    if intensity_ratio > 0.8:
-                        fragment_colors.append('green')  # Excellent match
-                    elif intensity_ratio > 0.5:
-                        fragment_colors.append('orange')  # Good match
-                    else:
-                        fragment_colors.append('red')     # Poor intensity match
-        
-        # Calculate similarity scores
-        num_matched = len(matched_fragments)
-        
-        if num_matched == 0:
-            similarity_score = 0.0
-            cosine_score = 0.0
-        else:
-            # Simple Jaccard-like similarity
-            total_unique_peaks = len(set(range(len(query_mz))) | set(range(len(ref_mz))))
-            jaccard_similarity = num_matched / total_unique_peaks if total_unique_peaks > 0 else 0.0
-            
-            # Weighted cosine similarity for matched peaks only
-            if len(matched_query_indices) > 0:
-                matched_query_int = query_intensity[matched_query_indices]
-                matched_ref_int = ref_intensity[matched_ref_indices]
-                
-                # Normalize intensities
-                matched_query_int = matched_query_int / np.linalg.norm(matched_query_int)
-                matched_ref_int = matched_ref_int / np.linalg.norm(matched_ref_int)
-                
-                cosine_score = np.dot(matched_query_int, matched_ref_int)
-            else:
-                cosine_score = 0.0
-            
-            # Combined similarity score
-            similarity_score = 0.6 * cosine_score + 0.4 * jaccard_similarity
+        for idx in range(min_len):
+            q_val = query_aligned[0][idx]
+            r_val = ref_aligned[0][idx]
+            if not np.isnan(q_val) and not np.isnan(r_val):
+                matched_fragments.append(float(q_val))
+                fragment_colors[idx] = "green"
         
         return {
-            'similarity_score': float(np.clip(similarity_score, 0.0, 1.0)),
-            'cosine_score': float(np.clip(cosine_score, 0.0, 1.0)),
-            'jaccard_score': float(np.clip(jaccard_similarity, 0.0, 1.0)) if num_matched > 0 else 0.0,
-            'num_matched_fragments': num_matched,
-            'matching_fragments': matched_fragments,
+            'matched_fragments': matched_fragments,
             'fragment_colors': fragment_colors,
-            'ref_mz': ref_mz.tolist(),
-            'ref_intensity': ref_intensity.tolist(),
-            'query_mz': query_mz.tolist(),
-            'query_intensity': query_intensity.tolist(),
-            'matched_query_indices': matched_query_indices,
-            'matched_ref_indices': matched_ref_indices
+            'query_aligned': query_aligned.tolist() if query_aligned is not None else [[], []],
+            'ref_aligned': ref_aligned.tolist() if ref_aligned is not None else [[], []],
+            'num_matched': len(matched_fragments)
         }
         
     except Exception as e:
         logger.error(f"Error in spectrum alignment: {e}")
         return {
-            'similarity_score': 0.0,
-            'cosine_score': 0.0,
-            'jaccard_score': 0.0,
-            'num_matched_fragments': 0,
-            'matching_fragments': [],
-            'fragment_colors': [],
-            'ref_mz': ref_spectrum['mz'].tolist() if 'mz' in ref_spectrum else [],
-            'ref_intensity': ref_spectrum['intensity'].tolist() if 'intensity' in ref_spectrum else [],
-            'query_mz': query_spectrum['mz'].tolist() if 'mz' in query_spectrum else [],
-            'query_intensity': query_spectrum['intensity'].tolist() if 'intensity' in query_spectrum else [],
-            'matched_query_indices': [],
-            'matched_ref_indices': []
+            'matched_fragments': [],
+            'fragment_colors': ['red'] * len(query_spectrum[0]) if len(query_spectrum) > 0 else [],
+            'query_aligned': [query_spectrum[0].tolist(), query_spectrum[1].tolist()] if len(query_spectrum) >= 2 else [[], []],
+            'ref_aligned': [ref_spectrum[0].tolist(), ref_spectrum[1].tolist()] if len(ref_spectrum) >= 2 else [[], []],
+            'num_matched': 0
         }
 
-def _simple_spectrum_comparison(query_mz: np.ndarray, query_intensity: np.ndarray,
-                               ref_mz: np.ndarray, ref_intensity: np.ndarray) -> Dict:
+def _match_peaks(spec1: np.ndarray, spec2: np.ndarray, frag_mz_tolerance: float) -> List[Tuple[Tuple[int, int], float]]:
     """
-    Simplified spectrum comparison - kept for backward compatibility.
-    Use _align_and_score_spectra for better results.
+    Match MS2 fragment peaks within m/z tolerance.
+    Returns list of ((query_idx, ref_idx), intensity_product) tuples.
     """
-    # Preprocess both spectra
-    query_spectrum = _preprocess_spectrum(query_mz, query_intensity)
-    ref_spectrum = _preprocess_spectrum(ref_mz, ref_intensity)
+    matched_peaks = []
+    spec1_mz, spec1_intensity = spec1[0], spec1[1]
+    spec2_mz, spec2_intensity = spec2[0], spec2[1]
     
-    if query_spectrum is None or ref_spectrum is None:
-        return {
-            'similarity_score': 0.0,
-            'num_matched_fragments': 0,
-            'matching_fragments': [],
-            'fragment_colors': [],
-            'ref_mz': ref_mz.tolist(),
-            'ref_intensity': ref_intensity.tolist()
-        }
+    for i in range(len(spec1_mz)):
+        # Find peaks in spec2 within tolerance of current spec1 peak
+        mz_diffs = np.abs(spec2_mz - spec1_mz[i])
+        within_tolerance = mz_diffs <= frag_mz_tolerance
+        
+        if np.any(within_tolerance):
+            matching_indices = np.where(within_tolerance)[0]
+            for j in matching_indices:
+                match_coords = (i, j)
+                match_value = float(spec1_intensity[i] * spec2_intensity[j])
+                matched_peaks.append((match_coords, match_value))
     
-    # Use the improved alignment method
-    return _align_and_score_spectra(query_spectrum, ref_spectrum)
+    return matched_peaks
+
+def _hungarian_assignment(matched_peaks: List[Tuple[Tuple[int, int], float]], 
+                         matrix_size: int) -> List[Tuple[int, int]]:
+    """
+    Filter matched peaks by maximizing the matched intensity product using Hungarian algorithm.
+    """
+    if not matched_peaks:
+        return []
+    
+    # Create cost matrix
+    cost_matrix = np.zeros((matrix_size, matrix_size))
+    for match in matched_peaks:
+        coords, value = match
+        row, col = coords
+        if row < matrix_size and col < matrix_size:
+            cost_matrix[row, col] = value
+    
+    # Solve assignment problem (maximize)
+    row_idx, col_idx = linear_sum_assignment(cost_matrix, maximize=True)
+    
+    # Filter to only include assignments with non-zero costs
+    filtered_coords = []
+    for i in range(len(row_idx)):
+        row, col = row_idx[i], col_idx[i]
+        if cost_matrix[row, col] > 0:
+            filtered_coords.append((row, col))
+    
+    return filtered_coords
+
+def _link_aligned_spectra(spec1: np.ndarray, spec2: np.ndarray, 
+                         filtered_coords: List[Tuple[int, int]]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Create linked and aligned MS2 spectra using filtered matching fragment indices.
+    Returns aligned spectra suitable for mirror plotting.
+    """
+    try:
+        spec1_mz, spec1_intensity = spec1[0], spec1[1]
+        spec2_mz, spec2_intensity = spec2[0], spec2[1]
+        
+        if not filtered_coords:
+            # No matches, return original spectra
+            return spec1, spec2
+        
+        shared_spec1_idxs = [coord[0] for coord in filtered_coords]
+        shared_spec2_idxs = [coord[1] for coord in filtered_coords]
+        
+        # Get shared and unshared peaks from spec2
+        shared_spec2_mzs = np.array([spec2_mz[i] for i in shared_spec2_idxs])
+        shared_spec2_intensities = np.array([spec2_intensity[i] for i in shared_spec2_idxs])
+        
+        unshared_spec2_mzs = np.array([spec2_mz[i] for i in range(len(spec2_mz)) if i not in shared_spec2_idxs])
+        unshared_spec2_intensities = np.array([spec2_intensity[i] for i in range(len(spec2_intensity)) if i not in shared_spec2_idxs])
+        
+        # Create aligned spec1: [nan placeholders for unshared spec2 peaks] + [all spec1 peaks]
+        spec1_alignment_linker = np.full(len(unshared_spec2_mzs), np.nan)
+        aligned_spec1_mz = np.concatenate((spec1_alignment_linker, spec1_mz))
+        aligned_spec1_intensity = np.concatenate((spec1_alignment_linker, spec1_intensity))
+        spec1_aligned = np.array([aligned_spec1_mz, aligned_spec1_intensity])
+        
+        # Create aligned spec2: [unshared spec2 peaks] + [matched spec2 peaks + nan placeholders]
+        spec2_alignment_linker_mz = np.full(len(spec1_mz), np.nan)
+        spec2_alignment_linker_intensity = np.full(len(spec1_intensity), np.nan)
+        
+        # Fill in the matched peaks at their corresponding positions
+        for i, spec1_idx in enumerate(shared_spec1_idxs):
+            if spec1_idx < len(spec2_alignment_linker_mz):
+                spec2_alignment_linker_mz[spec1_idx] = shared_spec2_mzs[i]
+                spec2_alignment_linker_intensity[spec1_idx] = shared_spec2_intensities[i]
+        
+        aligned_spec2_mz = np.concatenate((unshared_spec2_mzs, spec2_alignment_linker_mz))
+        aligned_spec2_intensity = np.concatenate((unshared_spec2_intensities, spec2_alignment_linker_intensity))
+        spec2_aligned = np.array([aligned_spec2_mz, aligned_spec2_intensity])
+        
+        return spec1_aligned, spec2_aligned
+        
+    except Exception as e:
+        logger.error(f"Error in linking aligned spectra: {e}")
+        return spec1, spec2
+
+# Remove the old _align_and_score_spectra function since it's replaced by the new workflow
+# ...existing code...
 
 def _add_summary_statistics(compound_data: Dict):
     """Add summary statistics to compound data - ensures consistent per-file structure."""
@@ -927,6 +915,7 @@ def _process_single_file_simple(file_index: int, file_input: Dict, compound_meta
             ms2_summary = ftt.calculate_ms2_summary(data['ms2_data'])
             
             if not ms2_summary.empty and 'label' in ms2_summary.columns:
+                logger.info(f"Colnames in MS2 summary: {ms2_summary.columns.tolist()}")
                 # Add metadata mapping like in sequential version
                 ms2_summary['inchi_key'] = ms2_summary['label'].map(
                     lambda x: compound_metadata.get(x, {}).get('inchi_key', '')

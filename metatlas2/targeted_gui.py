@@ -330,6 +330,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         ms2_title = ""
 
         # Handle case when there's no MS2 data at all
+        logger.info(f"MS2 data type: {ms2_data_type}, selected_query: {selected_query}, selected_ref: {selected_ref}")
         if ms2_data_type is None or (selected_query is None and selected_ref is None):
             # Create empty MS2 plot with proper structure
             ms2_title = write_ms2_title(compound, None, None, None)
@@ -986,7 +987,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             if best_hit and 'rt_measured' in best_hit:
                 rt_measured = best_hit.get('rt_measured')
             elif best_ms2:
-                rt_measured = best_ms2.get('rt') or best_ms2.get('rt_peak')
+                rt_measured = best_ms2.get('rt_measured') or best_ms2.get('rt') or best_ms2.get('rt_peak')
             
             # Only include files where MS2 data falls within current RT bounds
             if rt_measured is not None and rt_min <= rt_measured <= rt_max:
@@ -1027,53 +1028,26 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
     def _process_reference_hit(best_hit: dict, selected_file: str):
         """Process best_hit data that contains both experimental and reference spectra."""
         
-        # Look for spectrum data fields in best_hit
-        # Try common field names for query (experimental) spectrum
-        qry_spectrum = None
-        for field in ['qry_spectrum', 'query_spectrum', 'experimental_spectrum']:
-            if field in best_hit:
-                qry_spectrum = best_hit[field]
-                break
+        # Extract aligned spectrum data from best_hit
+        qry_spectrum_aligned = best_hit.get('qry_spectrum', [])
+        ref_spectrum_aligned = best_hit.get('ref_spectrum', [])
         
-        # Try common field names for reference spectrum  
-        ref_spectrum = None
-        for field in ['ref_spectrum', 'reference_spectrum', 'library_spectrum']:
-            if field in best_hit:
-                ref_spectrum = best_hit[field]
-                break
-        
-        # If standard fields not found, look for any spectrum-like data
-        if qry_spectrum is None or ref_spectrum is None:
-            spectrum_fields = []
-            for key, value in best_hit.items():
-                if isinstance(value, (list, tuple, np.ndarray)) and len(value) == 2:
-                    try:
-                        mz_array = np.array(value[0])
-                        int_array = np.array(value[1])
-                        if len(mz_array) > 0 and len(int_array) > 0:
-                            spectrum_fields.append((key, value))
-                    except:
-                        continue
-            
-            # Assign first two spectrum fields found
-            if len(spectrum_fields) >= 2:
-                qry_spectrum = spectrum_fields[0][1] if qry_spectrum is None else qry_spectrum
-                ref_spectrum = spectrum_fields[1][1] if ref_spectrum is None else ref_spectrum
-            elif len(spectrum_fields) == 1 and qry_spectrum is None:
-                qry_spectrum = spectrum_fields[0][1]
+        # Get fragment colors
+        qry_colors = best_hit.get('qry_frag_colors', [])
         
         query_spec = None
         ref_spec = None
         
-        # Process experimental spectrum
-        if qry_spectrum is not None and len(qry_spectrum) >= 2:
+        # Process experimental spectrum using aligned data
+        if qry_spectrum_aligned and len(qry_spectrum_aligned) >= 2:
             try:
-                qry_mz = np.array(qry_spectrum[0])
-                qry_intensity = np.array(qry_spectrum[1])
+                qry_mz = np.array(qry_spectrum_aligned[0])
+                qry_intensity = np.array(qry_spectrum_aligned[1])
                 
                 if len(qry_mz) > 0 and len(qry_intensity) > 0:
-                    # Get fragment colors (default to red if not available)
-                    qry_colors = best_hit.get('qry_frag_colors', ['red'] * len(qry_mz))
+                    # Ensure colors match spectrum length
+                    if len(qry_colors) != len(qry_mz):
+                        qry_colors = ['red'] * len(qry_mz)
                     
                     query_spec = {
                         'mz': qry_mz,
@@ -1083,17 +1057,17 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
                         'qry_frag_colors': qry_colors
                     }
             except Exception as e:
-                logger.error(f"Error processing query spectrum: {e}")
+                logger.error(f"Error processing aligned query spectrum: {e}")
         
-        # Process reference spectrum
-        if ref_spectrum is not None and len(ref_spectrum) >= 2:
+        # Process reference spectrum using aligned data
+        if ref_spectrum_aligned and len(ref_spectrum_aligned) >= 2:
             try:
-                ref_mz = np.array(ref_spectrum[0])
-                ref_intensity = np.array(ref_spectrum[1])
+                ref_mz = np.array(ref_spectrum_aligned[0])
+                ref_intensity = np.array(ref_spectrum_aligned[1])
                 
                 if len(ref_mz) > 0 and len(ref_intensity) > 0:
-                    # Use same colors as query for consistency
-                    ref_colors = best_hit.get('qry_frag_colors', ['red'] * len(ref_mz))
+                    # Use same colors as query for consistency in aligned data
+                    ref_colors = qry_colors if len(qry_colors) == len(ref_mz) else ['red'] * len(ref_mz)
                     
                     ref_spec = {
                         'mz': ref_mz,
@@ -1148,8 +1122,8 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         query_spec = {
             'mz': mz_values,
             'intensity': intensity_values,
-            'precursor_mz': best_ms2.get('precursor_mz', 0.0),
-            'rt': best_ms2.get('rt') or best_ms2.get('rt_peak', 0.0),
+            'precursor_mz': best_ms2.get('precursor_mz', best_ms2.get('mz_measured', 0.0)),
+            'rt': best_ms2.get('rt_measured') or best_ms2.get('rt') or best_ms2.get('rt_peak', 0.0),
             'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
         }
         
