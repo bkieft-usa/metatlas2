@@ -283,13 +283,12 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         return eic_title
 
     def create_targeted_analysis_plot(compound: dcl.CompoundData, 
-                                      height=600, file_color_dict=None, 
-                                      ms2_data_type=None, ms2_plot_data=None,
+                                      height=600, ms2_plot_data=None,
                                       initial_render=False, current_compound_index=None):
         """
         Create the plot using CompoundData object.
         Args:
-            ms2_plot_data: tuple (query_spec, ref_spec, selected_file)
+            ms2_plot_data: tuple (spec_data_dict, selected_file)
             initial_render: if True, update EIC x-axis bounds based on RT bounds
         """
 
@@ -324,144 +323,108 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         ms2_row = 1
 
         # MS2 plot logic
-        selected_query, selected_ref, selected_file = ms2_plot_data
+        ms2_plot_data_dict = ms2_plot_data[0]
+        selected_file = ms2_plot_data[1]
+        
+        # Initialize defaults
         exp_max_intensity = 0
-        ref_max_intensity = 0
-        ms2_title = ""
-
-        # Handle case when there's no MS2 data at all
-        logger.info(f"MS2 data type: {ms2_data_type}, selected_query: {selected_query}, selected_ref: {selected_ref}")
-        if ms2_data_type is None or (selected_query is None and selected_ref is None):
-            # Create empty MS2 plot with proper structure
-            ms2_title = write_ms2_title(compound, None, None, None)
-            pmz = 0.0
-            max_mz = 500.0
-            # Add an invisible trace to properly initialize the subplot
+        max_mz = 500.0
+        pmz = 0.0
+        y_range = [-1000, 1000]  # Default range
+        
+        def add_experimental_spectrum(mz_vals, intensity_vals, fragment_colors, marker_color="black"):
+            """Helper function to add experimental spectrum traces"""
+            for mz, intensity, color in zip(mz_vals, intensity_vals, fragment_colors):
+                fig.add_trace(go.Scatter(
+                    x=[mz, mz], y=[0, intensity],
+                    mode='lines', line=dict(color=color, width=2),
+                    showlegend=False, hoverinfo='skip', name='Experimental'
+                ), row=ms2_row, col=1)
+            
+            # Add invisible markers for hover interaction
             fig.add_trace(go.Scatter(
-                x=[0, max_mz],
-                y=[0, 0],
-                mode='lines',
-                line=dict(color='rgba(0,0,0,0)', width=0),  # Completely transparent
-                showlegend=False,
-                hoverinfo='skip',
-                name='Empty'
+                x=list(mz_vals), y=list(intensity_vals),
+                mode='markers', marker=dict(size=1, color=marker_color, opacity=0.01),
+                showlegend=False, name='Experimental Peaks',
+                hovertemplate='m/z: %{x:.4f}<br>Intensity: %{y:.0f}<extra>Experimental</extra>'
             ), row=ms2_row, col=1)
+        
+        def add_reference_spectrum(mz_vals, intensity_vals, fragment_colors, exp_max_intensity):
+            """Helper function to add reference spectrum traces (mirrored downward)"""
+            ref_max_intensity = np.max(intensity_vals) if len(intensity_vals) > 0 else 1
+            scale_factor = exp_max_intensity / ref_max_intensity if ref_max_intensity > 0 else 1
+            scaled_intensities = [i * scale_factor for i in intensity_vals]
             
-            # Set y-range for MS2 plot - handle empty plot case
-            y_range = [-1000, 1000]
-        elif ms2_data_type == 'hits':
-            # Plot query (top) with hover info
-            mz_vals = selected_query.get('mz', [])
-            pmz = selected_query.get('precursor_mz', 0.0)
-            mz_colors = selected_query.get('qry_frag_colors', [])
-            intensity_vals = selected_query.get('intensity', [])
-
-            if len(mz_vals) > 0 and len(intensity_vals) > 0:
-                max_mz = np.max(mz_vals)
-                exp_max_intensity = max(exp_max_intensity, np.max(intensity_vals))
-                
-                # Create stick plot for experimental spectrum with per-stick color
-                for mz, intensity, color in zip(mz_vals, intensity_vals, mz_colors):
-                    fig.add_trace(go.Scatter(
-                        x=[mz, mz],
-                        y=[0, intensity],
-                        mode='lines',
-                        line=dict(color=color, width=2),
-                        showlegend=False, hoverinfo='skip', name='Experimental'
-                    ), row=ms2_row, col=1)
-                
-                # Add invisible markers at peak tops for hover interaction
+            for mz, scaled_int, color in zip(mz_vals, scaled_intensities, fragment_colors):
                 fig.add_trace(go.Scatter(
-                    x=list(mz_vals), y=list(intensity_vals),
-                    mode='markers',
-                    marker=dict(size=1, color="black", opacity=0.01),
-                    showlegend=False, name='Experimental Peaks',
-                    hovertemplate='m/z: %{x:.4f}<br>Intensity: %{y:.0f}<extra>Experimental</extra>'
+                    x=[mz, mz], y=[0, -scaled_int],  # Negative for downward
+                    mode='lines', line=dict(color=color, width=2),
+                    showlegend=False, hoverinfo='skip', name='Reference'
                 ), row=ms2_row, col=1)
             
-            # Plot reference (bottom) with hover info
-            mz_vals = selected_ref.get('mz', [])
-            mz_colors = selected_ref.get('qry_frag_colors', [])
-            intensity_vals = selected_ref.get('intensity', [])
+            # Add invisible markers for hover interaction
+            fig.add_trace(go.Scatter(
+                x=list(mz_vals), y=[-s for s in scaled_intensities],
+                mode='markers', marker=dict(size=1, color='red', opacity=0.01),
+                showlegend=False, name='Reference Peaks',
+                hovertemplate='m/z: %{x:.4f}<br>Intensity: %{customdata:.0f}<extra>Reference</extra>',
+                customdata=list(intensity_vals)  # Use original intensities for hover
+            ), row=ms2_row, col=1)
+
+        if ms2_plot_data_dict is not None:
+            # Determine data type and extract spectra
+            has_reference = "database" in ms2_plot_data_dict
+            ms2_data_type = 'hits' if has_reference else 'extracted'
+            
+            if has_reference:
+                # Database hit with reference spectrum
+                query_spectrum = ms2_plot_data_dict['qry_spectrum']
+                ref_spectrum = ms2_plot_data_dict['ref_spectrum']
+                fragment_colors = ms2_plot_data_dict['qry_frag_colors']
+                pmz = ms2_plot_data_dict.get('mz_theoretical', 0.0)
+            else:
+                # Extracted spectrum only
+                query_spectrum = ms2_plot_data_dict['spectrum']
+                ref_spectrum = None
+                fragment_colors = ['red'] * len(ms2_plot_data_dict['spectrum'][0])
+                pmz = ms2_plot_data_dict.get('precursor_mz', 0.0)
+            
+            # Plot experimental spectrum
+            mz_vals, intensity_vals = query_spectrum[0], query_spectrum[1]
             if len(mz_vals) > 0 and len(intensity_vals) > 0:
                 max_mz = np.max(mz_vals)
-                ref_max_intensity = max(ref_max_intensity, np.max(intensity_vals))
-                # Scale reference intensities to match experimental scale
-                if exp_max_intensity > 0 and ref_max_intensity > 0:
-                    scaled_intensities = [i * (exp_max_intensity / ref_max_intensity) for i in intensity_vals]
+                exp_max_intensity = np.max(intensity_vals)
+                add_experimental_spectrum(mz_vals, intensity_vals, fragment_colors)
+                
+                # Plot reference spectrum if available
+                if ref_spectrum is not None:
+                    ref_mz_vals, ref_intensity_vals = ref_spectrum[0], ref_spectrum[1]
+                    if len(ref_mz_vals) > 0 and len(ref_intensity_vals) > 0:
+                        max_mz = max(max_mz, np.max(ref_mz_vals))
+                        add_reference_spectrum(ref_mz_vals, ref_intensity_vals, fragment_colors, exp_max_intensity)
+                
+                # Set appropriate y-range based on data type
+                if has_reference:
+                    y_range = [-exp_max_intensity * 1.1, exp_max_intensity * 1.1]  # Symmetric for mirror plot
                 else:
-                    scaled_intensities = intensity_vals
-
-                # Create stick plot for reference spectrum with per-stick color
-                for mz, scaled_int, color in zip(mz_vals, scaled_intensities, mz_colors):
-                    fig.add_trace(go.Scatter(
-                        x=[mz, mz],
-                        y=[0, -scaled_int],  # Negative for downward
-                        mode='lines',
-                        line=dict(color=color, width=2),
-                        showlegend=False, hoverinfo='skip', name='Reference'
-                    ), row=ms2_row, col=1)
-
-                # Add invisible markers at peak tops for hover interaction
-                fig.add_trace(go.Scatter(
-                    x=list(mz_vals), y=[-s for s in scaled_intensities],
-                    mode='markers',
-                    marker=dict(size=1, color='red', opacity=0.01),
-                    showlegend=False, name='Reference Peaks',
-                    hovertemplate='m/z: %{x:.4f}<br>Intensity: %{customdata:.0f}<extra>Reference</extra>',
-                    customdata=list(intensity_vals)  # Use original intensities for hover
-                ), row=ms2_row, col=1)
+                    y_range = [0, exp_max_intensity * 1.1]  # Start at 0 for single spectrum
             
-            ms2_title = write_ms2_title(compound, selected_ref, ms2_data_type, selected_file)
-            # Set y-range for MS2 plot to show both positive and negative
-            if exp_max_intensity > 0:
-                y_range = [-exp_max_intensity * 1.1, exp_max_intensity * 1.1]
-            else:
-                y_range = [-1000, 1000]
-        elif ms2_data_type == 'extracted':
-            # Plot only experimental spectrum (top) with hover info
-            mz_vals = selected_query.get('mz', [])
-            pmz = selected_query.get('precursor_mz', 0.0)
-            intensity_vals = selected_query.get('intensity', [])
-            colors = ['red'] * len(mz_vals)
-            
-            if len(mz_vals) > 0 and len(intensity_vals) > 0:
-                max_mz = np.max(mz_vals)
-                exp_max_intensity = max(exp_max_intensity, np.max(intensity_vals))
-                
-                # Create stick plot for experimental spectrum with per-stick color
-                for mz, intensity, color in zip(mz_vals, intensity_vals, colors):
-                    fig.add_trace(go.Scatter(
-                        x=[mz, mz],
-                        y=[0, intensity],
-                        mode='lines',
-                        line=dict(color=color, width=2),
-                        showlegend=False, hoverinfo='skip', name='Experimental'
-                    ), row=ms2_row, col=1)
-                
-                # Add invisible markers at peak tops for hover interaction
-                fig.add_trace(go.Scatter(
-                    x=list(mz_vals), y=list(intensity_vals),
-                    mode='markers',
-                    marker=dict(size=1, color="red", opacity=0.01),
-                    showlegend=False, name='Experimental Peaks',
-                    hovertemplate='m/z: %{x:.4f}<br>Intensity: %{y:.0f}<extra>Experimental</extra>'
-                ), row=ms2_row, col=1)
-            
-            ms2_title = write_ms2_title(compound, selected_query, ms2_data_type, selected_file)
-            # Set y-range for MS2 plot to start at 0 and go to max intensity
-            if exp_max_intensity > 0:
-                y_range = [0, exp_max_intensity * 1.1]
-            else:
-                y_range = [0, 1000]
+            ms2_title = write_ms2_title(compound, ms2_plot_data_dict, ms2_data_type, selected_file)
         else:
-            raise ValueError(f"Unknown MS2 data type: {ms2_data_type}")
+            # No MS2 data - add invisible trace to initialize subplot
+            ms2_title = write_ms2_title(compound, None, None, None)
+            y_range = [-1000, 1000]  # Default for empty plot
+            fig.add_trace(go.Scatter(
+                x=[0, max_mz], y=[0, 0],
+                mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                showlegend=False, hoverinfo='skip', name='Empty'
+            ), row=ms2_row, col=1)
 
         # Configure MS2 subplot
         fig.update_xaxes(
             title_text="m/z",
             showgrid=False,
-            range=[0, max_mz*1.1] if 'max_mz' in locals() and max_mz > 0 else [0, 500],
+            range=[0, max_mz*1.1],
             row=ms2_row, col=1
         )
         
@@ -470,7 +433,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             showgrid=False,
             range=y_range,
             row=ms2_row, col=1,
-            exponentformat="e",  # Use scientific notation
+            exponentformat="e",
             showexponent="all"
         )
         fig.add_hline(y=0, line_color="black", line_width=1, row=ms2_row, col=1)
@@ -625,53 +588,21 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         rt_max = compound.rt_max
         rt_peak = compound.rt_peak
 
-        print(f"\n=== DEBUG: create_plot_only for {compound.compound_name} ===")
-        print(f"RT bounds: {rt_min:.3f} - {rt_max:.3f}, peak: {rt_peak:.3f}")
-
         # Get MS2 selection info (now filtered by RT bounds and sorted by score)
-        ms2_data_type, query_spec, ref_spec, ms2_file = get_selected_ms2_spectra(compound, 
-                                                                                current_ms2_file_index[0],
-                                                                                rt_min,
-                                                                                rt_max)
+        plot_spec_data, ms2_file, files_in_rt_window = get_selected_ms2_spectra(compound, 
+                                                            current_ms2_file_index[0],
+                                                            rt_min,
+                                                            rt_max)
 
-        print(f"MS2 result: type={ms2_data_type}, file={ms2_file}")
-        print(f"Query spec: {query_spec is not None}")
-        print(f"Ref spec: {ref_spec is not None}")
-
-        # Update MS2 counter label - count only files within RT window
-        ms2_data = compound.ms2_data_files
-        if ms2_data:
-            files_in_rt_window = []
-            for file_name in ms2_data.keys():
-                file_data = ms2_data[file_name]
-                best_hit = file_data.get('best_hit', {})
-                best_ms2 = file_data.get('best_ms2', {})
-                
-                rt_measured = None
-                if best_hit and 'rt_measured' in best_hit:
-                    rt_measured = best_hit.get('rt_measured', 0)
-                elif best_ms2 and 'rt' in best_ms2:
-                    rt_measured = best_ms2.get('rt', 0)
-                elif best_ms2 and 'rt_peak' in best_ms2:
-                    rt_measured = best_ms2.get('rt_peak', 0)
-                
-                if rt_measured is not None and rt_min <= rt_measured <= rt_max:
-                    files_in_rt_window.append(file_name)
-            
-            total_files_in_window = len(files_in_rt_window)
-            if total_files_in_window > 0:
-                current_file_idx = min(current_ms2_file_index[0], total_files_in_window - 1)
-                ms2_counter_label.value = f"MS2 File {current_file_idx + 1} of {total_files_in_window}"
-            else:
-                ms2_counter_label.value = "No MS2 data"
+        if len(files_in_rt_window) > 0:
+            current_file_idx = min(current_ms2_file_index[0], len(files_in_rt_window) - 1)
+            ms2_counter_label.value = f"MS2 File {current_file_idx + 1} of {len(files_in_rt_window)}"
         else:
             ms2_counter_label.value = "No MS2 data"
 
         fig = create_targeted_analysis_plot(
             compound=compound,
-            file_color_dict=file_color_dict,
-            ms2_data_type=ms2_data_type,
-            ms2_plot_data=(query_spec, ref_spec, ms2_file),
+            ms2_plot_data=(plot_spec_data, ms2_file),
             initial_render=initial_render,
             current_compound_index=current_compound_index[0]
         )
@@ -971,7 +902,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         # Get MS2 data from CompoundData structure
         ms2_data = compound.ms2_data_files
         if not ms2_data:
-            return None, None, None, None
+            return None, None, []
         
         # Filter files that have MS2 data within RT bounds and calculate scores
         files_in_rt_window = []
@@ -1002,7 +933,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         
         # If no files have MS2 data in the current RT window, return None
         if not files_in_rt_window:
-            return None, None, None, None
+            return None, None, []
         
         # Sort files by score (highest first)
         files_in_rt_window.sort(key=lambda x: x[1], reverse=True)
@@ -1015,119 +946,14 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         
         # Check if we have a best_hit (with reference data)
         best_hit = file_data.get('best_hit', {})
-        
+        best_ms2 = file_data.get('best_ms2', {})
+
         if best_hit:  # We have reference hit data
-            return _process_reference_hit(best_hit, selected_file)
-        else:  # Use experimental data only
-            best_ms2 = file_data.get('best_ms2', {})
-            if best_ms2:
-                return _process_experimental_only(best_ms2, selected_file)
-            else:
-                return None, None, None, selected_file
-
-    def _process_reference_hit(best_hit: dict, selected_file: str):
-        """Process best_hit data that contains both experimental and reference spectra."""
-        
-        # Extract aligned spectrum data from best_hit
-        qry_spectrum_aligned = best_hit.get('qry_spectrum', [])
-        ref_spectrum_aligned = best_hit.get('ref_spectrum', [])
-        
-        # Get fragment colors
-        qry_colors = best_hit.get('qry_frag_colors', [])
-        
-        query_spec = None
-        ref_spec = None
-        
-        # Process experimental spectrum using aligned data
-        if qry_spectrum_aligned and len(qry_spectrum_aligned) >= 2:
-            try:
-                qry_mz = np.array(qry_spectrum_aligned[0])
-                qry_intensity = np.array(qry_spectrum_aligned[1])
-                
-                if len(qry_mz) > 0 and len(qry_intensity) > 0:
-                    # Ensure colors match spectrum length
-                    if len(qry_colors) != len(qry_mz):
-                        qry_colors = ['red'] * len(qry_mz)
-                    
-                    query_spec = {
-                        'mz': qry_mz,
-                        'intensity': qry_intensity,
-                        'precursor_mz': best_hit.get('mz_measured', 0.0),
-                        'rt': best_hit.get('rt_measured', 0.0),
-                        'qry_frag_colors': qry_colors
-                    }
-            except Exception as e:
-                logger.error(f"Error processing aligned query spectrum: {e}")
-        
-        # Process reference spectrum using aligned data
-        if ref_spectrum_aligned and len(ref_spectrum_aligned) >= 2:
-            try:
-                ref_mz = np.array(ref_spectrum_aligned[0])
-                ref_intensity = np.array(ref_spectrum_aligned[1])
-                
-                if len(ref_mz) > 0 and len(ref_intensity) > 0:
-                    # Use same colors as query for consistency in aligned data
-                    ref_colors = qry_colors if len(qry_colors) == len(ref_mz) else ['red'] * len(ref_mz)
-                    
-                    ref_spec = {
-                        'mz': ref_mz,
-                        'intensity': ref_intensity,
-                        'score': best_hit.get('score', 0.0),
-                        'database': best_hit.get('database', 'N/A'),
-                        'num_matches': best_hit.get('num_matches', 0),
-                        'ref_id': best_hit.get('ref_id', 'N/A'),
-                        'mz_measured': best_hit.get('mz_measured', 0.0),
-                        'mz_theoretical': best_hit.get('mz_theoretical', 0.0),
-                        'rt_measured': best_hit.get('rt_measured', 0.0),
-                        'qry_frag_colors': ref_colors
-                    }
-            except Exception as e:
-                logger.error(f"Error processing reference spectrum: {e}")
-        
-        # Determine return type based on what we successfully extracted
-        if query_spec is not None and ref_spec is not None:
-            return 'hits', query_spec, ref_spec, selected_file
-        elif query_spec is not None:
-            return 'extracted', query_spec, None, selected_file
+            return best_hit, selected_file, files_in_rt_window
+        elif not best_hit and best_ms2:  # Use experimental data only
+            return best_ms2, selected_file, files_in_rt_window
         else:
-            return None, None, None, selected_file
-
-    def _process_experimental_only(best_ms2: dict, selected_file: str):
-        """Process best_ms2 data that contains only experimental spectrum."""
-        
-        # Extract spectrum data from best_ms2
-        spectrum_data = best_ms2.get('spectrum')
-        if spectrum_data is None or len(spectrum_data) < 2:
-            return None, None, None, selected_file
-        
-        # Parse spectrum format
-        try:
-            if isinstance(spectrum_data, (list, tuple)) and len(spectrum_data) == 2:
-                mz_values = np.array(spectrum_data[0])
-                intensity_values = np.array(spectrum_data[1])
-            elif isinstance(spectrum_data, np.ndarray) and spectrum_data.shape[0] == 2:
-                mz_values = np.array(spectrum_data[0])
-                intensity_values = np.array(spectrum_data[1])
-            else:
-                return None, None, None, selected_file
-                
-            if len(mz_values) == 0 or len(intensity_values) == 0:
-                return None, None, None, selected_file
-                
-        except Exception as e:
-            logger.error(f"Error parsing spectrum data: {e}")
-            return None, None, None, selected_file
-        
-        # Create query spec for experimental data only
-        query_spec = {
-            'mz': mz_values,
-            'intensity': intensity_values,
-            'precursor_mz': best_ms2.get('precursor_mz', best_ms2.get('mz_measured', 0.0)),
-            'rt': best_ms2.get('rt_measured') or best_ms2.get('rt') or best_ms2.get('rt_peak', 0.0),
-            'qry_frag_colors': ['red'] * len(mz_values)  # All red for experimental-only
-        }
-        
-        return 'extracted', query_spec, None, selected_file
+            return None, selected_file, files_in_rt_window
 
     def update_annotation_widgets():
         """Update annotation radio buttons to reflect current compound's values"""

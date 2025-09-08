@@ -37,7 +37,6 @@ import load_tools as ldt
 import data_classes as dcl
 import logging_config as lcf
 import simple_cache as scache
-#import spectrum_handlers as sph
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_analysis')
@@ -75,6 +74,9 @@ def run_targeted_analysis_workflow(project_db_path: str,
             
             logger.info("Resuming analysis from cache")
             return atlas_df, cached_analysis
+
+    else:
+        logger.info("Data caching disabled, running fresh GUI instance")
 
     # Run fresh analysis if no cache or cache failed
     logger.info("Running fresh targeted analysis...")
