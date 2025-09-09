@@ -821,9 +821,6 @@ def _link_aligned_spectra(spec1: np.ndarray, spec2: np.ndarray,
         logger.error(f"Error in linking aligned spectra: {e}")
         return spec1, spec2
 
-# Remove the old _align_and_score_spectra function since it's replaced by the new workflow
-# ...existing code...
-
 def _add_summary_statistics(compound_data: Dict):
     """Add summary statistics to compound data - ensures consistent per-file structure."""
     try:

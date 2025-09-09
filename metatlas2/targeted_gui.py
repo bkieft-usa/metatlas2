@@ -138,7 +138,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
     )
 
     # Create placeholder for slider that will be replaced dynamically
-    slider_container = widgets.HBox([], layout=widgets.Layout(justify_content='center', width='75%', margin='-110px 0 0 0'))
+    slider_container = widgets.HBox([], layout=widgets.Layout(justify_content='center', width='71%', margin='-110px 0 0 0'))
 
     # Add analyst notes text box
     analyst_notes_box = widgets.Text(
@@ -187,7 +187,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             except Exception as e:
                 logger.error(f"Auto-save failed: {e}")
 
-    def write_ms2_title(compound: dcl.CompoundData, ms2_info, ms2_data_type, ms2_file, current_compound_index=None):
+    def write_ms2_title(compound: dcl.CompoundData, ms2_info, has_reference, ms2_file, current_compound_index=None):
         """Create MS2 title and subheadings"""
         
         # Create MS2 title (exact same format as original)
@@ -196,13 +196,13 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         index = current_compound_index + 1 if current_compound_index is not None else 1
         heading = f"{name} {index}"
 
-        if ms2_data_type == 'hits' and ms2_info is not None:
+        if has_reference is True and ms2_info is not None:
             # ms2_info is now the reference spectrum dict directly
             subheading1 = (
                 f"Measured m/z: {ms2_info.get('mz_measured', 0.0):.4f}  |  Reference m/z: {ms2_info.get('mz_theoretical', 0.0):.4f}  |  "
                 f"Reference DB: {ms2_info.get('database', 'N/A')}  |  Ref Matches: {ms2_info.get('num_matches', 0)}  |  Score: {ms2_info.get('score', 0.0):.4f}"
             )
-        elif ms2_data_type == 'extracted' and ms2_info is not None:
+        elif has_reference is False and ms2_info is not None:
             subheading1 = (
                 f"Measured m/z: {ms2_info.get('precursor_mz', 0.0):.4f}  |  Theoretical m/z: {compound.mz:.4f}  |  "
                 f"Reference DB: N/A  |  Ref Matches: N/A  |  Score: N/A"
@@ -322,9 +322,10 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         eic_row = 2
         ms2_row = 1
 
-        # MS2 plot logic
         ms2_plot_data_dict = ms2_plot_data[0]
         selected_file = ms2_plot_data[1]
+        print(ms2_plot_data_dict)
+        print(selected_file)
         
         # Initialize defaults
         exp_max_intensity = 0
@@ -332,49 +333,48 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         pmz = 0.0
         y_range = [-1000, 1000]  # Default range
         
-        def add_experimental_spectrum(mz_vals, intensity_vals, fragment_colors, marker_color="black"):
+        def add_experimental_spectrum(mz_vals, intensity_vals, fragment_colors):
             """Helper function to add experimental spectrum traces"""
             for mz, intensity, color in zip(mz_vals, intensity_vals, fragment_colors):
                 fig.add_trace(go.Scatter(
                     x=[mz, mz], y=[0, intensity],
                     mode='lines', line=dict(color=color, width=2),
-                    showlegend=False, hoverinfo='skip', name='Experimental'
+                    showlegend=False, hoverinfo='skip', name='Exp Frag'
                 ), row=ms2_row, col=1)
             
             # Add invisible markers for hover interaction
             fig.add_trace(go.Scatter(
                 x=list(mz_vals), y=list(intensity_vals),
-                mode='markers', marker=dict(size=1, color=marker_color, opacity=0.01),
-                showlegend=False, name='Experimental Peaks',
-                hovertemplate='m/z: %{x:.4f}<br>Intensity: %{y:.0f}<extra>Experimental</extra>'
+                mode='markers', marker=dict(size=1, color="black", opacity=0.01),
+                showlegend=False, name='Exp Frag',
+                hovertemplate='m/z: %{x:.4f}<br>Intensity: %{y:e}'
             ), row=ms2_row, col=1)
         
         def add_reference_spectrum(mz_vals, intensity_vals, fragment_colors, exp_max_intensity):
             """Helper function to add reference spectrum traces (mirrored downward)"""
-            ref_max_intensity = np.max(intensity_vals) if len(intensity_vals) > 0 else 1
+            ref_max_intensity = np.nanmax(intensity_vals) if len(intensity_vals) > 0 else 1
             scale_factor = exp_max_intensity / ref_max_intensity if ref_max_intensity > 0 else 1
             scaled_intensities = [i * scale_factor for i in intensity_vals]
-            
+
             for mz, scaled_int, color in zip(mz_vals, scaled_intensities, fragment_colors):
                 fig.add_trace(go.Scatter(
                     x=[mz, mz], y=[0, -scaled_int],  # Negative for downward
                     mode='lines', line=dict(color=color, width=2),
-                    showlegend=False, hoverinfo='skip', name='Reference'
+                    showlegend=False, hoverinfo='skip', name='Ref Frag'
                 ), row=ms2_row, col=1)
             
             # Add invisible markers for hover interaction
             fig.add_trace(go.Scatter(
                 x=list(mz_vals), y=[-s for s in scaled_intensities],
                 mode='markers', marker=dict(size=1, color='red', opacity=0.01),
-                showlegend=False, name='Reference Peaks',
-                hovertemplate='m/z: %{x:.4f}<br>Intensity: %{customdata:.0f}<extra>Reference</extra>',
+                showlegend=False, name='Ref Frag',
+                hovertemplate='m/z: %{x:.4f}<br>Intensity: %{customdata:e}',
                 customdata=list(intensity_vals)  # Use original intensities for hover
             ), row=ms2_row, col=1)
 
         if ms2_plot_data_dict is not None:
             # Determine data type and extract spectra
             has_reference = "database" in ms2_plot_data_dict
-            ms2_data_type = 'hits' if has_reference else 'extracted'
             
             if has_reference:
                 # Database hit with reference spectrum
@@ -392,15 +392,14 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             # Plot experimental spectrum
             mz_vals, intensity_vals = query_spectrum[0], query_spectrum[1]
             if len(mz_vals) > 0 and len(intensity_vals) > 0:
-                max_mz = np.max(mz_vals)
-                exp_max_intensity = np.max(intensity_vals)
+                exp_max_intensity = np.nanmax(intensity_vals)
                 add_experimental_spectrum(mz_vals, intensity_vals, fragment_colors)
-                
+
                 # Plot reference spectrum if available
                 if ref_spectrum is not None:
                     ref_mz_vals, ref_intensity_vals = ref_spectrum[0], ref_spectrum[1]
                     if len(ref_mz_vals) > 0 and len(ref_intensity_vals) > 0:
-                        max_mz = max(max_mz, np.max(ref_mz_vals))
+                        max_mz = max(np.nanmax(mz_vals), np.nanmax(ref_mz_vals))
                         add_reference_spectrum(ref_mz_vals, ref_intensity_vals, fragment_colors, exp_max_intensity)
                 
                 # Set appropriate y-range based on data type
@@ -408,8 +407,10 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
                     y_range = [-exp_max_intensity * 1.1, exp_max_intensity * 1.1]  # Symmetric for mirror plot
                 else:
                     y_range = [0, exp_max_intensity * 1.1]  # Start at 0 for single spectrum
-            
-            ms2_title = write_ms2_title(compound, ms2_plot_data_dict, ms2_data_type, selected_file)
+                
+                print(f"Y-axis range: {y_range}")
+
+            ms2_title = write_ms2_title(compound, ms2_plot_data_dict, has_reference, selected_file)
         else:
             # No MS2 data - add invisible trace to initialize subplot
             ms2_title = write_ms2_title(compound, None, None, None)
@@ -438,7 +439,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         )
         fig.add_hline(y=0, line_color="black", line_width=1, row=ms2_row, col=1)
         fig.add_vline(x=pmz, line_dash="dash", line_color="black",
-                       line_width=1, row=ms2_row, col=1)
+                        line_width=1, row=ms2_row, col=1)
 
         # Add EIC traces
         def get_file_color(file_name, color_dict, default_color="gray"):
@@ -751,13 +752,6 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             compound.rt_peak = compound.original_rt_peak
             compound.is_rt_modified = False
             
-            # Reset annotations
-            compound.ms1_notes = "keep"
-            compound.ms2_notes = "no selection"
-            compound.analyst_notes = ""
-            compound.identification_notes = ""
-            compound.is_annotation_modified = False
-            
             # Update cache metadata
             project_analysis.update_cache_metadata('compound_reset')
             
@@ -890,13 +884,6 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         """
         Returns the selected MS2 spectra for plotting and info for the title.
         Uses CompoundData structure and filters by RT bounds.
-        
-        Returns:
-            tuple: (ms2_data_type, query_spec, ref_spec, selected_file)
-                ms2_data_type: 'hits' (with reference) or 'extracted' (experimental only) or None
-                query_spec: dict with experimental spectrum data
-                ref_spec: dict with reference spectrum data (None for 'extracted')
-                selected_file: filename of selected MS2 data
         """
         
         # Get MS2 data from CompoundData structure
@@ -1126,10 +1113,6 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         button_row,
         identification_notes_display
     ], layout=widgets.Layout(width='100%', align_items='flex-start', height='fit-content'))
-    
-    # Add helper methods for backwards compatibility
-    container.get_plot_data = lambda: project_analysis.generate_plot_data()
-    container.get_project_analysis = lambda: project_analysis
     
     # Initialize with the first compound
     full_update()
