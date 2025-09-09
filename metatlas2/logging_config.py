@@ -69,6 +69,14 @@ def configure_existing_loggers(formatter, console_handler, log_level):
     existing_loggers = [name for name in logging.Logger.manager.loggerDict 
                        if name.startswith('metatlas2.')]
     
+    # Check if we're in Jupyter
+    in_jupyter = False
+    try:
+        get_ipython()
+        in_jupyter = True
+    except NameError:
+        pass
+    
     for logger_name in existing_loggers:
         existing_logger = logging.getLogger(logger_name)
         existing_logger.handlers.clear()  # Remove any existing handlers
@@ -80,8 +88,8 @@ def configure_existing_loggers(formatter, console_handler, log_level):
         handler.setFormatter(formatter)
         existing_logger.addHandler(handler)
         
-        # Prevent propagation to avoid duplicate messages
-        existing_logger.propagate = False
+        # Set propagation based on environment
+        existing_logger.propagate = in_jupyter
 
 def ensure_logging_initialized():
     """Ensure logging is initialized with default settings if not already done."""
@@ -105,7 +113,14 @@ def get_logger(module_name):
     
     logger = logging.getLogger(f"metatlas2.{module_name}")
     
-    # Ensure the logger doesn't propagate to avoid duplicate messages
-    logger.propagate = False
+    # In Jupyter notebooks, we want propagation enabled so messages appear
+    # Check if we're running in a Jupyter environment
+    try:
+        # This will be available if running in Jupyter
+        get_ipython()
+        logger.propagate = True
+    except NameError:
+        # Not in Jupyter, prevent propagation to avoid duplicate messages
+        logger.propagate = False
     
     return logger

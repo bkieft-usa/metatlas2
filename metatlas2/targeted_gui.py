@@ -34,27 +34,27 @@ from scipy.ndimage import gaussian_filter1d
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
 import database_interact as dbi
 import ms1_ms2_analysis as msa
-import data_classes as dcl
+import metatlas2_objects as mto
 import logging_config as lcf
 import simple_cache as scache
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_gui')
 
-def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir: str = None):
+def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir: str = None):
     """
-    Create an enhanced RT editor working directly with ProjectAnalysis and CompoundData objects.
-    Automatically saves progress through ProjectAnalysis caching system.
+    Create an enhanced RT editor working directly with AnalysisProject and CompoundExperimental objects.
+    Automatically saves progress through AnalysisProject caching system.
     
     Args:
-        project_analysis: ProjectAnalysis object containing CompoundData objects
+        analysis_project: AnalysisProject object containing CompoundExperimental objects
         config: Configuration dictionary
         project_dir: Project directory for caching (optional)
     """
     
     # Filter compounds that have EIC or MS2 data
     compound_list = [
-        inchi_key for inchi_key, compound in project_analysis.compounds.items()
+        inchi_key for inchi_key, compound in analysis_project.compounds.items()
         if compound.eic_data_files or compound.ms2_data_files
     ]
     
@@ -64,15 +64,15 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
 
     # Set starting status
     file_color_dict = config['plot_settings']['file_color_mapping'] if 'file_color_mapping' in config['plot_settings'] else None
-    all_compound_names = [project_analysis.compounds[inchi_key].compound_name for inchi_key in compound_list]
+    all_compound_names = [analysis_project.compounds[inchi_key].compound_name for inchi_key in compound_list]
     current_compound_index = [0]
     current_ms2_file_index = [0]
     updating = [False]  # Prevent recursive updates
     rt_slider = [None]  # Store slider reference
     
     # Get project directory for caching
-    if project_dir is None and hasattr(project_analysis, 'project_db_path'):
-        project_dir = str(Path(project_analysis.project_db_path).parent)
+    if project_dir is None and hasattr(analysis_project, 'project_db_path'):
+        project_dir = str(Path(analysis_project.project_db_path).parent)
     
     last_save_time = [time.time()]
     save_interval = 30  # seconds between auto-saves
@@ -165,29 +165,29 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         layout=widgets.Layout(width='100%', height='auto', margin='5px 0px')
     )
 
-    def get_current_compound() -> Optional[dcl.CompoundData]:
-        """Get current CompoundData object"""
+    def get_current_compound() -> Optional[mto.CompoundExperimental]:
+        """Get current CompoundExperimental object"""
         idx = current_compound_index[0]
         if 0 <= idx < len(compound_list):
             inchi_key = compound_list[idx]
-            return project_analysis.compounds[inchi_key]
+            return analysis_project.compounds[inchi_key]
         return None
 
     def auto_save_if_needed():
-        """Auto-save ProjectAnalysis if changes have been made and enough time has passed."""
+        """Auto-save AnalysisProject if changes have been made and enough time has passed."""
         if (project_dir and 
-            any(c.is_rt_modified or c.is_annotation_modified for c in project_analysis.compounds.values()) and
+            any(c.is_rt_modified or c.is_annotation_modified for c in analysis_project.compounds.values()) and
             time.time() - last_save_time[0] > save_interval):
             
             try:
-                # Save ProjectAnalysis to progress cache
-                scache.save_progress_checkpoint(project_analysis, project_dir, project_analysis.atlas_uid, "gui_progress")
+                # Save AnalysisProject to progress cache
+                scache.save_progress_checkpoint(analysis_project, project_dir, analysis_project.atlas_uid, "gui_progress")
                 last_save_time[0] = time.time()
                 logger.info("Auto-saved GUI progress to cache")
             except Exception as e:
                 logger.error(f"Auto-save failed: {e}")
 
-    def write_ms2_title(compound: dcl.CompoundData, ms2_info, has_reference, ms2_file, current_compound_index=None):
+    def write_ms2_title(compound: mto.CompoundExperimental, ms2_info, has_reference, ms2_file, current_compound_index=None):
         """Create MS2 title and subheadings"""
         
         # Create MS2 title (exact same format as original)
@@ -220,7 +220,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
 
         return ms2_title
 
-    def write_eic_title(compound: dcl.CompoundData, current_compound_index=None):
+    def write_eic_title(compound: mto.CompoundExperimental, current_compound_index=None):
         # Create EIC title (exact same format as original)
         eic_title_parts = []
         
@@ -282,11 +282,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
 
         return eic_title
 
-    def create_targeted_analysis_plot(compound: dcl.CompoundData, 
+    def create_targeted_analysis_plot(compound: mto.CompoundExperimental, 
                                       height=600, ms2_plot_data=None,
                                       initial_render=False, current_compound_index=None):
         """
-        Create the plot using CompoundData object.
+        Create the plot using CompoundExperimental object.
         Args:
             ms2_plot_data: tuple (spec_data_dict, selected_file)
             initial_render: if True, update EIC x-axis bounds based on RT bounds
@@ -746,14 +746,14 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         
         updating[0] = True
         try:
-            # Reset compound to original values using CompoundData methods
+            # Reset compound to original values using CompoundExperimental methods
             compound.rt_min = compound.original_rt_min
             compound.rt_max = compound.original_rt_max
             compound.rt_peak = compound.original_rt_peak
             compound.is_rt_modified = False
             
             # Update cache metadata
-            project_analysis.update_cache_metadata('compound_reset')
+            analysis_project.update_cache_metadata('compound_reset')
             
             # Reset MS2 file index since RT bounds changed
             reset_ms2_file_index()
@@ -821,7 +821,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             # Reset MS2 file index since RT bounds will change
             reset_ms2_file_index()
             
-            # Update using CompoundData method
+            # Update using CompoundExperimental method
             compound.update_rt_bounds(
                 suggested_data['rt_min'],
                 suggested_data['rt_max'],
@@ -829,7 +829,7 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
             )
             
             # Update cache metadata
-            project_analysis.update_cache_metadata('rt_bounds_accepted')
+            analysis_project.update_cache_metadata('rt_bounds_accepted')
 
             # Update all UI elements
             create_plot_only()
@@ -862,11 +862,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         # Calculate new peak as midpoint
         new_peak = new_min + (new_max - new_min) / 2.0
         
-        # Update using CompoundData method
+        # Update using CompoundExperimental method
         compound.update_rt_bounds(new_min, new_max, new_peak)
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('rt_bounds_modified')
+        analysis_project.update_cache_metadata('rt_bounds_modified')
 
         # Reset MS2 file index since RT bounds changed
         reset_ms2_file_index()
@@ -880,13 +880,13 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         """Reset MS2 file index to 0 when switching compounds"""
         current_ms2_file_index[0] = 0
 
-    def get_selected_ms2_spectra(compound: dcl.CompoundData, current_ms2_file_index, rt_min, rt_max):
+    def get_selected_ms2_spectra(compound: mto.CompoundExperimental, current_ms2_file_index, rt_min, rt_max):
         """
         Returns the selected MS2 spectra for plotting and info for the title.
-        Uses CompoundData structure and filters by RT bounds.
+        Uses CompoundExperimental structure and filters by RT bounds.
         """
         
-        # Get MS2 data from CompoundData structure
+        # Get MS2 data from CompoundExperimental structure
         ms2_data = compound.ms2_data_files
         if not ms2_data:
             return None, None, []
@@ -969,11 +969,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
                 
-        # Update using CompoundData method
+        # Update using CompoundExperimental method
         compound.update_annotations(ms2_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
+        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -987,11 +987,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
         
-        # Update using CompoundData method
+        # Update using CompoundExperimental method
         compound.update_annotations(ms1_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
+        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -1005,11 +1005,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
         
-        # Update using CompoundData method
+        # Update using CompoundExperimental method
         compound.update_annotations(analyst_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
+        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -1023,11 +1023,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
         if compound is None:
             return
 
-        # Update using CompoundData method
+        # Update using CompoundExperimental method
         compound.update_annotations(identification_notes=change['new'])
         
         # Update cache metadata
-        project_analysis.update_cache_metadata('annotations_modified')
+        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -1040,11 +1040,11 @@ def create_gui(project_analysis: dcl.ProjectAnalysis, config: Dict, project_dir:
     )
     
     def on_manual_save(button):
-        """Manual save handler for ProjectAnalysis"""
+        """Manual save handler for AnalysisProject"""
         if project_dir:
             try:
-                # Save ProjectAnalysis to progress cache
-                timestamp = scache.save_progress_checkpoint(project_analysis, project_dir, project_analysis.atlas_uid, "gui_progress")
+                # Save AnalysisProject to progress cache
+                timestamp = scache.save_progress_checkpoint(analysis_project, project_dir, analysis_project.atlas_uid, "gui_progress")
                 button.description = f"Saved {timestamp[-8:-3]}"
                 last_save_time[0] = time.time()
                 

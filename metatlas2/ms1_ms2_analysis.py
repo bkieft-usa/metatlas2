@@ -269,7 +269,7 @@ def calculate_mz_tolerance_range(mz: float, tolerance_ppm: float) -> Tuple[float
 def extract_eic_and_ms2_data(input_data_list: List[Dict], atlas_dataframe: pd.DataFrame, config: Dict) -> Dict[str, Dict]:
     """
     Extract EIC and MS2 data using simplified approach - returns raw data only.
-    ProjectAnalysis will handle object creation and management.
+    AnalysisProject will handle object creation and management.
     
     Returns:
         Dict keyed by inchi_key containing simple experimental data structures

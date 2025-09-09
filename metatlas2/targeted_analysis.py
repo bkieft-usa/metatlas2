@@ -34,7 +34,7 @@ sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
 import database_interact as dbi
 import ms1_ms2_analysis as msa
 import load_tools as ldt
-import data_classes as dcl
+import metatlas2_objects as mto
 import logging_config as lcf
 import simple_cache as scache
 
@@ -44,10 +44,10 @@ current_time = datetime.now().isoformat()
 
 def run_targeted_analysis_workflow(project_db_path: str, 
                                     target_atlas_uid: str, 
-                                    config: Dict,) -> Tuple[pd.DataFrame, dcl.ProjectAnalysis]: 
+                                    config: Dict,) -> Tuple[pd.DataFrame, mto.AnalysisProject]: 
     """
     Execute the complete targeted analysis workflow with comprehensive caching support.
-    Returns atlas DataFrame and ProjectAnalysis object - no more plot_data dictionary.
+    Returns atlas DataFrame and AnalysisProject object - no more plot_data dictionary.
     """
     logger.info("Setting up targeted analysis database...")
 
@@ -96,14 +96,14 @@ def run_targeted_analysis_workflow(project_db_path: str,
     logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
 
     # Initialize project analysis with flat classes
-    project_analysis = dcl.ProjectAnalysis(
+    analysis_project = mto.AnalysisProject.from_database(
         project_db_path=project_db_path,
-        atlas_uid=target_atlas_uid
+        atlas_uid=target_atlas_uid,
+        main_db_path=main_db_path
     )
-    project_analysis.load_from_atlas(atlas_dataframe)
 
     # Save initialization checkpoint
-    scache.save_progress_checkpoint(project_analysis, project_dir, target_atlas_uid, "initialized")
+    scache.save_progress_checkpoint(analysis_project, project_dir, target_atlas_uid, "initialized")
 
     logger.info("Loading experimental files from project database...")
     project_files = dbi.get_experimental_files_from_db(project_db_path)
@@ -126,32 +126,32 @@ def run_targeted_analysis_workflow(project_db_path: str,
     experimental_data = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config)
 
     # Add experimental data to project analysis using simplified format
-    project_analysis.add_experimental_data_simple(experimental_data)
+    analysis_project.add_experimental_data_simple(experimental_data)
 
     # Save data extraction checkpoint
-    scache.save_progress_checkpoint(project_analysis, project_dir, target_atlas_uid, "data_extracted")
+    scache.save_progress_checkpoint(analysis_project, project_dir, target_atlas_uid, "data_extracted")
 
     # Apply post-processing features independently
-    apply_isomer_detection(project_analysis, atlas_dataframe)
-    apply_rt_bounds_suggestions(project_analysis)
+    apply_isomer_detection(analysis_project, atlas_dataframe)
+    apply_rt_bounds_suggestions(analysis_project)
 
     # Save final analysis cache (ready for GUI)
     data_timestamp = scache.save_analysis_cache(
-        project_analysis, 
+        analysis_project, 
         project_dir,
         target_atlas_uid
     )
     logger.info(f"Saved complete analysis cache with timestamp: {data_timestamp}")
 
     logger.info(f"Analysis complete:")
-    logger.info(f"  Total compounds: {len(project_analysis.compounds)}")
+    logger.info(f"  Total compounds: {len(analysis_project.compounds)}")
 
     # Get analysis summary
-    summary = project_analysis.get_analysis_summary()
+    summary = analysis_project.get_analysis_summary()
     logger.info(f"  Compounds with EIC data: {summary['compounds_with_eic']}")
     logger.info(f"  Compounds with MS2 data: {summary['compounds_with_ms2']}")
 
-    return atlas_dataframe, project_analysis
+    return atlas_dataframe, analysis_project
 
 def build_isomer_dict(atlas_df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
     """Return a dict: inchi_key → list of isomer dicts (empty list if none).
@@ -187,7 +187,7 @@ def build_isomer_dict(atlas_df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]
         ]
     return isomer_dict
 
-def create_post_analysis_atlas_v2(project_analysis: dcl.ProjectAnalysis, 
+def create_post_analysis_atlas_v2(analysis_project: mto.AnalysisProject, 
                                   config: Dict, 
                                   output_dir: str = None) -> str:
     """
@@ -195,13 +195,13 @@ def create_post_analysis_atlas_v2(project_analysis: dcl.ProjectAnalysis,
     """
     # Find modified compounds
     modified_compounds = {
-        inchi_key: compound for inchi_key, compound in project_analysis.compounds.items()
+        inchi_key: compound for inchi_key, compound in analysis_project.compounds.items()
         if compound.is_rt_modified or compound.is_annotation_modified
     }
     
     if not modified_compounds:
         logger.info("No compounds were modified during analysis")
-        return project_analysis.atlas_uid
+        return analysis_project.atlas_uid
     
     logger.info(f"Creating post-analysis atlas with {len(modified_compounds)} modified compounds...")
     
@@ -211,9 +211,9 @@ def create_post_analysis_atlas_v2(project_analysis: dcl.ProjectAnalysis,
     
     # Get original atlas information for the new atlas
     atlas_df = dbi.get_atlas_compounds_with_metadata(
-        project_db_path=project_analysis.project_db_path,
+        project_db_path=analysis_project.project_db_path,
         main_db_path=main_db_path,
-        atlas_uid=project_analysis.atlas_uid
+        atlas_uid=analysis_project.atlas_uid
     )
     
     for compound in modified_compounds.values():
@@ -243,9 +243,9 @@ def create_post_analysis_atlas_v2(project_analysis: dcl.ProjectAnalysis,
     
     # Create new atlas using existing database function
     new_atlas_uid = dbi.clone_and_modify_atlas(
-        project_analysis.project_db_path,
-        project_analysis.project_db_path,
-        project_analysis.atlas_uid,
+        analysis_project.project_db_path,
+        analysis_project.project_db_path,
+        analysis_project.atlas_uid,
         config,
         compound_updates,
         use_experimental_table=False,
@@ -256,7 +256,7 @@ def create_post_analysis_atlas_v2(project_analysis: dcl.ProjectAnalysis,
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
         new_atlas_table = dbi.get_atlas_compounds_with_metadata(
-            project_db_path=project_analysis.project_db_path, 
+            project_db_path=analysis_project.project_db_path, 
             main_db_path=main_db_path, 
             atlas_uid=new_atlas_uid
         )
@@ -271,14 +271,14 @@ def create_post_analysis_atlas_v2(project_analysis: dcl.ProjectAnalysis,
 
 def run_post_analysis_workflow_v2(project_db_path: str,
                                   analysis_atlas_uid: str,
-                                  project_analysis: dcl.ProjectAnalysis,
+                                  analysis_project: mto.AnalysisProject,
                                   atlas_dataframe: pd.DataFrame,
                                   project_name: str,
                                   config: Dict,
                                   analysis_output_path: str) -> Tuple[str, str, Dict]:
     """
     Execute complete post-analysis workflow using class-based approach.
-    No plot_data dictionary needed - works directly with ProjectAnalysis.
+    No plot_data dictionary needed - works directly with AnalysisProject.
     """
     logger.info("Starting class-based post-analysis workflow...")
     
@@ -286,7 +286,7 @@ def run_post_analysis_workflow_v2(project_db_path: str,
     os.makedirs(analysis_output_path, exist_ok=True)
     logger.info("Creating post-analysis atlas...")
     post_analysis_atlas_uid = create_post_analysis_atlas_v2(
-        project_analysis, 
+        analysis_project, 
         config, 
         analysis_output_path
     )
@@ -294,8 +294,8 @@ def run_post_analysis_workflow_v2(project_db_path: str,
     
     # Step 2: Save targeted analysis results using simplified approach
     logger.info("Saving targeted analysis results...")
-    targeted_analysis_uid = dbi.save_targeted_analysis_from_project_analysis(
-        project_analysis, 
+    targeted_analysis_uid = dbi.save_targeted_analysis_from_analysis_project(
+        analysis_project, 
         project_name, 
         post_analysis_atlas_uid
     )
@@ -316,71 +316,6 @@ def run_post_analysis_workflow_v2(project_db_path: str,
     logger.info("Class-based post-analysis workflow completed successfully")
     
     return post_analysis_atlas_uid, targeted_analysis_uid, comprehensive_report
-
-# def run_complete_targeted_analysis_v3(project_db_path: str,
-#                                       target_atlas_uid: str,
-#                                       project_name: str,
-#                                       config: Dict,
-#                                       analysis_output_path: str,
-#                                       resume_from_cache: bool = True) -> Tuple[str, str, str]:
-#     """
-#     Complete targeted analysis workflow with comprehensive caching and resumption support.
-#     """
-#     logger.info("Starting complete targeted analysis workflow v3 with caching...")
-    
-#     project_dir = str(Path(project_db_path).parent)
-    
-#     # Check cache status
-#     cache_status = scache.get_cache_status(project_dir, target_atlas_uid)
-#     logger.info(f"Cache status: {cache_status['total_caches']} caches, {cache_status['total_checkpoints']} checkpoints")
-    
-#     # Step 1: Run targeted analysis (with caching support)
-#     if resume_from_cache and cache_status['has_latest_cache']:
-#         logger.info("Attempting to resume from latest cache...")
-#         config['analysis_settings']['use_data_cache'] = True
-#     else:
-#         logger.info("Running fresh analysis...")
-#         config['analysis_settings']['use_data_cache'] = False
-    
-#     atlas_df, project_analysis, plot_data = run_targeted_analysis_workflow(
-#         project_db_path, target_atlas_uid, config
-#     )
-    
-#     # Step 2: Create post-analysis atlas
-#     logger.info("Creating post-analysis atlas...")
-#     os.makedirs(analysis_output_path, exist_ok=True)
-#     post_analysis_atlas_uid = create_post_analysis_atlas_v2(
-#         project_analysis, config, analysis_output_path
-#     )
-    
-#     # Save post-atlas checkpoint
-#     scache.save_progress_checkpoint(project_analysis, project_dir, target_atlas_uid, "post_atlas_created")
-    
-#     # Step 3: Save analysis to database
-#     logger.info("Saving analysis results to database...")
-#     analysis_uid = project_analysis.save_to_database(project_name, post_analysis_atlas_uid)
-    
-#     # Save database checkpoint
-#     scache.save_progress_checkpoint(project_analysis, project_dir, target_atlas_uid, "database_saved")
-    
-#     # Step 4: Generate report
-#     logger.info("Generating comprehensive report...")
-#     comprehensive_report = dbi.generate_comprehensive_targeted_analysis_report(
-#         project_db_path, config, analysis_uid, atlas_df,
-#         post_analysis_atlas_uid, analysis_output_path
-#     )
-    
-#     report_path = Path(analysis_output_path) / f"targeted_analysis_report_{analysis_uid}.xlsx"
-    
-#     # Save final completion checkpoint
-#     scache.save_progress_checkpoint(project_analysis, project_dir, target_atlas_uid, "completed")
-    
-#     # Cleanup old caches to save space
-#     scache.cleanup_old_caches(project_dir, target_atlas_uid, keep_last_n=3)
-    
-#     logger.info("Complete targeted analysis workflow v3 finished successfully")
-    
-#     return post_analysis_atlas_uid, analysis_uid, str(report_path)
 
 def suggest_rt_bounds_from_eic(
     eic_data: Dict[str, Dict[str, Any]],
@@ -584,7 +519,7 @@ def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
     cumsum = np.cumsum(np.insert(x, 0, 0.0))
     return (cumsum[window:] - cumsum[:-window]) / float(window)
 
-def apply_isomer_detection(project_analysis: dcl.ProjectAnalysis, atlas_dataframe: pd.DataFrame):
+def apply_isomer_detection(analysis_project: mto.AnalysisProject, atlas_dataframe: pd.DataFrame):
     """
     Apply isomer detection to all compounds in the project analysis.
     Separated for independent testing and debugging.
@@ -603,10 +538,10 @@ def apply_isomer_detection(project_analysis: dcl.ProjectAnalysis, atlas_datafram
     logger.info(f"Found {compounds_with_isomers} compounds with isomers")
     
     # Apply to compounds
-    for inchi_key, compound in project_analysis.compounds.items():
+    for inchi_key, compound in analysis_project.compounds.items():
         compound.isomers = isomer_dict.get(inchi_key, [])
 
-def apply_rt_bounds_suggestions(project_analysis: dcl.ProjectAnalysis):
+def apply_rt_bounds_suggestions(analysis_project: mto.AnalysisProject):
     """
     Apply RT bounds suggestions to all compounds with EIC data.
     Separated for independent testing and debugging.
@@ -616,7 +551,7 @@ def apply_rt_bounds_suggestions(project_analysis: dcl.ProjectAnalysis):
     compounds_processed = 0
     compounds_with_suggestions = 0
     
-    for inchi_key, compound in project_analysis.compounds.items():
+    for inchi_key, compound in analysis_project.compounds.items():
         if compound.eic_data_files:
             compounds_processed += 1
             
@@ -700,12 +635,12 @@ def test_isomer_detection(atlas_dataframe: pd.DataFrame, target_inchi_key: str =
         
         return isomer_dict
 
-def test_rt_bounds_suggestion(project_analysis: dcl.ProjectAnalysis, target_inchi_key: str = None) -> Dict[str, Dict]:
+def test_rt_bounds_suggestion(analysis_project: mto.AnalysisProject, target_inchi_key: str = None) -> Dict[str, Dict]:
     """
     Test RT bounds suggestion functionality independently.
     
     Args:
-        project_analysis: ProjectAnalysis object with EIC data
+        analysis_project: AnalysisProject object with EIC data
         target_inchi_key: Optional specific compound to analyze, or None for all
     
     Returns:
@@ -717,8 +652,8 @@ def test_rt_bounds_suggestion(project_analysis: dcl.ProjectAnalysis, target_inch
     
     if target_inchi_key:
         # Test specific compound
-        if target_inchi_key in project_analysis.compounds:
-            compound = project_analysis.compounds[target_inchi_key]
+        if target_inchi_key in analysis_project.compounds:
+            compound = analysis_project.compounds[target_inchi_key]
             
             if compound.eic_data_files:
                 logger.info(f"RT bounds analysis for {compound.compound_name} ({target_inchi_key}):")
@@ -773,7 +708,7 @@ def test_rt_bounds_suggestion(project_analysis: dcl.ProjectAnalysis, target_inch
         compounds_with_eic = 0
         compounds_with_suggestions = 0
         
-        for inchi_key, compound in project_analysis.compounds.items():
+        for inchi_key, compound in analysis_project.compounds.items():
             if compound.eic_data_files:
                 compounds_with_eic += 1
                 

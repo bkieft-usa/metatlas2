@@ -12,13 +12,13 @@ import logging_config as lcf
 
 logger = lcf.get_logger('simple_cache')
 
-def save_analysis_cache(project_analysis, project_dir: str, atlas_uid: str) -> str:
+def save_analysis_cache(analysis_project, project_dir: str, atlas_uid: str) -> str:
     """
-    Save ProjectAnalysis object to cache with comprehensive metadata.
+    Save AnalysisProject object to cache with comprehensive metadata.
     This is the main caching function for the new simplified workflow.
     
     Args:
-        project_analysis: ProjectAnalysis object containing all analysis data
+        analysis_project: AnalysisProject object containing all analysis data
         project_dir: Project directory path
         atlas_uid: Atlas UID for organizing caches
     
@@ -31,23 +31,23 @@ def save_analysis_cache(project_analysis, project_dir: str, atlas_uid: str) -> s
     cache_dir = Path(project_dir) / "cache" / "analysis" / atlas_uid
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    cache_file = cache_dir / f"project_analysis_{timestamp}.pkl"
+    cache_file = cache_dir / f"analysis_project_{timestamp}.pkl"
     metadata_file = cache_dir / f"metadata_{timestamp}.json"
     
     try:
-        # Save ProjectAnalysis object
+        # Save AnalysisProject object
         with open(cache_file, 'wb') as f:
-            pickle.dump(project_analysis, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(analysis_project, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         # Generate comprehensive metadata
-        metadata = _generate_analysis_metadata(project_analysis, timestamp, atlas_uid)
+        metadata = _generate_analysis_metadata(analysis_project, timestamp, atlas_uid)
         
         # Save metadata
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2, default=str)
         
         # Create/update latest symlink for easy access
-        latest_file = cache_dir / "project_analysis_latest.pkl"
+        latest_file = cache_dir / "analysis_project_latest.pkl"
         latest_metadata = cache_dir / "metadata_latest.json"
         
         if latest_file.exists():
@@ -72,7 +72,7 @@ def save_analysis_cache(project_analysis, project_dir: str, atlas_uid: str) -> s
 
 def load_analysis_cache(project_dir: str, use_cache, atlas_uid: str):
     """
-    Load ProjectAnalysis object from cache.
+    Load AnalysisProject object from cache.
     
     Args:
         project_dir: Project directory path
@@ -80,7 +80,7 @@ def load_analysis_cache(project_dir: str, use_cache, atlas_uid: str):
         atlas_uid: Atlas UID for organizing caches
     
     Returns:
-        ProjectAnalysis object or None if not found/failed
+        AnalysisProject object or None if not found/failed
     """
     if use_cache is False:
         return None
@@ -97,7 +97,7 @@ def load_analysis_cache(project_dir: str, use_cache, atlas_uid: str):
     
     if use_cache is True:
         # Load latest cache
-        cache_file = cache_dir / "project_analysis_latest.pkl"
+        cache_file = cache_dir / "analysis_project_latest.pkl"
         metadata_file = cache_dir / "metadata_latest.json"
         
         if not cache_file.exists():
@@ -106,7 +106,7 @@ def load_analysis_cache(project_dir: str, use_cache, atlas_uid: str):
             
     elif isinstance(use_cache, str):
         # Load specific timestamp
-        cache_file = cache_dir / f"project_analysis_{use_cache}.pkl"
+        cache_file = cache_dir / f"analysis_project_{use_cache}.pkl"
         metadata_file = cache_dir / f"metadata_{use_cache}.json"
         
         if not cache_file.exists():
@@ -125,12 +125,12 @@ def load_analysis_cache(project_dir: str, use_cache, atlas_uid: str):
             logger.info(f"  Cache contains {metadata['total_compounds']} compounds")
             logger.info(f"  Analysis stage: {metadata.get('analysis_stage', 'unknown')}")
         
-        # Load ProjectAnalysis object
+        # Load AnalysisProject object
         with open(cache_file, 'rb') as f:
-            project_analysis = pickle.load(f)
+            analysis_project = pickle.load(f)
         
         logger.info("Analysis cache loaded successfully")
-        return project_analysis
+        return analysis_project
         
     except Exception as e:
         logger.error(f"Failed to load analysis cache: {e}")
@@ -161,7 +161,7 @@ def list_analysis_caches(project_dir: str, atlas_uid: str) -> List[Dict[str, Any
             
             # Check if corresponding cache file exists
             timestamp = metadata['timestamp']
-            cache_file = cache_dir / f"project_analysis_{timestamp}.pkl"
+            cache_file = cache_dir / f"analysis_project_{timestamp}.pkl"
             
             if cache_file.exists():
                 cache_info = {
@@ -185,12 +185,12 @@ def list_analysis_caches(project_dir: str, atlas_uid: str) -> List[Dict[str, Any
     caches.sort(key=lambda x: x['timestamp'], reverse=True)
     return caches
 
-def save_progress_checkpoint(project_analysis, project_dir: str, atlas_uid: str, stage: str) -> str:
+def save_progress_checkpoint(analysis_project, project_dir: str, atlas_uid: str, stage: str) -> str:
     """
     Save a progress checkpoint during analysis.
     
     Args:
-        project_analysis: ProjectAnalysis object
+        analysis_project: AnalysisProject object
         project_dir: Project directory
         atlas_uid: Atlas UID
         stage: Analysis stage identifier (e.g., 'data_extracted', 'rt_bounds_set', 'annotations_added')
@@ -210,10 +210,10 @@ def save_progress_checkpoint(project_analysis, project_dir: str, atlas_uid: str,
     try:
         # Save checkpoint
         with open(checkpoint_file, 'wb') as f:
-            pickle.dump(project_analysis, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(analysis_project, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         # Save checkpoint metadata
-        metadata = _generate_analysis_metadata(project_analysis, timestamp, atlas_uid)
+        metadata = _generate_analysis_metadata(analysis_project, timestamp, atlas_uid)
         metadata['analysis_stage'] = stage
         metadata['checkpoint_type'] = 'progress'
         
@@ -249,7 +249,7 @@ def load_progress_checkpoint(project_dir: str, atlas_uid: str, stage: str):
         stage: Analysis stage identifier
     
     Returns:
-        ProjectAnalysis object or None
+        AnalysisProject object or None
     """
     checkpoint_dir = Path(project_dir) / "cache" / "checkpoints" / atlas_uid
     
@@ -265,10 +265,10 @@ def load_progress_checkpoint(project_dir: str, atlas_uid: str, stage: str):
     
     try:
         with open(checkpoint_file, 'rb') as f:
-            project_analysis = pickle.load(f)
+            analysis_project = pickle.load(f)
         
         logger.info(f"Loaded progress checkpoint for stage: {stage}")
-        return project_analysis
+        return analysis_project
         
     except Exception as e:
         logger.error(f"Failed to load progress checkpoint: {e}")
@@ -385,14 +385,14 @@ def get_cache_status(project_dir: str, atlas_uid: str) -> Dict[str, Any]:
     
     return cache_info
 
-def _generate_analysis_metadata(project_analysis, timestamp: str, atlas_uid: str) -> Dict[str, Any]:
-    """Generate comprehensive metadata for ProjectAnalysis cache."""
+def _generate_analysis_metadata(analysis_project, timestamp: str, atlas_uid: str) -> Dict[str, Any]:
+    """Generate comprehensive metadata for AnalysisProject cache."""
     
     # Count compounds with different types of data
-    compounds_with_eic = sum(1 for c in project_analysis.compounds.values() if c.eic_data_files)
-    compounds_with_ms2 = sum(1 for c in project_analysis.compounds.values() 
+    compounds_with_eic = sum(1 for c in analysis_project.compounds.values() if c.eic_data_files)
+    compounds_with_ms2 = sum(1 for c in analysis_project.compounds.values() 
                            if c.ms2_data_files)  # Simple check: any MS2 files exist
-    modified_compounds = sum(1 for c in project_analysis.compounds.values() 
+    modified_compounds = sum(1 for c in analysis_project.compounds.values() 
                            if c.is_rt_modified or c.is_annotation_modified)
     
     # Determine analysis stage based on data completeness
@@ -403,14 +403,14 @@ def _generate_analysis_metadata(project_analysis, timestamp: str, atlas_uid: str
         analysis_stage = "modified"
     
     # Calculate data statistics
-    total_eic_files = sum(len(c.eic_data_files) for c in project_analysis.compounds.values())
-    total_ms2_files = sum(len(c.ms2_data_files) for c in project_analysis.compounds.values())
+    total_eic_files = sum(len(c.eic_data_files) for c in analysis_project.compounds.values())
+    total_ms2_files = sum(len(c.ms2_data_files) for c in analysis_project.compounds.values())
     
     return {
         'timestamp': timestamp,
         'atlas_uid': atlas_uid,
-        'project_db_path': project_analysis.project_db_path,
-        'total_compounds': len(project_analysis.compounds),
+        'project_db_path': analysis_project.project_db_path,
+        'total_compounds': len(analysis_project.compounds),
         'compounds_with_eic': compounds_with_eic,
         'compounds_with_ms2': compounds_with_ms2,
         'modified_compounds': modified_compounds,
@@ -418,5 +418,5 @@ def _generate_analysis_metadata(project_analysis, timestamp: str, atlas_uid: str
         'total_eic_files': total_eic_files,
         'total_ms2_files': total_ms2_files,
         'cache_version': '2.0',
-        'cache_type': 'project_analysis'
+        'cache_type': 'analysis_project'
     }

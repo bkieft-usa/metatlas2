@@ -1253,7 +1253,7 @@ def get_atlas_from_db(db_path: str, atlas_uid: str) -> pd.DataFrame:
         df = conn.execute(query, [atlas_uid]).df()
     
     if df.empty:
-        logger.warning(f"No atlas found with UID: {atlas_uid}")
+        #logger.warning(f"No atlas found with UID: {atlas_uid}")
         return pd.DataFrame()
     else:
         logger.info(f"Retrieved atlas metadata for: {df['atlas_name'].iloc[0]}")
@@ -1285,14 +1285,14 @@ def get_rt_correction_table_entry(db_path: Path, atlas_uid: str) -> Optional[dic
         logger.warning(f"No RT correction entry found for atlas UID: {atlas_uid}")
         return None
 
-def _generate_uid(entity_type: str) -> str:
+def _generate_uid(entity_type: str, decorator: str = None) -> str:
     """Generate a unique identifier for database entities."""
     if entity_type == "atlas":
-        return f"atl-raw-{uuid.uuid4().hex[:32]}"
+        return f"atl-raw-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-raw-{uuid.uuid4().hex[:32]}"
     elif entity_type == "rt_atlas":
-        return f"atl-rta-{uuid.uuid4().hex[:32]}"
+        return f"atl-rta-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-rta-{uuid.uuid4().hex[:32]}"
     elif entity_type == "analyzed_atlas":
-        return f"atl-tga-{uuid.uuid4().hex[:32]}"
+        return f"atl-tga-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-tga-{uuid.uuid4().hex[:32]}"
     elif entity_type == "mz_rt_experimental":
         return f"mzrt-exp-{uuid.uuid4().hex[:32]}"
     elif entity_type == "compound":
@@ -1349,22 +1349,22 @@ def get_atlas_compounds_with_metadata(project_db_path: str, main_db_path: str, a
     
     return enriched_df
 
-def save_targeted_analysis_from_project_analysis(
-    project_analysis,
+def save_targeted_analysis_from_analysis_project(
+    analysis_project,
     project_name: str,
     atlas_uid: str
 ) -> str:
     """
-    Save targeted analysis results using ProjectAnalysis class.
+    Save targeted analysis results using AnalysisProject class.
     This replaces the old deposit_targeted_analysis_from_plot_data function.
     """
     logger.info(f"Saving targeted analysis results for project '{project_name}' using class-based approach...")
     
     # Use the class method to save to database
-    analysis_uid = project_analysis.save_to_database(project_name, atlas_uid)
+    analysis_uid = analysis_project.save_to_database(project_name, atlas_uid)
     
     # Validate the saved data
-    validated = validate_targeted_analysis_data(project_analysis.project_db_path, analysis_uid)
+    validated = validate_targeted_analysis_data(analysis_project.project_db_path, analysis_uid)
     if not validated:
         logger.warning(f"Validation failed for targeted analysis entry {analysis_uid}")
         return None
@@ -1661,6 +1661,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 atlas_description TEXT,
                 chromatography TEXT,
                 polarity TEXT,
+                atlas_type TEXT,
                 created_by TEXT,
                 last_modified TEXT
             )
@@ -1702,6 +1703,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 atlas_description TEXT,
                 chromatography TEXT,
                 polarity TEXT,
+                atlas_type TEXT,
+                source_atlas_uid TEXT,
                 created_by TEXT,
                 last_modified TEXT
             )
@@ -1789,6 +1792,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 analysis_uid TEXT,
                 project_name TEXT,
                 atlas_uid TEXT,
+                atlas_type TEXT,
+                chromatography_polarity TEXT,
                 compound_uid TEXT,
                 inchi_key TEXT,
                 compound_name TEXT,
@@ -1831,6 +1836,9 @@ def _create_database_tables(conn, db_type: str = "main"):
                 ms2_total_matches INTEGER,
                 ms1_notes TEXT,
                 ms2_notes TEXT,
+                analyst_notes TEXT,
+                identification_notes TEXT,
+                curation_status TEXT,
                 analyst TEXT,
                 analysis_timestamp TEXT,
                 PRIMARY KEY (analysis_uid, compound_uid)
@@ -1838,7 +1846,9 @@ def _create_database_tables(conn, db_type: str = "main"):
         """)
 
 def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: str, 
-                               atlas_description: str, config: Dict) -> Tuple[str, str]:
+                               atlas_description: str, atlas_type: str,
+                               chromatography: str, polarity: str,
+                               config: Dict) -> Tuple[str, str]:
     """
     Create a new atlas from a DataFrame of compounds.
     
@@ -1854,67 +1864,121 @@ def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: st
     db_path = config["paths"]["main_database"]
     
     # Generate atlas UID
-    atlas_uid = _generate_uid("atlas")
-    
-    # Detect chromatography and polarity
-    chromatography = ldt.detect_atlas_input_chromatography(atlas_compounds_df)
-    polarity = ldt.detect_atlas_input_polarity(atlas_compounds_df)
+    atlas_uid = _generate_uid("atlas", decorator=atlas_type.lower())
     
     prov = ldt.get_provenance()
     
     with get_db_connection(db_path) as conn:
         # Create atlas
         conn.execute("""
-            INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             atlas_uid,
             atlas_name,
             atlas_description,
             chromatography,
             polarity,
+            atlas_type,
             prov["analyst"],
             prov["timestamp"]
-               ))
+        ))
         
-        # Get existing compounds and references
+        # Get existing compounds
         existing_compounds = {}
-        existing_refs = {}
-        
         existing_compound_result = conn.execute("SELECT inchi_key, compound_uid FROM compounds").fetchall()
         for row in existing_compound_result:
             existing_compounds[row[0]] = row[1]
+        logger.info(f"Found {len(existing_compounds)} existing compounds in database")
         
-        existing_ref_result = conn.execute("""
-            SELECT compound_uid, chromatography, polarity, adduct, mz_rt_reference_uid 
-            FROM mz_rt_references
-        """).fetchall()
-        for row in existing_ref_result:
-            key = (row[0], row[1], row[2], row[3])  # compound_uid, chromatography, polarity, adduct
-            existing_refs[key] = row[4]
-        
-        # Process compounds and create associations
+        # Process compounds and create/find RT/MZ references
         association_order = 0
+        compounds_processed = 0
+        compounds_skipped = 0
+        references_created = 0
+        references_reused = 0
         
         for _, row in atlas_compounds_df.iterrows():
             inchi_key = row.get('inchi_key', '')
             if not inchi_key:
                 continue
             
-            # Get or create compound
+            # Check if compound exists in database
             compound_uid = existing_compounds.get(inchi_key)
             if not compound_uid:
                 logger.warning(f"Compound {inchi_key} not found in database, skipping")
+                compounds_skipped += 1
                 continue
             
-            # Check for existing reference
-            ref_key = (compound_uid, chromatography, polarity, row.get('adduct', ''))
-            mz_rt_reference_uid = existing_refs.get(ref_key)
+            # Extract RT/MZ data from input
+            rt_peak = row.get('rt_peak')
+            rt_min = row.get('rt_min')
+            rt_max = row.get('rt_max')
+            mz = row.get('mz')
+            adduct = row.get('adduct', '')
+            mz_tolerance = row.get('mz_tolerance', 5.0)
             
-            if not mz_rt_reference_uid:
-                logger.warning(f"No RT/MZ reference found for compound {inchi_key}, skipping")
+            # Validate that we have the required RT/MZ data
+            if pd.isna(rt_peak) or pd.isna(mz):
+                logger.warning(f"Compound {inchi_key} missing RT or MZ data, skipping")
+                compounds_skipped += 1
                 continue
             
-            # Create association
+            # Check for existing reference with identical data
+            existing_ref_query = """
+                SELECT mz_rt_reference_uid 
+                FROM mz_rt_references 
+                WHERE compound_uid = ? 
+                AND chromatography = ? 
+                AND polarity = ? 
+                AND adduct = ?
+                AND ABS(rt_peak - ?) < 0.001 
+                AND ABS(mz - ?) < 0.001
+                AND ABS(mz_tolerance - ?) < 0.001
+            """
+            
+            existing_ref = conn.execute(existing_ref_query, [
+                compound_uid, chromatography, polarity, adduct,
+                float(rt_peak), float(mz), float(mz_tolerance)
+            ]).fetchone()
+            
+            if existing_ref:
+                # Use existing identical reference
+                mz_rt_reference_uid = existing_ref[0]
+                references_reused += 1
+                logger.debug(f"Reusing existing RT/MZ reference for compound {inchi_key}")
+            else:
+                # Create new RT/MZ reference
+                mz_rt_reference_uid = _generate_uid("mz_rt_reference")
+                
+                # Prepare RT bounds
+                if pd.isna(rt_min):
+                    rt_min = float(rt_peak) - 0.5
+                if pd.isna(rt_max):
+                    rt_max = float(rt_peak) + 0.5
+                
+                conn.execute("""
+                    INSERT INTO mz_rt_references VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    mz_rt_reference_uid,
+                    compound_uid,
+                    float(rt_peak),
+                    float(rt_min),
+                    float(rt_max),
+                    float(mz),
+                    float(mz_tolerance),
+                    adduct,
+                    chromatography,
+                    polarity,
+                    row.get('confidence', 'Unknown'),
+                    'atlas_creation',  # source
+                    prov["analyst"],
+                    prov["timestamp"]
+                ))
+                
+                references_created += 1
+                logger.debug(f"Created new RT/MZ reference for compound {inchi_key}")
+            
+            # Create atlas-compound association
             assoc_uid = _generate_uid("association")
             conn.execute("""
                 INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1929,9 +1993,14 @@ def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: st
             ))
             
             association_order += 1
+            compounds_processed += 1
     
-       
+    
     logger.info(f"Created atlas '{atlas_name}' with UID: {atlas_uid}")
+    logger.info(f"  Processed {compounds_processed} compounds successfully")
+    logger.info(f"  Skipped {compounds_skipped} compounds (missing from database or invalid data)")
+    logger.info(f"  Created {references_created} new RT/MZ references")
+    logger.info(f"  Reused {references_reused} existing RT/MZ references")
     logger.info(f"  Added {association_order} compound associations")
     
     return atlas_uid, atlas_name

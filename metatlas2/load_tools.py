@@ -94,6 +94,19 @@ def load_metatlas_config(config_path: str) -> Dict[str, Any]:
     
     return config
 
+def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
+    """Load and validate atlas configuration from YAML file with type enforcement."""
+    with open(atlas_config_path, 'r') as f:
+        atlas_config = yaml.safe_load(f)
+    
+    # Validate required fields
+    required_fields = ['paths', 'atlases']
+    for field in required_fields:
+        if field not in atlas_config:
+            raise ValueError(f"Missing required atlas configuration field: {field}")
+
+    return atlas_config
+
 def get_provenance():
     """Get provenance information for database records."""
     return {
@@ -109,13 +122,10 @@ def load_compound_input(file_path: str) -> pd.DataFrame:
         raise FileNotFoundError(f"Compound input file not found: {file_path}")
     
     # Try to read as TSV first, then CSV
-    try:
+    if file_path.suffix.lower() != '.csv':
         df = pd.read_csv(file_path, sep='\t')
-    except:
-        try:
-            df = pd.read_csv(file_path)
-        except Exception as e:
-            raise ValueError(f"Could not read file {file_path}: {e}")
+    else:
+        df = pd.read_csv(file_path)
     
     # Check for required columns
     required_columns = ['inchi_key', 'label']
@@ -171,13 +181,10 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
         raise FileNotFoundError(f"Atlas input file not found: {file_path}")
     
     # Try to read as TSV first, then CSV
-    try:
+    if file_path.suffix.lower() != '.csv':
         df = pd.read_csv(file_path, sep='\t')
-    except:
-        try:
-            df = pd.read_csv(file_path)
-        except Exception as e:
-            raise ValueError(f"Could not read file {file_path}: {e}")
+    else:
+        df = pd.read_csv(file_path)
     
     # Check for required columns for atlas creation
     required_columns = ['inchi_key', 'label', 'rt_peak', 'mz', 'adduct']
