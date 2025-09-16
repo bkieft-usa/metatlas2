@@ -102,8 +102,7 @@ def setup_file_slicing_parameters(atlas,filenames,extra_time=0.1,ppm_tolerance=2
                 outfile = os.path.join(output_dir,output_filename)
             else:
                 outfile = None
-            input_data.append({'outfile':outfile,'lcmsrun':f,'atlas':atlas,'polarity':polarity}) # 'ppm_tolerance':ppm_tolerance,'extra_time':extra_time,,'start_time':time.time() 'file_index':i,
-
+            input_data.append({'outfile':outfile,'lcmsrun':f,'atlas':atlas,'polarity':polarity})
     """
     wipe out all the files and put the atlas in each one
     """
@@ -371,7 +370,7 @@ def calculate_ms2_summary(df, feature_filter=True):
     return pd.DataFrame(spectra)
 
 
-def get_data(input_data,return_data=False,save_file=True,ms1_feature_filter=True):
+def get_data(input_data,ms_levels,return_data=False,save_file=True,ms1_feature_filter=True):
     """
     Required Inputs a Dict that has these attributes:
     {'file_index':i, #a numerical index that helps with bookkeeping
@@ -391,34 +390,41 @@ def get_data(input_data,return_data=False,save_file=True,ms1_feature_filter=True
 
     polarity_short_string = input_data['polarity'][:3]
 
-    d = get_atlas_data_from_file(input_data['lcmsrun'],input_data['atlas'],desired_key='ms1_%s'%polarity_short_string)
+    if 'ms1' in ms_levels:
+        d = get_atlas_data_from_file(input_data['lcmsrun'],input_data['atlas'],desired_key='ms1_%s'%polarity_short_string)
 
-    if return_data is True:
-        out_data['atlas'] = input_data['atlas']
-        out_data['ms1_data'] = d
-    if save_file is True:
-        with pd.HDFStore(input_data['outfile'],mode='a',complib='zlib',complevel=9) as f:
-            f.put('ms1_data',d,data_columns=True)
+        if return_data is True:
+            out_data['atlas'] = input_data['atlas']
+            out_data['ms1_data'] = d
+        if save_file is True:
+            with pd.HDFStore(input_data['outfile'],mode='a',complib='zlib',complevel=9) as f:
+                f.put('ms1_data',d,data_columns=True)
 
-    d = calculate_ms1_summary(d, feature_filter=ms1_feature_filter).reset_index(drop=True)
+        d = calculate_ms1_summary(d, feature_filter=ms1_feature_filter).reset_index(drop=True)
 
-    if d.shape[0]==0:
-        for c in ['num_datapoints','peak_area','peak_height','mz_centroid','rt_peak']:
-            d[c] = 0
+        if d.shape[0]==0:
+            for c in ['num_datapoints','peak_area','peak_height','mz_centroid','rt_peak']:
+                d[c] = 0
 
-    if return_data is True:
-        out_data['ms1_summary'] = d
-    if save_file is True:
-        with pd.HDFStore(input_data['outfile'],mode='a',complib='zlib',complevel=9) as f:
-            f.put('ms1_summary',d,data_columns=True)
+        if return_data is True:
+            out_data['ms1_summary'] = d
+        if save_file is True:
+            with pd.HDFStore(input_data['outfile'],mode='a',complib='zlib',complevel=9) as f:
+                f.put('ms1_summary',d,data_columns=True)
 
-    d = get_atlas_data_from_file(input_data['lcmsrun'],input_data['atlas'],desired_key='ms2_%s'%polarity_short_string)
-    
-    if return_data is True:
-        out_data['ms2_data'] = d
-    if save_file is True:
-        with pd.HDFStore(input_data['outfile'],mode='a',complib='zlib',complevel=9) as f:
-            f.put('ms2_data',d,data_columns=True)
+    if 'ms2' in ms_levels:
+        d = get_atlas_data_from_file(input_data['lcmsrun'],input_data['atlas'],desired_key='ms2_%s'%polarity_short_string)
+        
+        if return_data is True:
+            out_data['ms2_data'] = d
+        if save_file is True:
+            with pd.HDFStore(input_data['outfile'],mode='a',complib='zlib',complevel=9) as f:
+                f.put('ms2_data',d,data_columns=True)
+
+    if 'ms1_data' not in out_data:
+        out_data['ms1_data'] = pd.DataFrame()
+    if 'ms2_data' not in out_data:
+        out_data['ms2_data'] = pd.DataFrame()
 
     if return_data is True:
         logger.info(f"Returning data dictionary for {input_data['lcmsrun']}")

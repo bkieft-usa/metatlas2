@@ -133,10 +133,8 @@ def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
     except Exception as e:
         logger.error(f"Error saving cache: {e}")
 
-def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
+def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, use_pubchem_cache: bool = True) -> None:
     """Retrieve PubChem information for compounds and update global cache."""
-    pubchem_cache_path = config["paths"]["pubchem_cache"]
-    force_cache_update = config["database_options"]["force_pubchem_cache_update"] if "force_pubchem_cache_update" in config["database_options"] else False
 
     # Load existing global cache
     pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path)
@@ -146,7 +144,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
     # Determine which compounds need to be fetched
     unique_inchi_keys = compounds['inchi_key'].dropna().unique()
 
-    if force_cache_update:
+    if use_pubchem_cache is False:
         compounds_to_fetch = list(unique_inchi_keys)
         compounds_in_cache = []
         logger.info(f"Force update enabled - will query all {len(compounds_to_fetch)} compounds")
@@ -159,8 +157,6 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
 
     if compounds_to_fetch:
         logger.info(f"Fetching PubChem data for {len(compounds_to_fetch)} compounds...")
-        if force_cache_update:
-            logger.info("Force update mode: updating existing cache entries")
         logger.info("This may take several minutes depending on the number of compounds.")
         
         # Track how many were actually updated
@@ -191,10 +187,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, config: Dict) -> None:
         save_pubchem_cache(pubchem_cache, pubchem_cache_path)
         
         # Report what was done
-        if force_cache_update:
-            logger.info(f"Force update completed: {updated_entries} entries updated, {new_entries} entries added")
-        else:
-            logger.info(f"Cache update completed: {new_entries} new entries added")
+        logger.info(f"Cache update completed: {new_entries} new entries added")
         
     else:
         logger.info("All compounds already in cache!")

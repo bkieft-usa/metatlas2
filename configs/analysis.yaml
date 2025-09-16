@@ -1,0 +1,92 @@
+ENV:
+  PATHS:
+    projects_dir: /Users/BKieft/Metabolomics/metatlas2/data/test_data/projects
+    main_database: /Users/BKieft/Metabolomics/metatlas2/data/databases/metatlas.duckdb
+    msms_refs: /Users/BKieft/Metabolomics/metatlas2/data/databases/msms_refs/msms_refs_no_inosine15n.tab
+
+WORKFLOWS:
+  HILICZ:
+    RT_ALIGN:
+      ATLAS:
+        uid: atl-raw-qc-bd654f5e1d4d40c493aef321a962933f
+      PARAMS:
+          use_rt_correction_cache: true
+          ppm_error: 20.0
+          extra_time: 1.0
+          apply_model_to_min_max: true
+          polynomial_degree: 2
+          min_observations_per_compound: 1
+          min_compounds_for_modeling: 2
+          r2_threshold: 0.7
+          exclude_inchikeys:
+            - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
+    ANALYSES:      
+      QC:
+        POS:
+          ATLAS:
+            uid: atl-raw-qc-bd654f5e1d4d40c493aef321a962933f
+          PARAMS:
+            use_id_search_cache: false
+            use_manual_curation_cache: false
+            default_ppm_error: 5.0
+            min_peak_intensity: 100000.0
+            extra_time: 0.0
+            ms2_min_score: 0.1
+            ms2_min_matches: 1
+        NEG:
+          ATLAS:
+            uid:
+          PARAMS:
+            use_id_search_cache: false
+            use_manual_curation_cache: false
+            default_ppm_error: 5.0
+            min_peak_intensity: 100000.0
+            extra_time: 0.0
+            ms2_min_score: 0.1
+            ms2_min_matches: 2
+      ISTD:
+        POS:
+          ATLAS:
+            uid: atl-raw-istd-2de05155672c4160b39d71bca895a85c
+          PARAMS:
+            use_id_search_cache: false
+            use_manual_curation_cache: false
+            default_ppm_error: 5.0
+            min_peak_intensity: 100000.0
+            extra_time: 0.0
+            ms2_min_score: 0.1
+            ms2_min_matches: 2
+        NEG:
+          ATLAS:
+            uid:
+          PARAMS:
+            use_id_search_cache: false
+            use_manual_curation_cache: false
+            default_ppm_error: 5.0
+            min_peak_intensity: 100000.0
+            extra_time: 0.0
+            ms2_min_score: 0.1
+            ms2_min_matches: 2
+      EMA:
+        POS:
+          ATLAS:
+            uid: atl-raw-ema-897c5e87af094afa98f99bb92c77f25a
+          PARAMS:
+            use_id_search_cache: false
+            use_manual_curation_cache: false
+            default_ppm_error: 5.0
+            min_peak_intensity: 100000.0
+            extra_time: 0.0
+            ms2_min_score: 0.1
+            ms2_min_matches: 2
+        NEG:
+          ATLAS:
+            uid:
+          PARAMS:
+            use_id_search_cache: false
+            use_manual_curation_cache: false
+            default_ppm_error: 5.0
+            min_peak_intensity: 100000.0
+            extra_time: 0.0
+            ms2_min_score: 0.1
+            ms2_min_matches: 2

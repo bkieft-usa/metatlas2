@@ -60,37 +60,80 @@ def load_msms_refs_file(file_path):
     df['mono_isotopic_molecular_weight'] = pd.to_numeric(df['mono_isotopic_molecular_weight'], errors='coerce')
 
     if not df.empty:
-        logger.info(f"    Reference DataFrame shape: {df.shape}")
+        logger.info(f"    Number of total references: {df.shape[0]}")
         logger.info(f"    Number of unique InChI keys: {df['inchi_key'].nunique()}")
         return df
     else:
         logger.info("    Reference DataFrame is empty")
         return None
 
-def load_metatlas_config(config_path: str) -> Dict[str, Any]:
-    """Load and validate metatlas configuration from YAML file with type enforcement."""
+def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
+    """Load and validate new metatlas2 configuration from YAML file with type enforcement."""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Define expected structure and types
-    required_sections = ['paths', 'rt_alignment', 'analysis_settings', 'database_options']
+    # Define expected top-level structure
+    required_sections = ['ENV', 'WORKFLOWS']
     
     # Validate required sections exist
     for section in required_sections:
         if section not in config:
             raise ValueError(f"Missing required configuration section: {section}")
     
-    # Validate and convert data types
-    if 'tolerances' in config['rt_alignment']:
-        tolerances = config['rt_alignment']['tolerances']
-        tolerances['mz'] = float(tolerances.get('mz', 10.0))
-        tolerances['rt'] = float(tolerances.get('rt', 0.5))
-        tolerances['i'] = float(tolerances.get('i', 1000.0))
+    # Validate ENV section
+    if 'PATHS' not in config['ENV']:
+        raise ValueError("Missing 'PATHS' section in ENV configuration")
+    required_paths = ['projects_dir', 'main_database', 'msms_refs']
+    for path_key in required_paths:
+        if path_key not in config['ENV']['PATHS']:
+            raise ValueError(f"Missing required path: {path_key}")
     
-    if 'analysis_settings' in config:
-        settings = config['analysis_settings']
-        settings['default_ppm_error'] = float(settings.get('default_ppm_error', 20.0))
-        settings['extra_time'] = float(settings.get('extra_time', 0.1))
+    # Validate WORKFLOWS section structure
+    workflows = config['WORKFLOWS']
+    for workflow_name, workflow_config in workflows.items():
+        # Validate RT_ALIGN section if present
+        if 'RT_ALIGN' in workflow_config:
+            rt_align = workflow_config['RT_ALIGN']
+            if 'ATLAS' not in rt_align or 'uid' not in rt_align['ATLAS']:
+                raise ValueError(f"RT_ALIGN section in {workflow_name} missing ATLAS uid")
+            
+            # # Validate and convert RT alignment parameters
+            # if 'PARAMS' in rt_align:
+            #     params = rt_align['PARAMS']
+            #     params['ppm_error'] = float(params.get('ppm_error', 20.0))
+            #     params['extra_time'] = float(params.get('extra_time', 1.0))
+            #     params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
+            #     params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
+            #     params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
+            #     params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
+            #     params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
+        
+        # Validate ANALYSES section
+        if 'ANALYSES' in workflow_config:
+            analyses = workflow_config['ANALYSES']
+            for analysis_name, analysis_config in analyses.items():
+                for polarity in ['POS', 'NEG']:
+                    if polarity in analysis_config:
+                        pol_config = analysis_config[polarity]
+                        if 'ATLAS' not in pol_config or 'uid' not in pol_config['ATLAS']:
+                            raise ValueError(f"Analysis {analysis_name} {polarity} missing ATLAS uid")
+                        
+                        # # Validate and convert analysis parameters
+                        # if 'PARAMS' in pol_config:
+                        #     params = pol_config['PARAMS']
+                        #     params['default_ppm_error'] = float(params.get('default_ppm_error', 5.0))
+                        #     params['min_peak_intensity'] = float(params.get('min_peak_intensity', 100000.0))
+                        #     params['extra_time'] = float(params.get('extra_time', 0.0))
+                        #     params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
+                        #     params['ms2_min_matches'] = int(params.get('ms2_min_matches', 2))
+                        #     params['use_rt_correction_cache'] = bool(params.get('use_rt_correction_cache', False))
+                        #     params['use_id_search_cache'] = bool(params.get('use_id_search_cache', False))
+                        #     params['use_manual_curation_cache'] = bool(params.get('use_manual_curation_cache', False))
+    
+    # Add config path for reference
+    config['ENV']['PATHS']['config_path'] = str(Path(config_path).resolve())
+    
+    logger.info(f"Loaded metatlas2 configuration from {config_path}")
     
     return config
 
@@ -100,7 +143,43 @@ def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
         atlas_config = yaml.safe_load(f)
     
     # Validate required fields
-    required_fields = ['paths', 'atlases']
+    required_fields = ['ENV', 'ATLASES']
+    for field in required_fields:
+        if field not in atlas_config:
+            raise ValueError(f"Missing required atlas configuration field: {field}")
+
+    # Validate ENV section
+    if 'PATHS' not in atlas_config['ENV']:
+        raise ValueError("Missing 'PATHS' section in ENV configuration")
+    required_paths = ['main_database']
+    for path_key in required_paths:
+        if path_key not in atlas_config['ENV']['PATHS']:
+            raise ValueError(f"Missing required path: {path_key}")
+
+    return atlas_config
+
+def load_compound_config(compound_config_path: str) -> Dict[str, Any]:
+    """Load and validate compound configuration from YAML file with type enforcement."""
+    with open(compound_config_path, 'r') as f:
+        compound_config = yaml.safe_load(f)
+
+    # Validate required fields
+    required_fields = ['ENV', 'COMPOUNDS']
+    for field in required_fields:
+        if field not in compound_config:
+            raise ValueError(f"Missing required compound configuration field: {field}")
+
+    # Validate ENV section
+    if 'PATHS' not in compound_config['ENV']:
+        raise ValueError("Missing 'PATHS' section in ENV configuration")
+    required_paths = ['main_database', 'pubchem_cache']
+    for path_key in required_paths:
+        if path_key not in compound_config['ENV']['PATHS']:
+            raise ValueError(f"Missing required path: {path_key}")
+
+    return compound_config
+
+    required_fields = ['ENV', 'ATLASES']
     for field in required_fields:
         if field not in atlas_config:
             raise ValueError(f"Missing required atlas configuration field: {field}")

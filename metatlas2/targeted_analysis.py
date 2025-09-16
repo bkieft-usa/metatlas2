@@ -11,6 +11,7 @@ import pickle
 import re
 import os
 import glob
+import json
 from typing import Dict, List, Optional, Any, Tuple, Union
 from tqdm.notebook import tqdm
 import time
@@ -34,9 +35,8 @@ sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
 import database_interact as dbi
 import ms1_ms2_analysis as msa
 import load_tools as ldt
-import metatlas2_objects as mto
 import logging_config as lcf
-import simple_cache as scache
+import json
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_analysis')
@@ -44,69 +44,110 @@ current_time = datetime.now().isoformat()
 
 def run_targeted_analysis_workflow(project_db_path: str, 
                                     target_atlas_uid: str, 
-                                    config: Dict,) -> Tuple[pd.DataFrame, mto.AnalysisProject]: 
+                                    config: Dict,
+                                    analysis_params: Dict) -> Tuple[pd.DataFrame, Dict]: 
     """
-    Execute the complete targeted analysis workflow with comprehensive caching support.
-    Returns atlas DataFrame and AnalysisProject object - no more plot_data dictionary.
+    Execute the complete targeted analysis workflow independently of workflow objects.
+    Returns atlas DataFrame and analysis results dictionary that can be used to 
+    create workflow objects in the calling module.
+    
+    Returns:
+        Tuple of (atlas_dataframe, analysis_results_dict)
+        
+    analysis_results_dict contains:
+        - compounds: Dict[str, Dict] - compound analysis data by inchi_key
+        - atlas_info: Dict - atlas metadata
+        - summary_stats: Dict - analysis summary statistics
     """
     logger.info("Setting up targeted analysis database...")
 
     # Get project directory for caching
     project_dir = str(Path(project_db_path).parent)
-    
-    # Handle data cache parameter
-    use_data_cache = config['analysis_settings'].get("use_data_cache", False)
-    
-    # First check for analysis cache
-    if use_data_cache is not False:
-        logger.info("Checking for analysis cache...")
-        
-        cached_analysis = scache.load_analysis_cache(project_dir, use_data_cache, target_atlas_uid)
-        if cached_analysis is not None:
-            logger.info(f"Loaded analysis cache with {len(cached_analysis.compounds)} compounds")
-            
-            # Also need atlas_df for compatibility
-            atlas_df = dbi.get_atlas_compounds_with_metadata(
-                project_db_path=project_db_path,
-                main_db_path=config["paths"]["main_database"],
-                atlas_uid=target_atlas_uid
-            )
-            
-            logger.info("Resuming analysis from cache")
-            return atlas_df, cached_analysis
 
-    else:
-        logger.info("Data caching disabled, running fresh GUI instance")
-
-    # Run fresh analysis if no cache or cache failed
+    # Run fresh analysis
     logger.info("Running fresh targeted analysis...")
-    main_db_path = config["paths"]["main_database"]
-    analysis_settings = config["analysis_settings"]
+    main_db_path = config["ENV"]["PATHS"]["main_database"]
 
     logger.info("Loading target atlas...")
-    atlas_dataframe = dbi.get_atlas_compounds_with_metadata(
-        project_db_path=project_db_path, 
-        main_db_path=main_db_path, 
-        atlas_uid=target_atlas_uid
-    )
+    atlas_dataframe = dbi.get_atlas_compounds_table(main_db_path, atlas_uid=target_atlas_uid)
 
     if len(atlas_dataframe) == 0:
         raise ValueError(f"No compounds found in RT-corrected atlas")
 
     logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
 
-    # Initialize project analysis with flat classes
-    analysis_project = mto.AnalysisProject.from_database(
-        project_db_path=project_db_path,
-        atlas_uid=target_atlas_uid,
-        main_db_path=main_db_path
-    )
+    # Initialize analysis data structure (no workflow objects dependency)
+    analysis_results = {
+        'compounds': {},
+        'atlas_info': {
+            'atlas_uid': target_atlas_uid,
+            'project_db_path': project_db_path,
+            'main_db_path': main_db_path
+        }
+    }
 
-    # Save initialization checkpoint
-    scache.save_progress_checkpoint(analysis_project, project_dir, target_atlas_uid, "initialized")
+    # Initialize compound data from atlas
+    for _, row in atlas_dataframe.iterrows():
+        inchi_key = row['inchi_key']
+        analysis_results['compounds'][inchi_key] = {
+            # Core identifiers
+            'compound_uid': row['compound_uid'],
+            'inchi_key': inchi_key,
+            'compound_name': row.get('compound_name', row.get('label', '')),
+            'formula': row.get('formula', ''),
+            'mz': row.get('mz', 0.0),
+            'adduct': row.get('adduct', ''),
+            'polarity': row.get('polarity', ''),
+            'chromatography': row.get('chromatography', ''),
+            'mz_tolerance': row.get('mz_tolerance', 5.0),
+            
+            # Original RT data from atlas
+            'original_rt_peak': row.get('rt_peak', 0.0),
+            'original_rt_min': row.get('rt_min', 0.0),
+            'original_rt_max': row.get('rt_max', 0.0),
+            
+            # Current RT data (modifiable)
+            'rt_peak': row.get('rt_peak', 0.0),
+            'rt_min': row.get('rt_min', 0.0),
+            'rt_max': row.get('rt_max', 0.0),
+            
+            # Analysis annotations
+            'ms1_notes': 'keep',
+            'ms2_notes': 'no selection',
+            'analyst_notes': '',
+            'identification_notes': '',
+            
+            # Experimental data containers
+            'eic_data_files': {},
+            'ms2_data_files': {},
+            'isomers': [],
+            'suggested_rt_bounds': None,
+            
+            # Best results (to be populated)
+            'best_eic_file': '',
+            'best_eic_rt': 0.0,
+            'best_eic_mz': 0.0,
+            'best_eic_intensity': 0.0,
+            'best_eic_ppm_error': 0.0,
+            'best_eic_rt_error': 0.0,
+            
+            'best_ms2_file': '',
+            'best_ms2_database': '',
+            'best_ms2_score': 0.0,
+            'best_ms2_num_matches': 0,
+            'best_ms2_matched_fragments': [],
+            
+            # Summary stats
+            'total_files_detected': 0,
+            'ms2_files_with_data': 0,
+            
+            # Modification tracking
+            'is_rt_modified': False,
+            'is_annotation_modified': False
+        }
 
     logger.info("Loading experimental files from project database...")
-    project_files = dbi.get_experimental_files_from_db(project_db_path)
+    project_files = dbi.get_lcmsruns_from_db(project_db_path, file_types=['experimental', 'istd', 'exctrl'])
 
     if len(project_files) == 0:
         raise ValueError("No experimental files found in project database")
@@ -117,41 +158,33 @@ def run_targeted_analysis_workflow(project_db_path: str,
     input_data_list = msa.prepare_feature_tools_inputs(
         atlas_df=atlas_dataframe,
         h5_files=project_files,
-        ppm_tolerance=analysis_settings["default_ppm_error"],
-        extra_time=analysis_settings["extra_time"]
+        ppm_tolerance=analysis_params["default_ppm_error"],
+        extra_time=analysis_params["extra_time"]
     )
     logger.info(f"Created {len(input_data_list)} input dictionaries for feature extraction")
 
-    logger.info("Extracting EIC and MS2 data with hits...")
-    experimental_data = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config)
+    logger.info("Extracting EIC and MS2 data...")
+    experimental_data_no_hits = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config)
+    
+    logger.info("Finding MS2 reference hits...")
+    experimental_data_with_hits = msa.find_ms2_hits(experimental_data_no_hits, config)
 
-    # Add experimental data to project analysis using simplified format
-    analysis_project.add_experimental_data_simple(experimental_data)
-
-    # Save data extraction checkpoint
-    scache.save_progress_checkpoint(analysis_project, project_dir, target_atlas_uid, "data_extracted")
+    # Add experimental data to analysis results
+    add_experimental_data_to_results(analysis_results, experimental_data_with_hits)
 
     # Apply post-processing features independently
-    apply_isomer_detection(analysis_project, atlas_dataframe)
-    apply_rt_bounds_suggestions(analysis_project)
-
-    # Save final analysis cache (ready for GUI)
-    data_timestamp = scache.save_analysis_cache(
-        analysis_project, 
-        project_dir,
-        target_atlas_uid
-    )
-    logger.info(f"Saved complete analysis cache with timestamp: {data_timestamp}")
+    apply_isomer_detection_to_results(analysis_results, atlas_dataframe)
+    apply_rt_bounds_suggestions_to_results(analysis_results)
+    
+    # Calculate summary statistics
+    analysis_results['summary_stats'] = calculate_analysis_summary(analysis_results)
 
     logger.info(f"Analysis complete:")
-    logger.info(f"  Total compounds: {len(analysis_project.compounds)}")
+    logger.info(f"  Total compounds: {len(analysis_results['compounds'])}")
+    logger.info(f"  Compounds with EIC data: {analysis_results['summary_stats']['compounds_with_eic']}")
+    logger.info(f"  Compounds with MS2 data: {analysis_results['summary_stats']['compounds_with_ms2']}")
 
-    # Get analysis summary
-    summary = analysis_project.get_analysis_summary()
-    logger.info(f"  Compounds with EIC data: {summary['compounds_with_eic']}")
-    logger.info(f"  Compounds with MS2 data: {summary['compounds_with_ms2']}")
-
-    return atlas_dataframe, analysis_project
+    return atlas_dataframe, analysis_results
 
 def build_isomer_dict(atlas_df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
     """Return a dict: inchi_key → list of isomer dicts (empty list if none).
@@ -186,136 +219,6 @@ def build_isomer_dict(atlas_df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]
             for _, r in isomers.iterrows()
         ]
     return isomer_dict
-
-def create_post_analysis_atlas_v2(analysis_project: mto.AnalysisProject, 
-                                  config: Dict, 
-                                  output_dir: str = None) -> str:
-    """
-    Create post-analysis atlas using class-based approach.
-    """
-    # Find modified compounds
-    modified_compounds = {
-        inchi_key: compound for inchi_key, compound in analysis_project.compounds.items()
-        if compound.is_rt_modified or compound.is_annotation_modified
-    }
-    
-    if not modified_compounds:
-        logger.info("No compounds were modified during analysis")
-        return analysis_project.atlas_uid
-    
-    logger.info(f"Creating post-analysis atlas with {len(modified_compounds)} modified compounds...")
-    
-    # Prepare compound updates for database
-    compound_updates = {}
-    main_db_path = config["paths"]["main_database"]
-    
-    # Get original atlas information for the new atlas
-    atlas_df = dbi.get_atlas_compounds_with_metadata(
-        project_db_path=analysis_project.project_db_path,
-        main_db_path=main_db_path,
-        atlas_uid=analysis_project.atlas_uid
-    )
-    
-    for compound in modified_compounds.values():
-        # Find compound rows in atlas
-        compound_rows = atlas_df[atlas_df['inchi_key'] == compound.inchi_key]
-        for _, row in compound_rows.iterrows():
-            compound_uid = row['compound_uid']
-            
-            update_dict = {}
-            
-            if compound.is_rt_modified:
-                update_dict.update({
-                    'rt_peak': compound.rt_peak,
-                    'rt_min': compound.rt_min,
-                    'rt_max': compound.rt_max
-                })
-            
-            if compound.is_annotation_modified:
-                update_dict.update({
-                    'ms1_notes': compound.ms1_notes,
-                    'ms2_notes': compound.ms2_notes,
-                    'analyst_notes': compound.analyst_notes,
-                    'identification_notes': compound.identification_notes
-                })
-            
-            compound_updates[compound_uid] = update_dict
-    
-    # Create new atlas using existing database function
-    new_atlas_uid = dbi.clone_and_modify_atlas(
-        analysis_project.project_db_path,
-        analysis_project.project_db_path,
-        analysis_project.atlas_uid,
-        config,
-        compound_updates,
-        use_experimental_table=False,
-        new_atlas_description="Targeted Analysis Completed"
-    )
-    
-    # Save atlas data to file if output directory specified
-    if output_dir is not None:
-        os.makedirs(output_dir, exist_ok=True)
-        new_atlas_table = dbi.get_atlas_compounds_with_metadata(
-            project_db_path=analysis_project.project_db_path, 
-            main_db_path=main_db_path, 
-            atlas_uid=new_atlas_uid
-        )
-        
-        output_path = Path(output_dir) / f"atlas_post_targeted_analysis_{new_atlas_uid}.tsv"
-        new_atlas_table.to_csv(output_path, sep="\t", index=False)
-        logger.info(f"Saved new atlas table to: {output_path}")
-    
-    logger.info(f"Created post-analysis atlas: {new_atlas_uid}")
-    
-    return new_atlas_uid
-
-def run_post_analysis_workflow_v2(project_db_path: str,
-                                  analysis_atlas_uid: str,
-                                  analysis_project: mto.AnalysisProject,
-                                  atlas_dataframe: pd.DataFrame,
-                                  project_name: str,
-                                  config: Dict,
-                                  analysis_output_path: str) -> Tuple[str, str, Dict]:
-    """
-    Execute complete post-analysis workflow using class-based approach.
-    No plot_data dictionary needed - works directly with AnalysisProject.
-    """
-    logger.info("Starting class-based post-analysis workflow...")
-    
-    # Step 1: Create post-analysis atlas with modifications
-    os.makedirs(analysis_output_path, exist_ok=True)
-    logger.info("Creating post-analysis atlas...")
-    post_analysis_atlas_uid = create_post_analysis_atlas_v2(
-        analysis_project, 
-        config, 
-        analysis_output_path
-    )
-    logger.info(f"Created post-analysis atlas: {post_analysis_atlas_uid}")
-    
-    # Step 2: Save targeted analysis results using simplified approach
-    logger.info("Saving targeted analysis results...")
-    targeted_analysis_uid = dbi.save_targeted_analysis_from_analysis_project(
-        analysis_project, 
-        project_name, 
-        post_analysis_atlas_uid
-    )
-    logger.info(f"Saved targeted analysis with UID: {targeted_analysis_uid}")
-    
-    # Step 3: Generate comprehensive report
-    logger.info("Generating comprehensive analysis report...")
-    comprehensive_report = dbi.generate_comprehensive_targeted_analysis_report(
-        project_db_path, 
-        config, 
-        targeted_analysis_uid, 
-        atlas_dataframe, 
-        post_analysis_atlas_uid, 
-        analysis_output_path
-    )
-    logger.info(f"Generated comprehensive report and saved to {analysis_output_path}")
-    
-    logger.info("Class-based post-analysis workflow completed successfully")
-    
-    return post_analysis_atlas_uid, targeted_analysis_uid, comprehensive_report
 
 def suggest_rt_bounds_from_eic(
     eic_data: Dict[str, Dict[str, Any]],
@@ -519,10 +422,83 @@ def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
     cumsum = np.cumsum(np.insert(x, 0, 0.0))
     return (cumsum[window:] - cumsum[:-window]) / float(window)
 
-def apply_isomer_detection(analysis_project: mto.AnalysisProject, atlas_dataframe: pd.DataFrame):
+def add_experimental_data_to_results(analysis_results: Dict, experimental_data: Dict) -> None:
     """
-    Apply isomer detection to all compounds in the project analysis.
-    Separated for independent testing and debugging.
+    Add experimental data to raw analysis results structure.
+    Independent of workflow objects.
+    """
+    for inchi_key, compound_experimental_data in experimental_data.items():
+        if inchi_key in analysis_results['compounds']:
+            compound = analysis_results['compounds'][inchi_key]
+            
+            # Add EIC data directly from simplified format
+            eic_files = compound_experimental_data.get('eic_files', {})
+            for filename, eic_data in eic_files.items():
+                compound['eic_data_files'][filename] = eic_data
+            
+            # Add MS2 data using consistent per-file structure
+            ms2_files = compound_experimental_data.get('ms2_files', {})
+            for filename, file_data in ms2_files.items():
+                compound['ms2_data_files'][filename] = file_data
+            
+            # Update summary statistics
+            compound['total_files_detected'] = len(compound['eic_data_files'])
+            if compound['ms2_data_files']:
+                compound['ms2_files_with_data'] = len([
+                    f for f, data in compound['ms2_data_files'].items() 
+                    if data.get('ms2_entries')
+                ])
+            
+            # Update best EIC and MS2 results
+            _update_best_eic_results(compound)
+            _update_best_ms2_results(compound)
+
+def _update_best_eic_results(compound: Dict) -> None:
+    """Update best EIC statistics from current data."""
+    if not compound['eic_data_files']:
+        return
+    
+    best_intensity = 0.0
+    best_file = ""
+    
+    for filename, eic_data in compound['eic_data_files'].items():
+        intensity = eic_data.get('intensity_peak', 0.0)
+        if intensity > best_intensity:
+            best_intensity = intensity
+            best_file = filename
+            compound['best_eic_file'] = filename
+            compound['best_eic_rt'] = eic_data.get('rt_peak', 0.0)
+            compound['best_eic_mz'] = eic_data.get('mz_peak', 0.0)
+            compound['best_eic_intensity'] = intensity
+            compound['best_eic_ppm_error'] = eic_data.get('ppm_diff', 0.0)
+            compound['best_eic_rt_error'] = eic_data.get('rt_diff', 0.0)
+
+def _update_best_ms2_results(compound: Dict) -> None:
+    """Update best MS2 statistics from current data."""
+    if not compound['ms2_data_files']:
+        return
+    
+    best_score = 0.0
+    best_hit_data = None
+    
+    for filename, ms2_data in compound['ms2_data_files'].items():
+        if isinstance(ms2_data, dict):
+            best_hit = ms2_data.get('best_hit', {})
+            if best_hit and best_hit.get('score', 0.0) > best_score:
+                best_score = best_hit.get('score', 0.0)
+                best_hit_data = best_hit
+                compound['best_ms2_file'] = filename
+    
+    if best_hit_data:
+        compound['best_ms2_database'] = best_hit_data.get('database', '')
+        compound['best_ms2_score'] = best_hit_data.get('score', 0.0)
+        compound['best_ms2_num_matches'] = best_hit_data.get('num_matches', 0)
+        compound['best_ms2_matched_fragments'] = best_hit_data.get('matched_fragments', [])
+
+def apply_isomer_detection_to_results(analysis_results: Dict, atlas_dataframe: pd.DataFrame) -> None:
+    """
+    Apply isomer detection to raw analysis results structure.
+    Independent of workflow objects.
     """
     logger.info("Applying isomer detection...")
     
@@ -537,27 +513,27 @@ def apply_isomer_detection(analysis_project: mto.AnalysisProject, atlas_datafram
     
     logger.info(f"Found {compounds_with_isomers} compounds with isomers")
     
-    # Apply to compounds
-    for inchi_key, compound in analysis_project.compounds.items():
-        compound.isomers = isomer_dict.get(inchi_key, [])
+    # Apply to compounds in analysis results
+    for inchi_key, compound in analysis_results['compounds'].items():
+        compound['isomers'] = isomer_dict.get(inchi_key, [])
 
-def apply_rt_bounds_suggestions(analysis_project: mto.AnalysisProject):
+def apply_rt_bounds_suggestions_to_results(analysis_results: Dict) -> None:
     """
-    Apply RT bounds suggestions to all compounds with EIC data.
-    Separated for independent testing and debugging.
+    Apply RT bounds suggestions to raw analysis results structure.
+    Independent of workflow objects.
     """
     logger.info("Applying RT bounds suggestions...")
     
     compounds_processed = 0
     compounds_with_suggestions = 0
     
-    for inchi_key, compound in analysis_project.compounds.items():
-        if compound.eic_data_files:
+    for inchi_key, compound in analysis_results['compounds'].items():
+        if compound['eic_data_files']:
             compounds_processed += 1
             
             # Prepare EIC data for RT bounds calculation
             eic_dict = {}
-            for filename, eic_data in compound.eic_data_files.items():
+            for filename, eic_data in compound['eic_data_files'].items():
                 eic_dict[filename] = {
                     "rt_vals": eic_data.get("rt_vals", []),
                     "i_vals": eic_data.get("i_vals", []),
@@ -567,198 +543,41 @@ def apply_rt_bounds_suggestions(analysis_project: mto.AnalysisProject):
             # Calculate suggested bounds
             suggested_bounds = suggest_rt_bounds_from_eic(
                 eic_dict,
-                compound.original_rt_peak,
-                compound.original_rt_min,
-                compound.original_rt_max
+                compound['original_rt_peak'],
+                compound['original_rt_min'],
+                compound['original_rt_max']
             )
             
             if suggested_bounds:
                 compounds_with_suggestions += 1
-                compound.suggested_rt_bounds = suggested_bounds
+                compound['suggested_rt_bounds'] = suggested_bounds
     
     logger.info(f"Processed {compounds_processed} compounds with EIC data")
     logger.info(f"Generated RT suggestions for {compounds_with_suggestions} compounds")
 
-def test_isomer_detection(atlas_dataframe: pd.DataFrame, target_inchi_key: str = None) -> Dict[str, List[Dict]]:
+def calculate_analysis_summary(analysis_results: Dict) -> Dict[str, Any]:
     """
-    Test isomer detection functionality independently.
-    
-    Args:
-        atlas_dataframe: Atlas DataFrame to analyze
-        target_inchi_key: Optional specific compound to analyze, or None for all
-    
-    Returns:
-        Dictionary of isomer results
+    Calculate analysis summary statistics from raw results structure.
+    Independent of workflow objects.
     """
-    logger.info("Testing isomer detection...")
+    compounds_with_eic = sum(
+        1 for compound in analysis_results['compounds'].values() 
+        if compound['eic_data_files']
+    )
+    compounds_with_ms2 = sum(
+        1 for compound in analysis_results['compounds'].values() 
+        if compound['ms2_data_files']
+    )
+    modified_compounds = sum(
+        1 for compound in analysis_results['compounds'].values() 
+        if compound['is_rt_modified'] or compound['is_annotation_modified']
+    )
     
-    isomer_dict = build_isomer_dict(atlas_dataframe)
-    
-    if target_inchi_key:
-        # Test specific compound
-        if target_inchi_key in isomer_dict:
-            compound_name = atlas_dataframe[atlas_dataframe['inchi_key'] == target_inchi_key]['compound_name'].iloc[0]
-            isomers = isomer_dict[target_inchi_key]
-            
-            logger.info(f"Isomer analysis for {compound_name} ({target_inchi_key}):")
-            logger.info(f"  Found {len(isomers)} isomers")
-            
-            for iso in isomers:
-                logger.info(f"  - {iso['compound_name']} ({iso['inchi_key']})")
-                logger.info(f"    RT: {iso['rt']:.2f} min, m/z: {iso['mz']:.4f}")
-            
-            return {target_inchi_key: isomers}
-        else:
-            logger.warning(f"Compound {target_inchi_key} not found in atlas")
-            return {}
-    else:
-        # Analyze all compounds
-        compounds_with_isomers = sum(1 for isomers in isomer_dict.values() if isomers)
-        total_isomers = sum(len(isomers) for isomers in isomer_dict.values())
-        
-        logger.info(f"Isomer detection summary:")
-        logger.info(f"  Total compounds: {len(isomer_dict)}")
-        logger.info(f"  Compounds with isomers: {compounds_with_isomers}")
-        logger.info(f"  Total isomer relationships: {total_isomers}")
-        
-        # Show top examples
-        sorted_compounds = sorted(
-            [(k, v) for k, v in isomer_dict.items() if v],
-            key=lambda x: len(x[1]),
-            reverse=True
-        )
-        
-        logger.info(f"Top compounds with most isomers:")
-        for i, (inchi_key, isomers) in enumerate(sorted_compounds[:5]):
-            compound_name = atlas_dataframe[atlas_dataframe['inchi_key'] == inchi_key]['compound_name'].iloc[0]
-            logger.info(f"  {i+1}. {compound_name}: {len(isomers)} isomers")
-        
-        return isomer_dict
-
-def test_rt_bounds_suggestion(analysis_project: mto.AnalysisProject, target_inchi_key: str = None) -> Dict[str, Dict]:
-    """
-    Test RT bounds suggestion functionality independently.
-    
-    Args:
-        analysis_project: AnalysisProject object with EIC data
-        target_inchi_key: Optional specific compound to analyze, or None for all
-    
-    Returns:
-        Dictionary of RT bounds results
-    """
-    logger.info("Testing RT bounds suggestion...")
-    
-    results = {}
-    
-    if target_inchi_key:
-        # Test specific compound
-        if target_inchi_key in analysis_project.compounds:
-            compound = analysis_project.compounds[target_inchi_key]
-            
-            if compound.eic_data_files:
-                logger.info(f"RT bounds analysis for {compound.compound_name} ({target_inchi_key}):")
-                logger.info(f"  EIC data from {len(compound.eic_data_files)} files")
-                
-                # Prepare EIC data
-                eic_dict = {}
-                for filename, eic_data in compound.eic_data_files.items():
-                    eic_dict[filename] = {
-                        "rt_vals": eic_data.get("rt_vals", []),
-                        "i_vals": eic_data.get("i_vals", []),
-                        "intensity_peak": eic_data.get("intensity_peak", 0.0)
-                    }
-                
-                # Calculate bounds
-                suggested_bounds = suggest_rt_bounds_from_eic(
-                    eic_dict,
-                    compound.original_rt_peak,
-                    compound.original_rt_min,
-                    compound.original_rt_max
-                )
-                
-                if suggested_bounds:
-                    logger.info(f"  Original RT bounds: {compound.original_rt_min:.2f} - {compound.original_rt_max:.2f} (peak: {compound.original_rt_peak:.2f})")
-                    logger.info(f"  Suggested RT bounds: {suggested_bounds['rt_min']:.2f} - {suggested_bounds['rt_max']:.2f} (peak: {suggested_bounds['rt_peak']:.2f})")
-                    logger.info(f"  Confidence: {suggested_bounds['confidence']:.3f}")
-                    
-                    # Calculate differences
-                    rt_shift = suggested_bounds['rt_peak'] - compound.original_rt_peak
-                    width_change = (suggested_bounds['rt_max'] - suggested_bounds['rt_min']) - (compound.original_rt_max - compound.original_rt_min)
-                    
-                    logger.info(f"  RT peak shift: {rt_shift:+.3f} min")
-                    logger.info(f"  Width change: {width_change:+.3f} min")
-                else:
-                    logger.info(f"  No RT bounds suggestion generated")
-                
-                results[target_inchi_key] = {
-                    'original': {
-                        'rt_min': compound.original_rt_min,
-                        'rt_max': compound.original_rt_max,
-                        'rt_peak': compound.original_rt_peak
-                    },
-                    'suggested': suggested_bounds,
-                    'num_files': len(compound.eic_data_files)
-                }
-            else:
-                logger.info(f"  No EIC data available for {compound.compound_name}")
-        else:
-            logger.warning(f"Compound {target_inchi_key} not found in project analysis")
-    else:
-        # Analyze all compounds
-        compounds_with_eic = 0
-        compounds_with_suggestions = 0
-        
-        for inchi_key, compound in analysis_project.compounds.items():
-            if compound.eic_data_files:
-                compounds_with_eic += 1
-                
-                # Prepare EIC data
-                eic_dict = {}
-                for filename, eic_data in compound.eic_data_files.items():
-                    eic_dict[filename] = {
-                        "rt_vals": eic_data.get("rt_vals", []),
-                        "i_vals": eic_data.get("i_vals", []),
-                        "intensity_peak": eic_data.get("intensity_peak", 0.0)
-                    }
-                
-                # Calculate bounds
-                suggested_bounds = suggest_rt_bounds_from_eic(
-                    eic_dict,
-                    compound.original_rt_peak,
-                    compound.original_rt_min,
-                    compound.original_rt_max
-                )
-                
-                if suggested_bounds:
-                    compounds_with_suggestions += 1
-                    results[inchi_key] = {
-                        'compound_name': compound.compound_name,
-                        'original': {
-                            'rt_min': compound.original_rt_min,
-                            'rt_max': compound.original_rt_max,
-                            'rt_peak': compound.original_rt_peak
-                        },
-                        'suggested': suggested_bounds,
-                        'num_files': len(compound.eic_data_files)
-                    }
-        
-        logger.info(f"RT bounds suggestion summary:")
-        logger.info(f"  Compounds with EIC data: {compounds_with_eic}")
-        logger.info(f"  Compounds with RT suggestions: {compounds_with_suggestions}")
-        
-        # Show examples with highest confidence
-        if results:
-            sorted_results = sorted(
-                results.items(),
-                key=lambda x: x[1]['suggested']['confidence'] if x[1]['suggested'] else 0,
-                reverse=True
-            )
-            
-            logger.info(f"Top RT suggestions by confidence:")
-            for i, (inchi_key, result) in enumerate(sorted_results[:5]):
-                suggested = result['suggested']
-                logger.info(f"  {i+1}. {result['compound_name']}: confidence {suggested['confidence']:.3f}")
-                rt_shift = suggested['rt_peak'] - result['original']['rt_peak']
-                logger.info(f"      RT shift: {rt_shift:+.3f} min")
-    
-    return results
+    return {
+        'total_compounds': len(analysis_results['compounds']),
+        'compounds_with_eic': compounds_with_eic,
+        'compounds_with_ms2': compounds_with_ms2,
+        'modified_compounds': modified_compounds,
+        'atlas_uid': analysis_results['atlas_info']['atlas_uid'],
+        'project_db_path': analysis_results['atlas_info']['project_db_path']
+    }

@@ -34,45 +34,79 @@ from scipy.ndimage import gaussian_filter1d
 sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
 import database_interact as dbi
 import ms1_ms2_analysis as msa
-import metatlas2_objects as mto
+import workflow_objects as wfo
 import logging_config as lcf
-import simple_cache as scache
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_gui')
 
-def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir: str = None):
+def create_gui_from_analysis_projects(analysis_projects: List[Tuple], config: Dict, project_dir: str = None):
     """
-    Create an enhanced RT editor working directly with AnalysisProject and CompoundExperimental objects.
-    Automatically saves progress through AnalysisProject caching system.
+    Create an enhanced RT editor working with AnalysisProject objects that contain full experimental data.
     
     Args:
-        analysis_project: AnalysisProject object containing CompoundExperimental objects
+        analysis_projects: List of tuples (atlas_type, chrom_pol, AnalysisProject)
         config: Configuration dictionary
-        project_dir: Project directory for caching (optional)
+        project_dir: Project directory for caching
     """
     
-    # Filter compounds that have EIC or MS2 data
-    compound_list = [
-        inchi_key for inchi_key, compound in analysis_project.compounds.items()
-        if compound.eic_data_files or compound.ms2_data_files
-    ]
+    if not analysis_projects:
+        logger.error("No analysis projects provided")
+        return None
     
-    if not compound_list:
-        logger.error("No compounds found with EIC or MS2 data")
+    # Flatten all compounds from all analysis projects
+    all_compounds = []
+    for atlas_type, chrom_pol, analysis_project in analysis_projects:
+        for inchi_key, compound in analysis_project.compounds.items():
+            # Add metadata to track which atlas/method this compound came from
+            compound._atlas_type = atlas_type
+            compound._chromatography_polarity = chrom_pol
+            all_compounds.append(compound)
+    
+    if not all_compounds:
+        logger.error("No compounds found in analysis projects")
+        return None
+    
+    logger.info(f"Creating GUI with {len(all_compounds)} compounds from {len(analysis_projects)} analysis projects")
+    
+    # Use the existing create_gui function but with compound objects that have full data
+    return create_gui_with_compounds(all_compounds, config, project_dir)
+
+def create_gui_with_compounds(compounds: List, config: Dict, project_dir: str = None):
+    """
+    Create an enhanced RT editor working directly with CompoundExperimental objects.
+    
+    Args:
+        compounds: List of CompoundExperimental objects with full experimental data
+        config: Configuration dictionary
+        project_dir: Project directory for caching
+    """
+    
+    if not compounds:
+        logger.error("No compounds provided")
+        return None
+    
+    # Set starting status
+    file_color_dict = config['plot_settings']['file_color_mapping'] if 'file_color_mapping' in config['plot_settings'] else None
+    
+    compound_list = list(range(len(compounds)))  # Use indices
+    all_compound_names = [compound.compound_name for compound in compounds]
+    
+    def get_current_compound_func():
+        idx = current_compound_index[0]
+        if 0 <= idx < len(compounds):
+            return compounds[idx]
         return None
 
     # Set starting status
-    file_color_dict = config['plot_settings']['file_color_mapping'] if 'file_color_mapping' in config['plot_settings'] else None
-    all_compound_names = [analysis_project.compounds[inchi_key].compound_name for inchi_key in compound_list]
     current_compound_index = [0]
     current_ms2_file_index = [0]
     updating = [False]  # Prevent recursive updates
     rt_slider = [None]  # Store slider reference
     
     # Get project directory for caching
-    if project_dir is None and hasattr(analysis_project, 'project_db_path'):
-        project_dir = str(Path(analysis_project.project_db_path).parent)
+    if project_dir is None:
+        logger.warning("No project directory provided - some features may not work")
     
     last_save_time = [time.time()]
     save_interval = 30  # seconds between auto-saves
@@ -165,29 +199,50 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         layout=widgets.Layout(width='100%', height='auto', margin='5px 0px')
     )
 
-    def get_current_compound() -> Optional[mto.CompoundExperimental]:
+    def get_current_compound() -> Optional[wfo.CompoundExperimental]:
         """Get current CompoundExperimental object"""
-        idx = current_compound_index[0]
-        if 0 <= idx < len(compound_list):
-            inchi_key = compound_list[idx]
-            return analysis_project.compounds[inchi_key]
-        return None
+        return get_current_compound_func()
 
     def auto_save_if_needed():
-        """Auto-save AnalysisProject if changes have been made and enough time has passed."""
+        """Auto-save compound changes if enough time has passed."""
         if (project_dir and 
-            any(c.is_rt_modified or c.is_annotation_modified for c in analysis_project.compounds.values()) and
+            any(compound.is_rt_modified or compound.is_annotation_modified for compound in compounds) and
             time.time() - last_save_time[0] > save_interval):
             
             try:
-                # Save AnalysisProject to progress cache
-                scache.save_progress_checkpoint(analysis_project, project_dir, analysis_project.atlas_uid, "gui_progress")
+                # Save compounds state to cache
+                save_compounds_progress(compounds, project_dir)
                 last_save_time[0] = time.time()
-                logger.info("Auto-saved GUI progress to cache")
+                logger.info("Auto-saved compounds progress to cache")
             except Exception as e:
                 logger.error(f"Auto-save failed: {e}")
 
-    def write_ms2_title(compound: mto.CompoundExperimental, ms2_info, has_reference, ms2_file, current_compound_index=None):
+    def save_compounds_progress(compounds, project_dir):
+        """Save current compounds state to cache"""
+        try:
+            cache_dir = Path(project_dir) / "cache" / "compounds_progress"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            cache_file = cache_dir / f"compounds_{timestamp}.pkl"
+            latest_file = cache_dir / "compounds_latest.pkl"
+            
+            # Save timestamped version
+            with open(cache_file, 'wb') as f:
+                pickle.dump(compounds, f)
+            
+            # Update latest symlink
+            if latest_file.exists():
+                latest_file.unlink()
+            latest_file.symlink_to(cache_file.name)
+            
+            logger.info(f"Saved compounds progress: {cache_file}")
+            return timestamp
+        except Exception as e:
+            logger.error(f"Failed to save compounds progress: {e}")
+            return None
+
+    def write_ms2_title(compound: wfo.CompoundExperimental, ms2_info, has_reference, ms2_file, current_compound_index=None):
         """Create MS2 title and subheadings"""
         
         # Create MS2 title (exact same format as original)
@@ -220,7 +275,7 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
 
         return ms2_title
 
-    def write_eic_title(compound: mto.CompoundExperimental, current_compound_index=None):
+    def write_eic_title(compound: wfo.CompoundExperimental, current_compound_index=None):
         # Create EIC title (exact same format as original)
         eic_title_parts = []
         
@@ -239,12 +294,12 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         subheading1 = ' | '.join(eic_title_parts)
 
         # RT and m/z comparison using CURRENT RT values
-        rt_parts = [f'Atlas RT: {compound.original_rt_peak:.2f}']
+        rt_parts = [f'Atlas RT: {compound.atlas_rt_peak:.2f}']
 
         best_rt = compound.best_eic_rt
         if best_rt is not None and best_rt > 0:
             # Recalculate RT diff using current RT peak
-            current_rt_diff = compound.original_rt_peak - best_rt
+            current_rt_diff = compound.atlas_rt_peak - best_rt
             rt_parts.extend([
                 f'Measured RT: {best_rt:.2f} min',
                 f'RT diff: {current_rt_diff:.2f} min'
@@ -282,7 +337,7 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
 
         return eic_title
 
-    def create_targeted_analysis_plot(compound: mto.CompoundExperimental, 
+    def create_targeted_analysis_plot(compound: wfo.CompoundExperimental, 
                                       height=600, ms2_plot_data=None,
                                       initial_render=False, current_compound_index=None):
         """
@@ -324,8 +379,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
 
         ms2_plot_data_dict = ms2_plot_data[0]
         selected_file = ms2_plot_data[1]
-        print(ms2_plot_data_dict)
-        print(selected_file)
         
         # Initialize defaults
         exp_max_intensity = 0
@@ -407,8 +460,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
                     y_range = [-exp_max_intensity * 1.1, exp_max_intensity * 1.1]  # Symmetric for mirror plot
                 else:
                     y_range = [0, exp_max_intensity * 1.1]  # Start at 0 for single spectrum
-                
-                print(f"Y-axis range: {y_range}")
 
             ms2_title = write_ms2_title(compound, ms2_plot_data_dict, has_reference, selected_file)
         else:
@@ -477,9 +528,9 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         fig.add_vline(x=current_rt_max, line_dash="dot", line_color="green", line_width=2, row=eic_row, col=1)
 
         # Add RT reference lines from original atlas
-        fig.add_vline(x=compound.original_rt_peak, line_dash="dash", line_color="gray", line_width=3, row=eic_row, col=1)
-        fig.add_vline(x=compound.original_rt_min, line_dash="dot", line_color="gray", line_width=2, row=eic_row, col=1)
-        fig.add_vline(x=compound.original_rt_max, line_dash="dot", line_color="gray", line_width=2, row=eic_row, col=1)
+        fig.add_vline(x=compound.atlas_rt_peak, line_dash="dash", line_color="gray", line_width=3, row=eic_row, col=1)
+        fig.add_vline(x=compound.atlas_rt_min, line_dash="dot", line_color="gray", line_width=2, row=eic_row, col=1)
+        fig.add_vline(x=compound.atlas_rt_max, line_dash="dot", line_color="gray", line_width=2, row=eic_row, col=1)
 
         # Add suggested RT bounds as two light green vlines if available
         suggested_data = compound.suggested_rt_bounds
@@ -581,6 +632,7 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         compound = get_current_compound()
         if compound is None:
             return
+        print(f"Compound: {compound}")
 
         plot_output.clear_output(wait=True)
 
@@ -659,6 +711,7 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
             # Update all UI elements WITHOUT any observers active
             update_annotation_widgets()
             update_dropdown_value()  # Update dropdown to match current compound
+            print("Running create_plot_only() on first compound")
             create_plot_only(initial_render=True)  # Use initial_render=True for compound navigation
             
         finally:
@@ -747,13 +800,10 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         updating[0] = True
         try:
             # Reset compound to original values using CompoundExperimental methods
-            compound.rt_min = compound.original_rt_min
-            compound.rt_max = compound.original_rt_max
-            compound.rt_peak = compound.original_rt_peak
+            compound.rt_min = compound.atlas_rt_min
+            compound.rt_max = compound.atlas_rt_max
+            compound.rt_peak = compound.atlas_rt_peak
             compound.is_rt_modified = False
-            
-            # Update cache metadata
-            analysis_project.update_cache_metadata('compound_reset')
             
             # Reset MS2 file index since RT bounds changed
             reset_ms2_file_index()
@@ -827,9 +877,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
                 suggested_data['rt_max'],
                 suggested_data['rt_peak']
             )
-            
-            # Update cache metadata
-            analysis_project.update_cache_metadata('rt_bounds_accepted')
 
             # Update all UI elements
             create_plot_only()
@@ -864,9 +911,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         
         # Update using CompoundExperimental method
         compound.update_rt_bounds(new_min, new_max, new_peak)
-        
-        # Update cache metadata
-        analysis_project.update_cache_metadata('rt_bounds_modified')
 
         # Reset MS2 file index since RT bounds changed
         reset_ms2_file_index()
@@ -880,16 +924,18 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         """Reset MS2 file index to 0 when switching compounds"""
         current_ms2_file_index[0] = 0
 
-    def get_selected_ms2_spectra(compound: mto.CompoundExperimental, current_ms2_file_index, rt_min, rt_max):
+    def get_selected_ms2_spectra(compound: wfo.CompoundExperimental, current_ms2_file_index, rt_min, rt_max):
         """
         Returns the selected MS2 spectra for plotting and info for the title.
         Uses CompoundExperimental structure and filters by RT bounds.
         """
         
+        print(f"Getting MS2 spectra for compound: {compound.compound_name}")
         # Get MS2 data from CompoundExperimental structure
         ms2_data = compound.ms2_data_files
         if not ms2_data:
             return None, None, []
+        print(ms2_data)
         
         # Filter files that have MS2 data within RT bounds and calculate scores
         files_in_rt_window = []
@@ -971,9 +1017,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
                 
         # Update using CompoundExperimental method
         compound.update_annotations(ms2_notes=change['new'])
-        
-        # Update cache metadata
-        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -989,9 +1032,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         
         # Update using CompoundExperimental method
         compound.update_annotations(ms1_notes=change['new'])
-        
-        # Update cache metadata
-        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -1007,9 +1047,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
         
         # Update using CompoundExperimental method
         compound.update_annotations(analyst_notes=change['new'])
-        
-        # Update cache metadata
-        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -1025,9 +1062,6 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
 
         # Update using CompoundExperimental method
         compound.update_annotations(identification_notes=change['new'])
-        
-        # Update cache metadata
-        analysis_project.update_cache_metadata('annotations_modified')
 
         # Trigger auto-save check
         auto_save_if_needed()
@@ -1040,27 +1074,29 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
     )
     
     def on_manual_save(button):
-        """Manual save handler for AnalysisProject"""
+        """Manual save handler for CompoundExperimental objects"""
         if project_dir:
             try:
-                # Save AnalysisProject to progress cache
-                timestamp = scache.save_progress_checkpoint(analysis_project, project_dir, analysis_project.atlas_uid, "gui_progress")
-                button.description = f"Saved {timestamp[-8:-3]}"
-                last_save_time[0] = time.time()
-                
-                # Reset button text after 2 seconds
-                import threading
-                def reset_button():
-                    time.sleep(2)
-                    button.description = "Save Session"
-                threading.Thread(target=reset_button).start()
+                # Save compounds state to cache
+                timestamp = save_compounds_progress(compounds, project_dir)
+                if timestamp:
+                    button.description = f"Saved {timestamp[-8:-3]}"
+                    last_save_time[0] = time.time()
+                    
+                    # Reset button text after 2 seconds
+                    import threading
+                    def reset_button():
+                        time.sleep(2)
+                        button.description = "Save Session"
+                    threading.Thread(target=reset_button).start()
+                else:
+                    button.description = "Save Failed"
             except Exception as e:
                 logger.error(f"Manual save failed: {e}")
                 button.description = "Save Failed"
     
-    manual_save_button.on_click(on_manual_save)
-
     # Connect all event handlers to their widgets
+    manual_save_button.on_click(on_manual_save)
     prev_button.on_click(lambda b: on_navigation(-1))
     next_button.on_click(lambda b: on_navigation(1))
     ms2_prev_button.on_click(lambda b: on_ms2_navigation(-1))
@@ -1117,4 +1153,51 @@ def create_gui(analysis_project: mto.AnalysisProject, config: Dict, project_dir:
     # Initialize with the first compound
     full_update()
     
-    return container
+    return container, compounds
+
+def export_compound_changes(compounds: List) -> pd.DataFrame:
+    """
+    Export all compound changes to a pandas DataFrame for review.
+    
+    Args:
+        compounds: List of CompoundExperimental objects
+        
+    Returns:
+        DataFrame with all compound changes
+    """
+    changes_data = []
+    
+    for i, compound in enumerate(compounds):
+        row = {
+            'compound_index': i + 1,
+            'compound_name': compound.compound_name,
+            'inchi_key': getattr(compound, 'inchi_key', ''),
+            'atlas_type': getattr(compound, '_atlas_type', ''),
+            'chromatography_polarity': getattr(compound, '_chromatography_polarity', ''),
+            'rt_modified': compound.is_rt_modified if hasattr(compound, 'is_rt_modified') else False,
+            'annotation_modified': compound.is_annotation_modified if hasattr(compound, 'is_annotation_modified') else False,
+            'atlas_rt_min': getattr(compound, 'atlas_rt_min', None),
+            'atlas_rt_max': getattr(compound, 'atlas_rt_max', None),
+            'atlas_rt_peak': getattr(compound, 'atlas_rt_peak', None),
+            'current_rt_min': getattr(compound, 'rt_min', None),
+            'current_rt_max': getattr(compound, 'rt_max', None),
+            'current_rt_peak': getattr(compound, 'rt_peak', None),
+            'rt_peak_delta': None,
+            'ms1_notes': getattr(compound, 'ms1_notes', ''),
+            'ms2_notes': getattr(compound, 'ms2_notes', ''),
+            'analyst_notes': getattr(compound, 'analyst_notes', ''),
+            'identification_notes': getattr(compound, 'identification_notes', '')
+        }
+        
+        # Calculate RT peak delta if both values exist
+        if row['atlas_rt_peak'] is not None and row['current_rt_peak'] is not None:
+            row['rt_peak_delta'] = row['current_rt_peak'] - row['atlas_rt_peak']
+            
+        changes_data.append(row)
+    
+    df = pd.DataFrame(changes_data)
+    
+    # Filter to only show compounds with changes
+    modified_df = df[df['rt_modified'] | df['annotation_modified']].copy()
+    
+    return df, modified_df
