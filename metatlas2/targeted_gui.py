@@ -40,46 +40,46 @@ import logging_config as lcf
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_gui')
 
-def create_gui_from_analysis_projects(analysis_projects: List[Tuple], config: Dict, project_dir: str = None):
-    """
-    Create an enhanced RT editor working with AnalysisProject objects that contain full experimental data.
+# def create_gui_from_analysis_projects(analysis_projects: List[Tuple], config: Dict, project_dir: str = None):
+#     """
+#     Create an enhanced RT editor working with AnalysisProject objects that contain full experimental data.
     
-    Args:
-        analysis_projects: List of tuples (atlas_type, chrom_pol, AnalysisProject)
-        config: Configuration dictionary
-        project_dir: Project directory for caching
-    """
+#     Args:
+#         analysis_projects: List of tuples (atlas_type, chrom_pol, AnalysisProject)
+#         config: Configuration dictionary
+#         project_dir: Project directory for caching
+#     """
     
-    if not analysis_projects:
-        logger.error("No analysis projects provided")
-        return None
+#     if not analysis_projects:
+#         logger.error("No analysis projects provided")
+#         return None
     
-    # Flatten all compounds from all analysis projects
-    all_compounds = []
-    for atlas_type, chrom_pol, analysis_project in analysis_projects:
-        for inchi_key, compound in analysis_project.compounds.items():
-            # Add metadata to track which atlas/method this compound came from
-            compound._atlas_type = atlas_type
-            compound._chromatography_polarity = chrom_pol
-            all_compounds.append(compound)
+#     # Flatten all compounds from all analysis projects
+#     all_compounds = []
+#     for atlas_type, chrom_pol, analysis_project in analysis_projects:
+#         for inchi_key, compound in analysis_project.compounds.items():
+#             # Add metadata to track which atlas/method this compound came from
+#             compound._atlas_type = atlas_type
+#             compound._chromatography_polarity = chrom_pol
+#             all_compounds.append(compound)
     
-    if not all_compounds:
-        logger.error("No compounds found in analysis projects")
-        return None
+#     if not all_compounds:
+#         logger.error("No compounds found in analysis projects")
+#         return None
     
-    logger.info(f"Creating GUI with {len(all_compounds)} compounds from {len(analysis_projects)} analysis projects")
+#     logger.info(f"Creating GUI with {len(all_compounds)} compounds from {len(analysis_projects)} analysis projects")
     
-    # Use the existing create_gui function but with compound objects that have full data
-    return create_gui_with_compounds(all_compounds, config, project_dir)
+#     # Use the existing create_gui function but with compound objects that have full data
+#     return create_gui_with_compounds(all_compounds, config, project_dir)
 
-def create_gui_with_compounds(compounds: List, config: Dict, project_dir: str = None):
+def create_gui_with_compounds(compounds: List, config: Dict, analysis_dir: str = None):
     """
     Create an enhanced RT editor working directly with CompoundExperimental objects.
     
     Args:
         compounds: List of CompoundExperimental objects with full experimental data
         config: Configuration dictionary
-        project_dir: Project directory for caching
+        analysis_dir: Project directory for caching
     """
     
     if not compounds:
@@ -104,10 +104,7 @@ def create_gui_with_compounds(compounds: List, config: Dict, project_dir: str = 
     updating = [False]  # Prevent recursive updates
     rt_slider = [None]  # Store slider reference
     
-    # Get project directory for caching
-    if project_dir is None:
-        logger.warning("No project directory provided - some features may not work")
-    
+    # Auto-save tracking
     last_save_time = [time.time()]
     save_interval = 30  # seconds between auto-saves
     
@@ -205,22 +202,22 @@ def create_gui_with_compounds(compounds: List, config: Dict, project_dir: str = 
 
     def auto_save_if_needed():
         """Auto-save compound changes if enough time has passed."""
-        if (project_dir and 
+        if (analysis_dir and 
             any(compound.is_rt_modified or compound.is_annotation_modified for compound in compounds) and
             time.time() - last_save_time[0] > save_interval):
             
             try:
                 # Save compounds state to cache
-                save_compounds_progress(compounds, project_dir)
+                save_compounds_progress(compounds, analysis_dir)
                 last_save_time[0] = time.time()
                 logger.info("Auto-saved compounds progress to cache")
             except Exception as e:
                 logger.error(f"Auto-save failed: {e}")
 
-    def save_compounds_progress(compounds, project_dir):
+    def save_compounds_progress(compounds, analysis_dir):
         """Save current compounds state to cache"""
         try:
-            cache_dir = Path(project_dir) / "cache" / "compounds_progress"
+            cache_dir = Path(analysis_dir) / "cache" / "compounds_progress"
             cache_dir.mkdir(parents=True, exist_ok=True)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1075,10 +1072,10 @@ def create_gui_with_compounds(compounds: List, config: Dict, project_dir: str = 
     
     def on_manual_save(button):
         """Manual save handler for CompoundExperimental objects"""
-        if project_dir:
+        if analysis_dir:
             try:
                 # Save compounds state to cache
-                timestamp = save_compounds_progress(compounds, project_dir)
+                timestamp = save_compounds_progress(compounds, analysis_dir)
                 if timestamp:
                     button.description = f"Saved {timestamp[-8:-3]}"
                     last_save_time[0] = time.time()

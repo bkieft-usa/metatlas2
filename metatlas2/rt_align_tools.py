@@ -41,6 +41,13 @@ def apply_rt_correction_to_target(target_atlas_info, best_model, config):
 
     correction_stats = []
     rt_corrected_compounds_df = target_compounds_df.copy()
+    # Ensure columns are float64 to avoid dtype warnings
+    for col in ['rt_peak', 'rt_min', 'rt_max', 'rt_shift']:
+        if col in rt_corrected_compounds_df.columns:
+            rt_corrected_compounds_df[col] = rt_corrected_compounds_df[col].astype('float64')
+        else:
+            rt_corrected_compounds_df[col] = np.nan
+            rt_corrected_compounds_df[col] = rt_corrected_compounds_df[col].astype('float64')
     rt_corrected_compounds_df['rt_shift'] = 0.0
     for i, row in target_compounds_df.iterrows():
         compound_uid = row['compound_uid']
@@ -69,10 +76,10 @@ def apply_rt_correction_to_target(target_atlas_info, best_model, config):
         rt_shift = corrected_rt_peak - original_rt_peak
 
         # Update the RT corrected DataFrame
-        rt_corrected_compounds_df.loc[i, 'rt_peak'] = corrected_rt_peak
-        rt_corrected_compounds_df.loc[i, 'rt_min'] = corrected_rt_min
-        rt_corrected_compounds_df.loc[i, 'rt_max'] = corrected_rt_max
-        rt_corrected_compounds_df.loc[i, 'rt_shift'] = rt_shift
+        rt_corrected_compounds_df.loc[i, 'rt_peak'] = float(corrected_rt_peak)
+        rt_corrected_compounds_df.loc[i, 'rt_min'] = float(corrected_rt_min)
+        rt_corrected_compounds_df.loc[i, 'rt_max'] = float(corrected_rt_max)
+        rt_corrected_compounds_df.loc[i, 'rt_shift'] = float(rt_shift)
 
         # Track correction statistics
         correction_stats.append({
@@ -379,7 +386,7 @@ def extract_matches_from_qc_files(project_db_path: str,
     )
     logger.info(f"Created {len(input_data_list)} input dictionaries for feature extraction")
 
-    logger.info("Extracting EIC and MS2 data with hits...")
+    logger.info("Extracting EIC data from QC files...")
     experimental_data = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config, ms_levels=['ms1'])
 
     # Add atlas metadata to each compound in experimental_data by inchi_key

@@ -39,7 +39,7 @@ def get_project_files(project_path: str) -> dict:
     # Initialize nested dictionary
     files_by_group = {}
     
-    for file_path in tqdm(h5_files, desc="Categorizing files"):
+    for file_path in tqdm(h5_files, desc="Getting project files"):
         filename = file_path.name
         
         # Infer chromatography from filename

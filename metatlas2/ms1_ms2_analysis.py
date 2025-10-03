@@ -102,7 +102,7 @@ def _extract_data(input_data_list: List[Dict], compound_metadata: Dict[str, Dict
                 futures.append((future, file_input['lcmsrun'], i))
             
             # Collect results
-            for future, file_path, i in tqdm(futures, desc="Processing files in parallel"):
+            for future, file_path, i in tqdm(futures, desc=f"Extracting {ms_levels} data from files"):
                 try:
                     file_experimental_data = future.result()
                     
@@ -486,7 +486,7 @@ def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str,
                 futures.append((future, hit_input['inchi_key'], i))
             
             # Collect results
-            for future, inchi_key, i in tqdm(futures, desc="Finding MS2 hits in parallel"):
+            for future, inchi_key, i in tqdm(futures, desc="Finding MS2 hits"):
                 try:
                     compound_hits = future.result()
                     # Update experimental_data with hit results
