@@ -1,10 +1,10 @@
 import glob
 import os
 import re
-import h5py
 import sys
 import pandas as pd
 import numpy as np
+from pymzml.run import Reader
 from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -20,7 +20,7 @@ def get_project_files(project_path: str) -> dict:
     Scan project directory for LCMS files and organize by chromatography/polarity/analysis type.
     
     Args:
-        project_path: Path to directory containing .h5 files
+        project_path: Path to directory containing .mzML files
         
     Returns:
         Nested dictionary: {chromatography: {polarity: {analysis_type: [file_paths]}}}
@@ -29,17 +29,17 @@ def get_project_files(project_path: str) -> dict:
     if not project_path.exists():
         raise FileNotFoundError(f"Project path does not exist: {project_path}")
     
-    # Find all .h5 files
-    h5_files = list(project_path.glob("*.h5"))
-    if not h5_files:
-        raise ValueError(f"No .h5 files found in {project_path}")
+    # Find all .mzML files
+    mzML_files = list(project_path.glob("*.mzML"))
+    if not mzML_files:
+        raise ValueError(f"No .mzML files found in {project_path}")
     
-    logger.info(f"Found {len(h5_files)} .h5 files in {project_path}")
+    logger.info(f"Found {len(mzML_files)} .mzML files in {project_path}")
     
     # Initialize nested dictionary
     files_by_group = {}
     
-    for file_path in tqdm(h5_files, desc="Getting project files"):
+    for file_path in tqdm(mzML_files, desc="Getting project files"):
         filename = file_path.name
         
         # Infer chromatography from filename
@@ -85,6 +85,29 @@ def get_project_files(project_path: str) -> dict:
     
     return files_by_group
 
+# def combine_dfs_across_files(file_list: List[str], key: str) -> pd.DataFrame:
+#     """
+#     Combine DataFrames from multiple HDF5 files based on a common key.
+    
+#     Args:
+#         file_list: List of file paths to .mzML files
+#         key: Key name to extract from each file (e.g., 'ms1_pos', 'ms1_neg')
+        
+#     Returns:
+#         Combined pandas DataFrame
+#     """
+#     combined_df = pd.DataFrame()
+    
+#     for file in file_list:
+#         try:
+#             df = read_hdf_file(file, key)
+#             if df is not None and not df.empty:
+#                 combined_df = pd.concat([combined_df, df], ignore_index=True)
+#         except Exception as e:
+#             logger.info(f"Error processing file {file}: {e}")
+    
+#     return combined_df
+
 def read_hdf_file(filename, desired_key=None):
     """
     Read data from HDF5 file, returning specified key or attempting common keys.
@@ -116,29 +139,6 @@ def read_hdf_file(filename, desired_key=None):
     except Exception as e:
         logger.info(f"Error reading {filename}: {e}")
         return None
-
-def combine_dfs_across_files(file_list: List[str], key: str) -> pd.DataFrame:
-    """
-    Combine DataFrames from multiple HDF5 files based on a common key.
-    
-    Args:
-        file_list: List of file paths to .h5 files
-        key: Key name to extract from each file (e.g., 'ms1_pos', 'ms1_neg')
-        
-    Returns:
-        Combined pandas DataFrame
-    """
-    combined_df = pd.DataFrame()
-    
-    for file in file_list:
-        try:
-            df = read_hdf_file(file, key)
-            if df is not None and not df.empty:
-                combined_df = pd.concat([combined_df, df], ignore_index=True)
-        except Exception as e:
-            logger.info(f"Error processing file {file}: {e}")
-    
-    return combined_df
 
 def extract_metadata_from_filename(filename: str) -> dict:
     """
@@ -205,7 +205,7 @@ def save_dataframe_to_hdf(df: pd.DataFrame, file_path: str, key: str, mode: str 
     
     Args:
         df: pandas DataFrame to save
-        file_path: Path to the output .h5 file
+        file_path: Path to the output .mzML file
         key: Key name under which to store the DataFrame
         mode: File mode ('w' for write, 'a' for append)
     """
@@ -220,7 +220,7 @@ def load_dataframe_from_hdf(file_path: str, key: str) -> pd.DataFrame:
     Load a DataFrame from an HDF5 file.
     
     Args:
-        file_path: Path to the .h5 file
+        file_path: Path to the .mzML file
         key: Key name under which the DataFrame is stored
         
     Returns:
