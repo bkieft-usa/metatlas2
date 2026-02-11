@@ -1,0 +1,460 @@
+import sys
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from tqdm.notebook import tqdm
+
+from matchms.similarity import CosineHungarian
+from matchms import Spectrum
+from scipy.optimize import linear_sum_assignment
+
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+
+from typing import Dict, List, Tuple
+
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
+import load_tools as ldt
+import logging_config as lcf
+
+# Initialize logger properly at module level
+logger = lcf.get_logger('ms2_hit_detection')
+
+def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str, Dict]:
+    """
+    Orchestration function to calculate MS2 hits and process results.
+    Find MS2 reference hits for previously extracted experimental data.
+    Uses parallel processing to match extracted MS2 spectra against reference database.
+    
+    Args:
+        experimental_data: Data returned from extract_eic_and_ms2_from_parquet()
+            Format: {inchi_key: {filename: {'ms1_data': df, 'ms2_data': df, 'ms1_summary': df}}}
+        config: Configuration dictionary
+        
+    Returns:
+        Updated experimental_data with 'ms2_hits' and 'ms2_summary' DataFrames added
+    """
+    # Load reference database
+    msms_refs_path = Path(config["ENV"]["PATHS"]["msms_refs"])
+    reference_df = ldt.load_msms_refs_file(msms_refs_path)
+    
+    if reference_df.empty:
+        raise FileNotFoundError("No reference database found - skipping hit detection")
+    
+    logger.info(f"Finding MS2 hits using reference database with {len(reference_df)} entries...")
+    
+    # Prepare data for parallel processing
+    hit_input_data = []
+    for inchi_key, file_results in experimental_data.items():
+        # Check if there's any MS2 data across all files
+        has_ms2 = any(
+            not file_data.get('ms2_data', pd.DataFrame()).empty 
+            for file_data in file_results.values()
+        )
+        if has_ms2:
+            hit_input_data.append({
+                'inchi_key': inchi_key,
+                'file_results': file_results
+            })
+    
+    if not hit_input_data:
+        logger.info("No MS2 data found for any compounds, skipping hit detection")
+        return experimental_data
+    else:
+        logger.info(f"Prepared hit detection input for {len(hit_input_data)}/{len(experimental_data)} compounds with MS2 data")
+    
+    # Use parallel processing for hit detection
+    max_workers = min(mp.cpu_count(), len(hit_input_data), 8)
+    use_parallel = max_workers > 1 and len(hit_input_data) > 1
+    
+    if use_parallel:
+        logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for i, hit_input in enumerate(hit_input_data):
+                future = executor.submit(_process_compound_hits, hit_input, reference_df, config)
+                futures.append((future, hit_input['inchi_key'], i))
+            
+            # Collect results
+            for future, inchi_key, i in futures:
+                try:
+                    compound_results = future.result()
+                    experimental_data[inchi_key] = compound_results['file_results']         
+                except Exception as e:
+                    logger.error(f"  Error in parallel hit detection for {inchi_key}: {e}")
+                    continue
+    
+    else:
+        logger.info("Using sequential processing for hit detection...")
+        for i, hit_input in enumerate(tqdm(hit_input_data, desc="Finding MS2 hits")):
+            inchi_key = hit_input['inchi_key']
+            try:
+                compound_results = _process_compound_hits(hit_input, reference_df, config)
+                experimental_data[inchi_key] = compound_results['file_results']
+                
+                logger.info(f"  Hit detection for {inchi_key} complete")
+                
+            except Exception as e:
+                logger.error(f"  Error in hit detection for {inchi_key}: {e}")
+                continue
+    
+    # Print summary
+    compounds_with_hits = sum(
+        1 for file_results in experimental_data.values()
+        if any(not file_data.get('ms2_hits', pd.DataFrame()).empty for file_data in file_results.values())
+    )
+    total_hits = sum(
+        len(file_data.get('ms2_hits', pd.DataFrame())) 
+        for file_results in experimental_data.values() 
+        for file_data in file_results.values()
+    )
+    logger.info(f"Hit detection complete: {compounds_with_hits} compounds with {total_hits} total reference hits")
+    
+    return experimental_data
+
+
+def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame, config: Dict) -> pd.DataFrame:
+    """
+    Find reference hits for all MS2 scans in a DataFrame.
+    
+    Args:
+        ms2_df: MS2 data DataFrame with columns: rt, mz, i, precursor_MZ, precursor_intensity
+        inchi_key: InChI key for compound
+        reference_df: Reference spectra database
+        config: Configuration dictionary
+        
+    Returns:
+        DataFrame with one row per hit, columns include all hit metadata
+    """
+    if ms2_df.empty:
+        return pd.DataFrame()
+    
+    all_hits = []
+    
+    # Set up MatchMS scoring
+    frag_mz_tolerance = config.get('ms2_matching', {}).get('mz_tolerance_da', 0.05)
+    cos = CosineHungarian(tolerance=frag_mz_tolerance)
+    
+    # Find matching reference spectra by inchi_key
+    matching_refs = reference_df[reference_df['inchi_key'] == inchi_key]
+    if matching_refs.empty:
+        return pd.DataFrame()
+    
+    # Group by RT to get individual MS2 scans
+    for rt_val, rt_group in ms2_df.groupby('rt'):
+        if rt_group.empty:
+            continue
+            
+        # Get precursor info (should be same for all fragments in scan)
+        precursor_mz = rt_group['precursor_MZ'].iloc[0]
+        precursor_intensity = rt_group['precursor_intensity'].iloc[0]
+        
+        # Build spectrum from fragments
+        fragment_mz = rt_group['mz'].values
+        fragment_intensity = rt_group['i'].values
+        
+        # Create MatchMS query spectrum
+        mms_query = Spectrum(mz=fragment_mz, intensities=fragment_intensity, metadata={'precursor_mz': np.nan})
+        
+        # Compare against each reference
+        for _, ref_row in matching_refs.iterrows():
+            try:
+                ref_spectrum = ref_row.get('spectrum', None)
+                if ref_spectrum is None or len(ref_spectrum) != 2:
+                    continue
+                
+                ref_mz = np.array(ref_spectrum[0], dtype=np.float64)
+                ref_intensity = np.array(ref_spectrum[1], dtype=np.float64)
+                
+                if len(ref_mz) == 0 or len(ref_intensity) == 0:
+                    continue
+                
+                # Filter reference spectrum to remove peaks above precursor + 2.5 Da
+                precursor_mz_ref = ref_row.get('precursor_mz', 0.0)
+                if precursor_mz_ref > 0:
+                    valid_peaks = ref_mz < (precursor_mz_ref + 2.5)
+                    ref_mz = ref_mz[valid_peaks]
+                    ref_intensity = ref_intensity[valid_peaks]
+                
+                if len(ref_mz) == 0:
+                    continue
+                
+                # Create MatchMS reference spectrum
+                mms_ref = Spectrum(mz=ref_mz, intensities=ref_intensity, metadata={'precursor_mz': np.nan})
+                
+                # Calculate MatchMS score
+                mms_comparison = cos.pair(mms_query, mms_ref)
+                score = mms_comparison['score'] if mms_comparison['score'] is not None else 0.0
+                
+                # Perform custom alignment for plotting
+                query_spectrum_array = np.array([fragment_mz, fragment_intensity])
+                ref_spectrum_array = np.array([ref_mz, ref_intensity])
+                alignment_data = _align_spectra_for_plotting(query_spectrum_array, ref_spectrum_array, frag_mz_tolerance)
+                
+                # Create hit data row
+                hit_data = {
+                    'inchi_key': inchi_key,
+                    'database': str(ref_row.get('database', 'unknown')),
+                    'ref_id': str(ref_row.get('id', '')),
+                    'ref_name': str(ref_row.get('name', 'Unknown')),
+                    'score': float(score),
+                    'num_matches': len(alignment_data.get('matched_fragments', [])),
+                    'mz_theoretical': float(precursor_mz_ref),
+                    'mz_measured': float(precursor_mz),
+                    'rt_measured': float(rt_val),
+                    'qry_intensity_peak': float(precursor_intensity),
+                    'ref_frags': len(ref_mz),
+                    'data_frags': len(fragment_mz),
+                    'matched_fragments': [alignment_data.get('matched_fragments', [])],  # Store as list for DataFrame
+                    'qry_frag_colors': [alignment_data.get('fragment_colors', [])],
+                    'qry_spectrum': [alignment_data.get('query_aligned', [])],
+                    'ref_spectrum': [alignment_data.get('ref_aligned', [])],
+                    'qry_spectrum_original': [[fragment_mz.tolist(), fragment_intensity.tolist()]],
+                    'ref_spectrum_original': [[ref_mz.tolist(), ref_intensity.tolist()]]
+                }
+                
+                all_hits.append(hit_data)
+                
+            except Exception as e:
+                logger.error(f"Error processing reference hit: {e}")
+                continue
+    
+    # Convert to DataFrame
+    if all_hits:
+        return pd.DataFrame(all_hits)
+    else:
+        return pd.DataFrame()
+
+
+def _process_compound_hits(hit_input: Dict, reference_df: pd.DataFrame, config: Dict) -> Dict:
+    """Process hit detection for a single compound across all its files."""
+    inchi_key = hit_input['inchi_key']
+    file_results = hit_input['file_results'].copy()
+    
+    # Process each file for this compound
+    for filename, file_data in file_results.items():
+        ms2_df = file_data.get('ms2_data', pd.DataFrame())
+        
+        if ms2_df.empty:
+            # Create empty DataFrames for consistency
+            file_data['ms2_hits'] = pd.DataFrame()
+            file_data['ms2_summary'] = pd.DataFrame()
+            continue
+        
+        # Find hits directly from ms2_data DataFrame
+        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df, config)
+        file_data['ms2_hits'] = ms2_hits_df
+        
+        # Create ms2_summary DataFrame
+        ms2_summary_df = _create_ms2_summary(ms2_df, ms2_hits_df)
+        file_data['ms2_summary'] = ms2_summary_df
+    
+    return {'inchi_key': inchi_key, 'file_results': file_results}
+
+
+def _create_ms2_summary(ms2_df: pd.DataFrame, ms2_hits_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create summary statistics for MS2 data and hits.
+    
+    Returns DataFrame with one row containing summary statistics.
+    """
+    if ms2_df.empty:
+        return pd.DataFrame()
+    
+    # Group ms2_data by RT to count scans
+    num_scans = ms2_df['rt'].nunique() if not ms2_df.empty else 0
+    num_fragments = len(ms2_df) if not ms2_df.empty else 0
+    
+    # Get best MS2 scan (highest precursor intensity)
+    if not ms2_df.empty:
+        best_scan_idx = ms2_df.groupby('rt')['precursor_intensity'].first().idxmax()
+        best_scan_data = ms2_df[ms2_df['rt'] == best_scan_idx].iloc[0]
+        best_ms2_rt = float(best_scan_data['rt'])
+        best_ms2_mz = float(best_scan_data['precursor_MZ'])
+        best_ms2_intensity = float(best_scan_data['precursor_intensity'])
+    else:
+        best_ms2_rt = 0.0
+        best_ms2_mz = 0.0
+        best_ms2_intensity = 0.0
+    
+    # Get best hit if available
+    if not ms2_hits_df.empty:
+        best_hit_idx = ms2_hits_df['score'].idxmax()
+        best_hit = ms2_hits_df.loc[best_hit_idx]
+        num_hits = len(ms2_hits_df)
+        best_hit_score = float(best_hit['score'])
+        best_hit_database = str(best_hit['database'])
+        best_hit_ref_id = str(best_hit['ref_id'])
+        best_hit_ref_name = str(best_hit['ref_name'])
+        best_hit_num_matches = int(best_hit['num_matches'])
+    else:
+        num_hits = 0
+        best_hit_score = 0.0
+        best_hit_database = ''
+        best_hit_ref_id = ''
+        best_hit_ref_name = ''
+        best_hit_num_matches = 0
+    
+    summary_data = {
+        'num_scans': num_scans,
+        'num_fragments': num_fragments,
+        'best_ms2_rt': best_ms2_rt,
+        'best_ms2_mz': best_ms2_mz,
+        'best_ms2_intensity': best_ms2_intensity,
+        'num_hits': num_hits,
+        'best_hit_score': best_hit_score,
+        'best_hit_database': best_hit_database,
+        'best_hit_ref_id': best_hit_ref_id,
+        'best_hit_ref_name': best_hit_ref_name,
+        'best_hit_num_matches': best_hit_num_matches
+    }
+    
+    return pd.DataFrame([summary_data])
+
+
+def _align_spectra_for_plotting(query_spectrum: np.ndarray, ref_spectrum: np.ndarray, 
+                               frag_mz_tolerance: float) -> Dict:
+    """
+    Align spectra using Hungarian assignment algorithm for proper mirror plotting.
+    Based on the provided MatchMS workflow.
+    """
+    try:
+        query_mz = query_spectrum[0]
+        query_intensity = query_spectrum[1]
+        ref_mz = ref_spectrum[0]
+        ref_intensity = ref_spectrum[1]
+        
+        matched_peaks = _match_peaks(query_spectrum, ref_spectrum, frag_mz_tolerance)
+        matrix_size = max(len(query_mz), len(ref_mz))
+        filtered_coords = _hungarian_assignment(matched_peaks, matrix_size)
+        query_aligned, ref_aligned = _link_aligned_spectra(query_spectrum, ref_spectrum, filtered_coords)
+        
+        # Generate fragment colors and matched fragment list based on aligned spectra
+        min_len = min(len(query_aligned[0]), len(ref_aligned[0]))
+        fragment_colors = ["red"] * min_len
+        matched_fragments = []
+        for idx in range(min_len):
+            q_val = query_aligned[0][idx]
+            r_val = ref_aligned[0][idx]
+            if not np.isnan(q_val) and not np.isnan(r_val):
+                matched_fragments.append(float(q_val))
+                fragment_colors[idx] = "green"
+        
+        return {
+            'matched_fragments': matched_fragments,
+            'fragment_colors': fragment_colors,
+            'query_aligned': query_aligned.tolist() if query_aligned is not None else [[], []],
+            'ref_aligned': ref_aligned.tolist() if ref_aligned is not None else [[], []],
+            'num_matched': len(matched_fragments)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in spectrum alignment: {e}")
+        return {
+            'matched_fragments': [],
+            'fragment_colors': ['red'] * len(query_spectrum[0]) if len(query_spectrum) > 0 else [],
+            'query_aligned': [query_spectrum[0].tolist(), query_spectrum[1].tolist()] if len(query_spectrum) >= 2 else [[], []],
+            'ref_aligned': [ref_spectrum[0].tolist(), ref_spectrum[1].tolist()] if len(ref_spectrum) >= 2 else [[], []],
+            'num_matched': 0
+        }
+
+def _match_peaks(spec1: np.ndarray, spec2: np.ndarray, frag_mz_tolerance: float) -> List[Tuple[Tuple[int, int], float]]:
+    """
+    Match MS2 fragment peaks within m/z tolerance.
+    Returns list of ((query_idx, ref_idx), intensity_product) tuples.
+    """
+    matched_peaks = []
+    spec1_mz, spec1_intensity = spec1[0], spec1[1]
+    spec2_mz, spec2_intensity = spec2[0], spec2[1]
+    
+    for i in range(len(spec1_mz)):
+        # Find peaks in spec2 within tolerance of current spec1 peak
+        mz_diffs = np.abs(spec2_mz - spec1_mz[i])
+        within_tolerance = mz_diffs <= frag_mz_tolerance
+        
+        if np.any(within_tolerance):
+            matching_indices = np.where(within_tolerance)[0]
+            for j in matching_indices:
+                match_coords = (i, j)
+                match_value = float(spec1_intensity[i] * spec2_intensity[j])
+                matched_peaks.append((match_coords, match_value))
+    
+    return matched_peaks
+
+def _hungarian_assignment(matched_peaks: List[Tuple[Tuple[int, int], float]], 
+                         matrix_size: int) -> List[Tuple[int, int]]:
+    """
+    Filter matched peaks by maximizing the matched intensity product using Hungarian algorithm.
+    """
+    if not matched_peaks:
+        return []
+    
+    # Create cost matrix
+    cost_matrix = np.zeros((matrix_size, matrix_size))
+    for match in matched_peaks:
+        coords, value = match
+        row, col = coords
+        if row < matrix_size and col < matrix_size:
+            cost_matrix[row, col] = value
+    
+    # Solve assignment problem (maximize)
+    row_idx, col_idx = linear_sum_assignment(cost_matrix, maximize=True)
+    
+    # Filter to only include assignments with non-zero costs
+    filtered_coords = []
+    for i in range(len(row_idx)):
+        row, col = row_idx[i], col_idx[i]
+        if cost_matrix[row, col] > 0:
+            filtered_coords.append((row, col))
+    
+    return filtered_coords
+
+def _link_aligned_spectra(spec1: np.ndarray, spec2: np.ndarray, 
+                         filtered_coords: List[Tuple[int, int]]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Create linked and aligned MS2 spectra using filtered matching fragment indices.
+    Returns aligned spectra suitable for mirror plotting.
+    """
+    try:
+        spec1_mz, spec1_intensity = spec1[0], spec1[1]
+        spec2_mz, spec2_intensity = spec2[0], spec2[1]
+        
+        if not filtered_coords:
+            # No matches, return original spectra
+            return spec1, spec2
+        
+        shared_spec1_idxs = [coord[0] for coord in filtered_coords]
+        shared_spec2_idxs = [coord[1] for coord in filtered_coords]
+        
+        # Get shared and unshared peaks from spec2
+        shared_spec2_mzs = np.array([spec2_mz[i] for i in shared_spec2_idxs])
+        shared_spec2_intensities = np.array([spec2_intensity[i] for i in shared_spec2_idxs])
+        
+        unshared_spec2_mzs = np.array([spec2_mz[i] for i in range(len(spec2_mz)) if i not in shared_spec2_idxs])
+        unshared_spec2_intensities = np.array([spec2_intensity[i] for i in range(len(spec2_intensity)) if i not in shared_spec2_idxs])
+        
+        # Create aligned spec1: [nan placeholders for unshared spec2 peaks] + [all spec1 peaks]
+        spec1_alignment_linker = np.full(len(unshared_spec2_mzs), np.nan)
+        aligned_spec1_mz = np.concatenate((spec1_alignment_linker, spec1_mz))
+        aligned_spec1_intensity = np.concatenate((spec1_alignment_linker, spec1_intensity))
+        spec1_aligned = np.array([aligned_spec1_mz, aligned_spec1_intensity])
+        
+        # Create aligned spec2: [unshared spec2 peaks] + [matched spec2 peaks + nan placeholders]
+        spec2_alignment_linker_mz = np.full(len(spec1_mz), np.nan)
+        spec2_alignment_linker_intensity = np.full(len(spec1_intensity), np.nan)
+        
+        # Fill in the matched peaks at their corresponding positions
+        for i, spec1_idx in enumerate(shared_spec1_idxs):
+            if spec1_idx < len(spec2_alignment_linker_mz):
+                spec2_alignment_linker_mz[spec1_idx] = shared_spec2_mzs[i]
+                spec2_alignment_linker_intensity[spec1_idx] = shared_spec2_intensities[i]
+        
+        aligned_spec2_mz = np.concatenate((unshared_spec2_mzs, spec2_alignment_linker_mz))
+        aligned_spec2_intensity = np.concatenate((unshared_spec2_intensities, spec2_alignment_linker_intensity))
+        spec2_aligned = np.array([aligned_spec2_mz, aligned_spec2_intensity])
+        
+        return spec1_aligned, spec2_aligned
+        
+    except Exception as e:
+        logger.error(f"Error in linking aligned spectra: {e}")
+        return spec1, spec2
