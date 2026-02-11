@@ -31,9 +31,8 @@ from ipywidgets import Output
 from scipy.signal import find_peaks, peak_widths, peak_prominences
 from scipy.ndimage import gaussian_filter1d
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
-import ms1_ms2_analysis as msa
 import workflow_objects as wfo
 import logging_config as lcf
 
@@ -87,7 +86,7 @@ def create_gui_with_compounds(compounds: List, config: Dict, analysis_dir: str =
         return None
     
     # Set starting status
-    file_color_dict = config['plot_settings']['file_color_mapping'] if 'file_color_mapping' in config['plot_settings'] else None
+    file_color_dict = {"istd": "green", "injblk": "red", "qc": "blue", "refstd": "black"}
     
     compound_list = list(range(len(compounds)))  # Use indices
     all_compound_names = [compound.compound_name for compound in compounds]
@@ -629,7 +628,6 @@ def create_gui_with_compounds(compounds: List, config: Dict, analysis_dir: str =
         compound = get_current_compound()
         if compound is None:
             return
-        print(f"Compound: {compound}")
 
         plot_output.clear_output(wait=True)
 

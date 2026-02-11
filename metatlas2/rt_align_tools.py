@@ -1,47 +1,44 @@
 import pandas as pd
 import numpy as np
 import sys
-import duckdb
-import os
-import json
-from tqdm.notebook import tqdm
 from pathlib import Path
+from IPython.display import display
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 from typing import Dict, Tuple, List
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
-import load_tools as ldt
 import logging_config as lcf
-import ms1_ms2_analysis as msa
+import extract_data_from_parquet as edp
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('rt_align_tools')
 
-def apply_rt_correction_to_target(target_atlas_info, best_model, config):
+def apply_rt_correction_to_target(main_db_path, target_atlas_info, best_model, rt_align_settings):
     
-    main_db_path = config["ENV"]['PATHS']['main_database']
-    rt_align_settings = config["WORKFLOWS"]["HILICZ"]["RT_ALIGN"]["PARAMS"]
-
     # Get target atlas and compounds from master database
     target_atlas_metadata_df = dbi.get_atlas_metadata_from_db(main_db_path, target_atlas_info['atlas_uid'])
     target_compounds_df = dbi.get_atlas_compounds_table(main_db_path, target_atlas_info['atlas_uid'])
     if target_atlas_metadata_df.empty or target_compounds_df.empty:
         raise ValueError(f"Atlas {target_atlas_info['atlas_uid']} not found in master database")
-    if dbi.verify_compounds_exist_in_db(target_compounds_df, main_db_path) is False:
+    else:
+        logger.info("Successfully loaded target atlas metadata and compounds from database")
+    compounds_verified = dbi.verify_compounds_exist_in_db(target_compounds_df['compound_uid'].tolist(), main_db_path)
+    logger.debug(f"Compounds verified in database: {compounds_verified}")
+    if compounds_verified is False:
         logger.error("One or more compounds in target_compounds_df do not exist in the main database. Aborting RT-corrected atlas creation.")
         return None, []
+    else:
+        logger.info(f"Loaded target atlas with {len(target_atlas_info)} compounds for RT correction")
 
-    correction_stats = []
-    rt_corrected_compounds_df = target_compounds_df.copy()
     # Ensure columns are float64 to avoid dtype warnings
+    rt_corrected_compounds_df = target_compounds_df.copy()
     for col in ['rt_peak', 'rt_min', 'rt_max', 'rt_shift']:
         if col in rt_corrected_compounds_df.columns:
             rt_corrected_compounds_df[col] = rt_corrected_compounds_df[col].astype('float64')
@@ -49,6 +46,8 @@ def apply_rt_correction_to_target(target_atlas_info, best_model, config):
             rt_corrected_compounds_df[col] = np.nan
             rt_corrected_compounds_df[col] = rt_corrected_compounds_df[col].astype('float64')
     rt_corrected_compounds_df['rt_shift'] = 0.0
+
+    correction_stats = []
     for i, row in target_compounds_df.iterrows():
         compound_uid = row['compound_uid']
         original_rt_peak = row.get('rt_peak')
@@ -90,6 +89,7 @@ def apply_rt_correction_to_target(target_atlas_info, best_model, config):
             'rt_shift': rt_shift
         })
 
+    logger.info(f"Returning RT corrected atlas with {len(rt_corrected_compounds_df)} compounds and stats for {len(correction_stats)} compounds")
     return rt_corrected_compounds_df, correction_stats
 
 def build_polynomial_model(X, y, degree):
@@ -226,19 +226,18 @@ def visualize_RT_model(modeling_results_df: pd.DataFrame, best_model: dict, outp
 
     return
 
-def build_rt_alignment_model(experimental_data: Dict, config: Dict) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
+def build_rt_alignment_model(experimental_data: Dict, rt_align_settings: Dict) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
     """
     Build RT alignment model from QC compound matches in experimental_data dict.
     
     Args:
         experimental_data: Dictionary containing compound experimental data (with atlas metadata)
-        config: Dictionary containing RT modeling settings
+        rt_align_settings: Dictionary containing RT modeling settings
     
     Returns:
         Tuple of (best_model, modeling_results_df, compound_rt_stats)
     """
     logger.info("Building RT alignment model from experimental_data dict...")
-    rt_align_settings = config["WORKFLOWS"]["HILICZ"]["RT_ALIGN"]["PARAMS"]
     exclude_inchikeys = rt_align_settings.get('exclude_inchikeys', [])
 
     # Aggregate per-compound statistics
@@ -356,45 +355,108 @@ def build_rt_alignment_model(experimental_data: Dict, config: Dict) -> Tuple[Dic
 
     return best_model, modeling_results_df, compound_rt_stats
 
-def extract_matches_from_qc_files(project_db_path: str, 
-                                    qc_atlas_uid: str,
-                                    qc_files_df: pd.DataFrame,
-                                    config: Dict,) -> Dict: 
+def extract_matches_from_qc_files(main_db_path: str,
+                                  qc_atlas_uid: str,
+                                  qc_files_df: pd.DataFrame,
+                                  rt_align_settings: Dict) -> Dict: 
     """
     Use same approach as feature extraction to extract EIC data for QC compounds.
     Adds atlas metadata to each compound in experimental_data by inchi_key.
     """
 
-    main_db_path = config["ENV"]["PATHS"]["main_database"]
-    rt_align_settings = config["WORKFLOWS"]["HILICZ"]["RT_ALIGN"]["PARAMS"]
-
     logger.info("Loading QC atlas...")
     atlas_dataframe = dbi.get_atlas_compounds_table(main_db_path, atlas_uid=qc_atlas_uid)
-
-    if len(atlas_dataframe) == 0:
+    if not atlas_dataframe.empty:
+        logger.info(f"Preparing {len(atlas_dataframe)} compounds for RT alignment modeling...")
+    else:
         raise ValueError(f"No compounds found in QC atlas")
-
     logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
 
-    logger.info("Preparing inputs for feature extraction...")
+    logger.info("Preparing parquet file list...")
     project_qc_files = qc_files_df['file_path'].tolist()
-    input_data_list = msa.prepare_feature_tools_inputs(
+    existing_parquet_files = [f for f in project_qc_files if Path(f).exists()]
+    if len(existing_parquet_files) == 0:
+        raise FileNotFoundError("No parquet files found for QC files")
+    logger.info(f"Found {len(existing_parquet_files)} parquet files")
+
+    logger.info("Extracting EIC data from QC parquet files...")
+    parquet_results = edp.extract_eic_and_ms2_from_parquet(
         atlas_df=atlas_dataframe,
-        h5_files=project_qc_files,
+        parquet_files=existing_parquet_files,
         ppm_tolerance=rt_align_settings['ppm_error'],
-        extra_time=rt_align_settings['extra_time']
+        extra_time=rt_align_settings['extra_time'],
+        use_parallel=True
     )
-    logger.info(f"Created {len(input_data_list)} input dictionaries for feature extraction")
 
-    logger.info("Extracting EIC data from QC files...")
-    experimental_data = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config, ms_levels=['ms1'])
+    logger.info("Formatting results for RT alignment...")
+    experimental_data = _format_parquet_results_for_rt_alignment(
+        parquet_results, 
+        atlas_dataframe
+    )
 
-    # Add atlas metadata to each compound in experimental_data by inchi_key
-    for inchi_key, compound_data in experimental_data.items():
-        inchi_atlas_info = atlas_dataframe[atlas_dataframe['inchi_key'] == inchi_key]
-        if inchi_key and not inchi_atlas_info.empty:
-            compound_data.update(inchi_atlas_info.iloc[0].to_dict())
+    return experimental_data
 
+
+def _format_parquet_results_for_rt_alignment(
+    parquet_results: Dict[str, Dict],
+    atlas_dataframe: pd.DataFrame
+) -> Dict:
+    """
+    Format parquet extraction results to match the structure expected by RT alignment.
+    
+    Args:
+        parquet_results: Output from extract_eic_and_ms2_from_parquet
+        atlas_dataframe: Atlas DataFrame with compound metadata
+    
+    Returns:
+        Dict matching experimental_data structure with eic_files and atlas metadata
+    """
+    experimental_data = {}
+    
+    for _, atlas_row in atlas_dataframe.iterrows():
+        inchi_key = atlas_row.get('inchi_key')
+        
+        if inchi_key not in parquet_results:
+            continue
+        
+        # Initialize compound entry with atlas metadata
+        compound_data = atlas_row.to_dict()
+        compound_data['eic_files'] = {}
+        
+        # Process each file's data for this compound
+        for parquet_file, file_data in parquet_results[inchi_key].items():
+            ms1_summary = file_data.get('ms1_summary', pd.DataFrame())
+            
+            if ms1_summary.empty or ms1_summary['peak_height'].iloc[0] == 0:
+                # No valid peak found in this file
+                continue
+            
+            # Extract peak properties
+            summary_row = ms1_summary.iloc[0]
+            observed_mz = summary_row['mz_centroid']
+            observed_rt = summary_row['rt_peak']
+            observed_intensity = summary_row['peak_height']
+            
+            # Calculate PPM error
+            atlas_mz = atlas_row['mz']
+            ppm_diff = ((observed_mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
+            
+            # Store in eic_files format expected by RT alignment
+            compound_data['eic_files'][parquet_file] = {
+                'rt_peak': observed_rt,
+                'mz_peak': observed_mz,
+                'intensity_peak': observed_intensity,
+                'ppm_diff': ppm_diff,
+                'peak_area': summary_row['peak_area'],
+                'num_datapoints': summary_row['num_datapoints']
+            }
+        
+        # Only add compounds that have at least one match
+        if compound_data['eic_files']:
+            experimental_data[inchi_key] = compound_data
+    
+    logger.info(f"Formatted data for {len(experimental_data)} compounds with matches")
+    
     return experimental_data
 
 def evaluate_qc_matching_stats(experimental_data: Dict) -> Dict:

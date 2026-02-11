@@ -1,7 +1,7 @@
 ENV:
   PATHS:
-    main_database: /Users/BKieft/Metabolomics/metatlas2/data/databases/metatlas.duckdb
-    pubchem_cache: /Users/BKieft/Metabolomics/metatlas2/data/databases/pubchem_cache/pubchem_global_cache.pkl
+    main_database: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb
+    pubchem_cache: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/pubchem_cache/pubchem_global_cache.pkl
 
 PARAMS:
   use_pubchem_cache: true
@@ -10,13 +10,13 @@ COMPOUNDS:
     HILICZ:
       POS:
         PATHS:
-          - /Users/BKieft/Metabolomics/metatlas2/data/atlas_tables/HILICZ/HILICZ_QC_POS.tsv
-          - /Users/BKieft/Metabolomics/metatlas2/data/atlas_tables/HILICZ/HILICZ_ISTD_POS.tsv
-          - /Users/BKieft/Metabolomics/metatlas2/data/atlas_tables/HILICZ/HILICZ_EMA_POS.tsv
+          - /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_QC_POS.tsv
+          - /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_ISTD_POS.tsv
+          - /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_EMA_POS.tsv
       NEG:
         PATHS:
-         - /Users/BKieft/Metabolomics/metatlas2/data/atlas_tables/HILICZ/HILICZ_ISTD_NEG.tsv
-         - /Users/BKieft/Metabolomics/metatlas2/data/atlas_tables/HILICZ/HILICZ_EMA_NEG.tsv
+         - /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_ISTD_NEG.tsv
+         - /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_EMA_NEG.tsv
     C18:
       POS:
         PATHS:

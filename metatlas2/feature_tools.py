@@ -10,7 +10,7 @@ from six.moves import range
 from six.moves import zip
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
 
 logger = lcf.get_logger('ms1_ms2_analysis')

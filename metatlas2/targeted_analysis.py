@@ -1,46 +1,23 @@
 import sys
-import copy
 from datetime import datetime
-from pathlib import Path
-import getpass
-import copy
 import pandas as pd
 import numpy as np
-import json
-import pickle
-import re
-import os
-import glob
-import json
-from typing import Dict, List, Optional, Any, Tuple, Union
-from tqdm.notebook import tqdm
-import time
-import uuid
-import glob
+from typing import Dict, List, Optional, Any, Tuple
 import warnings
+
 from scipy.interpolate import interp1d
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-from IPython.display import display, HTML
-import ipywidgets as widgets
-from ipywidgets import Output
 from scipy.signal import find_peaks, peak_widths, peak_prominences
-from scipy.ndimage import gaussian_filter1d
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
-import ms1_ms2_analysis as msa
-import load_tools as ldt
+import ms2_hit_detection as mhd
 import logging_config as lcf
-import json
+import extract_data_from_parquet as pdx
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('targeted_analysis')
 current_time = datetime.now().isoformat()
+
 
 def run_targeted_analysis_workflow(project_db_path: str, 
                                     target_atlas_uid: str, 
@@ -59,22 +36,81 @@ def run_targeted_analysis_workflow(project_db_path: str,
         - atlas_info: Dict - atlas metadata
         - summary_stats: Dict - analysis summary statistics
     """
-    logger.info("Setting up targeted analysis database...")
-
-    # Get project directory for caching
-    project_dir = str(Path(project_db_path).parent)
-
-    # Run fresh analysis
-    logger.info("Running fresh targeted analysis...")
-    main_db_path = config["ENV"]["PATHS"]["main_database"]
-
+    logger.info("Running new targeted analysis...")
+    
     logger.info("Loading target atlas...")
-    atlas_dataframe = dbi.get_atlas_compounds_table(main_db_path, atlas_uid=target_atlas_uid)
-
+    main_db_path = config["ENV"]["PATHS"]["main_database"]
+    atlas_dataframe = dbi.get_atlas_compounds_table(database_path=main_db_path, 
+                                                    atlas_uid=target_atlas_uid)
     if len(atlas_dataframe) == 0:
         raise ValueError(f"No compounds found in RT-corrected atlas")
+    else:
+        logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
 
-    logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
+    logger.info("Setting up targeted analysis results structure...")
+    analysis_results = _set_up_analysis_results_structure(main_db_path=main_db_path,
+                                                          target_atlas_uid=target_atlas_uid,
+                                                          project_db_path=project_db_path,
+                                                          atlas_dataframe=atlas_dataframe)
+    if not analysis_results['compounds']:
+        raise ValueError("No compounds initialized in analysis results structure")
+    else:
+        logger.info(f"Initialized analysis results structure for {len(analysis_results['compounds'])} compounds")
+
+    logger.info("Loading experimental files from project database...")
+    project_files_df = dbi.get_files_by_type_from_db(project_db_path=project_db_path, 
+                                                     file_types=['experimental', 'istd', 'exctrl'])
+    project_files = project_files_df['file_path'].tolist()
+    if len(project_files) == 0:
+        raise ValueError("No experimental files found in project database")
+    else:
+        logger.info(f"Found {len(project_files)} experimental files")
+
+    logger.info("Extracting EIC and MS2 data from parquet files...")
+    experimental_data_no_hits = pdx.extract_eic_and_ms2_from_parquet(
+        atlas_df=atlas_dataframe,
+        parquet_files=project_files,
+        ppm_tolerance=analysis_params["default_ppm_error"],
+        extra_time=analysis_params["extra_time"],
+        use_parallel=True if len(project_files) > 1 else False,
+    )
+    # for inchi_key, file_results in experimental_data_no_hits.items():
+    #     for filename, ms_level_results in file_results.items():
+    #         for ms_level, data in ms_level_results.items():
+    #             if not data.empty:
+    #                 print(f"{ms_level} - {inchi_key} - {filename}:")
+    #                 display(data.head(2))
+    
+    logger.info("Finding MS2 reference hits...")
+    experimental_data_with_hits = mhd.find_ms2_hits(experimental_data=experimental_data_no_hits, 
+                                                    config=config)
+    # for inchi_key, file_results in experimental_data_with_hits.items():
+    #     for filename, ms_level_results in file_results.items():
+    #         for ms_level, data in ms_level_results.items():
+    #             if not data.empty:
+    #                 print(f"{ms_level} - {inchi_key} - {filename}:")
+    #                 display(data.head(2))
+
+    # Add experimental data to analysis results and run post-processing
+    _apply_experimental_data_to_results(analysis_results, experimental_data_with_hits)
+    _apply_isomer_detection_to_results(analysis_results, atlas_dataframe)
+    _apply_rt_bounds_suggestions_to_results(analysis_results)
+    _apply_analysis_summary(analysis_results)
+
+    logger.info(f"Analysis complete:")
+    logger.info(f"  Total compounds: {len(analysis_results['compounds'])}")
+    logger.info(f"  Compounds with EIC data: {analysis_results['summary_stats']['compounds_with_eic']}")
+    logger.info(f"  Compounds with MS2 data: {analysis_results['summary_stats']['compounds_with_ms2']}")
+
+    return atlas_dataframe, analysis_results
+
+def _set_up_analysis_results_structure(main_db_path: str,
+                                       target_atlas_uid: str,
+                                       project_db_path: str,
+                                       atlas_dataframe: pd.DataFrame) -> None:
+    """
+    Set up the database structure for storing analysis results.
+    """
 
     # Initialize analysis data structure (no workflow objects dependency)
     analysis_results = {
@@ -123,7 +159,7 @@ def run_targeted_analysis_workflow(project_db_path: str,
             'isomers': [],
             'suggested_rt_bounds': None,
             
-            # Best results (to be populated)
+            # Best results
             'best_eic_file': '',
             'best_eic_rt': 0.0,
             'best_eic_mz': 0.0,
@@ -146,45 +182,7 @@ def run_targeted_analysis_workflow(project_db_path: str,
             'is_annotation_modified': False
         }
 
-    logger.info("Loading experimental files from project database...")
-    project_files = dbi.get_lcmsruns_from_db(project_db_path, file_types=['experimental', 'istd', 'exctrl'])
-
-    if len(project_files) == 0:
-        raise ValueError("No experimental files found in project database")
-
-    logger.info(f"Found {len(project_files)} experimental files")
-
-    logger.info("Preparing inputs for feature extraction...")
-    input_data_list = msa.prepare_feature_tools_inputs(
-        atlas_df=atlas_dataframe,
-        h5_files=project_files,
-        ppm_tolerance=analysis_params["default_ppm_error"],
-        extra_time=analysis_params["extra_time"]
-    )
-    logger.info(f"Created {len(input_data_list)} input dictionaries for feature extraction")
-
-    logger.info("Extracting EIC and MS2 data...")
-    experimental_data_no_hits = msa.extract_eic_and_ms2_data(input_data_list, atlas_dataframe, config)
-    
-    logger.info("Finding MS2 reference hits...")
-    experimental_data_with_hits = msa.find_ms2_hits(experimental_data_no_hits, config)
-
-    # Add experimental data to analysis results
-    add_experimental_data_to_results(analysis_results, experimental_data_with_hits)
-
-    # Apply post-processing features independently
-    apply_isomer_detection_to_results(analysis_results, atlas_dataframe)
-    apply_rt_bounds_suggestions_to_results(analysis_results)
-    
-    # Calculate summary statistics
-    analysis_results['summary_stats'] = calculate_analysis_summary(analysis_results)
-
-    logger.info(f"Analysis complete:")
-    logger.info(f"  Total compounds: {len(analysis_results['compounds'])}")
-    logger.info(f"  Compounds with EIC data: {analysis_results['summary_stats']['compounds_with_eic']}")
-    logger.info(f"  Compounds with MS2 data: {analysis_results['summary_stats']['compounds_with_ms2']}")
-
-    return atlas_dataframe, analysis_results
+    return analysis_results
 
 def build_isomer_dict(atlas_df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
     """Return a dict: inchi_key → list of isomer dicts (empty list if none).
@@ -422,50 +420,121 @@ def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
     cumsum = np.cumsum(np.insert(x, 0, 0.0))
     return (cumsum[window:] - cumsum[:-window]) / float(window)
 
-def add_experimental_data_to_results(analysis_results: Dict, experimental_data: Dict) -> None:
+def _apply_experimental_data_to_results(analysis_results: Dict, experimental_data: Dict) -> None:
     """
-    Add experimental data to raw analysis results structure.
-    Independent of workflow objects.
+    Add experimental data to raw analysis results structure (analysis_results is an empty object for filling).
+    
+    Args:
+        analysis_results: Analysis results dictionary to populate
+        experimental_data: Data from extract_eic_and_ms2_from_parquet() and find_ms2_hits()
+            Format: {inchi_key: {filename: {'ms1_data': df, 'ms1_summary': df, 'ms2_data': df, 'ms2_hits': df, 'ms2_summary': df}}}
     """
-    for inchi_key, compound_experimental_data in experimental_data.items():
-        if inchi_key in analysis_results['compounds']:
-            compound = analysis_results['compounds'][inchi_key]
+    logger.info("Filling in analysis results template with experimental data...")
+
+    for inchi_key, file_results in experimental_data.items():
+        if inchi_key not in analysis_results['compounds']:
+            logger.debug(f"  Compound {inchi_key} not found in analysis results, skipping experimental data addition")
+            continue
             
-            # Add EIC data directly from simplified format
-            eic_files = compound_experimental_data.get('eic_files', {})
-            for filename, eic_data in eic_files.items():
+        logger.debug(f"  Found compound {inchi_key} in analysis results template, adding data...")
+        compound = analysis_results['compounds'][inchi_key]
+        
+        # Process each file for this compound
+        for filename, data_dict in file_results.items():
+            # Extract MS1 (EIC) data
+            ms1_data = data_dict.get('ms1_data', pd.DataFrame())
+            ms1_summary = data_dict.get('ms1_summary', pd.DataFrame())
+            
+            if not ms1_data.empty and not ms1_summary.empty:
+                # Convert ms1_summary row to dict for storage
+                summary_dict = ms1_summary.iloc[0].to_dict() if len(ms1_summary) > 0 else {}
+                
+                eic_data = {
+                    'rt_vals': ms1_data['rt'].tolist(),
+                    'mz_vals': ms1_data['mz'].tolist(),
+                    'i_vals': ms1_data['i'].tolist(),
+                    'rt_peak': float(summary_dict.get('rt_peak', 0.0)),
+                    'mz_peak': float(summary_dict.get('mz_peak', 0.0)),
+                    'intensity_peak': float(summary_dict.get('intensity_peak', 0.0)),
+                    'ppm_diff': float(summary_dict.get('ppm_diff', 0.0)),
+                    'rt_diff': float(summary_dict.get('rt_diff', 0.0)),
+                    'num_datapoints': int(summary_dict.get('num_datapoints', 0))
+                }
                 compound['eic_data_files'][filename] = eic_data
+                logger.debug(f"    Added MS1 data for file {filename}")
             
-            # Add MS2 data using consistent per-file structure
-            ms2_files = compound_experimental_data.get('ms2_files', {})
-            for filename, file_data in ms2_files.items():
-                compound['ms2_data_files'][filename] = file_data
+            # Extract MS2 data
+            ms2_data = data_dict.get('ms2_data', pd.DataFrame())
+            ms2_hits = data_dict.get('ms2_hits', pd.DataFrame())
+            ms2_summary = data_dict.get('ms2_summary', pd.DataFrame())
             
-            # Update summary statistics
-            compound['total_files_detected'] = len(compound['eic_data_files'])
-            if compound['ms2_data_files']:
-                compound['ms2_files_with_data'] = len([
-                    f for f, data in compound['ms2_data_files'].items() 
-                    if data.get('ms2_entries')
-                ])
-            
-            # Update best EIC and MS2 results
-            _update_best_eic_results(compound)
-            _update_best_ms2_results(compound)
+            if not ms2_data.empty:
+                # Store MS2 data in a structured format
+                ms2_file_data = {
+                    'ms2_data': ms2_data,
+                    'ms2_hits': ms2_hits,
+                    'ms2_summary': ms2_summary,
+                }
+                
+                # Extract summary statistics if available
+                if not ms2_summary.empty:
+                    summary_dict = ms2_summary.iloc[0].to_dict()
+                    ms2_file_data['num_scans'] = int(summary_dict.get('num_scans', 0))
+                    ms2_file_data['num_fragments'] = int(summary_dict.get('num_fragments', 0))
+                    ms2_file_data['best_ms2_rt'] = float(summary_dict.get('best_ms2_rt', 0.0))
+                    ms2_file_data['best_ms2_mz'] = float(summary_dict.get('best_ms2_mz', 0.0))
+                    ms2_file_data['best_ms2_intensity'] = float(summary_dict.get('best_ms2_intensity', 0.0))
+                    ms2_file_data['num_hits'] = int(summary_dict.get('num_hits', 0))
+                    
+                    # Extract best hit info
+                    if not ms2_hits.empty and summary_dict.get('num_hits', 0) > 0:
+                        best_hit_idx = ms2_hits['score'].idxmax()
+                        best_hit = ms2_hits.loc[best_hit_idx]
+                        
+                        ms2_file_data['best_hit'] = {
+                            'database': str(best_hit['database']),
+                            'ref_id': str(best_hit['ref_id']),
+                            'ref_name': str(best_hit['ref_name']),
+                            'score': float(best_hit['score']),
+                            'num_matches': int(best_hit['num_matches']),
+                            'mz_theoretical': float(best_hit['mz_theoretical']),
+                            'mz_measured': float(best_hit['mz_measured']),
+                            'rt_measured': float(best_hit['rt_measured']),
+                            'matched_fragments': best_hit['matched_fragments'][0] if isinstance(best_hit['matched_fragments'], list) else best_hit['matched_fragments']
+                        }
+                else:
+                    ms2_file_data['num_scans'] = 0
+                    ms2_file_data['num_hits'] = 0
+                    ms2_file_data['best_hit'] = {}
+                
+                compound['ms2_data_files'][filename] = ms2_file_data
+                logger.debug(f"    Added MS2 data for file {filename} ({ms2_file_data.get('num_scans', 0)} scans, {ms2_file_data.get('num_hits', 0)} hits)")
+        
+        # Update summary statistics
+        compound['total_files_detected'] = len(compound['eic_data_files'])
+        if compound['ms2_data_files']:
+            compound['ms2_files_with_data'] = len([
+                f for f, data in compound['ms2_data_files'].items() 
+                if data.get('num_scans', 0) > 0
+            ])
+        
+        # Update best EIC and MS2 results
+        logger.debug(f"    Updating best EIC and MS2 results for compound {inchi_key}...")
+        _update_best_eic_results(compound)
+        _update_best_ms2_results(compound)
 
 def _update_best_eic_results(compound: Dict) -> None:
     """Update best EIC statistics from current data."""
     if not compound['eic_data_files']:
+        logger.debug("      No EIC data files to calculate best EIC results")
         return
     
-    best_intensity = 0.0
-    best_file = ""
-    
+    best_intensity = 0.0    
     for filename, eic_data in compound['eic_data_files'].items():
         intensity = eic_data.get('intensity_peak', 0.0)
         if intensity > best_intensity:
+            logger.debug(f"      New best EIC found in file {filename} with intensity {intensity}")
             best_intensity = intensity
-            best_file = filename
             compound['best_eic_file'] = filename
             compound['best_eic_rt'] = eic_data.get('rt_peak', 0.0)
             compound['best_eic_mz'] = eic_data.get('mz_peak', 0.0)
@@ -476,11 +545,11 @@ def _update_best_eic_results(compound: Dict) -> None:
 def _update_best_ms2_results(compound: Dict) -> None:
     """Update best MS2 statistics from current data."""
     if not compound['ms2_data_files']:
+        logger.debug("      No MS2 data files to calculate best MS2 results")
         return
     
     best_score = 0.0
     best_hit_data = None
-    
     for filename, ms2_data in compound['ms2_data_files'].items():
         if isinstance(ms2_data, dict):
             best_hit = ms2_data.get('best_hit', {})
@@ -490,12 +559,13 @@ def _update_best_ms2_results(compound: Dict) -> None:
                 compound['best_ms2_file'] = filename
     
     if best_hit_data:
+        logger.debug(f"      New best MS2 found in file {compound['best_ms2_file']} with score {best_score}")
         compound['best_ms2_database'] = best_hit_data.get('database', '')
         compound['best_ms2_score'] = best_hit_data.get('score', 0.0)
         compound['best_ms2_num_matches'] = best_hit_data.get('num_matches', 0)
         compound['best_ms2_matched_fragments'] = best_hit_data.get('matched_fragments', [])
 
-def apply_isomer_detection_to_results(analysis_results: Dict, atlas_dataframe: pd.DataFrame) -> None:
+def _apply_isomer_detection_to_results(analysis_results: Dict, atlas_dataframe: pd.DataFrame) -> None:
     """
     Apply isomer detection to raw analysis results structure.
     Independent of workflow objects.
@@ -517,17 +587,20 @@ def apply_isomer_detection_to_results(analysis_results: Dict, atlas_dataframe: p
     for inchi_key, compound in analysis_results['compounds'].items():
         compound['isomers'] = isomer_dict.get(inchi_key, [])
 
-def apply_rt_bounds_suggestions_to_results(analysis_results: Dict) -> None:
+    return
+
+def _apply_rt_bounds_suggestions_to_results(analysis_results: Dict) -> None:
     """
     Apply RT bounds suggestions to raw analysis results structure.
     Independent of workflow objects.
     """
-    logger.info("Applying RT bounds suggestions...")
+    logger.info("Applying RT bounds suggestions to EIC data...")
     
     compounds_processed = 0
     compounds_with_suggestions = 0
     
     for inchi_key, compound in analysis_results['compounds'].items():
+        logger.debug(f"Processing compound {inchi_key} for RT bounds suggestion...")
         if compound['eic_data_files']:
             compounds_processed += 1
             
@@ -551,15 +624,21 @@ def apply_rt_bounds_suggestions_to_results(analysis_results: Dict) -> None:
             if suggested_bounds:
                 compounds_with_suggestions += 1
                 compound['suggested_rt_bounds'] = suggested_bounds
+        else:
+            logger.debug(f"No EIC data for compound {inchi_key}, skipping RT bounds suggestion")
     
     logger.info(f"Processed {compounds_processed} compounds with EIC data")
     logger.info(f"Generated RT suggestions for {compounds_with_suggestions} compounds")
 
-def calculate_analysis_summary(analysis_results: Dict) -> Dict[str, Any]:
+    return
+
+def _apply_analysis_summary(analysis_results: Dict) -> None:
     """
     Calculate analysis summary statistics from raw results structure.
     Independent of workflow objects.
     """
+    logger.info("Calculating analysis results summary statistics...")
+
     compounds_with_eic = sum(
         1 for compound in analysis_results['compounds'].values() 
         if compound['eic_data_files']
@@ -573,7 +652,7 @@ def calculate_analysis_summary(analysis_results: Dict) -> Dict[str, Any]:
         if compound['is_rt_modified'] or compound['is_annotation_modified']
     )
     
-    return {
+    total_summary = {
         'total_compounds': len(analysis_results['compounds']),
         'compounds_with_eic': compounds_with_eic,
         'compounds_with_ms2': compounds_with_ms2,
@@ -581,3 +660,7 @@ def calculate_analysis_summary(analysis_results: Dict) -> Dict[str, Any]:
         'atlas_uid': analysis_results['atlas_info']['atlas_uid'],
         'project_db_path': analysis_results['atlas_info']['project_db_path']
     }
+    analysis_results['summary_stats'] = total_summary
+    logger.debug(f"Summary statistics: {total_summary}")
+
+    return

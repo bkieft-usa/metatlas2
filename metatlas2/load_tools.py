@@ -6,9 +6,9 @@ import getpass
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List, Union
+from typing import Dict, Any
 
-sys.path.append('/Users/BKieft/Metabolomics/metatlas2/metatlas2')
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
 
 # Initialize logger properly at module level
