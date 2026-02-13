@@ -16,38 +16,42 @@ sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
 import logging_config as lcf
 import extract_data_from_parquet as edp
+import ms1_ms2_summarizer as mss
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('rt_align_tools')
 
-def apply_rt_correction_to_target(main_db_path, target_atlas_info, best_model, rt_align_settings):
+def apply_rt_alignment_to_target(main_db_path: str, 
+                                 target_atlas_uid: str, 
+                                 best_model: dict, 
+                                 rt_align_settings: dict
+) -> Tuple[pd.DataFrame, List[Dict]]:
     
     # Get target atlas and compounds from master database
-    target_atlas_metadata_df = dbi.get_atlas_metadata_from_db(main_db_path, target_atlas_info['atlas_uid'])
-    target_compounds_df = dbi.get_atlas_compounds_table(main_db_path, target_atlas_info['atlas_uid'])
-    if target_atlas_metadata_df.empty or target_compounds_df.empty:
-        raise ValueError(f"Atlas {target_atlas_info['atlas_uid']} not found in master database")
+    target_compounds_df = dbi.get_atlas_compounds_table(main_db_path, target_atlas_uid)
+    if target_compounds_df.empty:
+        raise ValueError(f"Atlas {target_atlas_uid} not found in master database")
     else:
         logger.info("Successfully loaded target atlas metadata and compounds from database")
     compounds_verified = dbi.verify_compounds_exist_in_db(target_compounds_df['compound_uid'].tolist(), main_db_path)
     logger.debug(f"Compounds verified in database: {compounds_verified}")
     if compounds_verified is False:
-        logger.error("One or more compounds in target_compounds_df do not exist in the main database. Aborting RT-corrected atlas creation.")
+        logger.error("One or more compounds in target_compounds_df do not exist in the main database. Aborting RT-aligned atlas creation.")
         return None, []
     else:
-        logger.info(f"Loaded target atlas with {len(target_atlas_info)} compounds for RT correction")
+        logger.info(f"Loaded target atlas with {len(target_compounds_df)} compounds for RT alignment")
 
     # Ensure columns are float64 to avoid dtype warnings
-    rt_corrected_compounds_df = target_compounds_df.copy()
+    rt_aligned_compounds_df = target_compounds_df.copy()
     for col in ['rt_peak', 'rt_min', 'rt_max', 'rt_shift']:
-        if col in rt_corrected_compounds_df.columns:
-            rt_corrected_compounds_df[col] = rt_corrected_compounds_df[col].astype('float64')
+        if col in rt_aligned_compounds_df.columns:
+            rt_aligned_compounds_df[col] = rt_aligned_compounds_df[col].astype('float64')
         else:
-            rt_corrected_compounds_df[col] = np.nan
-            rt_corrected_compounds_df[col] = rt_corrected_compounds_df[col].astype('float64')
-    rt_corrected_compounds_df['rt_shift'] = 0.0
+            rt_aligned_compounds_df[col] = np.nan
+            rt_aligned_compounds_df[col] = rt_aligned_compounds_df[col].astype('float64')
+    rt_aligned_compounds_df['rt_shift'] = 0.0
 
-    correction_stats = []
+    alignment_stats = []
     for i, row in target_compounds_df.iterrows():
         compound_uid = row['compound_uid']
         original_rt_peak = row.get('rt_peak')
@@ -58,39 +62,68 @@ def apply_rt_correction_to_target(main_db_path, target_atlas_info, best_model, r
             logger.warning(f"Skipping compound {row.get('compound_name', 'Unknown')} - no RT peak data")
             continue
 
-        # Apply RT correction using the model
-        corrected_rt_peak = apply_rt_model([original_rt_peak], best_model)[0]
+        # Apply RT alignment using the model
+        aligned_rt_peak = apply_rt_model([original_rt_peak], best_model)[0]
         if rt_align_settings['apply_model_to_min_max'] and pd.notna(original_rt_min) and pd.notna(original_rt_max):
-            corrected_rt_min = apply_rt_model([original_rt_min], best_model)[0]
-            corrected_rt_max = apply_rt_model([original_rt_max], best_model)[0]
+            aligned_rt_min = apply_rt_model([original_rt_min], best_model)[0]
+            aligned_rt_max = apply_rt_model([original_rt_max], best_model)[0]
         else:
             original_window = None
             if pd.notna(original_rt_min) and pd.notna(original_rt_max):
                 original_window = original_rt_max - original_rt_min
             else:
                 original_window = 1.0  # Default 1-minute window
-            corrected_rt_min = corrected_rt_peak - original_window / 2
-            corrected_rt_max = corrected_rt_peak + original_window / 2
+            aligned_rt_min = aligned_rt_peak - original_window / 2
+            aligned_rt_max = aligned_rt_peak + original_window / 2
 
-        rt_shift = corrected_rt_peak - original_rt_peak
+        rt_shift = aligned_rt_peak - original_rt_peak
 
-        # Update the RT corrected DataFrame
-        rt_corrected_compounds_df.loc[i, 'rt_peak'] = float(corrected_rt_peak)
-        rt_corrected_compounds_df.loc[i, 'rt_min'] = float(corrected_rt_min)
-        rt_corrected_compounds_df.loc[i, 'rt_max'] = float(corrected_rt_max)
-        rt_corrected_compounds_df.loc[i, 'rt_shift'] = float(rt_shift)
+        # Update the RT aligned DataFrame
+        rt_aligned_compounds_df.loc[i, 'rt_peak'] = float(aligned_rt_peak)
+        rt_aligned_compounds_df.loc[i, 'rt_min'] = float(aligned_rt_min)
+        rt_aligned_compounds_df.loc[i, 'rt_max'] = float(aligned_rt_max)
+        rt_aligned_compounds_df.loc[i, 'rt_shift'] = float(rt_shift)
 
-        # Track correction statistics
-        correction_stats.append({
+        # Track alignment statistics
+        alignment_stats.append({
             'compound_name': row.get('compound_name'),
             'compound_inchi_key': row.get('inchi_key'),
             'compound_uid': compound_uid,
-            'corrected_rt': corrected_rt_peak,
+            'aligned_rt': aligned_rt_peak,
             'rt_shift': rt_shift
         })
 
-    logger.info(f"Returning RT corrected atlas with {len(rt_corrected_compounds_df)} compounds and stats for {len(correction_stats)} compounds")
-    return rt_corrected_compounds_df, correction_stats
+    logger.info(f"Returning RT aligned atlas with {len(rt_aligned_compounds_df)} compounds and stats for {len(alignment_stats)} compounds")
+    return rt_aligned_compounds_df, alignment_stats
+
+def calculate_model_values_from_existing(model_dict: Dict) -> Dict:
+    """
+    Reconstruct sklearn model objects from database values and calculate predictions and metrics.
+    """
+    metadata = model_dict.get('metadata', {})
+    
+    # Reconstruct PolynomialFeatures
+    poly_features = PolynomialFeatures(
+        degree=metadata.get('poly_degree', model_dict.get('degree', 1)),
+        include_bias=metadata.get('poly_include_bias', True),
+        interaction_only=metadata.get('poly_interaction_only', False)
+    )
+    
+    # Fit the PolynomialFeatures with dummy data matching expected input shape
+    dummy_X = np.array([[0]]).reshape(-1, 1)
+    poly_features.fit(dummy_X)
+    
+    # Reconstruct LinearRegression model
+    model = LinearRegression()
+    model.coef_ = np.array(metadata.get('model_coefficients', model_dict.get('coefficients', [])))
+    model.intercept_ = metadata.get('model_intercept', model_dict.get('intercept', 0.0))
+    
+    # Update model_dict with reconstructed objects
+    model_dict['poly_features'] = poly_features
+    model_dict['model'] = model
+    model_dict['intercept'] = model.intercept_
+    
+    return model_dict
 
 def build_polynomial_model(X, y, degree):
     """Build polynomial regression model."""
@@ -117,11 +150,11 @@ def build_polynomial_model(X, y, degree):
     }
 
 def apply_rt_model(atlas_rt_values, model_info):
-    """Apply RT correction model to Atlas RT values."""
+    """Apply RT alignment model to Atlas RT values."""
     X_new = np.array(atlas_rt_values).reshape(-1, 1)
     X_new_poly = model_info['poly_features'].transform(X_new)
-    corrected_rt = model_info['model'].predict(X_new_poly)
-    return corrected_rt
+    aligned_rt = model_info['model'].predict(X_new_poly)
+    return aligned_rt
 
 def format_polynomial_equation(model_info):
     """Format polynomial equation as string."""
@@ -130,15 +163,15 @@ def format_polynomial_equation(model_info):
     intercept = model_info['intercept']
     
     if degree == 1:
-        return f"RT_corrected = {intercept:.6f} + {coeffs[1]:.6f} * RT_atlas"
+        return f"RT_aligned = {intercept:.6f} + {coeffs[1]:.6f} * RT_atlas"
     elif degree == 2:
-        return f"RT_corrected = {intercept:.6f} + {coeffs[1]:.6f} * RT_atlas + {coeffs[2]:.6f} * RT_atlas^2"
+        return f"RT_aligned = {intercept:.6f} + {coeffs[1]:.6f} * RT_atlas + {coeffs[2]:.6f} * RT_atlas^2"
     elif degree == 3:
-        return f"RT_corrected = {intercept:.6f} + {coeffs[1]:.6f} * RT_atlas + {coeffs[2]:.6f} * RT_atlas^2 + {coeffs[3]:.6f} * RT_atlas³"
+        return f"RT_aligned = {intercept:.6f} + {coeffs[1]:.6f} * RT_atlas + {coeffs[2]:.6f} * RT_atlas^2 + {coeffs[3]:.6f} * RT_atlas³"
     else:
         return f"Polynomial degree {degree} (coefficients: {coeffs})"
 
-def visualize_RT_model(modeling_results_df: pd.DataFrame, best_model: dict, output_dir: str, rt_alignment_uid: str, save_plot: bool = True):
+def visualize_RT_model(modeling_results_df: pd.DataFrame, best_model: dict, output_dir: str, save_plot: bool = True):
 
     # Sort by Atlas RT before numbering and plotting
     modeling_results_df = modeling_results_df.sort_values('atlas_rt_peak').reset_index(drop=True)
@@ -212,13 +245,13 @@ def visualize_RT_model(modeling_results_df: pd.DataFrame, best_model: dict, outp
     table.set_fontsize(10)
     table.scale(1, 1.2)
 
-    plt.suptitle('RT Correction Model Validation', fontsize=16, fontweight='bold', y=1.02)
+    plt.suptitle('RT Alignment Model Validation', fontsize=16, fontweight='bold', y=1.02)
 
     if save_plot:
         # Save the plot as PDF
         plot_save_dir = Path(output_dir) / "rt_alignment_results"
         plot_save_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = plot_save_dir / f"summary-for-{rt_alignment_uid}.pdf"
+        pdf_path = plot_save_dir / f"summary-for-{best_model['rt_alignment_uid']}.pdf"
         plt.savefig(pdf_path, bbox_inches='tight')
         #plt.show()
         logger.info(f"Plot saved to {pdf_path}")
@@ -385,12 +418,21 @@ def extract_matches_from_qc_files(main_db_path: str,
         parquet_files=existing_parquet_files,
         ppm_tolerance=rt_align_settings['ppm_error'],
         extra_time=rt_align_settings['extra_time'],
-        use_parallel=True
+        use_parallel=True,
+        only_ms_level=1,
     )
+    parquet_results_with_summary = mss.create_ms_summaries(parquet_results, 
+                                                           only_ms_level=1)
+
+    # for inchi_key, file_data in parquet_results.items():
+    #     for file, ms_level_data in file_data.items():
+    #         for ms_level, df in ms_level_data.items():
+    #             if not df.empty:
+    #                 display(df.head(2))
 
     logger.info("Formatting results for RT alignment...")
     experimental_data = _format_parquet_results_for_rt_alignment(
-        parquet_results, 
+        parquet_results_with_summary, 
         atlas_dataframe
     )
 
@@ -548,30 +590,29 @@ def create_rt_alignment_summary(
     rtc_atlas_uid: str,
     rt_alignment_uid: str,
     rtc_atlas_name: str,
-    correction_stats: List[Dict],
+    alignment_stats: List[Dict],
 ) -> Dict:
     """
     Create RT alignment summary dictionary.
 
     Args:
-        rtc_atlas_name: Name of RT-corrected atlas
-        correction_stats: List of correction statistics
+        rtc_atlas_name: Name of RT-aligned atlas
+        alignment_stats: List of alignment statistics
 
     Returns:
         Dictionary with alignment summary
     """
-    rt_shifts = [stat['rt_shift'] for stat in correction_stats]
+    rt_shifts = [stat['rt_shift'] for stat in alignment_stats]
     summary = {
         'rt_alignment_uid': rt_alignment_uid,
         'rtc_atlas_name': rtc_atlas_name,
         'rtc_atlas_uid': rtc_atlas_uid,
-        'total_compounds': len(correction_stats),
-        'corrected_compounds': len(correction_stats),
-        #'correction_stats': correction_stats,
-        'mean_correction': np.mean(rt_shifts),
-        'std_correction': np.std(rt_shifts),
-        'min_correction': np.min(rt_shifts),
-        'max_correction': np.max(rt_shifts)
+        'total_compounds': len(alignment_stats),
+        'aligned_compounds': len(alignment_stats),
+        'mean_alignment': np.mean(rt_shifts),
+        'std_alignment': np.std(rt_shifts),
+        'min_alignment': np.min(rt_shifts),
+        'max_alignment': np.max(rt_shifts)
     }
     
     return summary

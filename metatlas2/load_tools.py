@@ -6,7 +6,7 @@ import getpass
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
@@ -90,45 +90,62 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
     
     # Validate WORKFLOWS section structure
     workflows = config['WORKFLOWS']
-    for workflow_name, workflow_config in workflows.items():
-        # Validate RT_ALIGN section if present
-        if 'RT_ALIGN' in workflow_config:
-            rt_align = workflow_config['RT_ALIGN']
-            if 'ATLAS' not in rt_align or 'uid' not in rt_align['ATLAS']:
-                raise ValueError(f"RT_ALIGN section in {workflow_name} missing ATLAS uid")
-            
-            # # Validate and convert RT alignment parameters
-            # if 'PARAMS' in rt_align:
-            #     params = rt_align['PARAMS']
-            #     params['ppm_error'] = float(params.get('ppm_error', 20.0))
-            #     params['extra_time'] = float(params.get('extra_time', 1.0))
-            #     params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
-            #     params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
-            #     params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
-            #     params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
-            #     params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
-        
-        # Validate ANALYSES section
-        if 'ANALYSES' in workflow_config:
-            analyses = workflow_config['ANALYSES']
-            for analysis_name, analysis_config in analyses.items():
-                for polarity in ['POS', 'NEG']:
-                    if polarity in analysis_config:
-                        pol_config = analysis_config[polarity]
-                        if 'ATLAS' not in pol_config or 'uid' not in pol_config['ATLAS']:
-                            raise ValueError(f"Analysis {analysis_name} {polarity} missing ATLAS uid")
-                        
-                        # # Validate and convert analysis parameters
-                        # if 'PARAMS' in pol_config:
-                        #     params = pol_config['PARAMS']
-                        #     params['default_ppm_error'] = float(params.get('default_ppm_error', 5.0))
-                        #     params['min_peak_intensity'] = float(params.get('min_peak_intensity', 100000.0))
-                        #     params['extra_time'] = float(params.get('extra_time', 0.0))
-                        #     params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
-                        #     params['ms2_min_matches'] = int(params.get('ms2_min_matches', 2))
-                        #     params['use_rt_correction_cache'] = bool(params.get('use_rt_correction_cache', False))
-                        #     params['use_id_search_cache'] = bool(params.get('use_id_search_cache', False))
-                        #     params['use_manual_curation_cache'] = bool(params.get('use_manual_curation_cache', False))
+    
+    # Validate RT_ALIGNMENT section if present
+    if 'RT_ALIGNMENT' in workflows:
+        rt_alignment = workflows['RT_ALIGNMENT']
+        for chromatography, chrom_config in rt_alignment.items():
+            for polarity, pol_config in chrom_config.items():
+                if 'ATLAS' not in pol_config:
+                    raise ValueError(f"RT_ALIGNMENT {chromatography}/{polarity} missing ATLAS section")
+                
+                # Check for uid field but allow None/empty
+                if 'uid' not in pol_config['ATLAS']:
+                    raise ValueError(f"RT_ALIGNMENT {chromatography}/{polarity} missing ATLAS uid field")
+                
+                # Convert uid to string or None
+                uid = pol_config['ATLAS']['uid']
+                pol_config['ATLAS']['uid'] = str(uid) if uid else None
+                
+                # Validate and convert RT alignment parameters if present
+                if 'PARAMS' in pol_config:
+                    params = pol_config['PARAMS']
+                    params['ppm_error'] = float(params.get('ppm_error', 20.0))
+                    params['extra_time'] = float(params.get('extra_time', 1.0))
+                    params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
+                    params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
+                    params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
+                    params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
+                    params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
+                    params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
+    
+    # Validate TARGETED_ANALYSIS section if present
+    if 'TARGETED_ANALYSIS' in workflows:
+        targeted = workflows['TARGETED_ANALYSIS']
+        for chromatography, chrom_config in targeted.items():
+            for polarity, pol_config in chrom_config.items():
+                for analysis_name, analysis_config in pol_config.items():
+                    if 'ATLAS' not in analysis_config:
+                        raise ValueError(f"TARGETED_ANALYSIS {chromatography}/{polarity}/{analysis_name} missing ATLAS section")
+                    
+                    # Check for uid field but allow None/empty
+                    if 'uid' not in analysis_config['ATLAS']:
+                        raise ValueError(f"TARGETED_ANALYSIS {chromatography}/{polarity}/{analysis_name} missing ATLAS uid field")
+                    
+                    # Convert uid to string or None
+                    uid = analysis_config['ATLAS']['uid']
+                    analysis_config['ATLAS']['uid'] = str(uid) if uid else None
+                    
+                    # Validate and convert analysis parameters if present
+                    if 'PARAMS' in analysis_config:
+                        params = analysis_config['PARAMS']
+                        params['use_existing_hits'] = bool(params.get('use_existing_hits', False))
+                        params['use_existing_analysis'] = bool(params.get('use_existing_analysis', False))
+                        params['default_ppm_error'] = float(params.get('default_ppm_error', 5.0))
+                        params['min_peak_intensity'] = float(params.get('min_peak_intensity', 100000.0))
+                        params['extra_time'] = float(params.get('extra_time', 0.0))
+                        params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
+                        params['ms2_min_matches'] = int(params.get('ms2_min_matches', 1))
     
     # Add config path for reference
     config['ENV']['PATHS']['config_path'] = str(Path(config_path).resolve())
@@ -156,6 +173,38 @@ def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
         if path_key not in atlas_config['ENV']['PATHS']:
             raise ValueError(f"Missing required path: {path_key}")
 
+    # Validate ATLASES section structure
+    atlases = atlas_config['ATLASES']
+    
+    for chromatography, chrom_config in atlases.items():
+        if not isinstance(chrom_config, dict):
+            raise ValueError(f"Invalid chromatography configuration for {chromatography}")
+        
+        for polarity, pol_config in chrom_config.items():
+            if not isinstance(pol_config, dict):
+                raise ValueError(f"Invalid polarity configuration for {chromatography}/{polarity}")
+            
+            for atlas_type, atlas_info in pol_config.items():
+                if not isinstance(atlas_info, dict):
+                    raise ValueError(f"Invalid atlas configuration for {chromatography}/{polarity}/{atlas_type}")
+                
+                # Check for required atlas fields (path, name, desc) but allow None/empty
+                required_atlas_fields = ['path', 'name', 'desc']
+                for field in required_atlas_fields:
+                    if field not in atlas_info:
+                        raise ValueError(f"Missing required field '{field}' in {chromatography}/{polarity}/{atlas_type}")
+                
+                # Convert to strings and handle None/empty values
+                atlas_info['path'] = str(atlas_info['path']) if atlas_info['path'] else None
+                atlas_info['name'] = str(atlas_info['name']) if atlas_info['name'] else None
+                atlas_info['desc'] = str(atlas_info['desc']) if atlas_info['desc'] else None
+                
+                # Only check file existence if path is not None
+                if atlas_info['path'] and not Path(atlas_info['path']).exists():
+                    logger.warning(f"Atlas file not found: {atlas_info['path']} for {chromatography}/{polarity}/{atlas_type}")
+
+    logger.info(f"Loaded atlas configuration from {atlas_config_path}")
+    
     return atlas_config
 
 def load_compound_config(compound_config_path: str) -> Dict[str, Any]:
@@ -178,13 +227,6 @@ def load_compound_config(compound_config_path: str) -> Dict[str, Any]:
             raise ValueError(f"Missing required path: {path_key}")
 
     return compound_config
-
-    required_fields = ['ENV', 'ATLASES']
-    for field in required_fields:
-        if field not in atlas_config:
-            raise ValueError(f"Missing required atlas configuration field: {field}")
-
-    return atlas_config
 
 def get_provenance():
     """Get provenance information for database records."""

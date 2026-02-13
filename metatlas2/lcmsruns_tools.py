@@ -1,5 +1,4 @@
 import sys
-from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import List
 
@@ -18,7 +17,7 @@ def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None
         file_type: Type of file ('parquet', 'raw', 'mzML')
         files_dict: Dictionary to populate with organized files
     """
-    for file_path in tqdm(files, desc=f"Organizing {file_type} files"):
+    for file_path in files:
         filename = file_path.name
         
         # Infer chromatography from filename

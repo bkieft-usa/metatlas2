@@ -28,11 +28,11 @@ def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str,
     
     Args:
         experimental_data: Data returned from extract_eic_and_ms2_from_parquet()
-            Format: {inchi_key: {filename: {'ms1_data': df, 'ms2_data': df, 'ms1_summary': df}}}
+            Format: {inchi_key: {filename: {'ms1_data': df, 'ms2_data': df}}}
         config: Configuration dictionary
         
     Returns:
-        Updated experimental_data with 'ms2_hits' and 'ms2_summary' DataFrames added
+        Updated experimental_data with 'ms2_hits' dataframe added
     """
     # Load reference database
     msms_refs_path = Path(config["ENV"]["PATHS"]["msms_refs"])
@@ -236,80 +236,14 @@ def _process_compound_hits(hit_input: Dict, reference_df: pd.DataFrame, config: 
         ms2_df = file_data.get('ms2_data', pd.DataFrame())
         
         if ms2_df.empty:
-            # Create empty DataFrames for consistency
             file_data['ms2_hits'] = pd.DataFrame()
-            file_data['ms2_summary'] = pd.DataFrame()
             continue
         
         # Find hits directly from ms2_data DataFrame
         ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df, config)
         file_data['ms2_hits'] = ms2_hits_df
-        
-        # Create ms2_summary DataFrame
-        ms2_summary_df = _create_ms2_summary(ms2_df, ms2_hits_df)
-        file_data['ms2_summary'] = ms2_summary_df
     
     return {'inchi_key': inchi_key, 'file_results': file_results}
-
-
-def _create_ms2_summary(ms2_df: pd.DataFrame, ms2_hits_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Create summary statistics for MS2 data and hits.
-    
-    Returns DataFrame with one row containing summary statistics.
-    """
-    if ms2_df.empty:
-        return pd.DataFrame()
-    
-    # Group ms2_data by RT to count scans
-    num_scans = ms2_df['rt'].nunique() if not ms2_df.empty else 0
-    num_fragments = len(ms2_df) if not ms2_df.empty else 0
-    
-    # Get best MS2 scan (highest precursor intensity)
-    if not ms2_df.empty:
-        best_scan_idx = ms2_df.groupby('rt')['precursor_intensity'].first().idxmax()
-        best_scan_data = ms2_df[ms2_df['rt'] == best_scan_idx].iloc[0]
-        best_ms2_rt = float(best_scan_data['rt'])
-        best_ms2_mz = float(best_scan_data['precursor_MZ'])
-        best_ms2_intensity = float(best_scan_data['precursor_intensity'])
-    else:
-        best_ms2_rt = 0.0
-        best_ms2_mz = 0.0
-        best_ms2_intensity = 0.0
-    
-    # Get best hit if available
-    if not ms2_hits_df.empty:
-        best_hit_idx = ms2_hits_df['score'].idxmax()
-        best_hit = ms2_hits_df.loc[best_hit_idx]
-        num_hits = len(ms2_hits_df)
-        best_hit_score = float(best_hit['score'])
-        best_hit_database = str(best_hit['database'])
-        best_hit_ref_id = str(best_hit['ref_id'])
-        best_hit_ref_name = str(best_hit['ref_name'])
-        best_hit_num_matches = int(best_hit['num_matches'])
-    else:
-        num_hits = 0
-        best_hit_score = 0.0
-        best_hit_database = ''
-        best_hit_ref_id = ''
-        best_hit_ref_name = ''
-        best_hit_num_matches = 0
-    
-    summary_data = {
-        'num_scans': num_scans,
-        'num_fragments': num_fragments,
-        'best_ms2_rt': best_ms2_rt,
-        'best_ms2_mz': best_ms2_mz,
-        'best_ms2_intensity': best_ms2_intensity,
-        'num_hits': num_hits,
-        'best_hit_score': best_hit_score,
-        'best_hit_database': best_hit_database,
-        'best_hit_ref_id': best_hit_ref_id,
-        'best_hit_ref_name': best_hit_ref_name,
-        'best_hit_num_matches': best_hit_num_matches
-    }
-    
-    return pd.DataFrame([summary_data])
 
 
 def _align_spectra_for_plotting(query_spectrum: np.ndarray, ref_spectrum: np.ndarray, 

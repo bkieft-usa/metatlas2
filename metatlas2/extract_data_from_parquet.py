@@ -36,6 +36,7 @@ def extract_eic_and_ms2_from_parquet(
     ppm_tolerance: float = 20.0,
     extra_time: float = 0.1,
     use_parallel: bool = True,
+    only_ms_level: int = None,
     max_workers: int = None
 ) -> Dict[str, Dict]:
     """
@@ -48,6 +49,7 @@ def extract_eic_and_ms2_from_parquet(
         ppm_tolerance: m/z tolerance in ppm
         extra_time: Extra RT time to extract beyond feature bounds
         use_parallel: Whether to use parallel processing (default: True)
+        only_ms_level: If specified, only extract data for this MS level (1 or 2)
         max_workers: Maximum number of parallel workers (default: min(cpu_count, len(files), 8))
     
     Returns:
@@ -55,7 +57,6 @@ def extract_eic_and_ms2_from_parquet(
         Dict for each file is in the format:
         {
             'ms1_data': DataFrame with columns [label, rt, mz, i, in_feature],
-            'ms1_summary': DataFrame with summary stats for MS1 data,
             'ms2_data': DataFrame with columns [label, rt, mz, i, precursor_MZ, precursor_intensity, collision_energy, in_feature]
         }
     """
@@ -82,7 +83,7 @@ def extract_eic_and_ms2_from_parquet(
             futures = []
             for parquet_file in parquet_files:
                 future = executor.submit(_process_single_parquet_file, 
-                                        parquet_file, atlas_df, ppm_tolerance, extra_time)
+                                        parquet_file, atlas_df, ppm_tolerance, extra_time, only_ms_level)
                 futures.append((future, parquet_file))
             
             # Collect results
@@ -91,8 +92,8 @@ def extract_eic_and_ms2_from_parquet(
                     file_results = future.result()
                     
                     # Merge file results into main results
-                    for label, file_data in file_results.items():
-                        results[label].update(file_data)
+                    for inchi_key, file_data in file_results.items():
+                        results[inchi_key].update(file_data)
                                         
                 except Exception as e:
                     logger.error(f"Error processing {parquet_file}: {e}")
@@ -103,28 +104,23 @@ def extract_eic_and_ms2_from_parquet(
         for parquet_file in tqdm(parquet_files, desc="Processing parquet files"):
             try:
                 file_results = _process_single_parquet_file(
-                    parquet_file, atlas_df, ppm_tolerance, extra_time
+                    parquet_file, atlas_df, ppm_tolerance, extra_time, only_ms_level
                 )
                 
                 # Merge file results into main results
-                for label, file_data in file_results.items():
-                    results[label].update(file_data)
+                for inchi_key, file_data in file_results.items():
+                    results[inchi_key].update(file_data)
                 
             except Exception as e:
                 logger.error(f"Error processing {parquet_file}: {e}")
                 continue
-    
-    logger.debug("Data extraction results:")
-    for label, file_data in results.items():
-        logger.debug(f"  {label}: {len(file_data)}/{len(parquet_files)} files with data")
+
     return results
 
 
 def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame, 
-                                  ppm_tolerance: float, extra_time: float) -> Dict[str, Dict]:
-    """Process a single parquet file - worker function for parallel processing."""
-    results = {}
-    
+                                  ppm_tolerance: float, extra_time: float, only_ms_level: int = None) -> Dict[str, Dict]:
+    """Process a single parquet file - worker function for parallel processing."""    
     # Determine if this is MS1 or MS2 from filename
     filename = Path(parquet_file).name
     is_ms1 = filename.endswith('_ms1_pos.parquet') or filename.endswith('_ms1_neg.parquet')
@@ -138,9 +134,11 @@ def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame,
         raise FileNotFoundError(f"Parquet file not found: {parquet_file}")
     
     # Extract features for each compound
+    results = {}
     for _, row in atlas_df.iterrows():
         label = row.get('label', '')
         inchi_key = row.get('inchi_key', '')
+        results[inchi_key] = {}
         
         if not inchi_key:
             logger.warning(f"Missing inchi_key for label {label}")
@@ -148,12 +146,11 @@ def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame,
         
         compound_data = {
             'ms1_data': pd.DataFrame(),
-            'ms1_summary': pd.DataFrame(),
             'ms2_data': pd.DataFrame()
         }
         
         # Extract MS1 data
-        if is_ms1:
+        if is_ms1 and (only_ms_level is None or only_ms_level == 1):
             ms1_data = extract_ms1_from_parquet(
                 parquet_file,
                 label=label,
@@ -165,17 +162,9 @@ def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame,
             )
             ms1_data = ms1_data.sort_values(by=['rt', 'i'], ascending=[True, False]).reset_index(drop=True)
             compound_data['ms1_data'] = ms1_data
-            
-            # Calculate summary
-            if not ms1_data.empty:
-                ms1_summary = calculate_ms1_summary(ms1_data, feature_filter=True).reset_index(drop=True)
-                if ms1_summary.shape[0] == 0:
-                    for c in ['num_datapoints', 'peak_area', 'peak_height', 'mz_centroid', 'rt_peak']:
-                        ms1_summary[c] = 0
-                compound_data['ms1_summary'] = ms1_summary
         
         # Extract MS2 data
-        elif is_ms2:
+        elif is_ms2 and (only_ms_level is None or only_ms_level == 2):
             ms2_data = extract_ms2_from_parquet(
                 parquet_file,
                 label=label,
@@ -188,11 +177,8 @@ def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame,
             # sort by rt, then mz within rt
             ms2_data = ms2_data.sort_values(by=['rt', 'mz'], ascending=[True, True]).reset_index(drop=True)
             compound_data['ms2_data'] = ms2_data
-            
-        
-        # Store results for this inchi_key
-        if inchi_key not in results:
-            results[inchi_key] = {}
+
+        # Store results for this inchi_key and file
         results[inchi_key][parquet_file] = compound_data
     
     return results
@@ -307,41 +293,3 @@ def extract_ms2_from_parquet(
     
     return df[['label', 'rt', 'mz', 'i', 'precursor_MZ', 
                'precursor_intensity', 'collision_energy', 'in_feature']]
-
-
-def calculate_ms1_summary(df: pd.DataFrame, feature_filter: bool = True) -> pd.DataFrame:
-    """
-    Calculate summary properties for features from MS1 data.
-    Use feature_filter=False to keep unmatched data
-    """
-    summary = {
-        'label': [],
-        'num_datapoints': [], 
-        'peak_area': [], 
-        'peak_height': [], 
-        'mz_centroid': [],
-        'rt_peak': []
-    }
-        
-    if feature_filter:
-        df = df[df['in_feature'] == True]
-
-    for label_group, label_data in df.groupby('label'):
-        summary['label'].append(label_group)
-        summary['num_datapoints'].append(label_data['i'].count())
-        sum_intensity = label_data['i'].sum()
-        summary['peak_area'].append(sum_intensity)
-        
-        if sum_intensity > 0:
-            idx = label_data['i'].idxmax()
-            summary['peak_height'].append(label_data.loc[idx, 'i'])
-            summary['mz_centroid'].append(sum(label_data['i'] * label_data['mz']) / sum_intensity)
-            summary['rt_peak'].append(label_data.loc[idx, 'rt'])
-        else:
-            summary['peak_height'].append(0.0)
-            summary['mz_centroid'].append(0.0)
-            summary['rt_peak'].append(0.0)
-
-    return pd.DataFrame(summary)
-
-

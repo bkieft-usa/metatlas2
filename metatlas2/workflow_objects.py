@@ -5,10 +5,12 @@ from enum import Enum
 from datetime import datetime
 import sys
 import json
-import pickle
 import numpy as np
 import pandas as pd
 import shutil
+
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
@@ -24,467 +26,10 @@ logger = lcf.get_logger('workflow_objects')
 class WorkflowStage(Enum):
     """Enumeration of workflow stages"""
     PROJECT_SETUP = "project_setup"
-    RT_CORRECTION = "rt_correction" 
-    PUTATIVE_IDENTIFICATION = "putative_identification"
+    RT_ALIGNMENT = "rt_alignment" 
+    AUTO_IDENTIFICATION = "auto_identification"
     MANUAL_CURATION = "manual_curation"
     FINAL_REPORT = "final_report"
-
-# =============================================================================
-# Cache Manager (Centralized cache handling for all workflow stages)
-# =============================================================================
-
-class CacheManager:
-    """
-    Centralized cache manager for all workflow stages.
-    Handles RT Correction, Putative Identifications, and Manual Curation caching.
-    """
-    
-    def __init__(self, project_directory: str, config: Dict[str, Any] = None):
-        """
-        Initialize cache manager for a project.
-        
-        Args:
-            project_directory: Path to the project directory
-            config: Configuration dictionary with cache settings
-        """
-        self.project_directory = Path(project_directory)
-        self.cache_base_dir = self.project_directory / "cache"
-        self.config = config or {}
-        
-        # Define cache directories for each stage
-        self.rt_correction_dir = self.cache_base_dir / "rt_correction"
-        self.putative_ids_dir = self.cache_base_dir / "putative_ids"
-        self.manual_curation_dir = self.cache_base_dir / "manual_curation"
-        
-        # Create cache directories
-        self._setup_cache_directories()
-    
-    def _setup_cache_directories(self):
-        """Create cache directory structure."""
-        for cache_dir in [self.rt_correction_dir, self.putative_ids_dir, self.manual_curation_dir]:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # =============================================================================
-    # RT CORRECTION CACHING
-    # =============================================================================
-    
-    def save_rt_correction(self, rt_models: Dict, corrected_atlases: Dict) -> str:
-        """
-        Save RT correction results to cache.
-        
-        Args:
-            rt_models: Dictionary of RT correction models by method
-            corrected_atlases: Dictionary of corrected atlas UIDs by type/method
-            
-        Returns:
-            timestamp of saved cache
-        """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        cache_data = {
-            'rt_models': rt_models,
-            'corrected_atlases': corrected_atlases,
-            'timestamp': timestamp,
-            'cache_version': '2.0',
-            'stage': 'rt_correction'
-        }
-        
-        # Save timestamped version
-        cache_file = self.rt_correction_dir / f"rt_correction_{timestamp}.pkl"
-        metadata_file = self.rt_correction_dir / f"rt_correction_{timestamp}.json"
-        
-        try:
-            # Save cache data
-            with open(cache_file, 'wb') as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            # Save metadata
-            metadata = {
-                'timestamp': timestamp,
-                'stage': 'rt_correction',
-                'cache_version': '2.0',
-                'rt_models_count': len(rt_models),
-                'corrected_atlases_count': sum(
-                    len(chroms) for atlas_chroms in corrected_atlases.values()
-                    for chroms in atlas_chroms.values()
-                ),
-                'methods': list(rt_models.keys())
-            }
-            
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2, default=str)
-            
-            # Update latest symlinks
-            self._update_latest_symlinks(self.rt_correction_dir, "rt_correction", timestamp)
-            
-            logger.info(f"RT correction cache saved: {cache_file}")
-            logger.info(f"  Models: {len(rt_models)} methods")
-            logger.info(f"  Corrected atlases: {metadata['corrected_atlases_count']}")
-            
-            return timestamp
-            
-        except Exception as e:
-            logger.error(f"Failed to save RT correction cache: {e}")
-            raise
-    
-    def load_rt_correction(self, timestamp: Optional[str] = None) -> Optional[Dict]:
-        """
-        Load RT correction results from cache.
-        
-        Args:
-            timestamp: Specific timestamp to load, or None for latest
-            
-        Returns:
-            Dictionary with rt_models and corrected_atlases, or None if not found
-        """
-        
-        if timestamp:
-            cache_file = self.rt_correction_dir / f"rt_correction_{timestamp}.pkl"
-        else:
-            cache_file = self.rt_correction_dir / "rt_correction_latest.pkl"
-        
-        if not cache_file.exists():
-            logger.info("No RT correction cache found")
-            return None
-        
-        try:
-            with open(cache_file, 'rb') as f:
-                cache_data = pickle.load(f)
-            
-            logger.info(f"Loaded RT correction cache from {cache_data.get('timestamp', 'unknown')}")
-            logger.info(f"  Models: {len(cache_data.get('rt_models', {}))}")
-            logger.info(f"  Corrected atlases: {cache_data.get('corrected_atlases', {})}")
-            
-            return cache_data
-            
-        except Exception as e:
-            logger.error(f"Failed to load RT correction cache: {e}")
-            return None
-    
-    def has_rt_correction_cache(self) -> bool:
-        """Check if RT correction cache exists."""
-        return (self.rt_correction_dir / "rt_correction_latest.pkl").exists()
-    
-    # =============================================================================
-    # PUTATIVE IDENTIFICATIONS CACHING
-    # =============================================================================
-    
-    def save_putative_identifications(self, putative_ids: Dict, summary_stats: Dict = None) -> str:
-        """
-        Save putative identification results to cache.
-        
-        Args:
-            putative_ids: Dictionary of putative identifications by atlas type and method
-            summary_stats: Optional summary statistics
-            
-        Returns:
-            timestamp of saved cache
-        """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        cache_data = {
-            'putative_ids': putative_ids,
-            'summary_stats': summary_stats,
-            'timestamp': timestamp,
-            'cache_version': '2.0',
-            'stage': 'putative_identifications'
-        }
-        
-        # Save timestamped version
-        cache_file = self.putative_ids_dir / f"putative_ids_{timestamp}.pkl"
-        metadata_file = self.putative_ids_dir / f"putative_ids_{timestamp}.json"
-        
-        try:
-            # Save cache data
-            with open(cache_file, 'wb') as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            # Calculate metadata
-            total_ids = sum(
-                len(method_ids) for atlas_methods in putative_ids.values()
-                for method_ids in atlas_methods.values()
-            )
-            
-            # Save metadata
-            metadata = {
-                'timestamp': timestamp,
-                'stage': 'putative_identifications',
-                'cache_version': '2.0',
-                'total_putative_ids': total_ids,
-                'by_atlas_type': {
-                    atlas_type: sum(len(method_ids) for method_ids in methods.values())
-                    for atlas_type, methods in putative_ids.items()
-                },
-                'atlas_methods': {
-                    atlas_type: list(methods.keys())
-                    for atlas_type, methods in putative_ids.items()
-                }
-            }
-            
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2, default=str)
-            
-            # Update latest symlinks
-            self._update_latest_symlinks(self.putative_ids_dir, "putative_ids", timestamp)
-            
-            logger.info(f"Putative identifications cache saved: {cache_file}")
-            
-            return timestamp
-            
-        except Exception as e:
-            logger.error(f"Failed to save putative identifications cache: {e}")
-            raise
-    
-    def load_putative_identifications(self, timestamp: Optional[str] = None) -> Optional[Dict]:
-        """
-        Load putative identification results from cache.
-        
-        Args:
-            timestamp: Specific timestamp to load, or None for latest
-            
-        Returns:
-            Dictionary with putative_ids and summary_stats, or None if not found
-        """
-        
-        if timestamp:
-            cache_file = self.putative_ids_dir / f"putative_ids_{timestamp}.pkl"
-        else:
-            cache_file = self.putative_ids_dir / "putative_ids_latest.pkl"
-        
-        if not cache_file.exists():
-            logger.info("No putative identifications cache found")
-            return None
-        
-        try:
-            with open(cache_file, 'rb') as f:
-                cache_data = pickle.load(f)
-            
-            total_ids = sum(
-                len(method_ids) for atlas_methods in cache_data.get('putative_ids', {}).values()
-                for method_ids in atlas_methods.values()
-            )
-            
-            logger.info(f"Loaded putative identifications cache from {cache_data.get('timestamp', 'unknown')}")
-            logger.info(f"  Total identifications: {total_ids}")
-            
-            return cache_data
-            
-        except Exception as e:
-            logger.error(f"Failed to load putative identifications cache: {e}")
-            return None
-    
-    def has_putative_identifications_cache(self) -> bool:
-        """Check if putative identifications cache exists."""
-        return (self.putative_ids_dir / "putative_ids_latest.pkl").exists()
-    
-    # =============================================================================
-    # MANUAL CURATION CACHING
-    # =============================================================================
-    
-    def save_manual_curation(self, putative_ids: Dict, curation_progress: Dict = None, 
-                           partial_save: bool = False) -> str:
-        """
-        Save manual curation results to cache.
-        Supports partial saves during curation process.
-        
-        Args:
-            putative_ids: Dictionary of curated putative identifications
-            curation_progress: Progress tracking information
-            partial_save: Whether this is a partial save during curation
-            
-        Returns:
-            timestamp of saved cache
-        """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        cache_data = {
-            'putative_ids': putative_ids,
-            'curation_progress': curation_progress,
-            'timestamp': timestamp,
-            'cache_version': '2.0',
-            'stage': 'manual_curation',
-            'partial_save': partial_save,
-            'completed': not partial_save
-        }
-        
-        # Use different naming for partial saves
-        if partial_save:
-            cache_file = self.manual_curation_dir / f"curation_partial_{timestamp}.pkl"
-            metadata_file = self.manual_curation_dir / f"curation_partial_{timestamp}.json"
-        else:
-            cache_file = self.manual_curation_dir / f"curation_{timestamp}.pkl"
-            metadata_file = self.manual_curation_dir / f"curation_{timestamp}.json"
-        
-        try:
-            # Save cache data
-            with open(cache_file, 'wb') as f:
-                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            # Calculate curation statistics
-            all_ids = []
-            for atlas_methods in putative_ids.values():
-                for method_ids in atlas_methods.values():
-                    all_ids.extend(method_ids)
-            
-            curation_stats = {
-                'pending': sum(1 for pid in all_ids if pid.curation_status == 'pending'),
-                'reviewed': sum(1 for pid in all_ids if pid.curation_status == 'reviewed'),
-                'finalized': sum(1 for pid in all_ids if pid.curation_status == 'finalized'),
-                'rt_modified': sum(1 for pid in all_ids if pid.is_rt_modified),
-                'annotation_modified': sum(1 for pid in all_ids if pid.is_annotation_modified)
-            }
-            
-            # Save metadata
-            metadata = {
-                'timestamp': timestamp,
-                'stage': 'manual_curation',
-                'cache_version': '2.0',
-                'partial_save': partial_save,
-                'completed': not partial_save,
-                'total_identifications': len(all_ids),
-                'curation_stats': curation_stats,
-                'progress_percent': ((curation_stats['reviewed'] + curation_stats['finalized']) / len(all_ids) * 100) if all_ids else 0
-            }
-            
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2, default=str)
-            
-            # Update latest symlinks (always update, even for partial saves)
-            self._update_latest_symlinks(self.manual_curation_dir, "curation", timestamp)
-            
-            save_type = "partial" if partial_save else "complete"
-            logger.info(f"Manual curation cache saved ({save_type}): {cache_file}")
-            logger.info(f"  Progress: {metadata['progress_percent']:.1f}%")
-            logger.info(f"  Curation stats: {curation_stats}")
-            
-            return timestamp
-            
-        except Exception as e:
-            logger.error(f"Failed to save manual curation cache: {e}")
-            raise
-    
-    def load_manual_curation(self, timestamp: Optional[str] = None, 
-                           prefer_partial: bool = True) -> Optional[Dict]:
-        """
-        Load manual curation results from cache.
-        
-        Args:
-            timestamp: Specific timestamp to load, or None for latest
-            prefer_partial: If True, prefer partial saves over complete ones when loading latest
-            
-        Returns:
-            Dictionary with putative_ids and curation_progress, or None if not found
-        """
-        # Check if manual curation caching is enabled
-        use_cache = self.config.get("analysis_settings", {}).get("use_manual_curation_cache", False)
-        if not use_cache:
-            logger.info("Manual curation caching disabled in config - skipping cache load")
-            return None
-        
-        if timestamp:
-            # Try both partial and complete versions for specific timestamp
-            cache_file = self.manual_curation_dir / f"curation_{timestamp}.pkl"
-            if not cache_file.exists():
-                cache_file = self.manual_curation_dir / f"curation_partial_{timestamp}.pkl"
-        else:
-            # Load latest - check for partial saves first if preferred
-            if prefer_partial:
-                # Find latest partial save
-                partial_files = list(self.manual_curation_dir.glob("curation_partial_*.pkl"))
-                complete_files = list(self.manual_curation_dir.glob("curation_[0-9]*.pkl"))
-                
-                all_files = partial_files + complete_files
-                if all_files:
-                    # Sort by timestamp in filename and get most recent
-                    latest_file = max(all_files, key=lambda f: f.stem.split('_')[-1])
-                    cache_file = latest_file
-                else:
-                    cache_file = self.manual_curation_dir / "curation_latest.pkl"
-            else:
-                cache_file = self.manual_curation_dir / "curation_latest.pkl"
-        
-        if not cache_file.exists():
-            logger.info("No manual curation cache found")
-            return None
-        
-        try:
-            with open(cache_file, 'rb') as f:
-                cache_data = pickle.load(f)
-            
-            # Calculate current progress
-            all_ids = []
-            for atlas_methods in cache_data.get('putative_ids', {}).values():
-                for method_ids in atlas_methods.values():
-                    all_ids.extend(method_ids)
-            
-            reviewed_count = sum(1 for pid in all_ids if pid.curation_status in ['reviewed', 'finalized'])
-            progress_percent = (reviewed_count / len(all_ids) * 100) if all_ids else 0
-            
-            save_type = "partial" if cache_data.get('partial_save', False) else "complete"
-            logger.info(f"Loaded manual curation cache ({save_type}) from {cache_data.get('timestamp', 'unknown')}")
-            logger.info(f"  Total identifications: {len(all_ids)}")
-            logger.info(f"  Progress: {progress_percent:.1f}%")
-            
-            return cache_data
-            
-        except Exception as e:
-            logger.error(f"Failed to load manual curation cache: {e}")
-            return None
-    
-    def has_manual_curation_cache(self) -> bool:
-        """Check if manual curation cache exists (including partial saves)."""
-        latest_exists = (self.manual_curation_dir / "curation_latest.pkl").exists()
-        partial_exists = len(list(self.manual_curation_dir.glob("curation_partial_*.pkl"))) > 0
-        return latest_exists or partial_exists
-    
-    def auto_save_curation_progress(self, putative_ids: Dict, interval_minutes: int = 5) -> None:
-        """
-        Auto-save curation progress at regular intervals.
-        This would be called periodically during the GUI curation process.
-        
-        Args:
-            putative_ids: Current state of putative identifications
-            interval_minutes: How often to auto-save
-        """
-        # Check if enough time has passed since last auto-save
-        last_autosave_file = self.manual_curation_dir / ".last_autosave"
-        
-        should_save = True
-        if last_autosave_file.exists():
-            try:
-                last_save_time = datetime.fromisoformat(last_autosave_file.read_text().strip())
-                time_since_save = (datetime.now() - last_save_time).total_seconds() / 60
-                should_save = time_since_save >= interval_minutes
-            except Exception:
-                should_save = True
-        
-        if should_save:
-            try:
-                self.save_manual_curation(putative_ids, partial_save=True)
-                last_autosave_file.write_text(datetime.now().isoformat())
-                logger.debug("Auto-saved curation progress")
-            except Exception as e:
-                logger.error(f"Auto-save failed: {e}")
-    
-    def _update_latest_symlinks(self, cache_dir: Path, prefix: str, timestamp: str) -> None:
-        """Update latest symlinks for a cache type."""
-        latest_pkl = cache_dir / f"{prefix}_latest.pkl"
-        latest_json = cache_dir / f"{prefix}_latest.json"
-        
-        target_pkl = f"{prefix}_{timestamp}.pkl"
-        target_json = f"{prefix}_{timestamp}.json"
-        
-        # Handle partial saves for manual curation
-        if prefix == "curation" and (cache_dir / f"curation_partial_{timestamp}.pkl").exists():
-            target_pkl = f"curation_partial_{timestamp}.pkl"
-            target_json = f"curation_partial_{timestamp}.json"
-        
-        # Update symlinks
-        for latest_file, target_file in [(latest_pkl, target_pkl), (latest_json, target_json)]:
-            if latest_file.exists():
-                latest_file.unlink()
-            if (cache_dir / target_file).exists():
-                latest_file.symlink_to(target_file)
 
 # =============================================================================
 # CORE DATA CLASSES (Database table representations of unique compounds)
@@ -649,339 +194,13 @@ class CompoundReference:
         }
 
 # =============================================================================
-# EXPERIMENTAL COMPOUND DATA (Mutable analysis info + experimental results)
-# =============================================================================
-
-@dataclass
-class CompoundExperimental:
-    """
-    Mutable compound data for targeted analysis workflow.
-    Contains reference data + experimental results + user modifications.
-    Maps to database targeted_analysis table.
-    """
-    
-    # Core identifiers (from reference)
-    compound_uid: str
-    inchi_key: str
-    compound_name: str
-    
-    # Chemical properties (immutable from reference)
-    formula: str = ""
-    mz: float = 0.0
-    adduct: str = ""
-    polarity: str = ""
-    chromatography: str = ""
-    mz_tolerance: float = 5.0
-    
-    # Original atlas RT data (immutable reference)
-    atlas_rt_peak: float = 0.0
-    atlas_rt_min: float = 0.0
-    atlas_rt_max: float = 0.0
-
-    # Current RT data (modifiable during analysis)
-    rt_peak: float = 0.0
-    rt_min: float = 0.0
-    rt_max: float = 0.0
-    
-    # Analysis annotations (modifiable)
-    ms1_notes: str = "keep"
-    ms2_notes: str = "no selection"
-    analyst_notes: str = ""
-    identification_notes: str = ""
-    
-    # Best EIC results (populated during analysis)
-    best_eic_file: str = ""
-    best_eic_rt: float = 0.0
-    best_eic_mz: float = 0.0
-    best_eic_intensity: float = 0.0
-    best_eic_ppm_error: float = 0.0
-    best_eic_rt_error: float = 0.0
-    
-    # Average EIC results
-    avg_eic_rt: float = 0.0
-    avg_eic_intensity: float = 0.0
-    avg_eic_mz: float = 0.0
-    
-    # Best MS2 results
-    best_ms2_file: str = ""
-    best_ms2_database: str = ""
-    best_ms2_ref_id: str = ""
-    best_ms2_rt: float = 0.0
-    best_ms2_intensity: float = 0.0
-    best_ms2_mz: float = 0.0
-    best_ms2_score: float = 0.0
-    best_ms2_num_matches: int = 0
-    best_ms2_ref_frags: int = 0
-    best_ms2_data_frags: int = 0
-    best_ms2_matched_fragments: List[float] = field(default_factory=list)
-    best_ms2_selection_method: str = "none"
-    
-    # Average MS2 results
-    avg_ms2_score: float = 0.0
-    
-    # Detection summary
-    total_files_detected: int = 0
-    ms2_files_with_data: int = 0
-    
-    # Raw data storage (for GUI - not persisted to database)
-    eic_data_files: Dict[str, Dict] = field(default_factory=dict)
-    ms2_data_files: Dict[str, Dict] = field(default_factory=dict)
-    suggested_rt_bounds: Optional[Dict] = None
-    isomers: List[Dict] = field(default_factory=list)
-    
-    # Workflow state tracking
-    is_rt_modified: bool = False
-    is_annotation_modified: bool = False
-    curation_status: str = "pending"  # pending, reviewed, finalized
-    
-    def __post_init__(self):
-        """Initialize derived values after creation."""
-        if self.rt_peak == 0.0 and self.atlas_rt_peak > 0.0:
-            self.rt_peak = self.atlas_rt_peak
-            self.rt_min = self.atlas_rt_min
-            self.rt_max = self.atlas_rt_max
-    
-    @classmethod
-    def from_compound_and_reference(cls, compound: Compound, compound_ref: CompoundReference) -> 'CompoundExperimental':
-        """Create from Compound and CompoundReference objects."""
-        return cls(
-            compound_uid=compound.compound_uid,
-            inchi_key=compound.inchi_key,
-            compound_name=compound.name,
-            formula=compound.formula,
-            mz=compound_ref.mz,
-            adduct=compound_ref.adduct,
-            polarity=compound_ref.polarity,
-            chromatography=compound_ref.chromatography,
-            mz_tolerance=compound_ref.mz_tolerance,
-            atlas_rt_peak=compound_ref.rt_peak,
-            atlas_rt_min=compound_ref.rt_min,
-            atlas_rt_max=compound_ref.rt_max,
-            rt_peak=compound_ref.rt_peak,
-            rt_min=compound_ref.rt_min,
-            rt_max=compound_ref.rt_max
-        )
-    
-    @classmethod
-    def from_atlas_row(cls, atlas_row: pd.Series) -> 'CompoundExperimental':
-        """Create from atlas DataFrame row (for compatibility)."""
-        return cls(
-            compound_uid=atlas_row.get('compound_uid', ''),
-            inchi_key=atlas_row.get('inchi_key', ''),
-            compound_name=atlas_row.get('compound_name', atlas_row.get('label', '')),
-            formula=atlas_row.get('formula', ''),
-            mz=atlas_row.get('mz', 0.0),
-            adduct=atlas_row.get('adduct', ''),
-            polarity=atlas_row.get('polarity', ''),
-            chromatography=atlas_row.get('chromatography', ''),
-            mz_tolerance=atlas_row.get('mz_tolerance', 5.0),
-            atlas_rt_peak=atlas_row.get('rt_peak', 0.0),
-            atlas_rt_min=atlas_row.get('rt_min', 0.0),
-            atlas_rt_max=atlas_row.get('rt_max', 0.0),
-            rt_peak=atlas_row.get('rt_peak', 0.0),
-            rt_min=atlas_row.get('rt_min', 0.0),
-            rt_max=atlas_row.get('rt_max', 0.0)
-        )
-    
-    # Analysis methods
-    def add_eic_data(self, filename: str, eic_dict: Dict):
-        """Add EIC data for a file."""
-        self.eic_data_files[filename] = eic_dict
-        self.total_files_detected = len(self.eic_data_files)
-        self._update_best_eic()
-    
-    def add_ms2_data(self, filename: str, ms2_dict: Dict):
-        """Add MS2 data for a file."""
-        self.ms2_data_files[filename] = ms2_dict
-        if ms2_dict.get('ms2_entries'):
-            self.ms2_files_with_data += 1
-        self._update_best_ms2()
-    
-    def update_rt_bounds(self, rt_min: float, rt_max: float, rt_peak: float):
-        """Update RT bounds and mark as modified."""
-        self.rt_min = rt_min
-        self.rt_max = rt_max
-        self.rt_peak = rt_peak
-        self.is_rt_modified = True
-    
-    def update_annotations(self, ms1_notes: str = None, ms2_notes: str = None, 
-                          analyst_notes: str = None, identification_notes: str = None):
-        """Update annotations and mark as modified."""
-        if ms1_notes is not None:
-            self.ms1_notes = ms1_notes
-            self.is_annotation_modified = True
-        if ms2_notes is not None:
-            self.ms2_notes = ms2_notes
-            self.is_annotation_modified = True
-        if analyst_notes is not None:
-            self.analyst_notes = analyst_notes
-            self.is_annotation_modified = True
-        if identification_notes is not None:
-            self.identification_notes = identification_notes
-            self.is_annotation_modified = True
-    
-    def _update_best_eic(self):
-        """Update best EIC statistics from current data."""
-        if not self.eic_data_files:
-            return
-        
-        best_intensity = 0.0
-        best_file = ""
-        
-        for filename, eic_data in self.eic_data_files.items():
-            intensity = eic_data.get('intensity_peak', 0.0)
-            if intensity > best_intensity:
-                best_intensity = intensity
-                best_file = filename
-                self.best_eic_file = filename
-                self.best_eic_rt = eic_data.get('rt_peak', 0.0)
-                self.best_eic_mz = eic_data.get('mz_peak', 0.0)
-                self.best_eic_intensity = intensity
-                self.best_eic_ppm_error = eic_data.get('ppm_diff', 0.0)
-                self.best_eic_rt_error = eic_data.get('rt_diff', 0.0)
-        
-        # Calculate averages
-        if self.eic_data_files:
-            intensities = [d.get('intensity_peak', 0.0) for d in self.eic_data_files.values()]
-            rts = [d.get('rt_peak', 0.0) for d in self.eic_data_files.values()]
-            mzs = [d.get('mz_peak', 0.0) for d in self.eic_data_files.values()]
-            
-            self.avg_eic_intensity = np.mean(intensities)
-            self.avg_eic_rt = np.mean(rts)
-            self.avg_eic_mz = np.mean(mzs)
-    
-    def _update_best_ms2(self):
-        """Update best MS2 statistics from current data."""
-        if not self.ms2_data_files:
-            return
-        
-        best_score = 0.0
-        best_hit_data = None
-        
-        for filename, ms2_data in self.ms2_data_files.items():
-            if isinstance(ms2_data, dict):
-                best_hit = ms2_data.get('best_hit', {})
-                if best_hit and best_hit.get('score', 0.0) > best_score:
-                    best_score = best_hit.get('score', 0.0)
-                    best_hit_data = best_hit
-                    self.best_ms2_file = filename
-                    self.best_ms2_selection_method = "reference_hit"
-        
-        if best_hit_data:
-            self.best_ms2_database = best_hit_data.get('database', '')
-            self.best_ms2_ref_id = best_hit_data.get('ref_id', '')
-            self.best_ms2_score = best_hit_data.get('score', 0.0)
-            self.best_ms2_num_matches = best_hit_data.get('num_matches', 0)
-            self.best_ms2_matched_fragments = best_hit_data.get('matched_fragments', [])
-            self.best_ms2_ref_frags = best_hit_data.get('ref_frags', 0)
-            self.best_ms2_data_frags = best_hit_data.get('data_frags', 0)
-            self.best_ms2_rt = best_hit_data.get('rt_measured', 0.0)
-            self.best_ms2_intensity = best_hit_data.get('qry_intensity_peak', 0.0)
-            self.best_ms2_mz = best_hit_data.get('mz_measured', 0.0)
-        else:
-            # No hits, find best by intensity
-            best_intensity = 0.0
-            for filename, ms2_data in self.ms2_data_files.items():
-                if isinstance(ms2_data, dict):
-                    best_ms2 = ms2_data.get('best_ms2', {})
-                    intensity = best_ms2.get('intensity_peak', 0.0)
-                    if intensity > best_intensity:
-                        best_intensity = intensity
-                        self.best_ms2_file = filename
-                        self.best_ms2_rt = best_ms2.get('rt_peak', 0.0)
-                        self.best_ms2_intensity = intensity
-                        self.best_ms2_mz = best_ms2.get('precursor_mz', 0.0)
-                        self.best_ms2_selection_method = "highest_intensity"
-        
-        # Calculate average score from all files
-        all_scores = []
-        for ms2_data in self.ms2_data_files.values():
-            if isinstance(ms2_data, dict):
-                for hit in ms2_data.get('all_hits', []):
-                    all_scores.append(hit.get('score', 0.0))
-        
-        self.avg_ms2_score = np.mean(all_scores) if all_scores else 0.0
-    
-    def to_plot_data_format(self) -> Dict:
-        """Convert to GUI plot_data format for compatibility."""
-        return {
-            'original_atlas_data': {
-                'compound_name': self.compound_name,
-                'inchi_key': self.inchi_key,
-                'formula': self.formula,
-                'mz': self.mz,
-                'adduct': self.adduct,
-                'polarity': self.polarity,
-                'rt_peak': self.atlas_rt_peak,
-                'rt_min': self.atlas_rt_min,
-                'rt_max': self.atlas_rt_max,
-                'mz_tolerance': self.mz_tolerance,
-                'isomers': self.isomers,
-                'ms1_notes': 'keep',
-                'ms2_notes': 'no selection',
-                'analyst_notes': '',
-                'identification_notes': ''
-            },
-            'new_atlas_data': {
-                'compound_name': self.compound_name,
-                'inchi_key': self.inchi_key,
-                'formula': self.formula,
-                'mz': self.mz,
-                'adduct': self.adduct,
-                'polarity': self.polarity,
-                'rt_peak': self.rt_peak,
-                'rt_min': self.rt_min,
-                'rt_max': self.rt_max,
-                'mz_tolerance': self.mz_tolerance,
-                'isomers': self.isomers,
-                'ms1_notes': self.ms1_notes,
-                'ms2_notes': self.ms2_notes,
-                'analyst_notes': self.analyst_notes,
-                'identification_notes': self.identification_notes
-            },
-            'suggested_rt_bounds_data': self.suggested_rt_bounds,
-            'eic_data': self.eic_data_files,
-            'best_eic': {
-                'file_peak': self.best_eic_file,
-                'rt_peak': self.best_eic_rt,
-                'mz_peak': self.best_eic_mz,
-                'intensity_peak': self.best_eic_intensity,
-                'ppm_diff': self.best_eic_ppm_error,
-                'rt_diff': self.best_eic_rt_error
-            },
-            'avg_eic': {
-                'rt_peak': self.avg_eic_rt,
-                'intensity_peak': self.avg_eic_intensity,
-                'mz_peak': self.avg_eic_mz
-            },
-            'best_ms2': {
-                'file_peak': self.best_ms2_file,
-                'database': self.best_ms2_database,
-                'ref_id': self.best_ms2_ref_id,
-                'rt_peak': self.best_ms2_rt,
-                'intensity_peak': self.best_ms2_intensity,
-                'mz_peak': self.best_ms2_mz,
-                'score': self.best_ms2_score,
-                'num_matches': self.best_ms2_num_matches,
-                'ref_frags': self.best_ms2_ref_frags,
-                'data_frags': self.best_ms2_data_frags,
-                'matched_fragments': self.best_ms2_matched_fragments,
-                'selection_method': self.best_ms2_selection_method
-            },
-            'avg_ms2': {
-                'avg_score': self.avg_ms2_score
-            },
-            'ms2_data': self.ms2_data_files,
-            'is_modified': self.is_rt_modified or self.is_annotation_modified
-       }
-
-# =============================================================================
 # ATLAS (Collection of compounds)
 # =============================================================================
 
 @dataclass
 class Atlas:
     """
+    Object-oriented representation of the atlases database table
     Collection of reference compounds with RT/MZ data.
     Maps to database atlas + atlas_compound_associations tables.
     """
@@ -998,7 +217,7 @@ class Atlas:
     
     # Atlas metadata
     created_by: str = ""
-    last_modified: str = ""
+    created_date: str = ""
     source_atlas_uid: Optional[str] = None
 
     # Utility methods
@@ -1090,1223 +309,600 @@ class Atlas:
         )
 
 # =============================================================================
-# WORKFLOW RESULTS CONTAINER (Central storage for all data as analysis progresses)
-# =============================================================================
-
-@dataclass
-class WorkflowResults:
-    """
-    Centralized container for all workflow results.
-    Consolidates data that was previously scattered across manager objects.
-    """
-    # Stage 2: RT Correction Results
-    rt_models: Dict[str, Dict] = field(default_factory=dict)  # {chrom_polarity: model_dict}
-    corrected_atlases: Dict[str, Dict[str, Dict[str, str]]] = field(default_factory=dict)  # {atlas_type: {chrom: {pol: atlas_uid}}}
-    
-    # Stage 3: Putative Identification Results
-    putative_ids: Dict[str, Dict[str, List[CompoundExperimental]]] = field(default_factory=dict)  # {atlas_type: {chrom_pol: [CompoundExperimental]}}
-    summary_stats: Optional[Dict[str, Any]] = field(default=None)  # Summary statistics for quick access
-    
-    # Stage 4: Manual Curation Cache
-    cached_curation_results: Optional[Dict[str, Any]] = field(default=None)
-    
-    # Metadata
-    created_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    last_modified: str = field(default_factory=lambda: datetime.now().isoformat())
-    
-    def update_timestamp(self):
-        """Update the last modified timestamp"""
-        self.last_modified = datetime.now().isoformat()
-    
-    # RT Correction Methods
-    def has_rt_correction_results(self) -> bool:
-        """Check if RT correction has been completed"""
-        return len(self.rt_models) > 0 and len(self.corrected_atlases) > 0
-    
-    def get_rt_correction_summary(self) -> Dict[str, Any]:
-        """Get summary of RT correction results"""
-        return {
-            'rt_models_count': len(self.rt_models),
-            'corrected_atlases': {
-                atlas_type: {
-                    chrom: list(pols.keys()) 
-                    for chrom, pols in chroms.items()
-                } for atlas_type, chroms in self.corrected_atlases.items()
-            },
-            'methods_corrected': list(self.rt_models.keys())
-        }
-    
-    def get_corrected_atlas_uid(self, atlas_type: str, chrom: str, pol: str) -> Optional[str]:
-        """Get corrected atlas UID for specific type/chrom/pol combination"""
-        return self.corrected_atlases.get(atlas_type, {}).get(chrom, {}).get(pol)
-    
-    def set_corrected_atlas_uid(self, atlas_type: str, chrom: str, pol: str, atlas_uid: str) -> None:
-        """Set corrected atlas UID for specific type/chrom/pol combination"""
-        if atlas_type not in self.corrected_atlases:
-            self.corrected_atlases[atlas_type] = {}
-        if chrom not in self.corrected_atlases[atlas_type]:
-            self.corrected_atlases[atlas_type][chrom] = {}
-        self.corrected_atlases[atlas_type][chrom][pol] = atlas_uid
-        self.update_timestamp()
-    
-    # Putative Identification Methods
-    def has_putative_identification_results(self) -> bool:
-        """Check if putative identification has been completed"""
-        return len(self.putative_ids) > 0 and any(
-            len(methods) > 0 for methods in self.putative_ids.values()
-        )
-    
-    def get_all_putative_ids(self) -> List[CompoundExperimental]:
-        """Get flat list of all putative IDs across all atlas types and methods"""
-        all_ids = []
-        for atlas_type, chrom_pol in self.putative_ids.items():
-            for putative_list in chrom_pol.values():
-                all_ids.extend(putative_list)
-        return all_ids
-
-    def get_putative_identification_summary(self) -> Dict[str, Any]:
-        """Get comprehensive summary statistics for putative identifications"""
-        
-        stats = {
-            'total_putative_ids': len(self.get_all_putative_ids()),
-            'by_atlas_type': {},
-            'by_curation_status': {'pending': 0, 'reviewed': 0, 'finalized': 0},
-            'with_ms2_data': 0,
-            'with_reference_hits': 0,
-            'rt_modified': 0,
-            'annotation_modified': 0
-        }
-        
-        # Calculate by atlas type
-        for atlas_type, chrom_pol in self.putative_ids.items():
-            type_count = sum(len(putative_ids) for putative_ids in chrom_pol.values())
-            stats['by_atlas_type'][atlas_type] = type_count
-        
-        # Calculate detailed statistics from individual CompoundExperimental objects
-        for pid in self.get_all_putative_ids():
-            # CompoundExperimental has curation_status field
-            status = getattr(pid, 'curation_status', 'pending')
-            stats['by_curation_status'][status] += 1
-            if pid.best_ms2_file:
-                stats['with_ms2_data'] += 1
-            if pid.best_ms2_score > 0:
-                stats['with_reference_hits'] += 1
-            if pid.is_rt_modified:
-                stats['rt_modified'] += 1
-            if pid.is_annotation_modified:
-                stats['annotation_modified'] += 1
-        
-        # Cache the stats for quick access
-        self.summary_stats = stats
-        return stats
-    
-    def set_putative_ids(self, atlas_type: str, chrom_pol: str, putative_list: List[CompoundExperimental]) -> None:
-        """Set putative IDs for specific atlas type and method"""
-        if atlas_type not in self.putative_ids:
-            self.putative_ids[atlas_type] = {}
-        else:
-            logger.warning(f"Overwriting existing putative IDs for {atlas_type} - {chrom_pol}")
-        self.putative_ids[atlas_type][chrom_pol] = putative_list
-        logger.info(f"Set {len(putative_list)} putative IDs for {atlas_type} - {chrom_pol}")
-        self.update_timestamp()
-    
-    # Manual Curation Methods
-    def has_curation_data(self) -> bool:
-        """Check if manual curation cache exists"""
-        return self.cached_curation_results is not None
-    
-    def get_curation_progress(self) -> Dict:
-        """Get curation progress summary"""
-        stats = self.get_putative_identification_summary()
-        total = stats['total_putative_ids']
-        
-        if total == 0:
-            return {'progress_percent': 0, 'details': stats}
-        
-        reviewed_and_finalized = stats['by_curation_status']['reviewed'] + stats['by_curation_status']['finalized']
-        progress_percent = (reviewed_and_finalized / total) * 100
-        
-        return {
-            'progress_percent': progress_percent,
-            'reviewed_count': reviewed_and_finalized,
-            'total_count': total,
-            'details': stats
-        }
-    
-    def update_curation_status(self, inchi_key: str, new_status: str) -> None:
-        """Update curation status for a specific compound"""
-        for pid in self.get_all_putative_ids():
-            if pid.inchi_key == inchi_key:
-                pid.curation_status = new_status
-                self.update_timestamp()
-                break
-    
-    # Utility Methods
-    def get_workflow_completion_status(self) -> Dict[str, bool]:
-        """Get completion status of each workflow stage"""
-        return {
-            'rt_correction': self.has_rt_correction_results(),
-            'putative_identification': self.has_putative_identification_results(),
-            'manual_curation': self.has_curation_data()
-        }
-    
-    def clear_stage_results(self, stage: str) -> None:
-        """Clear results for a specific workflow stage"""
-        if stage == 'rt_correction':
-            self.rt_models.clear()
-            self.corrected_atlases.clear()
-        elif stage == 'putative_identification':
-            self.putative_ids.clear()
-        elif stage == 'manual_curation':
-            self.cached_curation_results = None
-        self.update_timestamp()
-    
-    def clear_all_results(self) -> None:
-        """Clear all workflow results"""
-        self.rt_models.clear()
-        self.corrected_atlases.clear()
-        self.putative_ids.clear()
-        self.cached_curation_results = None
-        self.update_timestamp()
-
-
-# =============================================================================
 # MAIN WORKFLOW ORCHESTRATOR (controls all steps of analysis)
 # =============================================================================
 
-@dataclass
-class TargetedAnalysisManager:
-    """
-    Main workflow orchestrator that manages the complete targeted metabolomics workflow.
-    
-    Schema alignment:
-    - TargetedAnalysisManager (organizer)
-        - WorkflowResults (central results container)
-            - Atlas (atlases from database by UID - minimum one QC + one target)
-                - Compound (comes with atlas)
-                    - CompoundReference (comes with atlas)
-                    - CompoundExperimental (created during analysis -> mz_rt_experimental table)
-    """
-    config: Dict
-    project_name: str
-    rt_alignment_number: int = 1
-    analysis_number: int = 1
-    current_stage: WorkflowStage = WorkflowStage.PROJECT_SETUP
-    results: WorkflowResults = field(default_factory=WorkflowResults)
-    cache_manager: Optional[CacheManager] = field(default=None, init=False)
-    
-    # Parquet files by type
-    parquet_files: Dict[str, pd.DataFrame] = field(default_factory=dict)
-    
-    # Compute fields
-    main_db_path: str = field(init=False)
-    atlas_data: Dict[str, Any] = field(init=False)
+# @dataclass
+# class TargetedAnalysisManager:
+#     """
+#     Main workflow orchestrator that manages the complete targeted metabolomics workflow.
+#     """
+#     config: Dict
+#     project_name: str
+#     rt_alignment_number: int = 1
+#     analysis_number: int = 1
+#     current_stage: WorkflowStage = WorkflowStage.PROJECT_SETUP
+#     results: dict = field(default_factory=dict)
+#     rt_models: Dict[str, Dict] = field(default_factory=dict)
 
-    def __post_init__(self):
-
-        logger.info("Setting up Targeted Analysis Manager to run workflow and store results")
-        # Use single project database with iteration tracking
-        self.raw_data_directory = str(Path(self.config['ENV']['PATHS']['raw_data_dir']) / str(self.project_name))
-        self.project_directory = str(Path(self.config['ENV']['PATHS']['projects_dir']) / str(self.project_name))
-        self.rt_alignment_directory = str(Path(self.project_directory) / f"{self.project_name}_RTA{self.rt_alignment_number}")
-        self.analysis_directory = str(Path(self.rt_alignment_directory) / f"{self.project_name}_RTA{self.rt_alignment_number}_ALY{self.analysis_number}")
-        
-        # Single project database for all iterations
-        self.project_db_path = str(Path(self.project_directory) / f"{self.project_name}.duckdb")
-        self.main_db_path = self.config["ENV"]["PATHS"]["main_database"]
-        
-        # Store current iteration info
-        self.current_rt_alignment = self.rt_alignment_number
-        self.current_analysis = self.analysis_number
-        
-        # Set up cache manager
-        self.cache_manager = CacheManager(self.analysis_directory, self.config)
-        logger.info("Completed Targeted Analysis Manager setup and initated cache manager")
+#     # Parquet files by type
+#     parquet_files: Dict[str, pd.DataFrame] = field(default_factory=dict)
     
-    def _setup_project_database(self, new_lcmsruns: bool = False) -> None:
-        """Create project database and load LCMS run files."""
-        logger.info(f"Creating project database at {self.project_db_path}...")
-        dbi.create_project_database(self.project_db_path, self.rt_alignment_number, self.analysis_number)
-        
-        logger.info("Parsing analysis configuration file to get atlas and compound info...")
-        self.atlas_data = self._parse_config()
+#     # Compute fields
+#     main_db_path: str = field(init=False)
+#     atlas_data: Dict[str, Any] = field(init=False)
 
-        logger.info(f"Loading LCMS runs for {self.project_name}...")
-        try:
-            _ = dbi.save_lcmsruns_to_db(
-                self.project_db_path,
-                self.project_name, 
-                self.raw_data_directory,
-                new_lcmsruns,
-            )
-            logger.info("LCMS runs loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load LCMS runs: {e}")
-            logger.info("Continuing with workflow - files may need to be loaded manually")
+#     def __post_init__(self):
+
+#         logger.info("Setting up Targeted Analysis Manager to run workflow and store results")
+#         # Use single project database with iteration tracking
+#         self.raw_data_directory = str(Path(self.config['ENV']['PATHS']['raw_data_dir']) / str(self.project_name))
+#         self.project_directory = str(Path(self.config['ENV']['PATHS']['projects_dir']) / str(self.project_name))
+#         self.rt_alignment_directory = str(Path(self.project_directory) / f"{self.project_name}_RTA{self.rt_alignment_number}")
+#         self.analysis_directory = str(Path(self.rt_alignment_directory) / f"{self.project_name}_RTA{self.rt_alignment_number}_ALY{self.analysis_number}")
+#         self.project_db_path = str(Path(self.project_directory) / f"{self.project_name}.duckdb")
+#         self.main_db_path = self.config["ENV"]["PATHS"]["main_database"]
+#         logger.info("Completed Targeted Analysis Manager setup")
     
-    def load_atlases_for_workflow(self) -> Dict[str, Atlas]:
-        """
-        Load all atlases required for the workflow from database.
-        This demonstrates the schema: Atlas -> Compound -> CompoundReference
+#     def _setup_project_database(self, new_lcmsruns: bool = False) -> None:
+#         """Create project database and load LCMS run files."""
+#         logger.info(f"Creating project database at {self.project_db_path}...")
+#         dbi.create_project_database(self.project_db_path, self.rt_alignment_number, self.analysis_number)
         
-        Returns:
-            Dict mapping atlas_uid to Atlas objects
-        """
-        atlases = {}
-        atlas_manager = AtlasManager(self.config)
-        
-        # Load RT alignment atlas (QC atlas)
-        rt_align_template_atlas_data = self.atlas_data.get('rt_align_template_atlas')
-        if rt_align_template_atlas_data:
-            atlas_uid = rt_align_template_atlas_data['atlas_uid']
-            atlas = atlas_manager.load_atlas_from_database(atlas_uid, self.main_db_path)
-            atlases[atlas_uid] = atlas
-            logger.info(f"Loaded RT alignment atlas: {atlas.atlas_name} with {len(atlas.compound_references)} compound references")
-        
-        # Load analysis atlases (target atlases)
-        for analysis_atlas_data in self.atlas_data.get('analysis_atlases', []):
-            atlas_uid = analysis_atlas_data['atlas_uid']
-            atlas = atlas_manager.load_atlas_from_database(atlas_uid, self.main_db_path)
-            atlases[atlas_uid] = atlas
-            logger.info(f"Loaded analysis atlas: {atlas.atlas_name} with {len(atlas.compound_references)} compound references")
-        
-        return atlases
+#         logger.info("Parsing analysis configuration file to get atlas and compound info...")
+#         self.atlas_data = self._parse_config()
 
-    def convert_compound_references_to_experimental(self, atlas: Atlas) -> List[CompoundExperimental]:
-        """
-        Convert CompoundReference objects from an Atlas to CompoundExperimental objects for analysis.
-        This demonstrates the schema: CompoundReference -> CompoundExperimental
+#         logger.info(f"Loading LCMS runs for {self.project_name}...")
+#         try:
+#             _ = dbi.save_lcmsruns_to_db(
+#                 self.project_db_path,
+#                 self.project_name, 
+#                 self.raw_data_directory,
+#                 new_lcmsruns,
+#             )
+#             logger.info("LCMS runs loaded successfully")
+#         except Exception as e:
+#             logger.warning(f"Failed to load LCMS runs: {e}")
+#             logger.info("Continuing with workflow - files may need to be loaded manually")
+    
+#     def load_atlases_for_workflow(self) -> Dict[str, Atlas]:
+#         """
+#         Load all atlases required for the workflow from database.
+#         This demonstrates the schema: Atlas -> Compound -> CompoundReference
         
-        Args:
-            atlas: Atlas object containing CompoundReference objects
+#         Returns:
+#             Dict mapping atlas_uid to Atlas objects
+#         """
+#         atlases = {}
+#         atlas_manager = AtlasManager(self.config)
+        
+#         # Load RT alignment atlas (QC atlas)
+#         rt_align_template_atlas_data = self.atlas_data.get('rt_align_template_atlas')
+#         if rt_align_template_atlas_data:
+#             atlas_uid = rt_align_template_atlas_data['atlas_uid']
+#             atlas = atlas_manager.load_atlas_from_database(atlas_uid, self.main_db_path)
+#             atlases[atlas_uid] = atlas
+#             logger.info(f"Loaded RT alignment atlas: {atlas.atlas_name} with {len(atlas.compound_references)} compound references")
+        
+#         # Load analysis atlases (target atlases)
+#         for analysis_atlas_data in self.atlas_data.get('analysis_atlases', []):
+#             atlas_uid = analysis_atlas_data['atlas_uid']
+#             atlas = atlas_manager.load_atlas_from_database(atlas_uid, self.main_db_path)
+#             atlases[atlas_uid] = atlas
+#             logger.info(f"Loaded analysis atlas: {atlas.atlas_name} with {len(atlas.compound_references)} compound references")
+        
+#         return atlases
+
+#     def load_parquet_files(self) -> None:
+#         """Load and categorize parquet file dataframes of info from project database"""
+#         self.parquet_files = {
+#             'qc': dbi.get_files_by_type_from_db(self.project_db_path, ['qc'], 'parquet'),
+#             'experimental': dbi.get_files_by_type_from_db(self.project_db_path, ['experimental'], 'parquet'),
+#             'istd': dbi.get_files_by_type_from_db(self.project_db_path, ['istd'], 'parquet'),
+#             'exctrl': dbi.get_files_by_type_from_db(self.project_db_path, ['exctrl'], 'parquet')
+#         }
+#         logger.debug(f"Loaded parquet files: { {k: len(df) for k, df in self.parquet_files.items()} }")
+
+#     def _parse_config(self) -> Dict[str, Any]:
+#         """
+#         Parse atlas configuration for all workflows.
+        
+#         Returns:
+#             Dict with rt_align atlas and analysis atlases info for all workflows
+#         """
+#         all_workflows = self.config.get('WORKFLOWS', {})
+        
+#         atlas_data = {
+#             'rt_align_template_atlas': None,
+#             'analysis_atlases': []
+#         }
+        
+#         # Process each workflow
+#         for workflow_name, workflow_config in all_workflows.items():
+#             #logger.info(f"Processing workflow: {workflow_name}")
             
-        Returns:
-            List of CompoundExperimental objects ready for targeted analysis
-        """
-        experimental_compounds = []
-        
-        # We need to get Compound objects to create CompoundExperimental objects
-        # This requires a database lookup to get the compound metadata
-        compound_uids = [ref.compound_uid for ref in atlas.compound_references.values()]
-        
-        # Get compound metadata from database
-        compounds_dict = {}
-        with dbi.get_db_connection(self.main_db_path) as conn:
-            if compound_uids:
-                placeholders = ','.join(['?'] * len(compound_uids))
-                compound_data = conn.execute(f"""
-                    SELECT * FROM compounds WHERE compound_uid IN ({placeholders})
-                """, compound_uids).fetchall()
-                
-                columns = [desc[0] for desc in conn.description]
-                for row_data in compound_data:
-                    row_dict = dict(zip(columns, row_data))
-                    compound = Compound(
-                        compound_uid=row_dict['compound_uid'],
-                        name=row_dict['name'],
-                        inchi_key=row_dict['inchi_key'],
-                        inchi=row_dict['inchi'] or '',
-                        smiles=row_dict['smiles'] or '',
-                        formula=row_dict['formula'] or '',
-                        compound_classes=row_dict['compound_classes'] or '',
-                        compound_pathways=row_dict['compound_pathways'] or '',
-                        compound_tags=row_dict['compound_tags'] or '',
-                        mono_isotopic_molecular_weight=row_dict['mono_isotopic_molecular_weight'] or 0.0,
-                        iupac_name=row_dict['iupac_name'] or '',
-                        pubchem_cid=row_dict['pubchem_cid'] or '',
-                        cas_number=row_dict['cas_number'] or '',
-                        synonyms=row_dict['synonyms'] or '',
-                        created_by=row_dict['created_by'] or '',
-                        created_date=row_dict['created_date'] or ''
-                    )
-                    compounds_dict[compound.compound_uid] = compound
-        
-        # Create CompoundExperimental objects
-        for inchi_key, compound_ref in atlas.compound_references.items():
-            compound = compounds_dict.get(compound_ref.compound_uid)
-            if compound:
-                experimental_compound = CompoundExperimental.from_compound_and_reference(
-                    compound, compound_ref
-                )
-                experimental_compounds.append(experimental_compound)
-            else:
-                logger.warning(f"Compound {compound_ref.compound_uid} not found in database")
-        
-        logger.info(f"Converted {len(experimental_compounds)} CompoundReference objects to CompoundExperimental objects")
-        return experimental_compounds
-
-    def load_parquet_files(self) -> None:
-        """Load and categorize parquet file dataframes of info from project database"""
-        self.parquet_files = {
-            'qc': dbi.get_files_by_type_from_db(self.project_db_path, ['qc'], 'parquet'),
-            'experimental': dbi.get_files_by_type_from_db(self.project_db_path, ['experimental'], 'parquet'),
-            'istd': dbi.get_files_by_type_from_db(self.project_db_path, ['istd'], 'parquet'),
-            'exctrl': dbi.get_files_by_type_from_db(self.project_db_path, ['exctrl'], 'parquet')
-        }
-        logger.debug(f"Loaded parquet files: { {k: len(df) for k, df in self.parquet_files.items()} }")
-
-    def _parse_config(self) -> Dict[str, Any]:
-        """
-        Parse atlas configuration for all workflows.
-        
-        Returns:
-            Dict with rt_align atlas and analysis atlases info for all workflows
-        """
-        all_workflows = self.config.get('WORKFLOWS', {})
-        
-        atlas_data = {
-            'rt_align_template_atlas': None,
-            'analysis_atlases': []
-        }
-        
-        # Process each workflow
-        for workflow_name, workflow_config in all_workflows.items():
-            #logger.info(f"Processing workflow: {workflow_name}")
+#             # Get RT alignment atlas (typically one per workflow)
+#             rt_align_config = workflow_config.get('RT_ALIGN', {})
+#             rt_align_template_atlas_uid = rt_align_config.get('ATLAS', {}).get('uid')
+#             rt_align_params = rt_align_config.get('PARAMS', {})
             
-            # Get RT alignment atlas (typically one per workflow)
-            rt_align_config = workflow_config.get('RT_ALIGN', {})
-            rt_align_template_atlas_uid = rt_align_config.get('ATLAS', {}).get('uid')
-            rt_align_params = rt_align_config.get('PARAMS', {})
-            
-            if rt_align_template_atlas_uid and not atlas_data['rt_align_template_atlas']:
-                # Get RT alignment atlas info (use first one found)
-                try:
-                    if Path(self.project_db_path).exists():
-                        logger.info(f"Looking for RT alignment template atlas {rt_align_template_atlas_uid} in project database")
-                        atlas_df = dbi.get_atlas_metadata_from_db(self.project_db_path, rt_align_template_atlas_uid, validation=True)
-                    else:
-                        atlas_df = pd.DataFrame()
-                    if atlas_df.empty:
-                        logger.info(f"Looking for RT alignment template atlas {rt_align_template_atlas_uid} in main database")
-                        atlas_df = dbi.get_atlas_metadata_from_db(self.main_db_path, rt_align_template_atlas_uid, validation=True)
+#             if rt_align_template_atlas_uid and not atlas_data['rt_align_template_atlas']:
+#                 # Get RT alignment atlas info (use first one found)
+#                 try:
+#                     if Path(self.project_db_path).exists():
+#                         logger.info(f"Looking for RT alignment template atlas {rt_align_template_atlas_uid} in project database")
+#                         atlas_df = dbi.get_atlas_metadata_from_db(self.project_db_path, rt_align_template_atlas_uid, validation=True)
+#                     else:
+#                         atlas_df = pd.DataFrame()
+#                     if atlas_df.empty:
+#                         logger.info(f"Looking for RT alignment template atlas {rt_align_template_atlas_uid} in main database")
+#                         atlas_df = dbi.get_atlas_metadata_from_db(self.main_db_path, rt_align_template_atlas_uid, validation=True)
                     
-                    if not atlas_df.empty:
-                        atlas_info = atlas_df.iloc[0]
-                        atlas_data['rt_align_template_atlas'] = {
-                            'atlas_uid': rt_align_template_atlas_uid,
-                            'atlas_name': atlas_info.get('atlas_name', ''),
-                            'atlas_description': atlas_info.get('atlas_description', ''),
-                            'chromatography': atlas_info.get('chromatography', '').lower(),
-                            'polarity': atlas_info.get('polarity', '').lower(),
-                            'workflow': workflow_name.lower(),
-                            'rt_align_params': rt_align_params
-                        }
-                        #logger.info(f"RT alignment atlas: {rt_align_template_atlas_uid} (workflow: {workflow_name})")
-                    else:
-                        logger.error(f"RT alignment atlas {rt_align_template_atlas_uid} not found in databases")
+#                     if not atlas_df.empty:
+#                         atlas_info = atlas_df.iloc[0]
+#                         atlas_data['rt_align_template_atlas'] = {
+#                             'atlas_uid': rt_align_template_atlas_uid,
+#                             'atlas_name': atlas_info.get('atlas_name', ''),
+#                             'atlas_description': atlas_info.get('atlas_description', ''),
+#                             'chromatography': atlas_info.get('chromatography', '').lower(),
+#                             'polarity': atlas_info.get('polarity', '').lower(),
+#                             'workflow': workflow_name.lower(),
+#                             'rt_align_params': rt_align_params
+#                         }
+#                         #logger.info(f"RT alignment atlas: {rt_align_template_atlas_uid} (workflow: {workflow_name})")
+#                     else:
+#                         logger.error(f"RT alignment atlas {rt_align_template_atlas_uid} not found in databases")
                         
-                except Exception as e:
-                    logger.error(f"Error loading RT alignment atlas {rt_align_template_atlas_uid}: {e}")
+#                 except Exception as e:
+#                     logger.error(f"Error loading RT alignment atlas {rt_align_template_atlas_uid}: {e}")
             
-            # Get analysis atlases from ANALYSES section
-            analyses_config = workflow_config.get('ANALYSES', {})
-            for atlas_type, methods in analyses_config.items():
-                for polarity, config_data in methods.items():
-                    analysis_atlas_uid = config_data.get('ATLAS', {}).get('uid')
-                    if analysis_atlas_uid:
-                        try:
-                            if Path(self.project_db_path).exists():
-                                logger.info(f"Looking for analysis atlas {analysis_atlas_uid} in project database")
-                                atlas_df = dbi.get_atlas_metadata_from_db(self.project_db_path, analysis_atlas_uid, validation=True)
-                            else:
-                                atlas_df = pd.DataFrame()
-                            if atlas_df.empty:
-                                logger.info(f"Looking for analysis atlas {analysis_atlas_uid} in main database")
-                                atlas_df = dbi.get_atlas_metadata_from_db(self.main_db_path, analysis_atlas_uid, validation=True)
+#             # Get analysis atlases from ANALYSES section
+#             analyses_config = workflow_config.get('ANALYSES', {})
+#             for atlas_type, methods in analyses_config.items():
+#                 for polarity, config_data in methods.items():
+#                     analysis_atlas_uid = config_data.get('ATLAS', {}).get('uid')
+#                     if analysis_atlas_uid:
+#                         try:
+#                             if Path(self.project_db_path).exists():
+#                                 logger.info(f"Looking for analysis atlas {analysis_atlas_uid} in project database")
+#                                 atlas_df = dbi.get_atlas_metadata_from_db(self.project_db_path, analysis_atlas_uid, validation=True)
+#                             else:
+#                                 atlas_df = pd.DataFrame()
+#                             if atlas_df.empty:
+#                                 logger.info(f"Looking for analysis atlas {analysis_atlas_uid} in main database")
+#                                 atlas_df = dbi.get_atlas_metadata_from_db(self.main_db_path, analysis_atlas_uid, validation=True)
                             
-                            if not atlas_df.empty:
-                                atlas_info = atlas_df.iloc[0]
-                                analysis_atlas_data = {
-                                    'atlas_uid': analysis_atlas_uid,
-                                    'atlas_name': atlas_info.get('atlas_name', ''),
-                                    'atlas_description': atlas_info.get('atlas_description', ''),
-                                    'chromatography': atlas_info.get('chromatography', '').lower(),
-                                    'polarity': polarity.lower(),
-                                    'atlas_type': atlas_type.lower(),
-                                    'workflow': workflow_name.lower(),
-                                    'analysis_params': config_data.get('PARAMS', {})
-                                }
-                                atlas_data['analysis_atlases'].append(analysis_atlas_data)
-                                #logger.info(f"Analysis atlas: {workflow_name}/{atlas_type}/{polarity} -> {analysis_atlas_uid}")
-                            else:
-                                logger.error(f"Analysis atlas {analysis_atlas_uid} not found in databases")
+#                             if not atlas_df.empty:
+#                                 atlas_info = atlas_df.iloc[0]
+#                                 analysis_atlas_data = {
+#                                     'atlas_uid': analysis_atlas_uid,
+#                                     'atlas_name': atlas_info.get('atlas_name', ''),
+#                                     'atlas_description': atlas_info.get('atlas_description', ''),
+#                                     'chromatography': atlas_info.get('chromatography', '').lower(),
+#                                     'polarity': polarity.lower(),
+#                                     'atlas_type': atlas_type.lower(),
+#                                     'workflow': workflow_name.lower(),
+#                                     'analysis_params': config_data.get('PARAMS', {})
+#                                 }
+#                                 atlas_data['analysis_atlases'].append(analysis_atlas_data)
+#                             else:
+#                                 logger.error(f"Analysis atlas {analysis_atlas_uid} not found in databases")
                                 
-                        except Exception as e:
-                            logger.error(f"Error loading analysis atlas {analysis_atlas_uid}: {e}")
-                    #else:
-                        #logger.info(f"No atlas UID provided for {workflow_name}/{atlas_type}/{polarity} - skipping")
+#                         except Exception as e:
+#                             logger.error(f"Error loading analysis atlas {analysis_atlas_uid}: {e}")
         
-        return atlas_data
+#         return atlas_data
 
-    def run_complete_workflow(self,
-                            new_lcmsruns: bool = False, 
-                            stop_at_stage: WorkflowStage = WorkflowStage.FINAL_REPORT,
-                            analysis_subset: List[Tuple[str, str, str]] = None,
-                            create_analysis_notebooks: bool = False) -> None:
-        """
-        Run the complete workflow up to the specified stage with optional caching
+#     def run_complete_workflow(self,
+#                             new_lcmsruns: bool = False, 
+#                             stop_at_stage: WorkflowStage = WorkflowStage.FINAL_REPORT,
+#                             analysis_subset: List[Tuple[str, str, str]] = None,
+#                             create_analysis_notebooks: bool = False) -> None:
+#         """
+#         Run the complete workflow up to the specified stage with optional caching
         
-        Args:
-            stop_at_stage: Which stage to stop at
-            analysis_subset: List of (atlas_type, polarity) tuples to limit analysis
-            create_analysis_notebooks: Whether to create individual notebooks per analysis
-        """
+#         Args:
+#             stop_at_stage: Which stage to stop at
+#             analysis_subset: List of (atlas_type, polarity) tuples to limit analysis
+#             create_analysis_notebooks: Whether to create individual notebooks per analysis
+#         """
         
-        # Stage 1: Project Setup
-        if self.current_stage == WorkflowStage.PROJECT_SETUP:
-            logger.info("\n========== Stage 1: Project Setup ==========\n")
+#         # Stage 1: Project Setup
+#         if self.current_stage == WorkflowStage.PROJECT_SETUP:
+#             logger.info("\n========== Stage 1: Project Setup ==========\n")
 
-            # Initialize project setup directly in workflow
-            self._setup_project_database(new_lcmsruns)
-            self.load_parquet_files()
+#             # Initialize project setup directly in workflow
+#             self._setup_project_database(new_lcmsruns)
+#             self.load_parquet_files()
             
-            if stop_at_stage == self.current_stage.value:
-                logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
-                return
+#             if stop_at_stage == self.current_stage.value:
+#                 logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
+#                 return
 
-            self.current_stage = WorkflowStage.RT_CORRECTION
+#             self.current_stage = WorkflowStage.RT_CORRECTION
         
-        # Stage 2: RT Correction
-        if self.current_stage == WorkflowStage.RT_CORRECTION:
-            logger.info("\n========== Stage 2: RT Correction ==========\n")
+#         # Stage 2: RT Correction
+#         if self.current_stage == WorkflowStage.RT_CORRECTION:
+#             logger.info("\n========== Stage 2: RT Correction ==========\n")
 
-            logger.info("Starting RT correction...")
-            self._run_rt_correction_workflow(analysis_subset)
+#             logger.info("Starting RT correction...")
+#             self._run_rt_correction_workflow(analysis_subset)
 
-            if stop_at_stage == self.current_stage.value:
-                logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
-                return
+#             if stop_at_stage == self.current_stage.value:
+#                 logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
+#                 return
 
-            self.current_stage = WorkflowStage.PUTATIVE_IDENTIFICATION
+#             self.current_stage = WorkflowStage.AUTO_IDENTIFICATION
         
-        # Stage 3: Putative Identification
-        if self.current_stage == WorkflowStage.PUTATIVE_IDENTIFICATION:
-            logger.info("\n========== Stage 3: Putative Identification ==========\n")
+#         # Stage 3: Auto Identification
+#         if self.current_stage == WorkflowStage.AUTO_IDENTIFICATION:
+#             logger.info("\n========== Stage 3: Auto Identification ==========\n")
 
-            logger.info(f"Starting putative identifications...")
-            compound_id_stats = self._run_putative_identification_workflow(self.config, analysis_subset)
+#             logger.info(f"Starting auto identifications...")
+#             self._run_auto_identification_workflow(self.config, analysis_subset)
 
-            # Print putative identification stats in a readable notebook format
-            stats_md = "### Putative Identification Summary\n"
-            stats_md += f"- **Total putative IDs:** {compound_id_stats.get('total_putative_ids', 0)}\n"
-            stats_md += "- **By atlas type:**\n"
-            for k, v in compound_id_stats.get('by_atlas_type', {}).items():
-                stats_md += f"    - {k}: {v}\n"
-            stats_md += "- **By curation status:**\n"
-            for k, v in compound_id_stats.get('by_curation_status', {}).items():
-                stats_md += f"    - {k}: {v}\n"
-            stats_md += f"- **With MS2 data:** {compound_id_stats.get('with_ms2_data', 0)}\n"
-            stats_md += f"- **With reference hits:** {compound_id_stats.get('with_reference_hits', 0)}\n"
-            stats_md += f"- **RT modified:** {compound_id_stats.get('rt_modified', 0)}\n"
-            stats_md += f"- **Annotation modified:** {compound_id_stats.get('annotation_modified', 0)}\n"
-            display(Markdown(stats_md))
-
-            if stop_at_stage == self.current_stage.value:
-                logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
-                if create_analysis_notebooks:
-                    self._create_individual_curation_notebooks()
-                return
+#             if stop_at_stage == self.current_stage.value:
+#                 logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
+#                 if create_analysis_notebooks:
+#                     self._create_individual_curation_notebooks()
+#                 return
             
-            self.current_stage = WorkflowStage.MANUAL_CURATION
+#             self.current_stage = WorkflowStage.MANUAL_CURATION
 
-        # Stage 4: Manual Curation (returns GUI for interactive work) 
-        if self.current_stage == WorkflowStage.MANUAL_CURATION:
-            logger.info("\n========== Stage 4: Manual Curation ==========\n")
+#         # Stage 4: Manual Curation (returns GUI for interactive work) 
+#         if self.current_stage == WorkflowStage.MANUAL_CURATION:
+#             logger.info("\n========== Stage 4: Manual Curation ==========\n")
 
-            if stop_at_stage == self.current_stage.value:
-                logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
-                if create_analysis_notebooks:
-                    return self._create_individual_curation_notebooks()
+#             if stop_at_stage == self.current_stage.value:
+#                 logger.info(f"Stopping workflow at the end of the {stop_at_stage} stage.")
+#                 if create_analysis_notebooks:
+#                     return self._create_individual_curation_notebooks()
 
-            self.current_stage = WorkflowStage.FINAL_REPORT
+#             self.current_stage = WorkflowStage.FINAL_REPORT
 
-        # Stage 5: Final Report
-        if self.current_stage == WorkflowStage.FINAL_REPORT or stop_at_stage == WorkflowStage.FINAL_REPORT:
-            logger.info("\n========== Stage 5: Final Report Generation ==========\n")
+#         # Stage 5: Final Report
+#         if self.current_stage == WorkflowStage.FINAL_REPORT or stop_at_stage == WorkflowStage.FINAL_REPORT:
+#             logger.info("\n========== Stage 5: Final Report Generation ==========\n")
 
-            # Create final report manager
-            final_report = FinalReportManager(self.results.putative_ids)
+#             # Create final report manager
+#             final_report = FinalReportManager()
             
-            output_path = Path(self.analysis_directory) / "final_targeted_analysis_report"
-            report_df = final_report.generate_comprehensive_report(self.config, str(output_path))
+#             output_path = Path(self.analysis_directory) / "final_targeted_analysis_report"
+#             report_df = final_report.generate_comprehensive_report(self.config, str(output_path))
             
-            logger.info(f"Workflow complete! Final report with {len(report_df)} identifications")
-            #return report_df
+#             logger.info(f"Workflow complete! Final report with {len(report_df)} identifications")
+#             #return report_df
     
-    def run_putative_identification_db_verification(self) -> None:
-        """Run database verification for putative identification stage to ensure all required data is present before analysis"""
-        results = dbi.verify_project_db_holdings(self.project_db_path, self.rt_alignment_number, self.analysis_number)
+#     def run_auto_identification_db_verification(self) -> None:
+#         """Run database verification for auto identification stage to ensure all required data is present before analysis"""
+#         results = dbi.verify_project_db_holdings(self.project_db_path, self.rt_alignment_number, self.analysis_number)
 
-        for table, table_contents in results.items():
-            if not table_contents.empty:
-                logger.info(f"{table} table contents:")
-                display(table_contents)
-        return
+#         for table, table_contents in results.items():
+#             if not table_contents.empty:
+#                 logger.info(f"{table} table contents:")
+#                 display(table_contents)
+#         return
 
-    def get_workflow_status(self) -> Dict:
-        """Get current workflow status and progress"""
-        status = {
-            'current_stage': self.current_stage.value,
-            'stages_completed': [],
-            'next_stage': None
-        }
-        
-        # Determine completed stages based on data existence
-        if self.parquet_files:
-            status['stages_completed'].append('project_setup')
-        if self.results.has_rt_correction_results():
-            status['stages_completed'].append('rt_correction')
-        if self.results.has_putative_identification_results():
-            status['stages_completed'].append('putative_identification')
-        
-        # Determine next stage
-        stage_order = [
-            WorkflowStage.PROJECT_SETUP,
-            WorkflowStage.RT_CORRECTION,
-            WorkflowStage.PUTATIVE_IDENTIFICATION,
-            WorkflowStage.MANUAL_CURATION,
-            WorkflowStage.FINAL_REPORT
-        ]
-        
-        current_idx = stage_order.index(self.current_stage)
-        if current_idx < len(stage_order) - 1:
-            status['next_stage'] = stage_order[current_idx + 1].value
-        
-        return status
+#     def _create_individual_curation_notebooks(self) -> List[str]:
+#         """Create individual notebooks for each analysis type/polarity combination"""
+#         created_notebooks = []
+#         logger.info("Creating individual curation notebooks for each analysis...")
+#         # Get all analysis combinations that have auto identifications
 
-    def _create_individual_curation_notebooks(self) -> List[str]:
-        """Create individual notebooks for each analysis type/polarity combination"""
-        created_notebooks = []
-        logger.info("Creating individual curation notebooks for each analysis...")
-        # Get all analysis combinations that have putative identifications
-
-        for analysis_key, chrom_pol in self.results.putative_ids.items():
-            for chrom_pol, putative_list in chrom_pol.items():
-                if putative_list:
-                    logger.info(f"Creating curation notebook for {analysis_key} in {chrom_pol} mode ({len(putative_list)} compounds)")
-                    notebook_path = self._create_analysis_specific_notebook(analysis_key, chrom_pol, putative_list)
-                    created_notebooks.append(notebook_path)
+#         for analysis_key, chrom_pol in self.results.auto_ids.items():
+#             for chrom_pol, auto_list in chrom_pol.items():
+#                 if auto_list:
+#                     logger.info(f"Creating curation notebook for {analysis_key} in {chrom_pol} mode ({len(auto_list)} compounds)")
+#                     notebook_path = self._create_analysis_specific_notebook(analysis_key, chrom_pol, auto_list)
+#                     created_notebooks.append(notebook_path)
         
-        logger.info(f"Created {len(created_notebooks)} individual curation notebooks")
-        return created_notebooks
+#         logger.info(f"Created {len(created_notebooks)} individual curation notebooks")
+#         return created_notebooks
     
-    def _create_analysis_specific_notebook(self, atlas_type: str, chrom_pol: str, putative_list: List) -> str:
-        """Create a notebook for a specific analysis type and chrom_pol"""
+#     def _create_analysis_specific_notebook(self, atlas_type: str, chrom_pol: str, auto_list: List) -> str:
+#         """Create a notebook for a specific analysis type and chrom_pol"""
         
-        # Copy the existing config file to the analysis directory for notebook reproducibility
-        analysis_config_path = Path(self.analysis_directory) / "metatlas2_config.yaml"
-        existing_config_path = self.config['ENV']['PATHS']['config_path']
-        if not analysis_config_path.exists():
-            shutil.copy(existing_config_path, analysis_config_path)
+#         # Copy the existing config file to the analysis directory for notebook reproducibility
+#         analysis_config_path = Path(self.analysis_directory) / "metatlas2_config.yaml"
+#         existing_config_path = self.config['ENV']['PATHS']['config_path']
+#         if not analysis_config_path.exists():
+#             shutil.copy(existing_config_path, analysis_config_path)
         
-        notebook_filename = f"curation_{atlas_type}_{chrom_pol}.ipynb"
-        notebook_path = Path(self.analysis_directory) / notebook_filename
+#         notebook_filename = f"curation_{atlas_type}_{chrom_pol}.ipynb"
+#         notebook_path = Path(self.analysis_directory) / notebook_filename
         
-        # Create notebook content specific to this analysis
-        notebook_content = self._generate_analysis_notebook_content(atlas_type, chrom_pol, putative_list)
+#         # Create notebook content specific to this analysis
+#         notebook_content = self._generate_analysis_notebook_content(atlas_type, chrom_pol, auto_list)
         
-        # Write notebook file
-        with open(notebook_path, 'w') as f:
-            json.dump(notebook_content, f, indent=2)
+#         # Write notebook file
+#         with open(notebook_path, 'w') as f:
+#             json.dump(notebook_content, f, indent=2)
         
-        logger.info(f"Created analysis-specific notebook: {notebook_path}")
-        return str(notebook_path)
+#         logger.info(f"Created analysis-specific notebook: {notebook_path}")
+#         return str(notebook_path)
     
-    def _generate_analysis_notebook_content(self, atlas_type: str, chrom_pol: str, putative_list: List) -> Dict:
-        """Generate notebook content for a specific analysis"""
+#     # =============================================================================
+#     # RT CORRECTION METHODS (Stage 2)
+#     # =============================================================================
+
+#     def _run_rt_correction_workflow(self, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
+#         """Run single RT correction using the RT alignment atlas"""
+
+#         if self.atlas_data['rt_align_template_atlas']['rt_align_params'].get('use_existing_rt_correction', False):
+#             logger.info("Parameter 'use_existing_rt_correction' is True - checking for existing RT alignment model in database...")
+#             rt_model = self._get_existing_rt_alignment_from_db()
+#             if rt_model is None:
+#                 logger.warning(f"No existing RT alignment model found in database for alignment number {self.rt_alignment_number} and QC atlas UID {self.atlas_data['rt_align_template_atlas']['atlas_uid']}. Running fresh RT correction workflow.")
+#         logger.info("Running RT correction workflow")
+#         rt_model = self._do_rt_correction()
+
+#         logger.info("Applying RT correction to all analysis atlases...")
+#         self._apply_rt_correction_to_analysis_atlases(rt_model, analysis_subset)
+
+#     def _get_existing_rt_alignment_from_db(self) -> Optional[Dict]:
+#         """
+#         Check if RT alignment already exists in database for this project.
+#         Returns the full RT model dict needed for applying corrections.
+#         """
+#         qc_atlas_uid = self.atlas_data.get('rt_align_template_atlas', {}).get('atlas_uid', None)
+#         if not qc_atlas_uid:
+#             logger.debug(f"Could not find QC atlas UID: {qc_atlas_uid}")
+#             return None
         
-        cells = [
-            # Title cell
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    f"# Manual Curation: {atlas_type.upper()} {chrom_pol.upper()}\n",
-                    f"## Project: {self.project_name}\n\n",
-                    f"This notebook contains manual curation for **{atlas_type.upper()} {chrom_pol.upper()}** analysis.\n\n",
-                    f"- Total compounds: **{len(putative_list)}**\n",
-                    f"- Generated: **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**\n\n",
-                    "**Note:** This notebook uses cached workflow data and does not re-run the analysis pipeline."
-                ]
-            },
+#         with dbi.get_db_connection(self.project_db_path) as conn:
+#             result = conn.execute("""
+#             SELECT 
+#                 rt_alignment_uid,
+#                 project_name,
+#                 rt_alignment_number,
+#                 qc_atlas_uid,
+#                 model_type,
+#                 polynomial_degree,
+#                 r_squared,
+#                 rmse,
+#                 coefficients,
+#                 equation,
+#                 num_qc_files,
+#                 num_compounds,
+#                 created_by,
+#                 created_date,
+#                 metadata
+#             FROM rt_alignment
+#             WHERE project_name = ? 
+#                 AND rt_alignment_number = ?
+#                 AND qc_atlas_uid = ?
+#             ORDER BY created_date DESC
+#             LIMIT 1
+#             """, [self.project_name, self.rt_alignment_number, qc_atlas_uid]).fetchone()
             
-            # Setup and load workflow with forced cache usage
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "import sys\n",
-                    "sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')\n",
-                    "import workflow_objects as wfo\n",
-                    "import load_tools as ldt\n",
-                    "import targeted_gui as tgi\n",
-                    "import logging_config as lcf\n",
-                    "\n",
-                    "logger = lcf.get_logger('analysis_notebook')",
-                    "\n",
-                    f"# Load configuration\n",
-                    f"config_path = r'{Path(self.analysis_directory) / 'metatlas2_config.yaml'}'\n",
-                    "config = ldt.load_metatlas2_config(config_path)\n",
-                    "\n",
-                    "# Create workflow manager\n",
-                    "workflow = wfo.TargetedAnalysisManager(\n",
-                    "    config=config,\n",
-                    f"    project_name=r'{self.project_name}',\n",
-                    f"    rt_alignment_number={self.rt_alignment_number},\n",
-                    f"    analysis_number={self.analysis_number}\n",
-                    ")\n",
-                    "\n",
-                    "# Load cached workflow results directly (skip pipeline execution)\n",
-                    "logger.info('Loading cached workflow results...')\n",
-                    "rt_cache = workflow.cache_manager.load_rt_correction()\n",
-                    "putative_cache = workflow.cache_manager.load_putative_identifications()\n",
-                    "curation_cache = workflow.cache_manager.load_manual_curation(prefer_partial=True)\n",
-                    "\n",
-                    "if rt_cache:\n",
-                    "    workflow.results.rt_models = rt_cache['rt_models']\n",
-                    "    workflow.results.corrected_atlases = rt_cache.get('corrected_atlases', {})\n",
-                    "    logger.info('RT correction cache loaded')\n",
-                    "\n",
-                    "if putative_cache:\n",
-                    "    workflow.results.putative_ids = putative_cache['putative_ids']\n",
-                    "    workflow.results.summary_stats = putative_cache.get('summary_stats')\n",
-                    "    workflow.current_stage = wfo.WorkflowStage.MANUAL_CURATION\n",
-                    "    logger.info('Putative identification cache loaded')\n",
-                    "\n",
-                    "if curation_cache:\n",
-                    "    # Update with any existing curation progress\n",
-                    "    workflow.results.putative_ids = curation_cache['putative_ids']\n",
-                    "    logger.info('Curation progress cache loaded')\n",
-                    "\n",
-                    f"logger.info(f'Cache loading complete. Current stage: {{workflow.current_stage.value}}')"
-                ]
-            },
+#             if result:
+#                 rt_model = {
+#                     'rt_alignment_uid': result[0],
+#                     'project_name': result[1],
+#                     'rt_alignment_number': result[2],
+#                     'qc_atlas_uid': result[3],
+#                     'model_type': result[4],
+#                     'polynomial_degree': result[5],
+#                     'r_squared': result[6],
+#                     'rmse': result[7],
+#                     'coefficients': json.loads(result[8]) if result[8] else [],
+#                     'equation': result[9],
+#                     'num_qc_files': result[10],
+#                     'num_compounds': result[11],
+#                     'created_by': result[12],
+#                     'created_date': result[13],
+#                     'metadata': result[14]
+#                 }
+                
+#                 logger.info(f"Found existing RT alignment in database: {result[0]}")
+        
+#                 if rt_model:
+#                     logger.info(f"Using existing RT correction with UID {rt_model['rt_alignment_uid']} from database created on {rt_model['created_date']} by {rt_model['created_by']}")
+#                     logger.info(f"  R² = {rt_model['r2']:.4f}, RMSE = {rt_model['rmse']:.4f}")
+                    
+#                     # Store the model and apply to target atlases
+#                     rt_align_template_atlas = self.atlas_data.get('rt_align_template_atlas')
+#                     chrom_pol = f"{rt_align_template_atlas['chromatography']}_{rt_align_template_atlas['polarity']}"
+#                     self.rt_models[chrom_pol] = rt_model
+#                 else:
+#                     logger.error(f"Tried to find RT model for alignment number {self.rt_alignment_number} and UID {self.atlas_data['rt_align_template_atlas']['atlas_uid']} but none found in database")
+#                     raise ValueError("No existing RT alignment model found in database - cannot proceed with RT correction. Please run without 'use_existing_rt_correction' or ensure the correct RT model exists in the database.")
+        
+#         return None
+
+#     def _do_rt_correction(self) -> None:
+#         """Run fresh RT correction using single RT alignment atlas"""
+        
+#         rt_align_template_atlas = self.atlas_data.get('rt_align_template_atlas', {})
+#         if not rt_align_template_atlas:
+#             raise ValueError("No RT alignment atlas specified in configuration")
+        
+#         atlas_uid = rt_align_template_atlas['atlas_uid']
+#         chromatography = rt_align_template_atlas['chromatography']
+#         polarity = rt_align_template_atlas['polarity']
+        
+#         logger.info(f"Running RT correction using atlas {atlas_uid} ({chromatography}_{polarity})")
+
+#         # Get QC files matching the RT alignment atlas method
+#         chrom_pol = f"{chromatography}_{polarity}"
+#         logger.info(f"Loading QC files for {chrom_pol}...")
+#         qc_files_df = self._filter_files_by_method(
+#             self.parquet_files['qc'], 
+#             chrom_pol
+#         )
+#         if qc_files_df.empty:
+#             raise ValueError(f"No QC files found for {chrom_pol}")
+#         logger.info(f"Found {len(qc_files_df)} QC files for {chrom_pol}")
+
+#         # Extract QC matches for RT model building
+#         logger.info(f"Extracting QC atlas compound data from {len(qc_files_df)} QC files...")
+#         qc_matches = rat.extract_matches_from_qc_files(
+#             self.main_db_path,
+#             atlas_uid,
+#             qc_files_df,
+#             self.config["WORKFLOWS"][chromatography.upper()]["RT_ALIGN"]["PARAMS"]
+#         )
+        
+#         matching_stats = rat.evaluate_qc_matching_stats(qc_matches)
+#         # Print QC compound matching stats in a readable notebook format
+#         matching_md = "### QC Compound Matching Summary\n"
+#         for key, value in matching_stats.items():
+#             if isinstance(value, dict):
+#                 matching_md += f"- **{key}:**\n"
+#                 for subkey, subval in value.items():
+#                     matching_md += f"    - {subkey}: {subval}\n"
+#             else:
+#                 matching_md += f"- **{key}:** {value}\n"
+#         display(Markdown(matching_md))
+#         #logger.info("QC compound matching completed:\n" + json.dumps(matching_stats, indent=2))
+
+#         logger.info(f"Building RT alignment model using {len(qc_matches)} matches")
+#         best_model, modeling_data, _ = rat.build_rt_alignment_model(qc_matches, self.config["WORKFLOWS"][chromatography.upper()]["RT_ALIGN"]["PARAMS"])
+#         logger.info(f"RT model created with R² = {best_model['r2']:.4f}, RMSE = {best_model['rmse']:.4f}")
+        
+#         logger.info("Saving RT model to database...")
+#         rt_alignment_uid = dbi.save_rt_alignment_model_to_db(
+#             atlas_uid,
+#             self.project_db_path,
+#             self.rt_alignment_number,
+#             best_model,
+#             qc_files_df,
+#             modeling_data.to_dict('records')
+#         )
+
+#         # Store the single RT model
+#         best_model['rt_alignment_uid'] = rt_alignment_uid
+#         self.rt_models[chrom_pol] = best_model
+        
+#         # Create RT model plot
+#         rat.visualize_RT_model(modeling_data, best_model, self.analysis_directory, rt_alignment_uid)
+
+#         return best_model
+
+#     def _filter_files_by_method(self, parquet_file_info: pd.DataFrame, chrom_pol: str) -> pd.DataFrame:
+#         """Filter files by chromatography and polarity using DataFrame columns."""
+#         logger.info(f"Filtering {len(parquet_file_info)} parquet files for method {chrom_pol}...")
+        
+#         # Parse requested chromatography and polarity
+#         chrom, pol = chrom_pol.split('_')
+#         chrom_map = {
+#             'hilicz': ['hilic', 'hilicz'],
+#             'hilic': ['hilic', 'hilicz'],
+#             'c18': ['c18'],
+#         }
+#         chrom_values = chrom_map.get(chrom.lower(), [chrom.lower()])
+#         logger.debug(f"Filtering for chromatography values: {chrom_values} and polarity: {pol}")
+        
+#         # Filter using DataFrame columns (case-insensitive)
+#         filtered_parquet_file_info = parquet_file_info[
+#             (parquet_file_info['chromatography'].str.lower().isin(chrom_values)) &
+#             (parquet_file_info['polarity'].str.lower() == pol.lower())
+#         ]        
+#         logger.info(f"Filtered to {len(filtered_parquet_file_info)} files")
+        
+#         return filtered_parquet_file_info
+
+#     def _apply_rt_correction_to_analysis_atlases(self, model: Dict, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
+#         """Apply RT correction to all analysis atlases using the single RT model"""
+        
+#         for analysis_atlas in self.atlas_data['analysis_atlases']:
+#             atlas_type = analysis_atlas['atlas_type']
+#             polarity = analysis_atlas['polarity']
+#             chromatography = analysis_atlas['chromatography']
+#             atlas_uid = analysis_atlas['atlas_uid']
+#             workflow_name = analysis_atlas['workflow']
+
+#             # Check analysis subset to run RT alignment on)
+#             if analysis_subset:
+#                 current_tuple = (workflow_name.lower(), atlas_type.lower(), polarity.lower())
+#                 user_tuple = list((w.lower(), a.lower(), p.lower()) for (w, a, p) in analysis_subset)
+#                 if current_tuple not in user_tuple:
+#                     logger.info(f"Skipping RT alignment for {atlas_type} with attributes {current_tuple} as not in supplied analysis subset {user_tuple}")
+#                     continue
             
-            # Launch curation GUI
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "# Launch manual curation GUI\n",
-                    f"analysis_key = '{atlas_type}'\n",
-                    f"chrom_pol = '{chrom_pol}'\n",
-                    "\n",
-                    "# Get putative IDs from cached results\n",
-                    "if analysis_key in workflow.results.putative_ids and chrom_pol in workflow.results.putative_ids[analysis_key]:\n",
-                    "    putative_ids = workflow.results.putative_ids[analysis_key][chrom_pol]\n",
-                    "    print(f'Found {len(putative_ids)} compounds for curation')\n",
-                    "    \n",
-                    "    # Auto-save callback\n",
-                    "    def save_progress(updated_ids):\n",
-                    "        workflow.results.putative_ids[analysis_key][chrom_pol] = updated_ids\n",
-                    "        timestamp = workflow.save_curation_progress(partial=True)\n",
-                    "        print(f'Progress saved at {timestamp} for {len(updated_ids)} compounds')\n",
-                    "    \n",
-                    "    # Launch GUI directly with cached CompoundExperimental objects\n",
-                    "    gui_container, updated_putative_ids = tgi.create_gui_with_compounds(\n",
-                    "        putative_ids, \n",
-                    "        config, \n",
-                    f"        analysis_dir=r'{self.analysis_directory}',\n",
-                    "    )\n",
-                    "    \n",
-                    "    # Display the GUI\n",
-                    "    if gui_container:\n",
-                    "        display(gui_container)\n",
-                    "        print('\\n=== Manual Curation GUI ===')\n",
-                    "        print('Use the GUI above to curate your compounds.')\n",
-                    "        print('Changes are auto-saved every 30 seconds.')\n",
-                    "        print('Close this notebook when curation is complete.')\n",
-                    "    else:\n",
-                    "        print('Failed to create GUI - check console for errors')\n",
-                    "        \n",
-                    "else:\n",
-                    f"    print('ERROR: No putative identifications found for {atlas_type.upper()} {chrom_pol.upper()}')\n",
-                    "    print('Available data:')\n",
-                    "    for at, methods in workflow.results.putative_ids.items():\n",
-                    "        for method, pids in methods.items():\n",
-                    "            print(f'  {at} - {method}: {len(pids)} compounds')"
-                ]
-            }
-        ]
-        
-        # Create notebook structure
-        notebook = {
-            "cells": cells,
-            "metadata": {
-                "kernelspec": {
-                    "display_name": "Python 3",
-                    "language": "python",
-                    "name": "python3"
-                },
-                "language_info": {
-                    "codemirror_mode": {
-                        "name": "ipython",
-                        "version": 3
-                    },
-                    "file_extension": ".py",
-                    "mimetype": "text/x-python",
-                    "name": "python",
-                    "nbconvert_exporter": "python",
-                    "pygments_lexer": "ipython3",
-                    "version": "3.8.0"
-                }
-            },
-            "nbformat": 4,
-            "nbformat_minor": 4
-        }
-        
-        return notebook
-        
-    def _save_workflow_state(self) -> None:
-        """Save workflow state to cache for notebook reconstruction"""
-        
-        cache_dir = Path(self.analysis_directory) / "cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        workflow_state = {
-            'config': self.config,
-            'project_db_path': self.project_db_path,
-            'project_directory': self.analysis_directory,
-            'atlas_data': self.atlas_data,
-            'current_stage': self.current_stage.value,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        state_file = cache_dir / "workflow_state.pkl"
-        
-        try:
-            with open(state_file, 'wb') as f:
-                pickle.dump(workflow_state, f)
-            logger.info(f"Saved workflow state: {state_file}")
-        except Exception as e:
-            logger.error(f"Failed to save workflow state: {e}")
+#             try:
+#                 logger.info(f"Applying RT correction to {atlas_type} {chromatography} {polarity} atlas {atlas_uid}")
+                
+#                 # Apply RT correction to this atlas
+#                 corr_atlas_df, stats = rat.apply_rt_correction_to_target(self.main_db_path, analysis_atlas, model, self.config["WORKFLOWS"][chromatography.upper()]["RT_ALIGN"]["PARAMS"])
+#                 if corr_atlas_df is None or (isinstance(corr_atlas_df, pd.DataFrame) and corr_atlas_df.empty):
+#                     logger.error(f"RT correction returned no data for {atlas_type} {polarity} atlas {atlas_uid}")
+#                     continue
+
+#                 # Save corrected atlas to database
+#                 corr_atlas_uid, corr_atlas_name = dbi.save_rt_corrected_atlas_to_db(
+#                     self.project_db_path,
+#                     analysis_atlas,
+#                     model,
+#                     corr_atlas_df,
+#                     self.rt_alignment_number,
+#                     self.analysis_number,
+#                 )
+                
+#                 # Create alignment summary
+#                 rt_align_summary = rat.create_rt_alignment_summary(corr_atlas_uid,
+#                                                                    model['rt_alignment_uid'], 
+#                                                                    corr_atlas_name, 
+#                                                                    stats
+#                                                                 )
+                
+#                 # Print RT correction summary in a readable notebook format
+#                 rt_align_md = f"### RT Correction Summary for {atlas_type} {chromatography} {polarity}\n"
+#                 for key, value in rt_align_summary.items():
+#                     if isinstance(value, dict):
+#                         rt_align_md += f"- **{key}:**\n"
+#                         for subkey, subval in value.items():
+#                             rt_align_md += f"    - {subkey}: {subval}\n"
+#                     else:
+#                         rt_align_md += f"- **{key}:** {value}\n"
+#                 display(Markdown(rt_align_md))
+                
+#             except Exception as e:
+#                 raise ValueError(f"Failed to apply RT correction to {atlas_type} {polarity} atlas {atlas_uid}: {e}")
+
+#     # =============================================================================
+#     # AUTO IDENTIFICATION METHODS (Stage 3)
+#     # =============================================================================
     
-    # =============================================================================
-    # RT CORRECTION METHODS (Stage 2)
-    # =============================================================================
+#     def _run_auto_identification_workflow(self, config: Dict, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
+#         """Run auto identification for specified analysis atlases with optional caching"""
 
-    def _run_rt_correction_workflow(self, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
-        """Run single RT correction using the RT alignment atlas"""
+#         logger.info(f"Running auto identifications workflow...")
         
-        # Check if we should use cached RT correction
-        use_rt_cache = self.atlas_data['rt_align_template_atlas']['rt_align_params'].get('use_rt_correction_cache', False)
+#         for analysis_atlas in self.atlas_data['analysis_atlases']:
+#             atlas_type = analysis_atlas['atlas_type']
+#             polarity = analysis_atlas['polarity']
+#             chromatography = analysis_atlas['chromatography']
+#             workflow_name = analysis_atlas['workflow']
+#             chrom_pol = f"{chromatography}_{polarity}"
+#             analysis_params = analysis_atlas.get('analysis_params', {})
 
-        if use_rt_cache:
-            # Try to load cached RT correction data
-            cached_data = self.cache_manager.load_rt_correction()
-            if cached_data:
-                logger.info("Using cached RT correction data")
-                self.results.rt_models = cached_data['rt_models']
-                self.results.corrected_atlases = cached_data.get('corrected_atlases', {})
-                return
-        
-        logger.info("Running RT correction workflow")
-        self._do_rt_correction(analysis_subset)
-
-        # Always save to cache when running fresh analysis
-        self.cache_manager.save_rt_correction(self.results.rt_models, self.results.corrected_atlases)
-
-    def _do_rt_correction(self, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
-        """Run fresh RT correction using single RT alignment atlas"""
-        
-        rt_align_template_atlas = self.atlas_data.get('rt_align_template_atlas')
-        if not rt_align_template_atlas:
-            raise ValueError("No RT alignment atlas specified in configuration")
-        
-        atlas_uid = rt_align_template_atlas['atlas_uid']
-        chromatography = rt_align_template_atlas['chromatography']
-        polarity = rt_align_template_atlas['polarity']
-        
-        logger.info(f"Running RT correction using atlas {atlas_uid} ({chromatography}_{polarity})")
-
-        # Get QC files matching the RT alignment atlas method
-        chrom_pol = f"{chromatography}_{polarity}"
-        logger.info(f"Loading QC files for {chrom_pol}...")
-        qc_files_df = self._filter_files_by_method(
-            self.parquet_files['qc'], 
-            chrom_pol
-        )
-        if qc_files_df.empty:
-            raise ValueError(f"No QC files found for {chrom_pol}")
-        logger.info(f"Found {len(qc_files_df)} QC files for {chrom_pol}")
-
-        # Extract QC matches for RT model building
-        logger.info(f"Extracting QC atlas compound data from {len(qc_files_df)} QC files...")
-        qc_matches = rat.extract_matches_from_qc_files(
-            self.main_db_path,
-            atlas_uid,
-            qc_files_df,
-            self.config["WORKFLOWS"][chromatography.upper()]["RT_ALIGN"]["PARAMS"]
-        )
-        
-        matching_stats = rat.evaluate_qc_matching_stats(qc_matches)
-        # Print QC compound matching stats in a readable notebook format
-        matching_md = "### QC Compound Matching Summary\n"
-        for key, value in matching_stats.items():
-            if isinstance(value, dict):
-                matching_md += f"- **{key}:**\n"
-                for subkey, subval in value.items():
-                    matching_md += f"    - {subkey}: {subval}\n"
-            else:
-                matching_md += f"- **{key}:** {value}\n"
-        display(Markdown(matching_md))
-        #logger.info("QC compound matching completed:\n" + json.dumps(matching_stats, indent=2))
-
-        # Build single RT correction model
-        logger.info(f"Building RT alignment model using {len(qc_matches)} matches")
-        best_model, modeling_data, _ = rat.build_rt_alignment_model(qc_matches, self.config["WORKFLOWS"][chromatography.upper()]["RT_ALIGN"]["PARAMS"])
-
-        logger.info(f"RT model created with R² = {best_model['r2']:.4f}, RMSE = {best_model['rmse']:.4f}")
-        
-        # Store the single RT model
-        self.results.rt_models[chrom_pol] = best_model
-        
-        # Save RT model to database
-        rt_alignment_uid = dbi.save_rt_alignment_model_to_db(
-            atlas_uid,
-            self.project_db_path,
-            self.rt_alignment_number,
-            best_model,
-            qc_files_df,
-            modeling_data.to_dict('records')
-        )
-
-        # Create RT model plot
-        rat.visualize_RT_model(modeling_data, best_model, self.analysis_directory, rt_alignment_uid)
-
-        # Apply RT correction to all analysis atlases
-        self._apply_rt_correction_to_analysis_atlases(best_model, rt_alignment_uid, analysis_subset)
-
-    def _filter_files_by_method(self, parquet_file_info: pd.DataFrame, chrom_pol: str) -> pd.DataFrame:
-        """Filter files by chromatography and polarity using DataFrame columns."""
-        logger.info(f"Filtering {len(parquet_file_info)} parquet files for method {chrom_pol}...")
-        
-        # Parse requested chromatography and polarity
-        chrom, pol = chrom_pol.split('_')
-        chrom_map = {
-            'hilicz': ['hilic', 'hilicz'],
-            'hilic': ['hilic', 'hilicz'],
-            'c18': ['c18'],
-        }
-        chrom_values = chrom_map.get(chrom.lower(), [chrom.lower()])
-        logger.debug(f"Filtering for chromatography values: {chrom_values} and polarity: {pol}")
-        
-        # Filter using DataFrame columns (case-insensitive)
-        filtered_parquet_file_info = parquet_file_info[
-            (parquet_file_info['chromatography'].str.lower().isin(chrom_values)) &
-            (parquet_file_info['polarity'].str.lower() == pol.lower())
-        ]        
-        logger.info(f"Filtered to {len(filtered_parquet_file_info)} files")
-        
-        return filtered_parquet_file_info
-
-    def _apply_rt_correction_to_analysis_atlases(self, model: Dict, rt_alignment_uid: str, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
-        """Apply RT correction to all analysis atlases using the single RT model"""
-        
-        logger.info("Applying RT correction to all analysis atlases...")
-        
-        for analysis_atlas in self.atlas_data['analysis_atlases']:
-            atlas_type = analysis_atlas['atlas_type']
-            polarity = analysis_atlas['polarity']
-            chromatography = analysis_atlas['chromatography']
-            atlas_uid = analysis_atlas['atlas_uid']
-            workflow_name = analysis_atlas['workflow']
-
-            # Check analysis subset to run RT alignment on)
-            if analysis_subset:
-                current_tuple = (workflow_name.lower(), atlas_type.lower(), polarity.lower())
-                user_tuple = list((w.lower(), a.lower(), p.lower()) for (w, a, p) in analysis_subset)
-                if current_tuple not in user_tuple:
-                    logger.info(f"Skipping RT alignment for {atlas_type} with attributes {current_tuple} as not in supplied analysis subset {user_tuple}")
-                    continue
+#             # Check analysis subset to process
+#             if analysis_subset:
+#                 current_tuple = (workflow_name.lower(), atlas_type.lower(), polarity.lower())
+#                 user_tuple = list((w.lower(), a.lower(), p.lower()) for (w, a, p) in analysis_subset)
+#                 if current_tuple not in user_tuple:
+#                     logger.info(f"Skipping analysis for {atlas_type} with attributes {current_tuple} as not in supplied analysis subset {user_tuple}")
+#                     continue
             
-            try:
-                logger.info(f"Applying RT correction to {atlas_type} {chromatography} {polarity} atlas {atlas_uid}")
-                
-                # Apply RT correction to this atlas
-                corr_atlas_df, stats = rat.apply_rt_correction_to_target(self.main_db_path, analysis_atlas, model, self.config["WORKFLOWS"][chromatography.upper()]["RT_ALIGN"]["PARAMS"])
-                if corr_atlas_df is None or (isinstance(corr_atlas_df, pd.DataFrame) and corr_atlas_df.empty):
-                    logger.error(f"RT correction returned no data for {atlas_type} {polarity} atlas {atlas_uid}")
-                    continue
+#             # Get analysis parameters from config
+#             use_existing_ids_in_db = analysis_params.get("use_existing_hits", False)
 
-                # Save corrected atlas to database
-                corr_atlas_uid, corr_atlas_name = dbi.save_rt_corrected_atlas_to_db(
-                    self.project_db_path,
-                    analysis_atlas,
-                    model,
-                    corr_atlas_df,
-                    self.rt_alignment_number,
-                    self.analysis_number,
-                )
-                
-                # Create alignment summary
-                rt_align_summary = rat.create_rt_alignment_summary(
-                    corr_atlas_uid, rt_alignment_uid, corr_atlas_name, stats
-                )
-                
-                # Print RT correction summary in a readable notebook format
-                rt_align_md = f"### RT Correction Summary for {atlas_type} {chromatography} {polarity}\n"
-                for key, value in rt_align_summary.items():
-                    if isinstance(value, dict):
-                        rt_align_md += f"- **{key}:**\n"
-                        for subkey, subval in value.items():
-                            rt_align_md += f"    - {subkey}: {subval}\n"
-                    else:
-                        rt_align_md += f"- **{key}:** {value}\n"
-                display(Markdown(rt_align_md))
-                #logger.info("RT correction summary:\n" + json.dumps(rt_align_summary, indent=2))
-                
-                # Store corrected atlas UID
-                self.results.set_corrected_atlas_uid(atlas_type, 'hilic', polarity, corr_atlas_uid)
-                logger.info(f"Created RT-corrected {atlas_type} {polarity} atlas: {corr_atlas_uid}")
-                
-            except Exception as e:
-                logger.error(f"Failed to apply RT correction to {atlas_type} {polarity} atlas {atlas_uid}: {e}")
-                continue
+#             if use_existing_ids_in_db:
+#                 pass
 
-    # =============================================================================
-    # PUTATIVE IDENTIFICATION METHODS (Stage 3)
-    # =============================================================================
+#             logger.info(f"Running auto identification for {atlas_type} {polarity} using atlas {target_atlas_uid}")
+            
+#             # Run targeted analysis workflow with specific parameters
+#             analysis_results = tga.run_targeted_analysis_workflow(
+#                 project_db_path=self.project_db_path,
+#                 target_atlas_uid=target_atlas_uid,
+#                 rt_alignment_number=self.rt_alignment_number,
+#                 analysis_number=self.analysis_number,
+#                 config=config,
+#                 analysis_params=analysis_params
+#             )
     
-    def _run_putative_identification_workflow(self, config: Dict, analysis_subset: List[Tuple[str, str, str]] = None) -> None:
-        """Run putative identification for specified analysis atlases with optional caching"""
-
-        logger.info(f"Running putative identifications workflow...")
-        
-        self.results.putative_ids = {}
-        for analysis_atlas in self.atlas_data['analysis_atlases']:
-            atlas_type = analysis_atlas['atlas_type']
-            polarity = analysis_atlas['polarity']
-            chromatography = analysis_atlas['chromatography']
-            workflow_name = analysis_atlas['workflow']
-            chrom_pol = f"{chromatography}_{polarity}"
-            analysis_params = analysis_atlas.get('analysis_params', {})
-
-            # Check analysis subset to process
-            if analysis_subset:
-                current_tuple = (workflow_name.lower(), atlas_type.lower(), polarity.lower())
-                user_tuple = list((w.lower(), a.lower(), p.lower()) for (w, a, p) in analysis_subset)
-                if current_tuple not in user_tuple:
-                    logger.info(f"Skipping analysis for {atlas_type} with attributes {current_tuple} as not in supplied analysis subset {user_tuple}")
-                    continue
-            
-            # Get corrected atlas UID or fallback to original
-            corrected_atlas_uid = self.results.get_corrected_atlas_uid(atlas_type, chromatography, polarity)
-            target_atlas_uid = corrected_atlas_uid or analysis_atlas['atlas_uid']
-            
-            # Get analysis parameters from config
-            use_cached_data = analysis_params.get("use_id_search_cache", False)
-
-            if use_cached_data:
-                # Try to load cached putative identifications
-                cached_data = self.cache_manager.load_putative_identifications()
-                if cached_data:
-                    logger.info("Using cached putative identification data")
-                    self.results.putative_ids = cached_data['putative_ids']
-                    self.results.summary_stats = cached_data.get('summary_stats')
-                    return
-
-            logger.info(f"Running putative identification for {atlas_type} {polarity} using atlas {target_atlas_uid}")
-            
-            try:                        
-                # Run targeted analysis workflow with specific parameters
-                _, analysis_results = tga.run_targeted_analysis_workflow(
-                    project_db_path=self.project_db_path,
-                    target_atlas_uid=target_atlas_uid,
-                    config=config,
-                    analysis_params=analysis_params  # Pass specific analysis parameters
-                )
-                
-                # Convert raw analysis results directly to putative identifications
-                putative_list = self._convert_raw_results_to_putative_ids(
-                    analysis_results, atlas_type, chrom_pol
-                )
-                
-                # Store results using atlas_type_polarity as key
-                self.results.set_putative_ids(atlas_type, chrom_pol, putative_list)
-                
-            except Exception as e:
-                logger.error(f"Failed putative identification for {atlas_type} {polarity}: {e}")
-                self.results.set_putative_ids(atlas_type, chrom_pol, [])
-
-        # Calculate summary statistics for workflow results
-        self.results.get_putative_identification_summary()
-        logger.info(f"Putative identification complete. Total: {len(self.results.get_all_putative_ids())} identifications")
-        
-        # Always save to cache when running new analysis
-        self.cache_manager.save_putative_identifications(
-            self.results.putative_ids, 
-            self.results.summary_stats
-        )
-
-        return self.results.summary_stats
-
-    # =============================================================================
-    # HELPER METHODS FOR PUTATIVE IDENTIFICATION CONVERSION
-    # =============================================================================
-    
-    def _convert_raw_results_to_putative_ids(self, analysis_results: Dict, 
-                                           atlas_type: str, chrom_pol: str) -> List[CompoundExperimental]:
-        """Convert raw analysis results directly to list of CompoundExperimental objects"""
-        compound_list = []
-        
-        # Extract compounds from analysis results
-        compounds_data = analysis_results.get('compounds', {})
-        
-        for inchi_key, compound_data in compounds_data.items():
-            # Extract chromatography and polarity from chrom_pol
-            chrom_parts = chrom_pol.split('_')
-            chromatography = chrom_parts[0] if len(chrom_parts) > 0 else ''
-            polarity = chrom_parts[1] if len(chrom_parts) > 1 else ''
-            
-            compound_experimental = CompoundExperimental(
-                compound_uid=compound_data.get('compound_uid', ''),
-                inchi_key=inchi_key,
-                compound_name=compound_data.get('compound_name', ''),
-                formula=compound_data.get('formula', ''),
-                mz=compound_data.get('mz', 0.0),
-                adduct=compound_data.get('adduct', ''),
-                polarity=polarity,
-                chromatography=chromatography,
-                mz_tolerance=compound_data.get('mz_tolerance', 5.0),
-                
-                # Original atlas RT data (immutable reference)
-                atlas_rt_peak=compound_data.get('original_rt_peak', 0.0),
-                atlas_rt_min=compound_data.get('original_rt_min', 0.0),
-                atlas_rt_max=compound_data.get('original_rt_max', 0.0),
-                
-                # Current RT data (modifiable during analysis)
-                rt_peak=compound_data.get('rt_peak', 0.0),
-                rt_min=compound_data.get('rt_min', 0.0),
-                rt_max=compound_data.get('rt_max', 0.0),
-                
-                # Analysis annotations
-                ms1_notes=compound_data.get('ms1_notes', 'keep'),
-                ms2_notes=compound_data.get('ms2_notes', 'no selection'),
-                analyst_notes=compound_data.get('analyst_notes', ''),
-                identification_notes=compound_data.get('identification_notes', ''),
-                
-                # Best EIC results
-                best_eic_file=compound_data.get('best_eic_file', ''),
-                best_eic_rt=compound_data.get('best_eic_rt', 0.0),
-                best_eic_mz=compound_data.get('best_eic_mz', 0.0),
-                best_eic_intensity=compound_data.get('best_eic_intensity', 0.0),
-                best_eic_ppm_error=compound_data.get('best_eic_ppm_error', 0.0),
-                best_eic_rt_error=compound_data.get('best_eic_rt_error', 0.0),
-                
-                # Average EIC results
-                avg_eic_rt=compound_data.get('avg_eic_rt', 0.0),
-                avg_eic_intensity=compound_data.get('avg_eic_intensity', 0.0),
-                avg_eic_mz=compound_data.get('avg_eic_mz', 0.0),
-                
-                # Best MS2 results
-                best_ms2_file=compound_data.get('best_ms2_file', ''),
-                best_ms2_database=compound_data.get('best_ms2_database', ''),
-                best_ms2_ref_id=compound_data.get('best_ms2_ref_id', ''),
-                best_ms2_rt=compound_data.get('best_ms2_rt', 0.0),
-                best_ms2_intensity=compound_data.get('best_ms2_intensity', 0.0),
-                best_ms2_mz=compound_data.get('best_ms2_mz', 0.0),
-                best_ms2_score=compound_data.get('best_ms2_score', 0.0),
-                best_ms2_num_matches=compound_data.get('best_ms2_num_matches', 0),
-                best_ms2_ref_frags=compound_data.get('best_ms2_ref_frags', 0),
-                best_ms2_data_frags=compound_data.get('best_ms2_data_frags', 0),
-                best_ms2_matched_fragments=compound_data.get('best_ms2_matched_fragments', []),
-                best_ms2_selection_method=compound_data.get('best_ms2_selection_method', 'none'),
-                
-                # Average MS2 results
-                avg_ms2_score=compound_data.get('avg_ms2_score', 0.0),
-                
-                # Detection summary
-                total_files_detected=compound_data.get('total_files_detected', 0),
-                ms2_files_with_data=compound_data.get('ms2_files_with_data', 0),
-                
-                # Raw data storage (for GUI)
-                eic_data_files=compound_data.get('eic_data_files', {}),
-                ms2_data_files=compound_data.get('ms2_data_files', {}),
-                suggested_rt_bounds=compound_data.get('suggested_rt_bounds'),
-                isomers=compound_data.get('isomers', []),
-                
-                # Workflow state tracking
-                is_rt_modified=compound_data.get('is_rt_modified', False),
-                is_annotation_modified=compound_data.get('is_annotation_modified', False)
-            )
-            compound_list.append(compound_experimental)
-        
-        return compound_list
-
-# =============================================================================
-# MANUAL CURATION METHODS (Stage 4)
-# =============================================================================
-    
-    def save_curation_progress(self, putative_ids: List = None, partial: bool = True) -> str:
-        """
-        Public method to save curation progress during manual curation.
-        Can be called from GUI or external scripts.
-        
-        Args:
-            putative_ids: Optional list of updated putative IDs. If None, saves current state
-            partial: Whether this is a partial save during curation
-            
-        Returns:
-            timestamp of saved cache
-        """
-        if putative_ids:
-            # Update results from provided putative IDs
-            for pid in putative_ids:
-                # Find and update the corresponding putative ID in results
-                for atlas_type, methods in self.results.putative_ids.items():
-                    for method, method_pids in methods.items():
-                        for i, existing_pid in enumerate(method_pids):
-                            if existing_pid.inchi_key == pid.inchi_key:
-                                method_pids[i] = pid
-                                break
-        
-        # Save to cache
-        timestamp = self.cache_manager.save_manual_curation(
-            self.results.putative_ids,
-            partial_save=partial
-        )
-        
-        return timestamp
-    
-    def load_curation_progress(self, timestamp: str = None) -> bool:
-        """
-        Load curation progress from cache.
-        
-        Args:
-            timestamp: Specific timestamp to load, or None for latest
-            
-        Returns:
-            True if successfully loaded, False otherwise
-        """
-        cached_data = self.cache_manager.load_manual_curation(timestamp=timestamp)
-        
-        if cached_data:
-            self.results.putative_ids = cached_data['putative_ids']
-            logger.info("Loaded curation progress from cache")
-            return True
-        
-        return False
-    
-    def auto_save_curation(self, putative_ids: List = None):
-        """
-        Convenience method for auto-saving curation progress.
-        This can be called from the GUI at regular intervals.
-        
-        Args:
-            putative_ids: Current putative identifications state
-        """
-        if putative_ids:
-            self.cache_manager.auto_save_curation_progress(putative_ids)
-        else:
-            # Use current workflow state
-            self.cache_manager.auto_save_curation_progress(self.results.putative_ids)
-
-
 # =============================================================================
 # DATABASE MANAGER (primarily for adding compounds to the database)
 # =============================================================================
@@ -2552,7 +1148,7 @@ class AtlasManager:
         atlas_info = atlas_metadata.iloc[0]
         
         # Get atlas compounds
-        atlas_compounds_df = dbi.get_atlas_compounds_from_db(database_path, atlas_uid)
+        atlas_compounds_df = dbi.get_atlas_compounds_table(database_path, atlas_uid)
         
         # Convert compounds to CompoundReference objects
         logger.info(f"Converting {len(atlas_compounds_df)} atlas compounds to CompoundReference objects")
@@ -2574,7 +1170,7 @@ class AtlasManager:
             polarity=atlas_info.get('polarity', ''),
             compound_references=compounds_dict,
             created_by=atlas_info.get('created_by', ''),
-            last_modified=atlas_info.get('last_modified', ''),
+            created_date=atlas_info.get('created_date', ''),
             source_atlas_uid=atlas_info.get('source_atlas_uid')
         )
         
@@ -2602,47 +1198,46 @@ class AtlasManager:
 
         logger.info(f"Processing atlas configurations for {len(atlas_configs)} atlas types...")
 
-        for atlas_type, atlas_info in atlas_configs.items():
-            if atlas_info:
-                for chrom, pols in atlas_info.items():
-                    for pol, atlas_details in pols.items():
-                        if atlas_details and atlas_details.get('path') is not None:
-                            try:
-                                # Extract configuration
-                                atlas_file_path = atlas_details['path']
-                                atlas_name = atlas_details['name']
-                                atlas_description = atlas_details['desc']
-                                
-                                logger.info(f"Creating atlas from config: {atlas_name} ({atlas_type}/{chrom}/{pol})")
+        for atlas_chrom, atlas_info in atlas_configs.items():
+            for atlas_pol, atlas_types in atlas_info.items():
+                for atlas_type, atlas_details in atlas_types.items():
+                    if atlas_details and atlas_details.get('path') is not None:
+                        try:
+                            # Extract configuration
+                            atlas_file_path = atlas_details['path']
+                            atlas_name = atlas_details['name']
+                            atlas_description = atlas_details['desc']
+                            
+                            logger.info(f"Creating atlas from config: {atlas_name} ({atlas_type}/{atlas_chrom}/{atlas_pol})")
 
-                                logger.info(f"Loading atlas data from file: {atlas_file_path}")
-                                atlas_compounds_df = ldt.load_atlas_input(atlas_file_path)
-                                
-                                logger.info(f"Creating Atlas object: {atlas_name}")
-                                atlas_obj = self.create_atlas_from_dataframe(atlas_compounds_df, atlas_name, atlas_description, atlas_type)
-                                
-                                logger.info(f"Saving atlas to database: {atlas_name}")
-                                dbi.save_atlas_to_database(atlas_obj, self.main_db_path)
+                            logger.info(f"Loading atlas data from file: {atlas_file_path}")
+                            atlas_compounds_df = ldt.load_atlas_input(atlas_file_path)
+                            
+                            logger.info(f"Creating Atlas object: {atlas_name}")
+                            atlas_obj = self.create_atlas_from_dataframe(atlas_compounds_df, atlas_name, atlas_description, atlas_type, atlas_chrom, atlas_pol)
+                            
+                            logger.info(f"Saving atlas to database: {atlas_name}")
+                            dbi.save_atlas_to_database(atlas_obj, self.main_db_path)
 
-                                # Store in created atlases list
-                                logger.info(f"Storing created atlas in workflow state: {atlas_name}")
-                                self.created_atlases.append({
-                                    'uid': atlas_obj.atlas_uid,
-                                    'name': atlas_obj.atlas_name,
-                                    'type': atlas_type,
-                                    'chromatography': atlas_obj.chromatography.lower(),
-                                    'polarity': atlas_obj.polarity.lower(),
-                                    'compound_count': len(atlas_obj.compound_references),
-                                    'atlas_object': atlas_obj
-                                })
+                            # Store in created atlases list
+                            logger.info(f"Storing created atlas in workflow state: {atlas_name}")
+                            self.created_atlases.append({
+                                'uid': atlas_obj.atlas_uid,
+                                'name': atlas_obj.atlas_name,
+                                'type': atlas_type,
+                                'chromatography': atlas_obj.chromatography.lower(),
+                                'polarity': atlas_obj.polarity.lower(),
+                                'compound_count': len(atlas_obj.compound_references),
+                                'atlas_object': atlas_obj
+                            })
 
-                                created_atlases.append(atlas_obj)
-                                logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
+                            created_atlases.append(atlas_obj)
+                            logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
 
-                            except Exception as e:
-                                logger.error(f"Failed to create atlas for {atlas_type}/{chrom}/{pol}: {e}")
-                        else:
-                            logger.info(f"Skipping {atlas_type}/{chrom}/{pol} - no path specified")
+                        except Exception as e:
+                            raise ValueError(f"Failed to create atlas for {atlas_type}/{atlas_chrom}/{atlas_pol}: {e}")
+                    else:
+                        logger.debug(f"Skipping {atlas_type}/{atlas_chrom}/{atlas_pol} - no path specified")
         
         logger.info(f"Created {len(created_atlases)} atlases from configuration file input:")
         for atlas in created_atlases:
@@ -2654,8 +1249,10 @@ class AtlasManager:
         return created_atlases
     
     def create_atlas_from_dataframe(self, atlas_df: pd.DataFrame, 
-                                        atlas_name: str, atlas_description: str, 
-                                        atlas_type: str = "ref", chromatography: str = None, 
+                                        atlas_name: str, 
+                                        atlas_description: str, 
+                                        atlas_type: str = "ref", 
+                                        chromatography: str = None, 
                                         polarity: str = None) -> Atlas:
         """
         Create Atlas with simple 2-step reference logic:
@@ -2741,7 +1338,7 @@ class AtlasManager:
         logger.info(f"  Missing compounds: {missing_compounds}")
 
         # Create Atlas object
-        atlas_uid = dbi._generate_uid("ref_atlas", decorator=atlas_type.lower())
+        atlas_uid = dbi._generate_uid("ref_atlas", decorator=f"{atlas_type.lower()}-{chromatography.lower()}-{polarity.lower()}")
         atlas_obj = Atlas(
             atlas_uid=atlas_uid,
             atlas_name=atlas_name,
@@ -2766,25 +1363,25 @@ class AtlasManager:
 @dataclass
 class FinalReportManager:
     """
-    Manages final report generation from curated CompoundExperimental objects.
+    Manages final report generation from analysis objects.
     """
-    putative_ids: Dict[str, Dict[str, List[CompoundExperimental]]]
+    auto_ids: Dict[str, Dict[str, Dict]]
     
     def generate_comprehensive_report(self, config: Dict, output_path: str = None) -> pd.DataFrame:
         """Generate final comprehensive report from all curated identifications"""
-        all_putative_ids = []
-        for atlas_type in self.putative_ids.values():
+        all_auto_ids = []
+        for atlas_type in self.auto_ids.values():
             for method_ids in atlas_type.values():
-                all_putative_ids.extend(method_ids)
+                all_auto_ids.extend(method_ids)
         
-        if not all_putative_ids:
-            logger.warning("No putative identifications found for report generation")
+        if not all_auto_ids:
+            logger.warning("No auto identifications found for report generation")
             return pd.DataFrame()
         
         # Build comprehensive report
         report_rows = []
         
-        for idx, pid in enumerate(all_putative_ids):
+        for idx, pid in enumerate(all_auto_ids):
             # Calculate quality scores
             msms_quality = self._calculate_msms_quality(pid)
             mz_quality = self._calculate_mz_quality(pid)
@@ -2855,7 +1452,7 @@ class FinalReportManager:
         
         return report_df
     
-    def _calculate_msms_quality(self, pid: CompoundExperimental) -> float:
+    def _calculate_msms_quality(self, pid) -> float:
         """Calculate MS/MS quality score"""
         ms2_notes = pid.ms2_notes.lower()
         if '1.0' in ms2_notes:
@@ -2867,7 +1464,7 @@ class FinalReportManager:
         else:
             return min(3.0, pid.best_ms2_score * 3.0) if pid.best_ms2_score > 0 else 0.0
     
-    def _calculate_mz_quality(self, pid: CompoundExperimental) -> float:
+    def _calculate_mz_quality(self, pid) -> float:
         """Calculate m/z quality score"""
         ppm_error = abs(pid.best_eic_ppm_error) if pid.best_eic_ppm_error else float('inf')
         
@@ -2882,7 +1479,7 @@ class FinalReportManager:
         else:
             return 0.0
     
-    def _calculate_rt_quality(self, pid: CompoundExperimental) -> float:
+    def _calculate_rt_quality(self, pid) -> float:
         """Calculate RT quality score"""
         rt_error = abs(pid.best_eic_rt_error) if pid.best_eic_rt_error else float('inf')
         
@@ -2909,3 +1506,354 @@ class FinalReportManager:
             return "MSI Level 4"
         else:
             return "MSI Level 5"
+
+
+
+# =============================================================================
+# INDEPENDENT WORKFLOW FUNCTIONS
+# =============================================================================
+
+def _set_up_paths(config: Dict, project_name: str) -> Tuple[str, str, str]:
+    """Set up and validate paths for project directory, raw data, and project database"""
+    
+    workflow_paths = {}
+
+    workflow_paths['raw_data_directory'] = str(Path(config['ENV']['PATHS']['raw_data_dir']) / project_name)
+    workflow_paths['project_directory'] = str(Path(config['ENV']['PATHS']['projects_dir']) / project_name)
+    workflow_paths['project_db_path'] = str(Path(workflow_paths['project_directory']) / f"{project_name}.duckdb")
+    workflow_paths['main_db_path'] = config["ENV"]["PATHS"]["main_database"]
+    
+    # Validate raw data directory exists
+    if not Path(workflow_paths['raw_data_directory']).exists():
+        raise ValueError(f"Raw data directory not found: {workflow_paths['raw_data_directory']}")
+    
+    # Create project directory if it doesn't exist
+    Path(workflow_paths['project_directory']).mkdir(parents=True, exist_ok=True)
+    
+    return workflow_paths
+
+def run_project_setup(
+    project_name: str,
+    config: Dict,
+    rt_alignment_number: int = 1,
+    analysis_number: int = 1,
+    new_lcmsruns: bool = False
+) -> str:
+    """
+    Stage 1: Project Setup
+    Creates project database and loads LCMS run files.
+    
+    Returns:
+        project_db_path: Path to created project database
+    """
+    logger.info("\n========== Stage 1: Project Setup ==========\n")
+    
+    # Setup paths
+    workflow_paths = _set_up_paths(config, project_name)
+    
+    # Create project database
+    logger.info(f"Creating project database at {workflow_paths['project_db_path']}...")
+    dbi.create_project_database(workflow_paths['project_db_path'], rt_alignment_number, analysis_number)
+    
+    # Load LCMS runs
+    logger.info(f"Loading LCMS runs for {project_name}...")
+    try:
+        dbi.save_lcmsruns_to_db(
+            workflow_paths['project_db_path'],
+            project_name,
+            workflow_paths['raw_data_directory'],
+            new_lcmsruns
+        )
+        logger.info("LCMS runs loaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to load LCMS runs: {e}")
+    
+    return workflow_paths['project_db_path']
+
+
+def run_rt_alignment(project_name: str,
+                     config: Dict,
+                     rt_alignment_number: int,
+                     workflow: List
+) -> None:
+    """Run fresh RT alignment using single RT alignment atlas"""
+    
+    logger.info("Parsing configuration file...")
+    workflow_paths = _set_up_paths(config, project_name)
+    template_chromatography = workflow[0]
+    template_polarity = "POS"
+    template_atlas_uid = config['WORKFLOWS']['RT_ALIGNMENT'][template_chromatography][template_polarity].get('ATLAS').get('uid', None)
+    target_atlas_uid = config['WORKFLOWS']['TARGETED_ANALYSIS'][workflow[0]][workflow[1]][workflow[2]].get('ATLAS').get('uid', None)
+    rt_alignment_parameters = config['WORKFLOWS']['RT_ALIGNMENT'][template_chromatography][template_polarity].get('PARAMS', {})
+    rt_alignment_directory = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}")
+    main_db_path = workflow_paths['main_db_path']
+    use_existing_rt_alignment = rt_alignment_parameters.get('use_existing_rt_alignment', False)
+    existing_rt_alignment = dbi.get_rt_alignment_model_from_db(workflow_paths['project_db_path'],
+                                                               template_atlas_uid, 
+                                                               rt_alignment_number)
+
+    best_model = None
+    if use_existing_rt_alignment and existing_rt_alignment is not None:
+        logger.info(f"Using the existing RT alignment model from database for atlas {template_atlas_uid} ({template_chromatography} {template_polarity}) and RT Alignment number {rt_alignment_number}")
+        best_model = dbi.get_rt_alignment_model_from_db(workflow_paths['project_db_path'], 
+                                                              template_atlas_uid, 
+                                                              rt_alignment_number)
+        best_model = rat.calculate_model_values_from_existing(best_model)
+        if best_model:
+            logger.info(f"Loaded existing RT alignment model with R² = {best_model['r2']:.4f}, RMSE = {best_model['rmse']:.4f}")
+    elif use_existing_rt_alignment and existing_rt_alignment is None:
+        logger.warning(f"Variable 'use_existing_rt_alignment' is True, but no existing RT alignment model found in database for atlas {template_atlas_uid} ({template_chromatography} {template_polarity}) and RT alignment number {rt_alignment_number}. Running RT alignment from scratch.")
+    elif not use_existing_rt_alignment and existing_rt_alignment is not None:
+        raise ValueError(f"Variable 'use_existing_rt_alignment' is False, but RT alignment model already exists in database for atlas {template_atlas_uid} ({template_chromatography} {template_polarity}) and RT alignment number {rt_alignment_number}. To avoid overwriting, either set use_existing_rt_alignment to True or choose a different RT alignment number.")
+    elif not use_existing_rt_alignment and existing_rt_alignment is None:
+        logger.info(f"Variable 'use_existing_rt_alignment' is False and no existing RT alignment model found in database for atlas {template_atlas_uid} ({template_chromatography} {template_polarity}) and RT alignment number {rt_alignment_number}. Running RT alignment from scratch.")
+
+    if best_model is None:
+        logger.info(f"Loading QC files for RT alignment from project database...")
+        database_files = dbi.get_files_by_type_from_db(workflow_paths['project_db_path'], 
+                                                        file_types=['qc'],
+                                                        file_format='parquet',
+                                                        chromatography=template_chromatography,
+                                                        polarity=template_polarity)
+        qc_files_df = database_files.get('qc', pd.DataFrame())
+        if qc_files_df.empty:
+            raise ValueError(f"No QC files found for input method {template_chromatography} {template_polarity} in project database.")
+        logger.info(f"Found {len(qc_files_df)} QC files for {template_chromatography} {template_polarity}")
+
+        logger.info(f"Extracting QC atlas compound data from {len(qc_files_df)} QC files...")
+        qc_matches = rat.extract_matches_from_qc_files(
+            main_db_path,
+            template_atlas_uid,
+            qc_files_df,
+            rt_alignment_parameters
+        )
+
+        logger.info(f"Evaluating QC compound matching stats for {len(qc_matches)} matches...")
+        matching_stats = rat.evaluate_qc_matching_stats(qc_matches)
+        matching_md = "### QC Compound Matching Summary\n"
+        for key, value in matching_stats.items():
+            if isinstance(value, dict):
+                matching_md += f"- **{key}:**\n"
+                for subkey, subval in value.items():
+                    matching_md += f"    - {subkey}: {subval}\n"
+            else:
+                matching_md += f"- **{key}:** {value}\n"
+        display(Markdown(matching_md))
+
+        logger.info(f"Building RT alignment model using {len(qc_matches)} matches")
+        best_model, modeling_data, _ = rat.build_rt_alignment_model(qc_matches, 
+                                                                    rt_alignment_parameters)
+        logger.info(f"RT model created with R² = {best_model['r2']:.4f}, RMSE = {best_model['rmse']:.4f}")
+        
+        logger.info("Saving RT model to database...")
+        dbi.save_rt_alignment_model_to_db(template_atlas_uid,
+                                        workflow_paths['project_db_path'],
+                                        rt_alignment_number,
+                                        best_model,
+                                        qc_files_df,
+                                        modeling_data.to_dict('records')
+                                        )
+        
+        logger.info(f"Creating RT alignment plot and saving to {rt_alignment_directory}...")
+        rat.visualize_RT_model(modeling_data, 
+                            best_model, 
+                            rt_alignment_directory
+                            )
+    
+    logger.info(f"Applying RT alignment to {workflow[0]} {workflow[1]} {workflow[2]} atlas {target_atlas_uid}...")
+    align_atlas_df, stats = rat.apply_rt_alignment_to_target(main_db_path, 
+                                                             target_atlas_uid, 
+                                                             best_model, 
+                                                             rt_alignment_parameters
+                                                             )
+
+    logger.info(f"Saving RT-aligned atlas to database...")
+    align_atlas_uid, align_atlas_name = dbi.save_rt_aligned_atlas_to_db(workflow_paths['project_db_path'],
+                                                                      workflow_paths['main_db_path'],
+                                                                      target_atlas_uid,
+                                                                      best_model,
+                                                                      align_atlas_df,
+                                                                      rt_alignment_number
+                                                                      )
+    
+    logger.info("Generating RT alignment summary...")
+    rt_align_summary = rat.create_rt_alignment_summary(align_atlas_uid,
+                                                        best_model['rt_alignment_uid'], 
+                                                        align_atlas_name, 
+                                                        stats
+                                                    )
+    
+    rt_align_md = f"### RT Alignment Summary for {workflow[0]} {workflow[1]} {workflow[2]}\n"
+    for key, value in rt_align_summary.items():
+        if isinstance(value, dict):
+            rt_align_md += f"- **{key}:**\n"
+            for subkey, subval in value.items():
+                rt_align_md += f"    - {subkey}: {subval}\n"
+        else:
+            rt_align_md += f"- **{key}:** {value}\n"
+    display(Markdown(rt_align_md))
+
+    return best_model
+
+
+def run_auto_identification(
+    project_name: str,
+    config: Dict,
+    rt_alignment_number: int = 1,
+    analysis_number: int = 1,
+    workflow: Optional[List[Tuple[str, str, str]]] = None
+) -> Dict[str, int]:
+    """
+    Stage 3: Auto Identification
+    Runs targeted analysis using RT-aligned atlases from database.
+    Can be run independently if RT alignment has been completed.
+    
+    Returns:
+        Dict with analysis statistics: {atlas_uid: num_identifications}
+    """
+    logger.info("\n========== Stage 3: Auto Identification ==========\n")
+    
+    # Get paths
+    workflow_paths = _set_up_paths(config, project_name)
+    print(workflow)
+    print(config['WORKFLOWS']['TARGETED_ANALYSIS'][workflow[0]][workflow[1]])
+    workflow_params = config['WORKFLOWS']['TARGETED_ANALYSIS'][workflow[0]][workflow[1]][workflow[2]]['PARAMS']
+    workflow_template_atlas_uid = config['WORKFLOWS']['RT_ALIGNMENT'][workflow[0]][workflow[1]][workflow[2]]['ATLAS']['uid']
+
+    # Verify project database exists
+    if not Path(workflow_paths['project_db_path']).exists():
+        raise FileNotFoundError(
+            f"Project database not found: {workflow_paths['project_db_path']}. "
+            "Please run project setup first."
+        )
+    
+    # Get RT-aligned atlases from database
+    rt_aligned_atlases = dbi.get_rt_aligned_atlases_from_db(project_db_path=workflow_paths['project_db_path'],
+                                                            rt_alignment_number=rt_alignment_number,
+                                                            )
+    print(rt_aligned_atlases)
+    
+    logger.info(f"Found {len(rt_aligned_atlases)} RT-aligned atlases to analyze")
+    
+    # Run analysis for each atlas
+    results = {}
+    for atlas_info in rt_aligned_atlases:
+        
+        # # Check if analysis already exists
+        # use_existing = config['ANALYSIS'].get('use_existing_identifications', False)
+        # if use_existing:
+        #     existing_count = dbi.count_existing_identifications(
+        #         project_db_path=workflow_paths['project_db_path'],
+        #         atlas_uid=atlas_info['atlas_uid'],
+        #         rt_alignment_number=rt_alignment_number,
+        #         analysis_number=analysis_number
+        #     )
+        #     if existing_count > 0:
+        #         logger.info(
+        #             f"Using existing {existing_count} identifications for "
+        #             f"{atlas_info['atlas_name']}"
+        #         )
+        #         results[atlas_info['atlas_uid']] = existing_count
+        #         continue
+        
+        # Run targeted analysis
+        logger.info(f"Running auto identification for {atlas_info['atlas_name']}...")
+        atlas_df, analysis_results = tga.run_targeted_analysis_workflow(
+            project_db_path=workflow_paths['project_db_path'],
+            target_atlas_uid=atlas_info['atlas_uid'],
+            rt_alignment_number=rt_alignment_number,
+            analysis_number=analysis_number,
+            config=config,
+            analysis_params=workflow_params
+        )
+        
+        num_identifications = len(analysis_results.get('compounds', {}))
+        results[atlas_info['atlas_uid']] = num_identifications
+        logger.info(f"Completed: {num_identifications} identifications")
+    
+    total_identifications = sum(results.values())
+    logger.info(f"Auto identification complete: {total_identifications} total identifications")
+    return results
+
+
+def run_manual_curation(
+    project_name: str,
+    config: Dict,
+    rt_alignment_number: int = 1,
+    analysis_number: int = 1,
+    create_notebooks: bool = True
+) -> List[str]:
+    """
+    Stage 4: Manual Curation
+    Creates individual curation notebooks for each analysis.
+    
+    Returns:
+        List of created notebook paths
+    """
+    logger.info("\n========== Stage 4: Manual Curation ==========\n")
+    
+    if not create_notebooks:
+        logger.info("Notebook creation skipped")
+        return []
+    
+    # Get paths
+    workflow_paths = _set_up_paths(config, project_name)
+    rt_alignment_directory = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}")
+    analysis_directory = str(Path(rt_alignment_directory) / f"{project_name}_RTA{rt_alignment_number}_ALY{analysis_number}")
+    
+    # Get all analyses from database
+    analyses = dbi.get_analyses_summary(
+        project_db_path=workflow_paths['project_db_path'],
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number
+    )
+    
+    # Create notebook for each analysis
+    created_notebooks = []
+    for analysis in analyses:
+        if analysis['compound_count'] > 0:
+            notebook_path = _create_curation_notebook(
+                analysis_directory=analysis_directory,
+                analysis_info=analysis,
+                config=config
+            )
+            created_notebooks.append(notebook_path)
+            logger.info(f"Created notebook: {notebook_path}")
+    
+    logger.info(f"Created {len(created_notebooks)} curation notebooks")
+    return created_notebooks
+
+
+def run_final_report(
+    project_name: str,
+    config: Dict,
+    rt_alignment_number: int = 1,
+    analysis_number: int = 1
+) -> pd.DataFrame:
+    """
+    Stage 5: Final Report Generation
+    Generates comprehensive report from all curated identifications.
+    
+    Returns:
+        DataFrame with final report
+    """
+    logger.info("\n========== Stage 5: Final Report Generation ==========\n")
+    
+    # Get paths
+    workflow_paths = _set_up_paths(config, project_name)
+    rt_alignment_directory = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}")
+    analysis_directory = str(Path(rt_alignment_directory) / f"{project_name}_RTA{rt_alignment_number}_ALY{analysis_number}")
+    output_path = Path(analysis_directory) / "final_targeted_analysis_report"
+    
+    # Generate report (this would use your FinalReportManager logic)
+    report_df = _generate_final_report(
+        project_name=project_name,
+        config=config,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number,
+        output_path=str(output_path)
+    )
+    
+    logger.info(f"Final report generated: {len(report_df)} identifications")
+    return report_df
+
