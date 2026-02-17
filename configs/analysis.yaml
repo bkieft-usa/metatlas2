@@ -8,41 +8,39 @@ ENV:
 WORKFLOWS:
   RT_ALIGNMENT:
     HILICZ:
-      POS:
-        ATLAS:
-          uid: atl-ref-qc-c8cd52fbfa7542aba1fc7f4df3923de1
-        PARAMS:
-            use_existing_rt_alignment: true
-            ppm_error: 20.0
-            extra_time: 1.0
-            apply_model_to_min_max: true
-            polynomial_degree: 2
-            min_observations_per_compound: 1
-            min_compounds_for_modeling: 2
-            r2_threshold: 0.7
-            exclude_inchikeys:
-              - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
+      ATLAS:
+        uid: atl-ref-qc-hilicz-pos-ca288f934c2f412f99ec19b31bda1f8b
+      PARAMS:
+          use_existing_rt_alignment: true
+          ppm_error: 20.0
+          extra_time: 1.0
+          apply_model_to_min_max: true
+          polynomial_degree: 2
+          min_observations_per_compound: 1
+          min_compounds_for_modeling: 2
+          r2_threshold: 0.7
+          exclude_inchikeys:
+            - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
     C18:
-      POS:
-        ATLAS:
-          uid:
-        PARAMS:
-            use_existing_rt_alignment: true
-            ppm_error: 20.0
-            extra_time: 1.0
-            apply_model_to_min_max: true
-            polynomial_degree: 2
-            min_observations_per_compound: 1
-            min_compounds_for_modeling: 2
-            r2_threshold: 0.5
-            exclude_inchikeys:
-              -
-  TARGETED_ANALYSIS:
+      ATLAS:
+        uid:
+      PARAMS:
+          use_existing_rt_alignment: true
+          ppm_error: 20.0
+          extra_time: 1.0
+          apply_model_to_min_max: true
+          polynomial_degree: 2
+          min_observations_per_compound: 1
+          min_compounds_for_modeling: 2
+          r2_threshold: 0.5
+          exclude_inchikeys:
+            -
+  TARGETED_ANALYSES:
     HILICZ:
       POS:
         QC:
           ATLAS:
-            uid: atl-ref-qc-c8cd52fbfa7542aba1fc7f4df3923de1
+            uid: atl-ref-qc-hilicz-pos-ca288f934c2f412f99ec19b31bda1f8b
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -53,7 +51,7 @@ WORKFLOWS:
             ms2_min_matches: 1
         ISTD:
           ATLAS:
-            uid: atl-ref-istd-29f160fa88bd44c181e7860c241130bc
+            uid: atl-ref-istd-hilicz-pos-87f809ef6515472dbda5dfc80401a166
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -64,7 +62,7 @@ WORKFLOWS:
             ms2_min_matches: 2
         EMA:
           ATLAS:
-            uid: atl-ref-ema-a510c3cdb90b406ea0f5b4e1862c2800
+            uid: atl-ref-ema-hilicz-pos-5958e29307ad4e90a26211be8b03abc0
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false

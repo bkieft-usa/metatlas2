@@ -20,7 +20,7 @@ import logging_config as lcf
 # Initialize logger properly at module level
 logger = lcf.get_logger('ms2_hit_detection')
 
-def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str, Dict]:
+def find_ms2_hits(experimental_data: Dict[str, Dict], msms_refs_path: str) -> Dict[str, Dict]:
     """
     Orchestration function to calculate MS2 hits and process results.
     Find MS2 reference hits for previously extracted experimental data.
@@ -29,14 +29,13 @@ def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str,
     Args:
         experimental_data: Data returned from extract_eic_and_ms2_from_parquet()
             Format: {inchi_key: {filename: {'ms1_data': df, 'ms2_data': df}}}
-        config: Configuration dictionary
+        msms_refs_path: Path to the MSMS reference database file
         
     Returns:
         Updated experimental_data with 'ms2_hits' dataframe added
     """
     # Load reference database
-    msms_refs_path = Path(config["ENV"]["PATHS"]["msms_refs"])
-    reference_df = ldt.load_msms_refs_file(msms_refs_path)
+    reference_df = ldt.load_msms_refs_file(Path(msms_refs_path))
     
     if reference_df.empty:
         raise FileNotFoundError("No reference database found - skipping hit detection")
@@ -72,7 +71,7 @@ def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str,
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for i, hit_input in enumerate(hit_input_data):
-                future = executor.submit(_process_compound_hits, hit_input, reference_df, config)
+                future = executor.submit(_process_compound_hits, hit_input, reference_df)
                 futures.append((future, hit_input['inchi_key'], i))
             
             # Collect results
@@ -89,7 +88,7 @@ def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str,
         for i, hit_input in enumerate(tqdm(hit_input_data, desc="Finding MS2 hits")):
             inchi_key = hit_input['inchi_key']
             try:
-                compound_results = _process_compound_hits(hit_input, reference_df, config)
+                compound_results = _process_compound_hits(hit_input, reference_df)
                 experimental_data[inchi_key] = compound_results['file_results']
                 
                 logger.info(f"  Hit detection for {inchi_key} complete")
@@ -113,7 +112,7 @@ def find_ms2_hits(experimental_data: Dict[str, Dict], config: Dict) -> Dict[str,
     return experimental_data
 
 
-def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame, config: Dict) -> pd.DataFrame:
+def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame) -> pd.DataFrame:
     """
     Find reference hits for all MS2 scans in a DataFrame.
     
@@ -121,7 +120,6 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
         ms2_df: MS2 data DataFrame with columns: rt, mz, i, precursor_MZ, precursor_intensity
         inchi_key: InChI key for compound
         reference_df: Reference spectra database
-        config: Configuration dictionary
         
     Returns:
         DataFrame with one row per hit, columns include all hit metadata
@@ -132,7 +130,7 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
     all_hits = []
     
     # Set up MatchMS scoring
-    frag_mz_tolerance = config.get('ms2_matching', {}).get('mz_tolerance_da', 0.05)
+    frag_mz_tolerance = 0.05
     cos = CosineHungarian(tolerance=frag_mz_tolerance)
     
     # Find matching reference spectra by inchi_key
@@ -226,7 +224,7 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
         return pd.DataFrame()
 
 
-def _process_compound_hits(hit_input: Dict, reference_df: pd.DataFrame, config: Dict) -> Dict:
+def _process_compound_hits(hit_input: Dict, reference_df: pd.DataFrame) -> Dict:
     """Process hit detection for a single compound across all its files."""
     inchi_key = hit_input['inchi_key']
     file_results = hit_input['file_results'].copy()
@@ -240,7 +238,7 @@ def _process_compound_hits(hit_input: Dict, reference_df: pd.DataFrame, config: 
             continue
         
         # Find hits directly from ms2_data DataFrame
-        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df, config)
+        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df)
         file_data['ms2_hits'] = ms2_hits_df
     
     return {'inchi_key': inchi_key, 'file_results': file_results}

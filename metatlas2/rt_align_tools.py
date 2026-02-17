@@ -22,79 +22,95 @@ import ms1_ms2_summarizer as mss
 logger = lcf.get_logger('rt_align_tools')
 
 def apply_rt_alignment_to_target(main_db_path: str, 
-                                 target_atlas_uid: str, 
+                                 targeted_analyses: Dict[str, Dict[str, Dict[str, Dict]]], 
                                  best_model: dict, 
                                  rt_align_settings: dict
 ) -> Tuple[pd.DataFrame, List[Dict]]:
     
-    # Get target atlas and compounds from master database
-    target_compounds_df = dbi.get_atlas_compounds_table(main_db_path, target_atlas_uid)
-    if target_compounds_df.empty:
-        raise ValueError(f"Atlas {target_atlas_uid} not found in master database")
-    else:
-        logger.info("Successfully loaded target atlas metadata and compounds from database")
-    compounds_verified = dbi.verify_compounds_exist_in_db(target_compounds_df['compound_uid'].tolist(), main_db_path)
-    logger.debug(f"Compounds verified in database: {compounds_verified}")
-    if compounds_verified is False:
-        logger.error("One or more compounds in target_compounds_df do not exist in the main database. Aborting RT-aligned atlas creation.")
-        return None, []
-    else:
-        logger.info(f"Loaded target atlas with {len(target_compounds_df)} compounds for RT alignment")
+    aligned_atlases = {}
+    for chrom, pol_dict in targeted_analyses.items():
+        for pol, analysis_dict in pol_dict.items():
+            for analysis_type, atlas_params_dict in analysis_dict.items():
+                target_atlas_uid = atlas_params_dict.get('ATLAS', {}).get('uid', None)
+                if target_atlas_uid is None:
+                    logger.warning(f"Skipping {chrom} {pol} {analysis_type} - no target atlas UID found in parameters")
+                    continue
+                aligned_atlases[target_atlas_uid] = {}
 
-    # Ensure columns are float64 to avoid dtype warnings
-    rt_aligned_compounds_df = target_compounds_df.copy()
-    for col in ['rt_peak', 'rt_min', 'rt_max', 'rt_shift']:
-        if col in rt_aligned_compounds_df.columns:
-            rt_aligned_compounds_df[col] = rt_aligned_compounds_df[col].astype('float64')
-        else:
-            rt_aligned_compounds_df[col] = np.nan
-            rt_aligned_compounds_df[col] = rt_aligned_compounds_df[col].astype('float64')
-    rt_aligned_compounds_df['rt_shift'] = 0.0
+                logger.info(f"Loading {chrom} {pol} {analysis_type} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
+                target_compounds_df = dbi.get_atlas_compounds_table(database_path=main_db_path, 
+                                                                    atlas_uid=target_atlas_uid)
 
-    alignment_stats = []
-    for i, row in target_compounds_df.iterrows():
-        compound_uid = row['compound_uid']
-        original_rt_peak = row.get('rt_peak')
-        original_rt_min = row.get('rt_min', None)
-        original_rt_max = row.get('rt_max', None)
+                # Initialize RT columns with original values
+                rt_aligned_compounds_df = target_compounds_df.copy()
+                if 'rt_peak' not in rt_aligned_compounds_df.columns:
+                    rt_aligned_compounds_df['rt_peak'] = 0.0
+                if 'rt_min' not in rt_aligned_compounds_df.columns:
+                    rt_aligned_compounds_df['rt_min'] = 0.0
+                if 'rt_max' not in rt_aligned_compounds_df.columns:
+                    rt_aligned_compounds_df['rt_max'] = 0.0
+                if 'rt_shift' not in rt_aligned_compounds_df.columns:
+                    rt_aligned_compounds_df['rt_shift'] = 0.0
+                for col in ['rt_peak', 'rt_min', 'rt_max', 'rt_shift']:
+                    rt_aligned_compounds_df[col] = rt_aligned_compounds_df[col].astype('float64')
 
-        if pd.isna(original_rt_peak) or original_rt_peak is None:
-            logger.warning(f"Skipping compound {row.get('compound_name', 'Unknown')} - no RT peak data")
-            continue
+                # Apply RT alignment model to each compound and update RT values in the DataFrame, while tracking alignment statistics
+                logger.info(f"Applying RT alignment model to {len(target_compounds_df)} target atlas compounds...")
+                alignment_stats = []
+                for i, row in target_compounds_df.iterrows():
+                    compound_uid = row['compound_uid']
+                    original_rt_peak = row.get('rt_peak')
+                    original_rt_min = row.get('rt_min', None)
+                    original_rt_max = row.get('rt_max', None)
 
-        # Apply RT alignment using the model
-        aligned_rt_peak = apply_rt_model([original_rt_peak], best_model)[0]
-        if rt_align_settings['apply_model_to_min_max'] and pd.notna(original_rt_min) and pd.notna(original_rt_max):
-            aligned_rt_min = apply_rt_model([original_rt_min], best_model)[0]
-            aligned_rt_max = apply_rt_model([original_rt_max], best_model)[0]
-        else:
-            original_window = None
-            if pd.notna(original_rt_min) and pd.notna(original_rt_max):
-                original_window = original_rt_max - original_rt_min
-            else:
-                original_window = 1.0  # Default 1-minute window
-            aligned_rt_min = aligned_rt_peak - original_window / 2
-            aligned_rt_max = aligned_rt_peak + original_window / 2
+                    if pd.isna(original_rt_peak) or original_rt_peak is None or original_rt_peak <= 0:
+                        logger.warning(f"Skipping compound {row.get('compound_name', 'Unknown')} - no valid RT peak data (value: {original_rt_peak})")
+                        continue
 
-        rt_shift = aligned_rt_peak - original_rt_peak
+                    # Apply RT alignment using the model
+                    aligned_rt_peak = float(_apply_rt_model([original_rt_peak], best_model)[0])
+                    
+                    if rt_align_settings['apply_model_to_min_max'] and pd.notna(original_rt_min) and pd.notna(original_rt_max):
+                        aligned_rt_min = float(_apply_rt_model([original_rt_min], best_model)[0])
+                        aligned_rt_max = float(_apply_rt_model([original_rt_max], best_model)[0])
+                    else:
+                        original_window = None
+                        if pd.notna(original_rt_min) and pd.notna(original_rt_max):
+                            original_window = original_rt_max - original_rt_min
+                        else:
+                            original_window = 1.0  # Default 1-minute window
+                        aligned_rt_min = float(aligned_rt_peak - original_window / 2)
+                        aligned_rt_max = float(aligned_rt_peak + original_window / 2)
 
-        # Update the RT aligned DataFrame
-        rt_aligned_compounds_df.loc[i, 'rt_peak'] = float(aligned_rt_peak)
-        rt_aligned_compounds_df.loc[i, 'rt_min'] = float(aligned_rt_min)
-        rt_aligned_compounds_df.loc[i, 'rt_max'] = float(aligned_rt_max)
-        rt_aligned_compounds_df.loc[i, 'rt_shift'] = float(rt_shift)
+                    rt_shift = float(aligned_rt_peak - original_rt_peak)
 
-        # Track alignment statistics
-        alignment_stats.append({
-            'compound_name': row.get('compound_name'),
-            'compound_inchi_key': row.get('inchi_key'),
-            'compound_uid': compound_uid,
-            'aligned_rt': aligned_rt_peak,
-            'rt_shift': rt_shift
-        })
+                    # Update the RT aligned DataFrame
+                    rt_aligned_compounds_df.loc[i, 'rt_peak'] = aligned_rt_peak
+                    rt_aligned_compounds_df.loc[i, 'rt_min'] = aligned_rt_min
+                    rt_aligned_compounds_df.loc[i, 'rt_max'] = aligned_rt_max
+                    rt_aligned_compounds_df.loc[i, 'rt_shift'] = rt_shift
 
-    logger.info(f"Returning RT aligned atlas with {len(rt_aligned_compounds_df)} compounds and stats for {len(alignment_stats)} compounds")
-    return rt_aligned_compounds_df, alignment_stats
+                    # Track alignment statistics
+                    alignment_stats.append({
+                        'compound_name': row.get('compound_name'),
+                        'compound_inchi_key': row.get('inchi_key'),
+                        'compound_uid': compound_uid,
+                        'aligned_rt': aligned_rt_peak,
+                        'rt_shift': rt_shift
+                    })
+
+                logger.info("Applied RT alignment model to all target compounds.")
+                rt_aligned_compounds_df['rt_alignment_applied'] = True
+                rt_aligned_compounds_df['atlas_type'] = "RT-ALIGNED"
+                rt_aligned_compounds_df['chromatography'] = chrom
+                rt_aligned_compounds_df['polarity'] = pol
+                rt_aligned_compounds_df['analysis_type'] = analysis_type
+
+                logger.info(f"Created {chrom} {pol} {analysis_type} RT aligned atlas with {len(rt_aligned_compounds_df)} compounds and stats for {len(alignment_stats)} compounds.")
+                aligned_atlases[target_atlas_uid]['aligned_df'] = rt_aligned_compounds_df
+                aligned_atlases[target_atlas_uid]['alignment_stats'] = alignment_stats
+    
+    return aligned_atlases
 
 def calculate_model_values_from_existing(model_dict: Dict) -> Dict:
     """
@@ -149,7 +165,7 @@ def build_polynomial_model(X, y, degree):
         'intercept': model.intercept_
     }
 
-def apply_rt_model(atlas_rt_values, model_info):
+def _apply_rt_model(atlas_rt_values, model_info):
     """Apply RT alignment model to Atlas RT values."""
     X_new = np.array(atlas_rt_values).reshape(-1, 1)
     X_new_poly = model_info['poly_features'].transform(X_new)
@@ -390,7 +406,7 @@ def build_rt_alignment_model(experimental_data: Dict, rt_align_settings: Dict) -
 
 def extract_matches_from_qc_files(main_db_path: str,
                                   qc_atlas_uid: str,
-                                  qc_files_df: pd.DataFrame,
+                                  qc_files_dict: dict,
                                   rt_align_settings: Dict) -> Dict: 
     """
     Use same approach as feature extraction to extract EIC data for QC compounds.
@@ -398,56 +414,39 @@ def extract_matches_from_qc_files(main_db_path: str,
     """
 
     logger.info("Loading QC atlas...")
-    atlas_dataframe = dbi.get_atlas_compounds_table(main_db_path, atlas_uid=qc_atlas_uid)
-    if not atlas_dataframe.empty:
-        logger.info(f"Preparing {len(atlas_dataframe)} compounds for RT alignment modeling...")
-    else:
-        raise ValueError(f"No compounds found in QC atlas")
-    logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
-
-    logger.info("Preparing parquet file list...")
-    project_qc_files = qc_files_df['file_path'].tolist()
-    existing_parquet_files = [f for f in project_qc_files if Path(f).exists()]
-    if len(existing_parquet_files) == 0:
-        raise FileNotFoundError("No parquet files found for QC files")
-    logger.info(f"Found {len(existing_parquet_files)} parquet files")
+    atlas_dataframe = dbi.get_atlas_compounds_table(database_path=main_db_path, 
+                                                    atlas_uid=qc_atlas_uid)
 
     logger.info("Extracting EIC data from QC parquet files...")
-    parquet_results = edp.extract_eic_and_ms2_from_parquet(
+    eic_results = edp.extract_eic_and_ms2_from_parquet(
         atlas_df=atlas_dataframe,
-        parquet_files=existing_parquet_files,
+        project_files=qc_files_dict,
         ppm_tolerance=rt_align_settings['ppm_error'],
         extra_time=rt_align_settings['extra_time'],
         use_parallel=True,
         only_ms_level=1,
     )
-    parquet_results_with_summary = mss.create_ms_summaries(parquet_results, 
+    eic_results_with_summary = mss.create_ms_summaries(eic_results, 
                                                            only_ms_level=1)
 
-    # for inchi_key, file_data in parquet_results.items():
-    #     for file, ms_level_data in file_data.items():
-    #         for ms_level, df in ms_level_data.items():
-    #             if not df.empty:
-    #                 display(df.head(2))
-
     logger.info("Formatting results for RT alignment...")
-    experimental_data = _format_parquet_results_for_rt_alignment(
-        parquet_results_with_summary, 
+    experimental_data = _format_eic_results_for_rt_alignment(
+        eic_results_with_summary, 
         atlas_dataframe
     )
 
     return experimental_data
 
 
-def _format_parquet_results_for_rt_alignment(
-    parquet_results: Dict[str, Dict],
+def _format_eic_results_for_rt_alignment(
+    eic_results: Dict[str, Dict],
     atlas_dataframe: pd.DataFrame
 ) -> Dict:
     """
-    Format parquet extraction results to match the structure expected by RT alignment.
+    Format EIC results to match the structure expected by RT alignment.
     
     Args:
-        parquet_results: Output from extract_eic_and_ms2_from_parquet
+        eic_results: Output from extract_eic_and_ms2_from_parquet
         atlas_dataframe: Atlas DataFrame with compound metadata
     
     Returns:
@@ -458,7 +457,7 @@ def _format_parquet_results_for_rt_alignment(
     for _, atlas_row in atlas_dataframe.iterrows():
         inchi_key = atlas_row.get('inchi_key')
         
-        if inchi_key not in parquet_results:
+        if inchi_key not in eic_results:
             continue
         
         # Initialize compound entry with atlas metadata
@@ -466,7 +465,7 @@ def _format_parquet_results_for_rt_alignment(
         compound_data['eic_files'] = {}
         
         # Process each file's data for this compound
-        for parquet_file, file_data in parquet_results[inchi_key].items():
+        for parquet_file, file_data in eic_results[inchi_key].items():
             ms1_summary = file_data.get('ms1_summary', pd.DataFrame())
             
             if ms1_summary.empty or ms1_summary['peak_height'].iloc[0] == 0:
@@ -501,7 +500,7 @@ def _format_parquet_results_for_rt_alignment(
     
     return experimental_data
 
-def evaluate_qc_matching_stats(experimental_data: Dict) -> Dict:
+def create_qc_matching_summary(experimental_data: Dict) -> None:
     """
     Evaluate QC compound matching statistics from experimental_data.
     
@@ -583,36 +582,39 @@ def evaluate_qc_matching_stats(experimental_data: Dict) -> Dict:
     logger.info(f"  Average peaks per matched compound: {avg_peaks_per_compound:.1f}")
     logger.info(f"  Average compounds matched per file: {avg_compounds_per_file:.1f}")
     
-    return stats
+    return
 
 
 def create_rt_alignment_summary(
-    rtc_atlas_uid: str,
+    aligned_atlases_info: dict,
     rt_alignment_uid: str,
-    rtc_atlas_name: str,
-    alignment_stats: List[Dict],
-) -> Dict:
+) -> None:
     """
     Create RT alignment summary dictionary.
 
     Args:
-        rtc_atlas_name: Name of RT-aligned atlas
-        alignment_stats: List of alignment statistics
+        aligned_atlases_info: Dictionary with info for each RT-aligned atlas
+        rt_alignment_uid: UID of the RT alignment
 
     Returns:
         Dictionary with alignment summary
     """
-    rt_shifts = [stat['rt_shift'] for stat in alignment_stats]
-    summary = {
-        'rt_alignment_uid': rt_alignment_uid,
-        'rtc_atlas_name': rtc_atlas_name,
-        'rtc_atlas_uid': rtc_atlas_uid,
-        'total_compounds': len(alignment_stats),
-        'aligned_compounds': len(alignment_stats),
-        'mean_alignment': np.mean(rt_shifts),
-        'std_alignment': np.std(rt_shifts),
-        'min_alignment': np.min(rt_shifts),
-        'max_alignment': np.max(rt_shifts)
-    }
+
+    for target_atlas_uid, atlas_info in aligned_atlases_info.items():
+        alignment_stats = atlas_info.get('alignment_stats', [])
+        aligned_atlas_name = atlas_info.get('aligned_atlas_name', '')
+        aligned_atlas_uid = atlas_info.get('aligned_atlas_uid', '')
+        rt_shifts = [stat['rt_shift'] for stat in alignment_stats]
+
+        logger.info(f"RT Alignment Summary for Atlas '{aligned_atlas_name}' (UID: {aligned_atlas_uid}):")
+        logger.info(f"  Reference Atlas UID: {target_atlas_uid}")
+        logger.info(f"  RT Alignment UID: {rt_alignment_uid}")
+        logger.info(f"  RT Aligned Atlas Name: {aligned_atlas_name}")
+        logger.info(f"  RT Aligned Atlas UID: {aligned_atlas_uid}")
+        logger.info(f"  Total aligned compounds: {len(rt_shifts)} of {len(alignment_stats)}")
+        logger.info(f"  Mean alignment: {np.mean(rt_shifts):.2f} min")
+        logger.info(f"  Min alignment: {np.min(rt_shifts):.2f}")
+        logger.info(f"  Max alignment: {np.max(rt_shifts):.2f}")
+        logger.info(f"  Std alignment: {np.std(rt_shifts):.2f}")
     
-    return summary
+    return

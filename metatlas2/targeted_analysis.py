@@ -20,160 +20,7 @@ import ms1_ms2_summarizer as mss
 logger = lcf.get_logger('targeted_analysis')
 current_time = datetime.now().isoformat()
 
-
-def run_targeted_analysis_workflow(project_db_path: str, 
-                                    target_atlas_uid: str,
-                                    rt_alignment_number: int,
-                                    analysis_number: int,
-                                    config: Dict,
-                                    analysis_params: Dict) -> Tuple[pd.DataFrame, Dict]: 
-    """
-    Execute the complete targeted analysis workflow independently of workflow objects.
-    Returns atlas DataFrame and analysis results dictionary that can be used to 
-    create workflow objects in the calling module.
-    
-    Returns:
-        Tuple of (atlas_dataframe, analysis_results_dict)
-        
-    analysis_results_dict contains:
-        - compounds: Dict[str, Dict] - compound analysis data by inchi_key
-        - atlas_info: Dict - atlas metadata
-        - summary_stats: Dict - analysis summary statistics
-    """
-    logger.info("Running new targeted analysis...")
-    
-    logger.info("Loading target atlas...")
-    main_db_path = config["ENV"]["PATHS"]["main_database"]
-    atlas_dataframe = dbi.get_atlas_compounds_table(database_path=main_db_path, 
-                                                    atlas_uid=target_atlas_uid)
-    if len(atlas_dataframe) == 0:
-        raise ValueError(f"No compounds found in RT-aligned atlas")
-    else:
-        logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
-
-    logger.info("Loading experimental files from project database...")
-    project_files_df = dbi.get_files_by_type_from_db(project_db_path=project_db_path, 
-                                                     file_types=['experimental', 'istd', 'exctrl'])
-    project_files = project_files_df['file_path'].tolist()
-    if len(project_files) == 0:
-        raise ValueError("No experimental files found in project database")
-    else:
-        logger.info(f"Found {len(project_files)} experimental files")
-
-    logger.info("Extracting EIC and MS2 data from parquet files...")
-    experimental_data_no_hits = pdx.extract_eic_and_ms2_from_parquet(atlas_df=atlas_dataframe,
-                                                                     parquet_files=project_files,
-                                                                     ppm_tolerance=analysis_params["default_ppm_error"],
-                                                                     extra_time=analysis_params["extra_time"],
-                                                                     use_parallel=True if len(project_files) > 1 else False)
-    
-    logger.info("Finding MS2 reference hits...")
-    experimental_data_with_hits = mhd.find_ms2_hits(experimental_data=experimental_data_no_hits, 
-                                                    config=config)
-    
-    logger.info("Calculating MS1 and MS2 summary statistics for each compound and file...")
-    experimental_data_with_hits_and_summaries = mss.create_ms_summaries(experimental_data_with_hits)
-
-    logger.info("Saving experimental data to project database...")
-    _save_experimental_data_to_db(exp_data=experimental_data_with_hits_and_summaries,
-                                  rt_alignment_number=rt_alignment_number,
-                                  analysis_number=analysis_number,
-                                  project_db_path=project_db_path)
-
-    logger.info("Setting up targeted analysis results structure...")
-    analysis_results = _create_analysis_results_dict(exp_data=experimental_data_with_hits_and_summaries,
-                                                      main_db_path=main_db_path,
-                                                      target_atlas_uid=target_atlas_uid,
-                                                      project_db_path=project_db_path,
-                                                      atlas_dataframe=atlas_dataframe)
-
-    logger.info("Calculating summary statistics for analysis results...")
-    _run_analysis_summary(analysis_results)
-
-    return atlas_dataframe, analysis_results
-
-def _save_experimental_data_to_db(exp_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]], 
-                                  rt_alignment_number: int,
-                                  analysis_number: int,
-                                  project_db_path: str) -> None:
-    """
-    Save experimental data from analysis results structure to project database.
-    Independent of workflow objects.
-    """
-    logger.info("Saving all MS1 and MS2 data")
-    
-    for inchi_key, file_results in exp_data.items():
-        for filename, ms_level_results in file_results.items():
-            for ms_level, data in ms_level_results.items():
-                if data.empty:
-                    logger.debug(f"Skipping saving empty dataframe for {ms_level} for {inchi_key} in file {filename}")
-                    continue
-                if ms_level == "ms1_data":
-                    try:
-                        dbi.save_ms1_data_to_db(
-                            project_db_path=project_db_path,
-                            inchi_key=inchi_key,
-                            rt_alignment_number=rt_alignment_number,
-                            analysis_number=analysis_number,
-                            file_path=filename,
-                            ms1_df=data
-                        )
-                    except Exception as e:
-                        raise ValueError(f"Error saving MS1 data for {inchi_key} in file {filename}: {e}")
-                if ms_level == "ms2_data":
-                    try:
-                        dbi.save_ms2_data_to_db(
-                            project_db_path=project_db_path,
-                            inchi_key=inchi_key,
-                            rt_alignment_number=rt_alignment_number,
-                            analysis_number=analysis_number,
-                            file_path=filename,
-                            ms2_df=data
-                        )
-                    except Exception as e:
-                        raise ValueError(f"Error saving MS2 data for {inchi_key} in file {filename}: {e}")
-                elif ms_level == "ms2_hits":
-                    try:
-                        dbi.save_ms2_hits_to_db(
-                            project_db_path=project_db_path,
-                            inchi_key=inchi_key,
-                            rt_alignment_number=rt_alignment_number,
-                            analysis_number=analysis_number,
-                            file_path=filename,
-                            ms2_hits_df=data
-                        )
-                    except Exception as e:
-                        raise ValueError(f"Error saving MS2 hits for {inchi_key} in file {filename}: {e}")
-                elif ms_level == "ms1_summary":
-                    try:
-                        dbi.save_ms1_summary_to_db(
-                            project_db_path=project_db_path,
-                            inchi_key=inchi_key,
-                            rt_alignment_number=rt_alignment_number,
-                            analysis_number=analysis_number,
-                            file_path=filename,
-                            ms1_summary_df=data
-                        )
-                    except Exception as e:
-                        raise ValueError(f"Error saving MS1 summary for {inchi_key} in file {filename}: {e}")
-                elif ms_level == "ms2_summary":
-                    try:
-                        dbi.save_ms2_summary_to_db(
-                            project_db_path=project_db_path,
-                            inchi_key=inchi_key,
-                            rt_alignment_number=rt_alignment_number,
-                            analysis_number=analysis_number,
-                            file_path=filename,
-                            ms2_summary_df=data
-                        )
-                    except Exception as e:
-                        raise ValueError(f"Error saving MS2 summary for {inchi_key} in file {filename}: {e}")
-    
-    logger.info("Experimental data saved to database")
-    return
-
-def _create_analysis_results_dict(exp_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
-                                  main_db_path: str,
+def create_analysis_results_dict(exp_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
                                   target_atlas_uid: str,
                                   project_db_path: str,
                                   atlas_dataframe: pd.DataFrame) -> Dict[str, Any]:
@@ -183,7 +30,6 @@ def _create_analysis_results_dict(exp_data: Dict[str, Dict[str, Dict[str, pd.Dat
 
     logger.info("Creating analysis results structure with compound data from atlas...")
     analysis_results = _create_analysis_results_structure(target_atlas_uid = target_atlas_uid,
-                                                          main_db_path = main_db_path,
                                                           project_db_path = project_db_path,
                                                           atlas_dataframe = atlas_dataframe)
     
@@ -195,7 +41,6 @@ def _create_analysis_results_dict(exp_data: Dict[str, Dict[str, Dict[str, pd.Dat
     return analysis_results
 
 def _create_analysis_results_structure(target_atlas_uid: str,
-                                       main_db_path: str,
                                        project_db_path: str,
                                        atlas_dataframe: pd.DataFrame) -> Dict[str, Any]:
     """
@@ -206,8 +51,7 @@ def _create_analysis_results_structure(target_atlas_uid: str,
         'compounds': {},
         'atlas_info': {
             'atlas_uid': target_atlas_uid,
-            'project_db_path': project_db_path,
-            'main_db_path': main_db_path
+            'project_db_path': project_db_path
         }
     }
 
@@ -727,7 +571,7 @@ def _apply_rt_bounds_suggestions_to_results(analysis_results: Dict) -> None:
 
     return
 
-def _run_analysis_summary(analysis_results: Dict) -> None:
+def run_analysis_summary(analysis_results: Dict) -> None:
     """
     Calculate analysis summary statistics from raw results structure.
     Independent of workflow objects.

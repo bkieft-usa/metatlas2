@@ -30,36 +30,215 @@ def get_db_connection(db_path: str):
     finally:
         conn.close()
 
+def find_rt_aligned_atlases_in_db(
+    project_db_path: str,
+    rt_alignment_number: int,
+    workflow: Tuple[str, str, str]
+) -> List[Dict]:
+    """
+    Get all RT-aligned atlases for given RT alignment number.
+    
+    """
+    params = [rt_alignment_number, workflow[0], workflow[1]]  # rt_alignment_number, chromatography, polarity
+    query = """
+        SELECT 
+            atlas_uid,
+            atlas_name,
+            atlas_description,
+            chromatography,
+            polarity,
+            atlas_type,
+            source_atlas_uid,
+            rt_alignment_number,
+            created_by,
+            created_date
+        FROM atlases
+        WHERE rt_alignment_number = ? AND chromatography = ? AND polarity = ?
+        ORDER BY created_date, chromatography, polarity
+    """
+        
+    with get_db_connection(project_db_path) as conn:
+        results = conn.execute(query, params).fetchall()
+        atlases = []
+        for row in results:
+            # Infer workflow from chromatography
+            workflow = row[3].upper()  # chromatography -> workflow
+            
+            atlases.append({
+                'atlas_uid': row[0],
+                'atlas_name': row[1],
+                'atlas_description': row[2],
+                'chromatography': row[3],
+                'polarity': row[4],
+                'atlas_type': row[5],
+                'source_atlas_uid': row[6],
+                'rt_alignment_number': row[7],
+                'created_by': row[8],
+                'created_date': row[9],
+                'workflow': workflow
+            })
+        
+        if not atlases:
+            raise ValueError(f"No RT-aligned atlases found in project database for RT alignment number {rt_alignment_number}")
+        else:
+            logger.info(f"Found {len(atlases)} RT-aligned atlases in project database for RT alignment number {rt_alignment_number}")
+        return atlases
+
+def save_rt_aligned_atlas_to_db(
+    project_db_path: str,
+    main_db_path: str,
+    aligned_atlases_info: dict,
+    best_model: dict,
+    rt_alignment_number: int,
+    analysis_number: Optional[int] = None
+) -> Tuple[str, str]:
+    """
+    Create RT-aligned atlas in project database and apply RT alignment to compounds.
+    
+    Args:
+        project_db_path: Path to project database
+        main_db_path: Path to main database
+        aligned_atlases_info: dataframe and stats for each RT-aligned atlas
+        target_atlas_uid: UID of the target atlas
+        best_model: RT alignment model dictionary
+        rt_alignment_number: RT alignment number
+        analysis_number: Optional analysis number for this RT alignment (if not provided, will be NULL in database)
+    Returns:
+        Tuple of (aligned_atlas_uid, aligned_atlas_name)
+    """
+    logger.info("Creating RT-aligned atlases in project database...")
+
+    for target_atlas_uid, atlas_data in aligned_atlases_info.items():
+
+        aligned_atlas_df = atlas_data['aligned_df']
+        logger.info("Verifying all compounds in RT-aligned atlas exist in main database...")
+        _verify_compounds_exist_in_db(aligned_atlas_df['compound_uid'].tolist(), main_db_path)
+
+        prov = ldt.get_provenance()
+
+        # Use some info from the target atlas for the new RT-aligned target atlas
+        target_atlas_info = get_atlas_metadata_from_db(main_db_path, target_atlas_uid)
+
+        # Generate new atlas UID for RT-aligned version
+        target_atlas_decorator = get_decorator_from_uid(target_atlas_uid)
+        aligned_atlas_uid = _generate_uid("rt_atlas", decorator=target_atlas_decorator)
+        aligned_atlas_name = f"{target_atlas_info['atlas_name']} (RT aligned)"
+        aligned_atlas_description = f"RT-aligned version of {target_atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
+        aligned_atlas_type = aligned_atlas_df['atlas_type'].iloc[0] if 'atlas_type' in aligned_atlas_df.columns else target_atlas_info['atlas_type']
+        aligned_atlas_chrom = aligned_atlas_df['chromatography'].iloc[0] if 'chromatography' in aligned_atlas_df.columns else target_atlas_info['chromatography']
+        aligned_atlas_polarity = aligned_atlas_df['polarity'].iloc[0] if 'polarity' in aligned_atlas_df.columns else target_atlas_info['polarity']
+        aligned_atlas_analysis_type = aligned_atlas_df['analysis_type'].iloc[0] if 'analysis_type' in aligned_atlas_df.columns else "custom"
+        logger.info(f"From the {target_atlas_info['atlas_uid']} template, generated new atlas UID: {aligned_atlas_uid} for RT-aligned atlas: {aligned_atlas_name}")
+
+        logger.info("Saving RT-aligned atlas and compounds to project database...")
+        with get_db_connection(project_db_path) as conn:
+            
+            # Create new atlas entry
+            conn.execute("""
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                aligned_atlas_uid,
+                aligned_atlas_name,
+                aligned_atlas_description,
+                aligned_atlas_chrom,
+                aligned_atlas_polarity,
+                aligned_atlas_analysis_type,
+                aligned_atlas_type,
+                target_atlas_info['atlas_uid'],
+                rt_alignment_number,
+                analysis_number,
+                prov["analyst"],
+                prov["timestamp"]
+            ))
+
+            association_order = 0
+            for _, row in aligned_atlas_df.iterrows():
+                compound_uid = row['compound_uid']
+                aligned_rt_peak = row.get('rt_peak')
+                aligned_rt_min = row.get('rt_min')
+                aligned_rt_max = row.get('rt_max')
+                rt_shift = row.get('rt_shift')
+                exp_uid = _generate_uid("mz_rt_experimental")
+                assoc_uid = _generate_uid("association")
+                mz_rt_reference_uid = row.get('mz_rt_reference_uid')
+
+                conn.execute("""
+                    INSERT INTO mz_rt_experimental VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    exp_uid,
+                    compound_uid,
+                    rt_alignment_number,
+                    analysis_number,
+                    aligned_rt_peak,
+                    aligned_rt_min,
+                    aligned_rt_max,
+                    '',  # ms1_notes
+                    '',  # ms2_notes
+                    row.get('mz'),
+                    row.get('mz_tolerance', 5.0),
+                    row.get('adduct', ''),
+                    target_atlas_info['chromatography'],
+                    target_atlas_info['polarity'],
+                    row.get('rt_alignment_applied', True),
+                    rt_shift,
+                    mz_rt_reference_uid,
+                    prov["analyst"],
+                    prov["timestamp"]
+                ))
+                
+                # Create atlas-compound association
+                conn.execute("""
+                    INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    assoc_uid,
+                    aligned_atlas_uid,
+                    compound_uid,
+                    exp_uid,
+                    association_order,
+                    prov["analyst"],
+                    prov["timestamp"]
+                ))
+
+                association_order += 1
+
+        logger.info(f"Created and deposited RT-aligned atlas: {aligned_atlas_uid} with name: {aligned_atlas_name}")
+
+        aligned_atlases_info[target_atlas_uid]['aligned_atlas_uid'] = aligned_atlas_uid
+        aligned_atlases_info[target_atlas_uid]['aligned_atlas_name'] = aligned_atlas_name
+    
+    return aligned_atlases_info
+
+
 def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: str = None) -> pd.DataFrame:
     """
-    Extract all compound information for a given atlas UID from the database and return as a pandas DataFrame.
-    Handles both main database (with mz_rt_references) and project database (with mz_rt_experimental) structures.
-    Uses external database attachment for compound metadata when needed.
+    Extract all compound information for a given atlas UID from the database.
+    Handles both main database (with mz_rt_references) and project database (with mz_rt_experimental).
     """
     with get_db_connection(database_path) as conn:
-    
+        
+        # Detect database type
         try:
-            # Check if this is a project database by looking for mz_rt_experimental table
-            is_project_db = conn.execute("""
-                SELECT COUNT(*) 
-                FROM information_schema.tables 
-                WHERE table_name = 'mz_rt_experimental'
-            """).fetchone()[0] > 0
+            result = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='mz_rt_experimental'
+            """).fetchall()
+            is_project_db = len(result) > 0
         except Exception as e:
-            logger.error(f"Error checking database type at {database_path}: {e}")
+            logger.error(f"Error checking database type: {e}")
             return pd.DataFrame()
 
-        # Attach main database if this is a project database and main_db_path provided
-        try:
-            if is_project_db and main_db_path:
+        # Attach main database if needed for compound metadata
+        if is_project_db and main_db_path:
+            try:
                 conn.execute(f"ATTACH '{main_db_path}' AS main_db")
                 logger.info("Attached main database for compound metadata")
-        except Exception as e:
-            logger.error(f"Error attaching main database at {main_db_path}: {e}")
+            except Exception as e:
+                logger.error(f"Error attaching main database: {e}")
+                return pd.DataFrame()
 
         try:
             if is_project_db:
-                # Project database query - uses experimental data with external compound references
+                # Project DB: Join through associations to experimental entries
                 query = """
                     SELECT
                         a.atlas_uid,
@@ -79,17 +258,17 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt_exp.mz_tolerance,
                         mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
                         mzrt_exp.rt_alignment_applied,
-                        mzrt_exp.rt_shift,
-                        mzrt_exp.source_mz_rt_reference_uid
+                        mzrt_exp.rt_shift
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     LEFT JOIN main_db.compounds ON aca.compound_uid = main_db.compounds.compound_uid
-                    LEFT JOIN mz_rt_experimental mzrt_exp ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
+                    LEFT JOIN mz_rt_experimental mzrt_exp 
+                        ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
                     WHERE a.atlas_uid = ?
-                    ORDER BY aca.association_order, mzrt_exp.rt_peak
+                    ORDER BY aca.association_order
                 """
             else:
-                # Main database query - uses reference data with full compound info
+                # Main DB: Join through associations to reference entries
                 query = """
                     SELECT
                         a.atlas_uid,
@@ -109,79 +288,86 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.mz_tolerance,
                         mzrt.mz_rt_reference_uid,
                         FALSE AS rt_alignment_applied,
-                        NULL AS rt_shift,
-                        NULL AS source_mz_rt_reference_uid
+                        NULL AS rt_shift
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     JOIN compounds c ON aca.compound_uid = c.compound_uid
-                    LEFT JOIN mz_rt_references mzrt ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
+                    LEFT JOIN mz_rt_references mzrt 
+                        ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
                     WHERE a.atlas_uid = ?
-                    ORDER BY aca.association_order, mzrt.rt_peak
+                    ORDER BY aca.association_order
                 """
 
             df = conn.execute(query, [atlas_uid]).df()
 
         except Exception as e:
-            logger.error(f"Error preparing query for atlas {atlas_uid}: {e}")
+            logger.error(f"Error querying atlas {atlas_uid}: {e}")
             return pd.DataFrame()
         
-        # Detach main database if attached
-        if is_project_db and main_db_path:
-            conn.execute("DETACH main_db")
+        finally:
+            # Detach if attached
+            if is_project_db and main_db_path:
+                try:
+                    conn.execute("DETACH main_db")
+                except:
+                    pass
 
     if df.empty:
         logger.warning(f"No compounds found for atlas {atlas_uid}")
-        return pd.DataFrame()
     else:
-        db_type = "project" if is_project_db else "main"
-        chromatography = ldt.detect_atlas_input_chromatography(df)
-        polarity = ldt.detect_atlas_input_polarity(df)
         df['label'] = df['compound_name'] if 'compound_name' in df.columns else ''
-        logger.info(f"Retrieved {len(df)} compounds from {db_type} database for atlas: {df['atlas_name'].iloc[0]} ({df['atlas_uid'].iloc[0]})")
+        logger.info(f"Retrieved {len(df)} compounds for atlas: {df['atlas_name'].iloc[0]}")
+        #_verify_compounds_exist_in_db(df['compound_uid'].tolist(), database_path)
+        #display(df.head())
 
     return df
 
-def check_rt_and_analysis_numbers(project_db_path: str, rt_alignment_number: int, analysis_number: int) -> None:
-    """
-    Check if the provided RT alignment number and analysis number already exist in the project database.
-    If they do, raise an error to prevent overwriting existing data.
-    """
-    with get_db_connection(project_db_path) as conn:
-        rt_exists = conn.execute("""
-            SELECT COUNT(*) 
-            FROM rt_alignment 
-            WHERE rt_alignment_number = ?
-        """, [rt_alignment_number]).fetchone()[0] > 0
+# def check_rt_and_analysis_numbers(project_db_path: str, rt_alignment_number: int, analysis_number: int) -> None:
+#     """
+#     Check if the provided RT alignment number and analysis number already exist in the project database.
+#     If they do, raise an error to prevent overwriting existing data.
+#     """
+#     with get_db_connection(project_db_path) as conn:
+#         rt_exists = conn.execute("""
+#             SELECT COUNT(*) 
+#             FROM rt_alignment 
+#             WHERE rt_alignment_number = ?
+#         """, [rt_alignment_number]).fetchone()[0] > 0
 
-        analysis_exists = conn.execute("""
-            SELECT COUNT(*) 
-            FROM mz_rt_experimental 
-            WHERE analysis_number = ?
-            AND rt_alignment_number = ?
-        """, [analysis_number, rt_alignment_number]).fetchone()[0] > 0
+#         analysis_exists = conn.execute("""
+#             SELECT COUNT(*) 
+#             FROM mz_rt_experimental 
+#             WHERE analysis_number = ?
+#             AND rt_alignment_number = ?
+#         """, [analysis_number, rt_alignment_number]).fetchone()[0] > 0
 
-    if rt_exists and analysis_exists:
-        raise ValueError(f"RT alignment number {rt_alignment_number} and analysis number {analysis_number} already exists in the project database. Please increment one.")
-    elif rt_exists and not analysis_exists:
-        logger.info(f"Creating new analysis ({analysis_number}) for existing RT alignment ({rt_alignment_number}).")
-    elif not rt_exists and analysis_exists:
-        pass
-    elif not rt_exists and not analysis_exists:
-        logger.info(f"Creating new RT alignment ({rt_alignment_number}) and new analysis ({analysis_number}).")
+#     if rt_exists and analysis_exists:
+#         raise ValueError(f"RT alignment number {rt_alignment_number} and analysis number {analysis_number} already exists in the project database. Please increment one.")
+#     elif rt_exists and not analysis_exists:
+#         logger.info(f"Creating new analysis ({analysis_number}) for existing RT alignment ({rt_alignment_number}).")
+#     elif not rt_exists and analysis_exists:
+#         pass
+#     elif not rt_exists and not analysis_exists:
+#         logger.info(f"Creating new RT alignment ({rt_alignment_number}) and new analysis ({analysis_number}).")
 
-    return
+#     return
 
-def create_project_database(project_db_path: str, rt_alignment_number: int, analysis_number: int) -> None:
+def create_project_database(project_db_path: str, overwrite: bool = False) -> None:
     """
     Create project-specific database with required tables.
     Never overwrites existing databases - requires analyst to increment analysis number.
     """
     project_db_path = Path(project_db_path)
-    project_db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if project_db_path.exists():
-        check_rt_and_analysis_numbers(project_db_path, rt_alignment_number, analysis_number)
-        logger.info(f"Project database already exists at {project_db_path}. Proceeding with existing database and new RT alignment {rt_alignment_number} and/or analysis {analysis_number}.")
+    if project_db_path.exists() and not overwrite:
+        logger.info(f"Project database already exists at {project_db_path}. Not overwriting.")
+        return
+    elif project_db_path.exists() and overwrite:
+        logger.warning(f"Overwriting existing project database at {project_db_path} (overwrite=True)")
+        project_db_path.unlink()
+        logger.info(f"Deleted existing database at {project_db_path}")
+    elif not project_db_path.exists():
+        logger.info(f"No existing project database found at {project_db_path}. Creating new database.")
 
     with get_db_connection(project_db_path) as conn:
         _create_database_tables(conn, db_type="project")
@@ -467,11 +653,9 @@ def save_rt_alignment_model_to_db(qc_atlas_uid: str,
         "alignment_timestamp": prov["timestamp"],
         "alignment_method": "polynomial_qc_based",
         "analyst": prov["analyst"],
-        # Store PolynomialFeatures parameters
         "poly_degree": int(best_model['degree']),
         "poly_include_bias": bool(best_model.get('poly_features').include_bias if best_model.get('poly_features') else True),
         "poly_interaction_only": bool(best_model.get('poly_features').interaction_only if best_model.get('poly_features') else False),
-        # Store LinearRegression parameters
         "model_intercept": float(best_model.get('intercept', 0.0)),
         "model_coefficients": best_model['coefficients'].tolist() if hasattr(best_model['coefficients'], 'tolist') else list(best_model['coefficients'])
     }
@@ -512,8 +696,6 @@ def get_rt_alignment_model_from_db(project_db_path: Path, qc_atlas_uid: str, rt_
         qc_atlas_uid: QC atlas UID to retrieve
         rt_alignment_number: RT alignment number to retrieve
     """
-    from sklearn.preprocessing import PolynomialFeatures
-    from sklearn.linear_model import LinearRegression
     
     project_db_path = Path(project_db_path)
     
@@ -842,6 +1024,7 @@ def get_atlas_metadata_from_db(db_path: str, atlas_uid: str, validation: bool = 
                 atlas_description,
                 chromatography,
                 polarity,
+                analysis_type,
                 atlas_type,
                 created_by,
                 created_date
@@ -853,7 +1036,7 @@ def get_atlas_metadata_from_db(db_path: str, atlas_uid: str, validation: bool = 
             logger.debug(f"Query executed successfully, retrieved {len(df)} records")
         
         if df.empty:
-            raise ValueError(f"Atlas not found in main database")
+            raise ValueError(f"Atlas not found in database")
         if len(df) > 1:
             raise ValueError(f"Multiple entries found for atlas in the database.")
         if validation is False:
@@ -862,6 +1045,13 @@ def get_atlas_metadata_from_db(db_path: str, atlas_uid: str, validation: bool = 
     except Exception as e:
         logger.warning(f"Did not find atlas {atlas_uid} in database {db_path}: {e}")
         return {}
+
+def get_decorator_from_uid(uid: str) -> Optional[str]:
+    """Extract decorator from UID if present."""
+    parts = uid.split('-')
+    if len(parts) >= 5 and parts[0] == 'atl' and parts[1] in ['ref', 'rta', 'tga']:
+        return f"{parts[2]}-{parts[3]}-{parts[4]}"
+    return None
 
 def _generate_uid(entity_type: str, decorator: str = None) -> str:
     """Generate a unique identifier for database entities."""
@@ -897,12 +1087,12 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
 
-def get_files_by_type_from_db(project_db_path: str, 
+def get_lcmsruns_from_db(project_db_path: str, 
                               file_types: List[str], 
                               file_format: str = "parquet",
                               chromatography: str = None,
                               polarity: str = None
-) -> pd.DataFrame:
+) -> Dict[str, pd.DataFrame]:
     """
     Get files of a specific type from the project database.
     
@@ -954,7 +1144,9 @@ def get_files_by_type_from_db(project_db_path: str,
             """, params).df()
         
         if files_df.empty:
-            raise ValueError(f"No {file_types} files found in the project database with specified filters")
+            raise ValueError(f"No {file_types} files found in the project database with filters: chromatography={chromatography}, polarity={polarity}, format={file_format}")
+        else:
+            logger.info(f"Retrieved {len(files_df)} {type} files from project database with filters: chromatography={chromatography}, polarity={polarity}, format={file_format}")
 
         database_files[type] = files_df
 
@@ -1194,6 +1386,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 atlas_description TEXT,
                 chromatography TEXT,
                 polarity TEXT,
+                analysis_type TEXT,
                 atlas_type TEXT,
                 created_by TEXT,
                 created_date TEXT
@@ -1237,6 +1430,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 atlas_description TEXT,
                 chromatography TEXT,
                 polarity TEXT,
+                analysis_type TEXT,
                 atlas_type TEXT,
                 source_atlas_uid TEXT,
                 rt_alignment_number INTEGER,
@@ -1285,7 +1479,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 polarity TEXT,
                 rt_alignment_applied BOOLEAN,
                 rt_shift REAL,
-                source_mz_rt_reference_uid TEXT,
+                mz_rt_reference_uid TEXT,
                 created_by TEXT,
                 created_date TEXT
             )
@@ -1338,7 +1532,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 in_feature BOOLEAN,
                 created_by TEXT,
                 created_date TEXT,
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
         
@@ -1359,7 +1552,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 in_feature BOOLEAN,
                 created_by TEXT,
                 created_date TEXT,
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
         
@@ -1392,7 +1584,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 created_date TEXT,
                 analyst_notes TEXT,
                 curation_status TEXT,
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
 
@@ -1411,11 +1602,9 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_peak REAL,
                 created_by TEXT,
                 created_date TEXT,
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
         
-        # Add MS2 summary table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ms2_summary (
                 ms2_summary_uid TEXT PRIMARY KEY,
@@ -1436,7 +1625,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 best_hit_num_matches INTEGER,
                 created_by TEXT,
                 created_date TEXT,
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
 
@@ -1480,82 +1668,15 @@ def _create_database_tables(conn, db_type: str = "main"):
                 
                 created_by TEXT,
                 created_date TEXT,
-                
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
 
-        # conn.execute("""
-        #     CREATE TABLE IF NOT EXISTS targeted_analysis (
-        #         analysis_uid TEXT,
-        #         project_name TEXT,
-        #         rt_alignment_number INTEGER,
-        #         analysis_number INTEGER,
-        #         atlas_uid TEXT,
-        #         atlas_type TEXT,
-        #         chromatography_polarity TEXT,
-        #         compound_uid TEXT,
-        #         inchi_key TEXT,
-        #         compound_name TEXT,
-        #         pre_rt_peak REAL,
-        #         pre_rt_min REAL,
-        #         pre_rt_max REAL,
-        #         pre_mz REAL,
-        #         mz_tolerance REAL,
-        #         adduct TEXT,
-        #         isomers TEXT,
-        #         post_rt_peak REAL,
-        #         post_rt_min REAL,
-        #         post_rt_max REAL,
-        #         is_rt_modified BOOLEAN,
-        #         best_eic_file TEXT,
-        #         best_eic_rt REAL,
-        #         best_eic_mz REAL,
-        #         best_eic_intensity REAL,
-        #         best_eic_ppm_error REAL,
-        #         best_eic_rt_error REAL,
-        #         avg_eic_rt REAL,
-        #         avg_eic_intensity REAL,
-        #         avg_eic_mz REAL,
-        #         best_ms2_file TEXT,
-        #         best_ms2_database TEXT,
-        #         best_ms2_ref_id TEXT,
-        #         best_ms2_rt_peak REAL,
-        #         best_ms2_intensity_peak REAL,
-        #         best_ms2_mz_peak REAL,
-        #         best_ms2_score REAL,
-        #         best_ms2_num_matches INTEGER,
-        #         best_ms2_ref_frags INTEGER,
-        #         best_ms2_data_frags INTEGER,
-        #         best_ms2_matched_fragments TEXT,
-        #         avg_ms2_score REAL,
-        #         total_files_detected INTEGER,
-        #         ms2_files_with_data INTEGER,
-        #         ms2_best_score REAL,
-        #         ms2_best_database TEXT,
-        #         ms2_total_matches INTEGER,
-        #         ms1_notes TEXT,
-        #         ms2_notes TEXT,
-        #         analyst_notes TEXT,
-        #         identification_notes TEXT,
-        #         curation_status TEXT,
-        #         analyst TEXT,
-        #         analysis_timestamp TEXT,
-        #         PRIMARY KEY (analysis_uid, compound_uid, rt_alignment_number, analysis_number)
-        #     )
-        # """)
-
-def verify_compounds_exist_in_db(compound_uids: list, db_path: str) -> bool:
+def _verify_compounds_exist_in_db(compound_uids: list, db_path: str) -> bool:
     """
     Verify that all compound_uids exist in the database at db_path.
     Returns a DataFrame of compounds that exist in the database.
     Logs warnings for any missing compound_uids.
     """
-    if not compound_uids:
-        logger.warning("No compound_uids provided for verification.")
-        return False
-
-    logger.info("Verifying that all compounds exist in the database...")
     with get_db_connection(db_path) as conn:
         placeholders = ','.join(['?'] * len(compound_uids))
         query = f"SELECT compound_uid FROM compounds WHERE compound_uid IN ({placeholders})"
@@ -1566,18 +1687,22 @@ def verify_compounds_exist_in_db(compound_uids: list, db_path: str) -> bool:
         for uid in missing_uids:
             logger.warning(f"Compound {uid} not found in database {db_path}")
         return False
+    logger.info("All compounds verified to exist in the database.")
     return True
 
 def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
     """Return {inchi_key: compound_uid} for all inchi_keys found in the database."""
+    if not inchi_keys:
+        return {}
     with get_db_connection(db_path) as conn:
-        if not inchi_keys:
-            return {}
         placeholders = ','.join(['?'] * len(inchi_keys))
         rows = conn.execute(
             f"SELECT inchi_key, compound_uid FROM compounds WHERE inchi_key IN ({placeholders})",
             inchi_keys
         ).fetchall()
+        if not rows:
+            logger.error(f"No compounds found in database {db_path} for provided inchi_keys.")
+            return {}
         return {row[0]: row[1] for row in rows}
 
 def get_or_create_mz_rt_reference_uid(
@@ -1609,474 +1734,312 @@ def get_or_create_mz_rt_reference_uid(
         else:
             return _generate_uid("mz_rt_reference"), False
 
-def save_ms1_data_to_db(
+def get_compound_by_uid(db_path: str, compound_uid: str) -> Optional[Dict]:
+    """
+    Retrieve a single compound from the database by compound_uid.
+    
+    Args:
+        db_path: Path to database
+        compound_uid: Compound UID to retrieve
+        
+    Returns:
+        Dictionary with compound data, or None if not found
+    """
+    with get_db_connection(db_path) as conn:
+        result = conn.execute("""
+            SELECT * FROM compounds WHERE compound_uid = ?
+        """, [compound_uid]).fetchone()
+        
+        if not result:
+            logger.warning(f"Compound {compound_uid} not found in database")
+            return None
+        
+        # Convert to dictionary with column names
+        columns = [
+            'compound_uid', 'name', 'inchi_key', 'inchi', 'smiles', 'formula',
+            'compound_classes', 'compound_pathways', 'compound_tags',
+            'mono_isotopic_molecular_weight', 'iupac_name', 'pubchem_cid',
+            'cas_number', 'synonyms', 'created_by', 'created_date'
+        ]
+        
+        return dict(zip(columns, result))
+
+def save_experimental_data_to_db(
     project_db_path: str,
-    inchi_key: str,
+    main_db_path: str,
+    exp_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
     rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str,
-    ms1_df: pd.DataFrame
+    analysis_number: int
 ) -> None:
-    """Save MS1 data for a compound/file to database."""
+    """
+    Save experimental data from analysis results structure to project database.
+    Uses bulk inserts for efficiency.
+    
+    Args:
+        project_db_path: Path to project database
+        main_db_path: Path to main database
+        exp_data: Nested dict {inchi_key: {filename: {data_type: DataFrame}}}
+        rt_alignment_number: RT alignment number
+        analysis_number: Analysis number
+    """
+    logger.info("Preparing bulk data for database save...")
+    
+    # Get compound_uid mappings from main database
+    inchi_keys = list(exp_data.keys())
+    compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
     prov = ldt.get_provenance()
     
+    # Collect all records in memory first
+    ms1_records = []
+    ms2_records = []
+    ms2_hits_records = []
+    ms1_summary_records = []
+    ms2_summary_records = []
+    
+    for inchi_key, file_results in exp_data.items():
+        compound_uid = compound_uid_map.get(inchi_key)
+        if not compound_uid:
+            logger.warning(f"Could not find compound_uid for {inchi_key}, skipping")
+            continue
+            
+        for filename, ms_level_results in file_results.items():
+            for ms_level, data in ms_level_results.items():
+                if data.empty:
+                    logger.debug(f"Skipping empty dataframe for {ms_level} for {inchi_key} in file {filename}")
+                    continue
+                    
+                try:
+                    if ms_level == "ms1_data":
+                        for _, row in data.iterrows():
+                            ms1_records.append((
+                                _generate_uid("ms1_data"),
+                                compound_uid,
+                                rt_alignment_number,
+                                analysis_number,
+                                filename,
+                                row.get('label', ''),
+                                float(row.get('rt', 0.0)),
+                                float(row.get('mz', 0.0)),
+                                float(row.get('i', 0.0)),
+                                bool(row.get('in_feature', False)),
+                                prov["analyst"],
+                                prov["timestamp"]
+                            ))
+                    
+                    elif ms_level == "ms2_data":
+                        for _, row in data.iterrows():
+                            ms2_records.append((
+                                _generate_uid("ms2_data"),
+                                compound_uid,
+                                rt_alignment_number,
+                                analysis_number,
+                                filename,
+                                row.get('label', ''),
+                                float(row.get('rt', 0.0)),
+                                float(row.get('mz', 0.0)),
+                                float(row.get('i', 0.0)),
+                                float(row.get('precursor_MZ', 0.0)),
+                                float(row.get('precursor_intensity', 0.0)),
+                                float(row.get('collision_energy', 0.0)),
+                                bool(row.get('in_feature', False)),
+                                prov["analyst"],
+                                prov["timestamp"]
+                            ))
+                    
+                    elif ms_level == "ms2_hits":
+                        import json
+                        for _, row in data.iterrows():
+                            ms2_hits_records.append((
+                                _generate_uid("ms2_hits"),
+                                compound_uid,
+                                rt_alignment_number,
+                                analysis_number,
+                                filename,
+                                row.get('inchi_key', ''),
+                                row.get('database', ''),
+                                row.get('ref_id', ''),
+                                row.get('ref_name', ''),
+                                float(row.get('score', 0.0)),
+                                int(row.get('num_matches', 0)),
+                                float(row.get('mz_theoretical', 0.0)),
+                                float(row.get('mz_measured', 0.0)),
+                                float(row.get('rt_measured', 0.0)),
+                                float(row.get('qry_intensity_peak', 0.0)),
+                                int(row.get('ref_frags', 0)),
+                                int(row.get('data_frags', 0)),
+                                json.dumps(row.get('matched_fragments', [])),
+                                json.dumps(row.get('qry_frag_colors', [])),
+                                json.dumps(row.get('qry_spectrum', [])),
+                                json.dumps(row.get('ref_spectrum', [])),
+                                json.dumps(row.get('qry_spectrum_original', [])),
+                                json.dumps(row.get('ref_spectrum_original', [])),
+                                prov["analyst"],
+                                prov["timestamp"],
+                                '',
+                                'pending'
+                            ))
+                    
+                    elif ms_level == "ms1_summary":
+                        for _, row in data.iterrows():
+                            ms1_summary_records.append((
+                                _generate_uid("ms1_summary"),
+                                compound_uid,
+                                rt_alignment_number,
+                                analysis_number,
+                                filename,
+                                row.get('label', ''),
+                                int(row.get('num_datapoints', 0)),
+                                float(row.get('peak_area', 0.0)),
+                                float(row.get('peak_height', 0.0)),
+                                float(row.get('mz_centroid', 0.0)),
+                                float(row.get('rt_peak', 0.0)),
+                                prov["analyst"],
+                                prov["timestamp"]
+                            ))
+                    
+                    elif ms_level == "ms2_summary":
+                        for _, row in data.iterrows():
+                            ms2_summary_records.append((
+                                _generate_uid("ms2_summary"),
+                                compound_uid,
+                                rt_alignment_number,
+                                analysis_number,
+                                filename,
+                                int(row.get('num_scans', 0)),
+                                int(row.get('num_fragments', 0)),
+                                float(row.get('best_ms2_rt', 0.0)),
+                                float(row.get('best_ms2_mz', 0.0)),
+                                float(row.get('best_ms2_intensity', 0.0)),
+                                int(row.get('num_hits', 0)),
+                                float(row.get('best_hit_score', 0.0)),
+                                row.get('best_hit_database', ''),
+                                row.get('best_hit_ref_id', ''),
+                                row.get('best_hit_ref_name', ''),
+                                int(row.get('best_hit_num_matches', 0)),
+                                prov["analyst"],
+                                prov["timestamp"]
+                            ))
+                            
+                except Exception as e:
+                    logger.error(f"Error preparing {ms_level} data for {inchi_key} in file {filename}: {e}")
+                    continue
+    
+    # Now do bulk inserts with a single connection
+    logger.info("Performing bulk database inserts...")
     with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
-        
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database. Skipping MS1 data.")
-            return
-        
-        compound_uid = compound_result[0]
-        
-        records = []
-        for _, row in ms1_df.iterrows():
-            records.append((
-                _generate_uid("ms1_data"),
-                compound_uid,
-                rt_alignment_number,
-                analysis_number,
-                file_path,
-                row.get('label', ''),
-                float(row.get('rt', 0.0)),
-                float(row.get('mz', 0.0)),
-                float(row.get('i', 0.0)),
-                bool(row.get('in_feature', False)),
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-        
-        if records:
+        if ms1_records:
+            logger.info(f"Inserting {len(ms1_records)} MS1 data records...")
             conn.executemany("""
                 INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
-    
-    logger.info(f"Saved {len(records)} MS1 data points for compound {inchi_key}")
-
-def save_ms2_data_to_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str,
-    ms2_df: pd.DataFrame
-) -> None:
-    """Save MS2 data for a compound/file to database."""
-    prov = ldt.get_provenance()
-    
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
+            """, ms1_records)
         
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database. Skipping MS2 data.")
-            return
-        
-        compound_uid = compound_result[0]
-        
-        records = []
-        for _, row in ms2_df.iterrows():
-            records.append((
-                _generate_uid("ms2_data"),
-                compound_uid,
-                rt_alignment_number,
-                analysis_number,
-                file_path,
-                row.get('label', ''),
-                float(row.get('rt', 0.0)),
-                float(row.get('mz', 0.0)),
-                float(row.get('i', 0.0)),
-                float(row.get('precursor_MZ', 0.0)),
-                float(row.get('precursor_intensity', 0.0)),
-                float(row.get('collision_energy', 0.0)),
-                bool(row.get('in_feature', False)),
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-        
-        if records:
+        if ms2_records:
+            logger.info(f"Inserting {len(ms2_records)} MS2 data records...")
             conn.executemany("""
                 INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
-    
-    logger.info(f"Saved {len(records)} MS2 data points for compound {inchi_key}")
-
-def save_ms2_hits_to_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str,
-    ms2_hits_df: pd.DataFrame
-) -> None:
-    """Save MS2 spectral matching hits to database."""
-    prov = ldt.get_provenance()
-    
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
+            """, ms2_records)
         
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database. Skipping MS2 hits.")
-            return
-        
-        compound_uid = compound_result[0]
-        
-        records = []
-        for _, row in ms2_hits_df.iterrows():
-            records.append((
-                _generate_uid("ms2_hits"),
-                compound_uid,
-                rt_alignment_number,
-                analysis_number,
-                file_path,
-                row.get('inchi_key', ''),
-                row.get('database', ''),
-                row.get('ref_id', ''),
-                row.get('ref_name', ''),
-                float(row.get('score', 0.0)),
-                int(row.get('num_matches', 0)),
-                float(row.get('mz_theoretical', 0.0)),
-                float(row.get('mz_measured', 0.0)),
-                float(row.get('rt_measured', 0.0)),
-                float(row.get('qry_intensity_peak', 0.0)),
-                int(row.get('ref_frags', 0)),
-                int(row.get('data_frags', 0)),
-                json.dumps(row.get('matched_fragments', [])),
-                json.dumps(row.get('qry_frag_colors', [])),
-                json.dumps(row.get('qry_spectrum', [])),
-                json.dumps(row.get('ref_spectrum', [])),
-                json.dumps(row.get('qry_spectrum_original', [])),
-                json.dumps(row.get('ref_spectrum_original', [])),
-                prov["analyst"],
-                prov["timestamp"],
-                '',  # analyst_notes
-                'pending'  # curation_status
-            ))
-        
-        if records:
+        if ms2_hits_records:
+            logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
             conn.executemany("""
-                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
-    
-    logger.info(f"Saved {len(records)} MS2 hits for compound {inchi_key}")
-
-def save_ms1_summary_to_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str,
-    ms1_summary_df: pd.DataFrame
-) -> None:
-    """Save MS1 summary data for a compound/file to database."""
-    prov = ldt.get_provenance()
-    
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
+                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, ms2_hits_records)
         
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database. Skipping MS1 summary.")
-            return
-        
-        compound_uid = compound_result[0]
-        
-        records = []
-        for _, row in ms1_summary_df.iterrows():
-            records.append((
-                _generate_uid("ms1_summary"),
-                compound_uid,
-                rt_alignment_number,
-                analysis_number,
-                file_path,
-                row.get('label', ''),
-                int(row.get('num_datapoints', 0)),
-                float(row.get('peak_area', 0.0)),
-                float(row.get('peak_height', 0.0)),
-                float(row.get('mz_centroid', 0.0)),
-                float(row.get('rt_peak', 0.0)),
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-        
-        if records:
+        if ms1_summary_records:
+            logger.info(f"Inserting {len(ms1_summary_records)} MS1 summary records...")
             conn.executemany("""
                 INSERT INTO ms1_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
-    
-    logger.info(f"Saved {len(records)} MS1 summary records for compound {inchi_key}")
-
-def save_ms2_summary_to_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str,
-    ms2_summary_df: pd.DataFrame
-) -> None:
-    """Save MS2 summary data for a compound/file to database."""
-    prov = ldt.get_provenance()
-    
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
+            """, ms1_summary_records)
         
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database. Skipping MS2 summary.")
-            return
-        
-        compound_uid = compound_result[0]
-        
-        records = []
-        for _, row in ms2_summary_df.iterrows():
-            records.append((
-                _generate_uid("ms2_summary"),
-                compound_uid,
-                rt_alignment_number,
-                analysis_number,
-                file_path,
-                int(row.get('num_scans', 0)),
-                int(row.get('num_fragments', 0)),
-                float(row.get('best_ms2_rt', 0.0)),
-                float(row.get('best_ms2_mz', 0.0)),
-                float(row.get('best_ms2_intensity', 0.0)),
-                int(row.get('num_hits', 0)),
-                float(row.get('best_hit_score', 0.0)),
-                row.get('best_hit_database', ''),
-                row.get('best_hit_ref_id', ''),
-                row.get('best_hit_ref_name', ''),
-                int(row.get('best_hit_num_matches', 0)),
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-        
-        if records:
+        if ms2_summary_records:
+            logger.info(f"Inserting {len(ms2_summary_records)} MS2 summary records...")
             conn.executemany("""
                 INSERT INTO ms2_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, records)
+            """, ms2_summary_records)
     
-    logger.info(f"Saved {len(records)} MS2 summary records for compound {inchi_key}")
+    logger.info("Experimental data saved to database")
+    return
 
-def get_ms1_data_from_db(
+def get_experimental_data_from_db(
     project_db_path: str,
-    inchi_key: str,
+    main_db_path: str,
     rt_alignment_number: int,
     analysis_number: int,
-    file_path: str = None
-) -> pd.DataFrame:
-    """Retrieve MS1 data for a compound from database using inchi_key."""
+    inchi_keys: List[str] = None
+) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
+    """
+    Retrieve all experimental data in the same nested structure as save function.
+    
+    Args:
+        project_db_path: Path to project database
+        main_db_path: Path to main database
+        rt_alignment_number: RT alignment number
+        analysis_number: Analysis number
+        inchi_keys: Optional list of inchi_keys to filter (if None, gets all)
+    
+    Returns:
+        Nested dict: {inchi_key: {filename: {data_type: DataFrame}}}
+    """
+    logger.info("Retrieving all experimental data from database...")
+    
+    # Get compound_uid mappings
+    if inchi_keys:
+        compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
+    else:
+        # Get all inchi_keys for this analysis
+        with get_db_connection(main_db_path) as conn:
+            all_inchi_keys = conn.execute("SELECT DISTINCT inchi_key FROM compounds").df()['inchi_key'].tolist()
+        compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, all_inchi_keys)
+    
+    # Reverse map: compound_uid -> inchi_key
+    uid_to_inchi = {v: k for k, v in compound_uid_map.items()}
+    
+    exp_data = {}
+    
+    # Get all data types with consistent structure
+    data_types = ['ms1_data', 'ms2_data', 'ms2_hits', 'ms1_summary', 'ms2_summary']
+    
     with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
-        
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database.")
-            return pd.DataFrame()
-        
-        compound_uid = compound_result[0]
-        
-        if file_path:
-            df = conn.execute("""
-                SELECT label, rt, mz, i, in_feature
-                FROM ms1_data
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ? AND file_path = ?
-                ORDER BY rt
-            """, [compound_uid, rt_alignment_number, analysis_number, file_path]).df()
-        else:
-            df = conn.execute("""
-                SELECT label, rt, mz, i, in_feature, file_path
-                FROM ms1_data
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ?
-                ORDER BY file_path, rt
-            """, [compound_uid, rt_alignment_number, analysis_number]).df()
+        for data_type in data_types:
+            logger.info(f"Retrieving {data_type}...")
+            
+            query = f"""
+                SELECT * FROM {data_type} 
+                WHERE rt_alignment_number = ? AND analysis_number = ?
+            """
+            df = conn.execute(query, [rt_alignment_number, analysis_number]).df()
+            
+            if df.empty:
+                continue
+            
+            if data_type == "ms2_hits":
+                json_columns = [
+                    'matched_fragments', 'qry_frag_colors', 'qry_spectrum', 
+                    'ref_spectrum', 'qry_spectrum_original', 'ref_spectrum_original'
+                ]
+                
+                for col in json_columns:
+                    if col in df.columns:
+                        df[col] = df[col].apply(lambda x: json.loads(x) if pd.notna(x) and x else [])
+            
+            # Group by compound_uid and filename
+            for (compound_uid, filename), group_df in df.groupby(['compound_uid', 'filename']):
+                inchi_key = uid_to_inchi.get(compound_uid)
+                if not inchi_key:
+                    logger.warning(f"No inchi_key found for compound_uid {compound_uid}")
+                    continue
+                
+                # Initialize nested structure
+                if inchi_key not in exp_data:
+                    exp_data[inchi_key] = {}
+                if filename not in exp_data[inchi_key]:
+                    exp_data[inchi_key][filename] = {}
+                
+                # Store dataframe
+                exp_data[inchi_key][filename][data_type] = group_df.reset_index(drop=True)
     
-    return df
-
-def get_ms2_data_from_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str = None
-) -> pd.DataFrame:
-    """Retrieve MS2 data for a compound from database using inchi_key."""
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
-        
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database.")
-            return pd.DataFrame()
-        
-        compound_uid = compound_result[0]
-        
-        if file_path:
-            df = conn.execute("""
-                SELECT label, rt, mz, i, precursor_MZ, precursor_intensity, 
-                       collision_energy, in_feature
-                FROM ms2_data
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ? AND file_path = ?
-                ORDER BY rt
-            """, [compound_uid, rt_alignment_number, analysis_number, file_path]).df()
-        else:
-            df = conn.execute("""
-                SELECT label, rt, mz, i, precursor_MZ, precursor_intensity, 
-                       collision_energy, in_feature, file_path
-                FROM ms2_data
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ?
-                ORDER BY file_path, rt
-            """, [compound_uid, rt_alignment_number, analysis_number]).df()
-    
-    return df
-
-def get_ms2_hits_from_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str = None
-) -> pd.DataFrame:
-    """Retrieve MS2 hits for a compound from database using inchi_key."""
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
-        
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database.")
-            return pd.DataFrame()
-        
-        compound_uid = compound_result[0]
-        
-        if file_path:
-            df = conn.execute("""
-                SELECT * FROM ms2_hits
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ? AND file_path = ?
-                ORDER BY score DESC
-            """, [compound_uid, rt_alignment_number, analysis_number, file_path]).df()
-        else:
-            df = conn.execute("""
-                SELECT * FROM ms2_hits
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ?
-                ORDER BY file_path, score DESC
-            """, [compound_uid, rt_alignment_number, analysis_number]).df()
-    
-    # Convert JSON text columns back to Python objects
-    json_columns = ['matched_fragments', 'qry_frag_colors', 'qry_spectrum', 
-                    'ref_spectrum', 'qry_spectrum_original', 'ref_spectrum_original']
-    
-    for col in json_columns:
-        if col in df.columns:
-            df[col] = df[col].apply(lambda x: json.loads(x) if pd.notna(x) else None)
-    
-    return df
-
-def get_ms1_summary_from_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str = None
-) -> pd.DataFrame:
-    """Retrieve MS1 summary for a compound from database using inchi_key."""
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
-        
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database.")
-            return pd.DataFrame()
-        
-        compound_uid = compound_result[0]
-        
-        if file_path:
-            df = conn.execute("""
-                SELECT label, num_datapoints, peak_area, peak_height, 
-                       mz_centroid, rt_peak
-                FROM ms1_summary
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ? AND file_path = ?
-            """, [compound_uid, rt_alignment_number, analysis_number, file_path]).df()
-        else:
-            df = conn.execute("""
-                SELECT label, num_datapoints, peak_area, peak_height, 
-                       mz_centroid, rt_peak, file_path
-                FROM ms1_summary
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ?
-                ORDER BY file_path
-            """, [compound_uid, rt_alignment_number, analysis_number]).df()
-    
-    return df
-
-def get_ms2_summary_from_db(
-    project_db_path: str,
-    inchi_key: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    file_path: str = None
-) -> pd.DataFrame:
-    """Retrieve MS2 summary for a compound from database using inchi_key."""
-    with get_db_connection(project_db_path) as conn:
-        # Look up compound_uid from inchi_key
-        compound_result = conn.execute("""
-            SELECT compound_uid FROM compounds WHERE inchi_key = ?
-        """, [inchi_key]).fetchone()
-        
-        if not compound_result:
-            logger.warning(f"Compound with inchi_key {inchi_key} not found in database.")
-            return pd.DataFrame()
-        
-        compound_uid = compound_result[0]
-        
-        if file_path:
-            df = conn.execute("""
-                SELECT num_scans, num_fragments, best_ms2_rt, best_ms2_mz, 
-                       best_ms2_intensity, num_hits, best_hit_score, 
-                       best_hit_database, best_hit_ref_id, best_hit_ref_name, 
-                       best_hit_num_matches
-                FROM ms2_summary
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ? AND file_path = ?
-            """, [compound_uid, rt_alignment_number, analysis_number, file_path]).df()
-        else:
-            df = conn.execute("""
-                SELECT num_scans, num_fragments, best_ms2_rt, best_ms2_mz, 
-                       best_ms2_intensity, num_hits, best_hit_score, 
-                       best_hit_database, best_hit_ref_id, best_hit_ref_name, 
-                       best_hit_num_matches, file_path
-                FROM ms2_summary
-                WHERE compound_uid = ? AND rt_alignment_number = ? 
-                AND analysis_number = ?
-                ORDER BY file_path
-            """, [compound_uid, rt_alignment_number, analysis_number]).df()
-    
-    return df
+    logger.info(f"Retrieved experimental data for {len(exp_data)} compounds")
+    return exp_data
 
 def save_atlas_to_database(atlas_obj, db_path: str, db_type: str = "main") -> None:
     """
@@ -2086,8 +2049,8 @@ def save_atlas_to_database(atlas_obj, db_path: str, db_type: str = "main") -> No
     Args:
         atlas_obj: Atlas object to save
     """
-    # Verify all compounds exist in database
-    if not verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_references.values()], db_path):
+    logger.info("Veryfing compounds in atlas exist in database before saving...")
+    if not _verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_references.values()], db_path):
         raise ValueError(f"Some compounds in atlas {atlas_obj.atlas_uid} don't exist in database")
 
     prov = ldt.get_provenance()
@@ -2095,14 +2058,15 @@ def save_atlas_to_database(atlas_obj, db_path: str, db_type: str = "main") -> No
         if db_type == "main":
             # Create atlas entry
             conn.execute("""
-                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 atlas_obj.atlas_uid,
                 atlas_obj.atlas_name,
                 atlas_obj.atlas_description,
                 atlas_obj.chromatography,
                 atlas_obj.polarity,
-                "REFERENCE",  # atlas_type
+                atlas_obj.analysis_type,
+                atlas_obj.atlas_type,
                 prov["analyst"],
                 prov["timestamp"]
             ))
@@ -2166,342 +2130,3 @@ def save_atlas_to_database(atlas_obj, db_path: str, db_type: str = "main") -> No
             logger.info(f"  Total associations: {association_order}")
 
         association_order += 1
-
-def get_rt_aligned_atlases_from_db(
-    project_db_path: str,
-    rt_alignment_number: int,
-) -> List[Dict]:
-    """
-    Get all RT-aligned atlases for given RT alignment number.
-    
-    """
-    params = [rt_alignment_number]
-    query = """
-        SELECT 
-            atlas_uid,
-            atlas_name,
-            atlas_description,
-            chromatography,
-            polarity,
-            atlas_type,
-            source_atlas_uid,
-            rt_alignment_number,
-            created_by,
-            created_date
-        FROM atlases
-        WHERE rt_alignment_number = ?
-    """
-    
-    query += " ORDER BY atlas_type, polarity"
-    
-    with get_db_connection(project_db_path) as conn:
-        results = conn.execute(query, params).fetchall()
-        
-        atlases = []
-        for row in results:
-            # Infer workflow from chromatography
-            workflow = row[3].upper()  # chromatography -> workflow
-            
-            atlases.append({
-                'atlas_uid': row[0],
-                'atlas_name': row[1],
-                'atlas_description': row[2],
-                'chromatography': row[3],
-                'polarity': row[4],
-                'atlas_type': row[5],
-                'source_atlas_uid': row[6],
-                'rt_alignment_number': row[7],
-                'created_by': row[8],
-                'created_date': row[9],
-                'workflow': workflow
-            })
-        
-        if not atlases:
-            raise ValueError(f"No RT-aligned atlases found in project database for RT alignment number {rt_alignment_number}")
-        else:
-            logger.info(f"Found {len(atlases)} RT-aligned atlases in project database for RT alignment number {rt_alignment_number}")
-        return atlases
-
-def save_rt_aligned_atlas_to_db(
-    project_db_path: str,
-    main_db_path: str,
-    target_atlas_uid: str,
-    best_model: dict,
-    corr_compounds_df: pd.DataFrame,
-    rt_alignment_number: int,
-    analysis_number: Optional[int] = None
-) -> Tuple[str, str]:
-    """
-    Create RT-aligned atlas in project database and apply RT alignment to compounds.
-    
-    Args:
-        project_db_path: Path to project database
-        main_db_path: Path to main database
-        target_atlas_uid: UID of the target atlas
-        best_model: RT alignment model dictionary
-        corr_compounds_df: DataFrame of RT aligned compounds
-        rt_alignment_number: RT alignment number
-        analysis_number: Optional analysis number for this RT alignment (if not provided, will be NULL in database)
-    Returns:
-        Tuple of (aligned_atlas_uid, aligned_atlas_name)
-    """
-    logger.info("Creating RT-aligned atlas in project database...")
-
-    prov = ldt.get_provenance()
-
-    # Use some info from the target atlas for the new RT-aligned target atlas
-    target_atlas_info = get_atlas_metadata_from_db(main_db_path, target_atlas_uid)
-
-    # Generate new atlas UID for RT-aligned version
-    aligned_atlas_uid = _generate_uid("rt_atlas")
-    aligned_atlas_name = f"{target_atlas_info['atlas_name']} (RT aligned)"
-    aligned_atlas_description = f"RT-aligned version of {target_atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
-    logger.info(f"From the {target_atlas_info['atlas_uid']} template, generated new atlas UID: {aligned_atlas_uid} for RT-aligned atlas: {aligned_atlas_name}")
-
-    logger.info("Saving RT-aligned atlas and compounds to project database...")
-    with get_db_connection(project_db_path) as conn:
-        
-        # Create new atlas entry
-        conn.execute("""
-            INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            aligned_atlas_uid,
-            aligned_atlas_name,
-            aligned_atlas_description,
-            target_atlas_info['chromatography'],
-            target_atlas_info['polarity'],
-            target_atlas_info['atlas_type'],
-            target_atlas_info['atlas_uid'],
-            rt_alignment_number,
-            analysis_number,
-            prov["analyst"],
-            prov["timestamp"]
-        ))
-
-        association_order = 0
-        for _, row in corr_compounds_df.iterrows():
-            compound_uid = row['compound_uid']
-            aligned_rt_peak = row.get('rt_peak')
-            aligned_rt_min = row.get('rt_min')
-            aligned_rt_max = row.get('rt_max')
-            rt_shift = row.get('rt_shift')
-            exp_uid = _generate_uid("mz_rt_experimental")
-            assoc_uid = _generate_uid("association")
-            source_mz_rt_reference_uid = row.get('mz_rt_reference_uid')
-
-            conn.execute("""
-                INSERT INTO mz_rt_experimental VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                exp_uid,
-                compound_uid,
-                rt_alignment_number,
-                analysis_number,
-                aligned_rt_peak,
-                aligned_rt_min,
-                aligned_rt_max,
-                '',  # ms1_notes
-                '',  # ms2_notes
-                row.get('mz'),
-                row.get('mz_tolerance', 5.0),
-                row.get('adduct', ''),
-                target_atlas_info['chromatography'],
-                target_atlas_info['polarity'],
-                True,  # rt_alignment_applied
-                rt_shift,
-                source_mz_rt_reference_uid,
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-            
-            # Create atlas-compound association
-            conn.execute("""
-                INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                assoc_uid,
-                aligned_atlas_uid,
-                compound_uid,
-                source_mz_rt_reference_uid,
-                association_order,
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-
-            association_order += 1
-
-    logger.info(f"Created and deposited RT-aligned atlas: {aligned_atlas_uid} with name: {aligned_atlas_name}")
-
-    return aligned_atlas_uid, aligned_atlas_name
-
-def verify_project_db_holdings(project_db_path: str, rt_alignment_number: int = None, analysis_number: int = None) -> Dict[str, pd.DataFrame]:
-    """
-    Verify all expected data from putative identification workflow.
-    Returns a dictionary of DataFrames for external display.
-    
-    Args:
-        project_db_path: Path to project database
-        rt_alignment_number: Optional RT alignment number to filter results
-        analysis_number: Optional analysis number to filter results
-    """
-    
-    results = {}
-    
-    with duckdb.connect(project_db_path) as conn:
-        # 1. LCMS Runs (not filtered - shows all runs)
-        results['lcms_runs'] = conn.execute("""
-            SELECT *
-            FROM lcmsruns
-            ORDER BY file_type, chromatography, polarity
-        """).df()
-        
-        # 2. RT Alignment Models
-        if rt_alignment_number is not None:
-            results['rt_models'] = conn.execute("""
-                SELECT *
-                FROM rt_alignment
-                WHERE rt_alignment_number = ?
-                ORDER BY rt_alignment_number DESC
-            """, [rt_alignment_number]).df()
-        else:
-            results['rt_models'] = conn.execute("""
-                SELECT *
-                FROM rt_alignment
-                ORDER BY rt_alignment_number DESC
-            """).df()
-        
-        # 3. Atlases Created
-        where_clauses = []
-        params = []
-        if rt_alignment_number is not None:
-            where_clauses.append("rt_alignment_number = ?")
-            params.append(rt_alignment_number)
-        if analysis_number is not None:
-            where_clauses.append("analysis_number = ?")
-            params.append(analysis_number)
-        
-        where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        
-        results['atlases'] = conn.execute(f"""
-            SELECT *
-            FROM atlases
-            {where_str}
-            ORDER BY rt_alignment_number DESC, analysis_number DESC
-        """, params).df()
-        
-        # 4. Atlas-Compound Associations (filtered by atlases from step 3)
-        if not results['atlases'].empty:
-            atlas_uids = results['atlases']['atlas_uid'].tolist()
-            placeholders = ','.join(['?' for _ in atlas_uids])
-            results['associations'] = conn.execute(f"""
-                SELECT *
-                FROM atlas_compound_associations
-                WHERE atlas_uid IN ({placeholders})
-                ORDER BY atlas_uid, compound_uid
-            """, atlas_uids).df()
-        else:
-            results['associations'] = pd.DataFrame()
-        
-        # 5. Experimental Entries (sample)
-        where_clauses = []
-        params = []
-        if rt_alignment_number is not None:
-            where_clauses.append("rt_alignment_number = ?")
-            params.append(rt_alignment_number)
-        if analysis_number is not None:
-            where_clauses.append("analysis_number = ?")
-            params.append(analysis_number)
-        
-        where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        
-        results['exp_entries'] = conn.execute(f"""
-            SELECT *
-            FROM mz_rt_experimental
-            {where_str}
-            ORDER BY rt_alignment_number DESC, analysis_number DESC
-            LIMIT 100
-        """, params).df()
-        
-        # 6. Summary Statistics
-        results['lcms_summary'] = conn.execute("""
-            SELECT file_type, file_format, chromatography, polarity, ms_level, COUNT(*) as count
-            FROM lcmsruns
-            WHERE file_format = 'parquet'
-            GROUP BY file_type, file_format, chromatography, polarity, ms_level
-            ORDER BY file_type, file_format, chromatography, polarity, ms_level
-        """).df()
-        
-        # Compounds per atlas (filtered by atlas_uids from step 3)
-        if not results['atlases'].empty:
-            atlas_uids = results['atlases']['atlas_uid'].tolist()
-            placeholders = ','.join(['?' for _ in atlas_uids])
-            results['compounds_per_atlas'] = conn.execute(f"""
-                SELECT a.atlas_name, a.atlas_type, a.chromatography, a.polarity,
-                       COUNT(DISTINCT aca.compound_uid) as compound_count
-                FROM atlases a
-                LEFT JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
-                WHERE a.atlas_uid IN ({placeholders})
-                GROUP BY a.atlas_name, a.atlas_type, a.chromatography, a.polarity
-                ORDER BY a.atlas_name
-            """, atlas_uids).df()
-        else:
-            results['compounds_per_atlas'] = pd.DataFrame()
-        
-        # Experimental summary (filtered)
-        where_clauses = []
-        params = []
-        if rt_alignment_number is not None:
-            where_clauses.append("rt_alignment_number = ?")
-            params.append(rt_alignment_number)
-        if analysis_number is not None:
-            where_clauses.append("analysis_number = ?")
-            params.append(analysis_number)
-        
-        where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-        
-        results['exp_summary'] = conn.execute(f"""
-            SELECT chromatography, polarity, rt_alignment_applied,
-                   COUNT(*) as entry_count,
-                   ROUND(AVG(ABS(rt_shift)), 3) as avg_abs_rt_shift,
-                   ROUND(MIN(rt_shift), 3) as min_rt_shift,
-                   ROUND(MAX(rt_shift), 3) as max_rt_shift
-            FROM mz_rt_experimental
-            {where_str}
-            GROUP BY chromatography, polarity, rt_alignment_applied
-            ORDER BY chromatography, polarity
-        """, params).df()
-        
-        # 7. Data Integrity Checks (filtered by atlas_uids from step 3)
-        integrity_results = []
-        
-        if not results['atlases'].empty:
-            atlas_uids = results['atlases']['atlas_uid'].tolist()
-            placeholders = ','.join(['?' for _ in atlas_uids])
-            
-            orphaned = conn.execute(f"""
-                SELECT COUNT(*) as orphaned_associations
-                FROM atlas_compound_associations aca
-                WHERE aca.atlas_uid IN ({placeholders})
-                AND NOT EXISTS (SELECT 1 FROM atlases WHERE atlas_uid = aca.atlas_uid)
-            """, atlas_uids).fetchone()[0]
-            integrity_results.append({"Check": "Orphaned associations", "Count": orphaned})
-        
-        # RT-aligned entries (filtered)
-        where_clauses = []
-        params = []
-        where_clauses.append("rt_alignment_applied = TRUE")
-        if rt_alignment_number is not None:
-            where_clauses.append("rt_alignment_number = ?")
-            params.append(rt_alignment_number)
-        if analysis_number is not None:
-            where_clauses.append("analysis_number = ?")
-            params.append(analysis_number)
-        
-        where_str = f"WHERE {' AND '.join(where_clauses)}"
-        
-        rt_aligned = conn.execute(f"""
-            SELECT COUNT(*) FROM mz_rt_experimental {where_str}
-        """, params).fetchone()[0]
-        integrity_results.append({"Check": "RT-aligned entries", "Count": rt_aligned})
-        
-        results['integrity_checks'] = pd.DataFrame(integrity_results)
-    
-    return results

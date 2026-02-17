@@ -95,42 +95,41 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
     if 'RT_ALIGNMENT' in workflows:
         rt_alignment = workflows['RT_ALIGNMENT']
         for chromatography, chrom_config in rt_alignment.items():
-            for polarity, pol_config in chrom_config.items():
-                if 'ATLAS' not in pol_config:
-                    raise ValueError(f"RT_ALIGNMENT {chromatography}/{polarity} missing ATLAS section")
-                
-                # Check for uid field but allow None/empty
-                if 'uid' not in pol_config['ATLAS']:
-                    raise ValueError(f"RT_ALIGNMENT {chromatography}/{polarity} missing ATLAS uid field")
-                
-                # Convert uid to string or None
-                uid = pol_config['ATLAS']['uid']
-                pol_config['ATLAS']['uid'] = str(uid) if uid else None
-                
-                # Validate and convert RT alignment parameters if present
-                if 'PARAMS' in pol_config:
-                    params = pol_config['PARAMS']
-                    params['ppm_error'] = float(params.get('ppm_error', 20.0))
-                    params['extra_time'] = float(params.get('extra_time', 1.0))
-                    params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
-                    params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
-                    params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
-                    params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
-                    params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
-                    params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
+            if 'ATLAS' not in chrom_config:
+                raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS section")
+            
+            # Check for uid field but allow None/empty
+            if 'uid' not in chrom_config['ATLAS']:
+                raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS uid field")
+            
+            # Convert uid to string or None
+            uid = chrom_config['ATLAS']['uid']
+            chrom_config['ATLAS']['uid'] = str(uid) if uid else None
+            
+            # Validate and convert RT alignment parameters if present
+            if 'PARAMS' in chrom_config:
+                params = chrom_config['PARAMS']
+                params['ppm_error'] = float(params.get('ppm_error', 20.0))
+                params['extra_time'] = float(params.get('extra_time', 1.0))
+                params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
+                params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
+                params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
+                params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
+                params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
+                params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
     
-    # Validate TARGETED_ANALYSIS section if present
-    if 'TARGETED_ANALYSIS' in workflows:
-        targeted = workflows['TARGETED_ANALYSIS']
+    # Validate TARGETED_ANALYSES section if present
+    if 'TARGETED_ANALYSES' in workflows:
+        targeted = workflows['TARGETED_ANALYSES']
         for chromatography, chrom_config in targeted.items():
             for polarity, pol_config in chrom_config.items():
                 for analysis_name, analysis_config in pol_config.items():
                     if 'ATLAS' not in analysis_config:
-                        raise ValueError(f"TARGETED_ANALYSIS {chromatography}/{polarity}/{analysis_name} missing ATLAS section")
+                        raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS section")
                     
                     # Check for uid field but allow None/empty
                     if 'uid' not in analysis_config['ATLAS']:
-                        raise ValueError(f"TARGETED_ANALYSIS {chromatography}/{polarity}/{analysis_name} missing ATLAS uid field")
+                        raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS uid field")
                     
                     # Convert uid to string or None
                     uid = analysis_config['ATLAS']['uid']

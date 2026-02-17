@@ -1,3 +1,372 @@
+# def save_atlas_to_database(atlas_obj, db_path: str, db_type: str = "main") -> None:
+#     """
+#     Save an Atlas object to the database (typing not included to avoid circular imports).
+#     Only creates new mz_rt_references entries for references that don't already exist.
+    
+#     Args:
+#         atlas_obj: Atlas object to save
+#     """
+#     # Verify all compounds exist in database
+#     if not verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_references.values()], db_path):
+#         raise ValueError(f"Some compounds in atlas {atlas_obj.atlas_uid} don't exist in database")
+
+#     prov = ldt.get_provenance()
+#     with get_db_connection(db_path) as conn:
+#         if db_type == "main":
+#             # Create atlas entry
+#             conn.execute("""
+#                 INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+#             """, (
+#                 atlas_obj.atlas_uid,
+#                 atlas_obj.atlas_name,
+#                 atlas_obj.atlas_description,
+#                 atlas_obj.chromatography,
+#                 atlas_obj.polarity,
+#                 "REFERENCE",  # atlas_type
+#                 prov["analyst"],
+#                 prov["timestamp"]
+#             ))
+            
+#             # Process each CompoundReference
+#             association_order = 0
+#             references_created = 0
+#             references_reused = 0
+#             for inchi_key, compound_ref in atlas_obj.compound_references.items():
+#                 # Check if this reference already exists in database
+#                 existing_check = conn.execute("""
+#                     SELECT mz_rt_reference_uid FROM mz_rt_references 
+#                     WHERE mz_rt_reference_uid = ?
+#                 """, [compound_ref.mz_rt_reference_uid]).fetchone()
+                
+#                 mz_rt_reference_uid = compound_ref.mz_rt_reference_uid
+                
+#                 # Create new reference if it doesn't exist
+#                 if not existing_check:
+#                     conn.execute("""
+#                         INSERT INTO mz_rt_references VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#                     """, (
+#                         mz_rt_reference_uid,
+#                         compound_ref.compound_uid,
+#                         compound_ref.rt_peak,
+#                         compound_ref.rt_min,
+#                         compound_ref.rt_max,
+#                         compound_ref.mz,
+#                         compound_ref.mz_tolerance,
+#                         compound_ref.adduct,
+#                         compound_ref.chromatography,
+#                         compound_ref.polarity,
+#                         compound_ref.confidence,
+#                         'atlas_creation',  # source
+#                         prov["analyst"],
+#                         prov["timestamp"]
+#                     ))
+#                     references_created += 1
+#                 else:
+#                     references_reused += 1
+                
+#                 # Create atlas-compound association
+#                 assoc_uid = _generate_uid("association")
+#                 conn.execute("""
+#                     INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+#                 """, (
+#                     assoc_uid,
+#                     atlas_obj.atlas_uid,
+#                     compound_ref.compound_uid,
+#                     mz_rt_reference_uid,
+#                     association_order,
+#                     prov["analyst"],
+#                     prov["timestamp"]
+#                 ))
+                
+#                 association_order += 1
+        
+#             logger.info(f"Saved atlas {atlas_obj.atlas_name} to database with UID: {atlas_obj.atlas_uid}")
+#             logger.info(f"  References created: {references_created}")
+#             logger.info(f"  References reused: {references_reused}")
+#             logger.info(f"  Total associations: {association_order}")
+
+#         association_order += 1
+
+# def get_rt_aligned_atlases_from_db(
+#     project_db_path: str,
+#     rt_alignment_number: int,
+# ) -> List[Dict]:
+#     """
+#     Get all RT-aligned atlases for given RT alignment number.
+    
+#     """
+#     params = [rt_alignment_number]
+#     query = """
+#         SELECT 
+#             atlas_uid,
+#             atlas_name,
+#             atlas_description,
+#             chromatography,
+#             polarity,
+#             atlas_type,
+#             source_atlas_uid,
+#             rt_alignment_number,
+#             created_by,
+#             created_date
+#         FROM atlases
+#         WHERE rt_alignment_number = ?
+#     """
+    
+#     query += " ORDER BY atlas_type, polarity"
+    
+#     with get_db_connection(project_db_path) as conn:
+#         results = conn.execute(query, params).fetchall()
+#         atlases = []
+#         for row in results:
+#             # Infer workflow from chromatography
+#             workflow = row[3].upper()  # chromatography -> workflow
+            
+#             atlases.append({
+#                 'atlas_uid': row[0],
+#                 'atlas_name': row[1],
+#                 'atlas_description': row[2],
+#                 'chromatography': row[3],
+#                 'polarity': row[4],
+#                 'atlas_type': row[5],
+#                 'source_atlas_uid': row[6],
+#                 'rt_alignment_number': row[7],
+#                 'created_by': row[8],
+#                 'created_date': row[9],
+#                 'workflow': workflow
+#             })
+        
+#         if not atlases:
+#             raise ValueError(f"No RT-aligned atlases found in project database for RT alignment number {rt_alignment_number}")
+#         else:
+#             logger.info(f"Found {len(atlases)} RT-aligned atlases in project database for RT alignment number {rt_alignment_number}")
+#         return atlases
+
+# def save_rt_aligned_atlas_to_db(
+#     project_db_path: str,
+#     main_db_path: str,
+#     target_atlas_uid: str,
+#     best_model: dict,
+#     aligned_compounds_df: pd.DataFrame,
+#     rt_alignment_number: int,
+#     analysis_number: Optional[int] = None
+# ) -> Tuple[str, str]:
+#     """
+#     Create RT-aligned atlas in project database and apply RT alignment to compounds.
+    
+#     Args:
+#         project_db_path: Path to project database
+#         main_db_path: Path to main database
+#         target_atlas_uid: UID of the target atlas
+#         best_model: RT alignment model dictionary
+#         aligned_compounds_df: DataFrame of RT aligned compounds
+#         rt_alignment_number: RT alignment number
+#         analysis_number: Optional analysis number for this RT alignment (if not provided, will be NULL in database)
+#     Returns:
+#         Tuple of (aligned_atlas_uid, aligned_atlas_name)
+#     """
+#     logger.info("Creating RT-aligned atlas in project database...")
+
+#     prov = ldt.get_provenance()
+
+#     # Use some info from the target atlas for the new RT-aligned target atlas
+#     target_atlas_info = get_atlas_metadata_from_db(main_db_path, target_atlas_uid)
+
+#     # Generate new atlas UID for RT-aligned version
+#     target_atlas_decorator = get_decorator_from_uid(target_atlas_uid)
+#     aligned_atlas_uid = _generate_uid("rt_atlas", decorator=target_atlas_decorator)
+#     aligned_atlas_name = f"{target_atlas_info['atlas_name']} (RT aligned)"
+#     aligned_atlas_description = f"RT-aligned version of {target_atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
+#     logger.info(f"From the {target_atlas_info['atlas_uid']} template, generated new atlas UID: {aligned_atlas_uid} for RT-aligned atlas: {aligned_atlas_name}")
+
+#     logger.info("Saving RT-aligned atlas and compounds to project database...")
+#     display(aligned_compounds_df.head())
+#     with get_db_connection(project_db_path) as conn:
+        
+#         # Create new atlas entry
+#         conn.execute("""
+#             INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#         """, (
+#             aligned_atlas_uid,
+#             aligned_atlas_name,
+#             aligned_atlas_description,
+#             target_atlas_info['chromatography'],
+#             target_atlas_info['polarity'],
+#             target_atlas_info['atlas_type'],
+#             target_atlas_info['atlas_uid'],
+#             rt_alignment_number,
+#             analysis_number,
+#             prov["analyst"],
+#             prov["timestamp"]
+#         ))
+
+#         association_order = 0
+#         for _, row in aligned_compounds_df.iterrows():
+#             compound_uid = row['compound_uid']
+#             aligned_rt_peak = row.get('rt_peak')
+#             aligned_rt_min = row.get('rt_min')
+#             aligned_rt_max = row.get('rt_max')
+#             rt_shift = row.get('rt_shift')
+#             exp_uid = _generate_uid("mz_rt_experimental")
+#             assoc_uid = _generate_uid("association")
+#             mz_rt_reference_uid = row.get('mz_rt_reference_uid')
+
+#             conn.execute("""
+#                 INSERT INTO mz_rt_experimental VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#             """, (
+#                 exp_uid,
+#                 compound_uid,
+#                 rt_alignment_number,
+#                 analysis_number,
+#                 aligned_rt_peak,
+#                 aligned_rt_min,
+#                 aligned_rt_max,
+#                 '',  # ms1_notes
+#                 '',  # ms2_notes
+#                 row.get('mz'),
+#                 row.get('mz_tolerance', 5.0),
+#                 row.get('adduct', ''),
+#                 target_atlas_info['chromatography'],
+#                 target_atlas_info['polarity'],
+#                 True,  # rt_alignment_applied
+#                 rt_shift,
+#                 mz_rt_reference_uid,
+#                 prov["analyst"],
+#                 prov["timestamp"]
+#             ))
+            
+#             # Create atlas-compound association
+#             conn.execute("""
+#                 INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+#             """, (
+#                 assoc_uid,
+#                 aligned_atlas_uid,
+#                 compound_uid,
+#                 exp_uid,
+#                 association_order,
+#                 prov["analyst"],
+#                 prov["timestamp"]
+#             ))
+
+#             association_order += 1
+
+#     logger.info(f"Created and deposited RT-aligned atlas: {aligned_atlas_uid} with name: {aligned_atlas_name}")
+
+#     return aligned_atlas_uid, aligned_atlas_name
+
+
+# def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: str = None) -> pd.DataFrame:
+#     """
+#     Extract all compound information for a given atlas UID from the database.
+#     Handles both main database (with mz_rt_references) and project database (with mz_rt_experimental).
+#     """
+#     with get_db_connection(database_path) as conn:
+        
+#         # Detect database type
+#         try:
+#             result = conn.execute("""
+#                 SELECT name FROM sqlite_master 
+#                 WHERE type='table' AND name='mz_rt_experimental'
+#             """).fetchall()
+#             is_project_db = len(result) > 0
+#         except Exception as e:
+#             logger.error(f"Error checking database type: {e}")
+#             return pd.DataFrame()
+
+#         # Attach main database if needed for compound metadata
+#         if is_project_db and main_db_path:
+#             try:
+#                 conn.execute(f"ATTACH '{main_db_path}' AS main_db")
+#                 logger.info("Attached main database for compound metadata")
+#             except Exception as e:
+#                 logger.error(f"Error attaching main database: {e}")
+#                 return pd.DataFrame()
+
+#         try:
+#             if is_project_db:
+#                 # Project DB: Join through associations to experimental entries
+#                 query = """
+#                     SELECT
+#                         a.atlas_uid,
+#                         a.atlas_name,
+#                         a.atlas_description,
+#                         a.chromatography,
+#                         a.polarity,
+#                         aca.compound_uid,
+#                         COALESCE(main_db.compounds.name, '') AS compound_name,
+#                         COALESCE(main_db.compounds.inchi_key, '') AS inchi_key,
+#                         COALESCE(main_db.compounds.inchi, '') AS inchi,
+#                         mzrt_exp.adduct,
+#                         mzrt_exp.mz,
+#                         mzrt_exp.rt_peak,
+#                         mzrt_exp.rt_min,
+#                         mzrt_exp.rt_max,
+#                         mzrt_exp.mz_tolerance,
+#                         mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
+#                         mzrt_exp.rt_alignment_applied,
+#                         mzrt_exp.rt_shift
+#                     FROM atlases a
+#                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+#                     LEFT JOIN main_db.compounds ON aca.compound_uid = main_db.compounds.compound_uid
+#                     LEFT JOIN mz_rt_experimental mzrt_exp 
+#                         ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
+#                     WHERE a.atlas_uid = ?
+#                     ORDER BY aca.association_order
+#                 """
+#             else:
+#                 # Main DB: Join through associations to reference entries
+#                 query = """
+#                     SELECT
+#                         a.atlas_uid,
+#                         a.atlas_name,
+#                         a.atlas_description,
+#                         a.chromatography,
+#                         a.polarity,
+#                         c.compound_uid,
+#                         c.name AS compound_name,
+#                         c.inchi_key,
+#                         c.inchi,
+#                         mzrt.adduct,
+#                         mzrt.mz,
+#                         mzrt.rt_peak,
+#                         mzrt.rt_min,
+#                         mzrt.rt_max,
+#                         mzrt.mz_tolerance,
+#                         mzrt.mz_rt_reference_uid,
+#                         FALSE AS rt_alignment_applied,
+#                         NULL AS rt_shift
+#                     FROM atlases a
+#                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
+#                     JOIN compounds c ON aca.compound_uid = c.compound_uid
+#                     LEFT JOIN mz_rt_references mzrt 
+#                         ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
+#                     WHERE a.atlas_uid = ?
+#                     ORDER BY aca.association_order
+#                 """
+
+#             df = conn.execute(query, [atlas_uid]).df()
+
+#         except Exception as e:
+#             logger.error(f"Error querying atlas {atlas_uid}: {e}")
+#             return pd.DataFrame()
+        
+#         finally:
+#             # Detach if attached
+#             if is_project_db and main_db_path:
+#                 try:
+#                     conn.execute("DETACH main_db")
+#                 except:
+#                     pass
+
+#     if df.empty:
+#         logger.warning(f"No compounds found for atlas {atlas_uid}")
+#     else:
+#         df['label'] = df['compound_name'] if 'compound_name' in df.columns else ''
+#         logger.info(f"Retrieved {len(df)} compounds for atlas: {df['atlas_name'].iloc[0]}")
+
+#     return df
+
+
+
 # def create_atlas_from_compounds(atlas_compounds_df: pd.DataFrame, atlas_name: str, 
 #                                atlas_description: str, atlas_type: str,
 #                                chromatography: str, polarity: str,

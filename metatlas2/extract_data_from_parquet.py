@@ -32,7 +32,7 @@ def view_parquet_file_contents(parquet_file: str, num_rows: int = 5, rt_slice: f
 
 def extract_eic_and_ms2_from_parquet(
     atlas_df: pd.DataFrame,
-    parquet_files: List[str],
+    project_files: dict,
     ppm_tolerance: float = 20.0,
     extra_time: float = 0.1,
     use_parallel: bool = True,
@@ -45,7 +45,7 @@ def extract_eic_and_ms2_from_parquet(
     
     Args:
         atlas_df: Atlas DataFrame with columns [label, inchi_key, mz, rt_min, rt_max, rt_peak]
-        parquet_files: List of parquet file paths (e.g., *_ms1_pos.parquet, *_ms2_neg.parquet)
+        project_files_df: DataFrame with columns ['file_path', 'ms_level', 'polarity']
         ppm_tolerance: m/z tolerance in ppm
         extra_time: Extra RT time to extract beyond feature bounds
         use_parallel: Whether to use parallel processing (default: True)
@@ -61,7 +61,8 @@ def extract_eic_and_ms2_from_parquet(
         }
     """
 
-    logger.info(f"Starting data extraction for {len(atlas_df)} compounds from {len(parquet_files)} parquet files...")
+    project_files_df = pd.concat(project_files.values(), ignore_index=True)
+    logger.info(f"Starting data extraction for {len(atlas_df)} compounds from {len(project_files_df)} project files...")
 
     # Initialize results structure
     results = {}
@@ -73,15 +74,16 @@ def extract_eic_and_ms2_from_parquet(
         results[inchi_key] = {}
     
     # Determine parallelization strategy
+    project_files = project_files_df['file_path'].tolist()
     if max_workers is None:
-        max_workers = min(mp.cpu_count(), len(parquet_files), 8)
-    use_parallel = use_parallel and max_workers > 1 and len(parquet_files) > 1
+        max_workers = min(mp.cpu_count(), len(project_files), 8)
+    use_parallel = use_parallel and max_workers > 1 and len(project_files) > 1
     
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers...")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = []
-            for parquet_file in parquet_files:
+            for parquet_file in project_files:
                 future = executor.submit(_process_single_parquet_file, 
                                         parquet_file, atlas_df, ppm_tolerance, extra_time, only_ms_level)
                 futures.append((future, parquet_file))
@@ -101,7 +103,7 @@ def extract_eic_and_ms2_from_parquet(
     else:
         logger.info("Using sequential processing...")
         
-        for parquet_file in tqdm(parquet_files, desc="Processing parquet files"):
+        for parquet_file in tqdm(project_files, desc="Processing parquet files"):
             try:
                 file_results = _process_single_parquet_file(
                     parquet_file, atlas_df, ppm_tolerance, extra_time, only_ms_level
