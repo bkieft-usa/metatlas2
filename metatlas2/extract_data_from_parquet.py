@@ -44,7 +44,7 @@ def extract_eic_and_ms2_from_parquet(
     Extract EIC and MS2 data directly from parquet files with optional parallel processing.
     
     Args:
-        atlas_df: Atlas DataFrame with columns [label, inchi_key, mz, rt_min, rt_max, rt_peak]
+        atlas_df: Atlas DataFrame with columns [label, inchi_key, 'adduct', mz, rt_min, rt_max, rt_peak]
         project_files_df: DataFrame with columns ['file_path', 'ms_level', 'polarity']
         ppm_tolerance: m/z tolerance in ppm
         extra_time: Extra RT time to extract beyond feature bounds
@@ -53,11 +53,19 @@ def extract_eic_and_ms2_from_parquet(
         max_workers: Maximum number of parallel workers (default: min(cpu_count, len(files), 8))
     
     Returns:
-        Dict mapping inchi_key to dict of file data
-        Dict for each file is in the format:
+        Dict mapping inchi_key and adduct to extracted data for each file, structured as:
         {
-            'ms1_data': DataFrame with columns [label, rt, mz, i, in_feature],
-            'ms2_data': DataFrame with columns [label, rt, mz, i, precursor_MZ, precursor_intensity, collision_energy, in_feature]
+            inchi_key: {
+                adduct: {
+                    file_path: {
+                        'ms1_data': DataFrame with columns [label, rt, mz, i],
+                        'ms2_data': DataFrame with columns [label, rt, mz, i, precursor_MZ, precursor_intensity, collision_energy]
+                    },
+                    ...
+                },
+                ...
+            },
+            ...
         }
     """
 
@@ -94,8 +102,13 @@ def extract_eic_and_ms2_from_parquet(
                     file_results = future.result()
                     
                     # Merge file results into main results
-                    for inchi_key, file_data in file_results.items():
-                        results[inchi_key].update(file_data)
+                    for inchi_key, adduct_data in file_results.items():
+                        for adduct, file_data in adduct_data.items():
+                            if inchi_key not in results:
+                                results[inchi_key] = {}
+                            if adduct not in results[inchi_key]:
+                                results[inchi_key][adduct] = {}
+                            results[inchi_key][adduct][parquet_file] = file_data
                                         
                 except Exception as e:
                     logger.error(f"Error processing {parquet_file}: {e}")
@@ -110,8 +123,13 @@ def extract_eic_and_ms2_from_parquet(
                 )
                 
                 # Merge file results into main results
-                for inchi_key, file_data in file_results.items():
-                    results[inchi_key].update(file_data)
+                for inchi_key, adduct_data in file_results.items():
+                    for adduct, file_data in adduct_data.items():
+                        if inchi_key not in results:
+                            results[inchi_key] = {}
+                        if adduct not in results[inchi_key]:
+                            results[inchi_key][adduct] = {}
+                        results[inchi_key][adduct][parquet_file] = file_data
                 
             except Exception as e:
                 logger.error(f"Error processing {parquet_file}: {e}")
@@ -123,7 +141,6 @@ def extract_eic_and_ms2_from_parquet(
 def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame, 
                                   ppm_tolerance: float, extra_time: float, only_ms_level: int = None) -> Dict[str, Dict]:
     """Process a single parquet file - worker function for parallel processing."""    
-    # Determine if this is MS1 or MS2 from filename
     filename = Path(parquet_file).name
     is_ms1 = filename.endswith('_ms1_pos.parquet') or filename.endswith('_ms1_neg.parquet')
     is_ms2 = filename.endswith('_ms2_pos.parquet') or filename.endswith('_ms2_neg.parquet')
@@ -135,27 +152,18 @@ def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame,
     if not Path(parquet_file).exists():
         raise FileNotFoundError(f"Parquet file not found: {parquet_file}")
     
-    # Extract features for each compound
     results = {}
     for _, row in atlas_df.iterrows():
-        label = row.get('label', '')
         inchi_key = row.get('inchi_key', '')
-        results[inchi_key] = {}
-        
-        if not inchi_key:
-            logger.warning(f"Missing inchi_key for label {label}")
-            continue
-        
+        adduct = row.get('adduct', '')
         compound_data = {
             'ms1_data': pd.DataFrame(),
             'ms2_data': pd.DataFrame()
         }
-        
-        # Extract MS1 data
         if is_ms1 and (only_ms_level is None or only_ms_level == 1):
             ms1_data = extract_ms1_from_parquet(
                 parquet_file,
-                label=label,
+                label=row['label'],
                 mz=row['mz'],
                 rt_min=row['rt_min'],
                 rt_max=row['rt_max'],
@@ -164,25 +172,22 @@ def _process_single_parquet_file(parquet_file: str, atlas_df: pd.DataFrame,
             )
             ms1_data = ms1_data.sort_values(by=['rt', 'i'], ascending=[True, False]).reset_index(drop=True)
             compound_data['ms1_data'] = ms1_data
-        
-        # Extract MS2 data
         elif is_ms2 and (only_ms_level is None or only_ms_level == 2):
             ms2_data = extract_ms2_from_parquet(
                 parquet_file,
-                label=label,
+                label=row['label'],
                 mz=row['mz'],
                 rt_min=row['rt_min'],
                 rt_max=row['rt_max'],
                 ppm_tolerance=ppm_tolerance,
                 extra_time=extra_time
             )
-            # sort by rt, then mz within rt
             ms2_data = ms2_data.sort_values(by=['rt', 'mz'], ascending=[True, True]).reset_index(drop=True)
             compound_data['ms2_data'] = ms2_data
-
-        # Store results for this inchi_key and file
-        results[inchi_key][parquet_file] = compound_data
-    
+        # Store results for this inchi_key and adduct
+        if inchi_key not in results:
+            results[inchi_key] = {}
+        results[inchi_key][adduct] = compound_data
     return results
 
 
@@ -208,43 +213,36 @@ def extract_ms1_from_parquet(
         extra_time: Extra time to extract beyond rt_min/rt_max
     
     Returns:
-        DataFrame with columns: [label, rt, mz, i, in_feature]
+        DataFrame with columns: [label, rt, mz, i]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, ppm_tolerance)
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, extra_time)
     
     # Read parquet with m/z filter (uses sorted index efficiently)
-    try:
-        df = pq.read_table(
-            parquet_file,
-            filters=[
-                ('mz', '>=', mz_min),
-                ('mz', '<=', mz_max)
-            ]
-        ).to_pandas()
-    except Exception as e:
-        logger.warning(f"Error reading {parquet_file}: {e}")
-        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'in_feature'])
+    df = pq.read_table(
+        parquet_file,
+        filters=[
+            ('mz', '>=', mz_min),
+            ('mz', '<=', mz_max),
+            ('rt', '>=', rt_min - extra_time),
+            ('rt', '<=', rt_max + extra_time)
+        ]
+    ).to_pandas()
     
-    if df.empty:
-        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'in_feature'])
-    
-    # Apply RT filter (with extra time)
-    rt_filter = (df['rt'] >= rt_min - extra_time) & (df['rt'] <= rt_max + extra_time)
-    df = df[rt_filter].copy()
-    
-    if df.empty:
-        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'in_feature'])
-    
-    # Mark points within vs outside feature bounds
-    df['in_feature'] = (df['rt'] >= rt_min) & (df['rt'] <= rt_max)
-    df['label'] = label
-    
-    return df[['label', 'rt', 'mz', 'i', 'in_feature']]
+    if not df.empty:
+        df['label'] = label
+        return df[['label', 'rt', 'mz', 'i']]
+    else:
+        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i'])
 
 def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:
     """Calculate m/z bounds given ppm tolerance."""
     delta = mz * ppm_tolerance / 1e6
     return (mz - delta, mz + delta)
+
+def calculate_rt_bounds(rt_min: float, rt_max: float, extra_time: float) -> tuple:
+    """Calculate RT bounds with extra time."""
+    return (rt_min - extra_time, rt_max + extra_time)
 
 def extract_ms2_from_parquet(
     parquet_file: str,
@@ -259,39 +257,27 @@ def extract_ms2_from_parquet(
     Extract MS2 feature from parquet file.
     
     Returns:
-        DataFrame with columns: [label, rt, mz, i, precursor_MZ, 
-                                 precursor_intensity, collision_energy, in_feature]
+        DataFrame with columns: [label, rt, mz, i, precursor_MZ,
+                                 precursor_intensity, collision_energy]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, ppm_tolerance)
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, extra_time)
     
     # For MS2, filter by precursor m/z
-    try:
-        df = pq.read_table(
-            parquet_file,
-            filters=[
-                ('precursor_MZ', '>=', mz_min),
-                ('precursor_MZ', '<=', mz_max)
-            ]
-        ).to_pandas()
-    except Exception as e:
-        logger.warning(f"Error reading {parquet_file}: {e}")
-        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'precursor_MZ', 
-                                     'precursor_intensity', 'collision_energy', 'in_feature'])
+    df = pq.read_table(
+        parquet_file,
+        filters=[
+            ('precursor_MZ', '>=', mz_min),
+            ('precursor_MZ', '<=', mz_max),
+            ('rt', '>=', rt_min - extra_time),
+            ('rt', '<=', rt_max + extra_time)
+        ]
+    ).to_pandas()
     
-    if df.empty:
-        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'precursor_MZ', 
-                                     'precursor_intensity', 'collision_energy', 'in_feature'])
-    
-    # Apply RT filter
-    rt_filter = (df['rt'] >= rt_min - extra_time) & (df['rt'] <= rt_max + extra_time)
-    df = df[rt_filter].copy()
-    
-    if df.empty:
-        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'precursor_MZ', 
-                                     'precursor_intensity', 'collision_energy', 'in_feature'])
-    
-    df['in_feature'] = (df['rt'] >= rt_min) & (df['rt'] <= rt_max)
-    df['label'] = label
-    
-    return df[['label', 'rt', 'mz', 'i', 'precursor_MZ', 
-               'precursor_intensity', 'collision_energy', 'in_feature']]
+    if not df.empty:
+        df['label'] = label
+        return df[['label', 'rt', 'mz', 'i', 'precursor_MZ',
+                'precursor_intensity', 'collision_energy']]
+    else:
+        return pd.DataFrame(columns=['label', 'rt', 'mz', 'i', 'precursor_MZ',
+                                'precursor_intensity', 'collision_energy'])

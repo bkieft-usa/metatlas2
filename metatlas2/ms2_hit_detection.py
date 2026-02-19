@@ -167,15 +167,15 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
                 if len(ref_mz) == 0 or len(ref_intensity) == 0:
                     continue
                 
-                # Filter reference spectrum to remove peaks above precursor + 2.5 Da
+                # # Filter reference spectrum to remove peaks above precursor + 2.5 Da
                 precursor_mz_ref = ref_row.get('precursor_mz', 0.0)
-                if precursor_mz_ref > 0:
-                    valid_peaks = ref_mz < (precursor_mz_ref + 2.5)
-                    ref_mz = ref_mz[valid_peaks]
-                    ref_intensity = ref_intensity[valid_peaks]
+                # if precursor_mz_ref > 0:
+                #     valid_peaks = ref_mz < (precursor_mz_ref + 2.5)
+                #     ref_mz = ref_mz[valid_peaks]
+                #     ref_intensity = ref_intensity[valid_peaks]
                 
-                if len(ref_mz) == 0:
-                    continue
+                # if len(ref_mz) == 0:
+                #     continue
                 
                 # Create MatchMS reference spectrum
                 mms_ref = Spectrum(mz=ref_mz, intensities=ref_intensity, metadata={'precursor_mz': np.nan})
@@ -203,7 +203,7 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
                     'qry_intensity_peak': float(precursor_intensity),
                     'ref_frags': len(ref_mz),
                     'data_frags': len(fragment_mz),
-                    'matched_fragments': [alignment_data.get('matched_fragments', [])],  # Store as list for DataFrame
+                    'matched_fragments': [alignment_data.get('matched_fragments', [])],
                     'qry_frag_colors': [alignment_data.get('fragment_colors', [])],
                     'qry_spectrum': [alignment_data.get('query_aligned', [])],
                     'ref_spectrum': [alignment_data.get('ref_aligned', [])],

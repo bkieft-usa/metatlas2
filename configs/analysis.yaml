@@ -1,15 +1,15 @@
 ENV:
   PATHS:
-    raw_data_dir: /pscratch/sd/b/bkieft/metatlas_lite_data/raw_data/jgi
-    projects_dir: /pscratch/sd/b/bkieft/metatlas_lite_data/projects
-    main_database: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb
-    msms_refs: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/msms_refs/msms_refs_no_inosine15n.tab
+    raw_data_dir: /Users/BKieft/Metabolomics/metatlas_lite_data/raw_data/jgi
+    projects_dir: /Users/BKieft/Metabolomics/metatlas_lite_data/projects
+    main_database: /Users/BKieft/Metabolomics/metatlas_lite_data/databases/metatlas.duckdb
+    msms_refs: /Users/BKieft/Metabolomics/metatlas_lite_data/databases/msms_refs/msms_refs_no_inosine15n.tab
 
 WORKFLOWS:
   RT_ALIGNMENT:
     HILICZ:
       ATLAS:
-        uid: atl-ref-qc-hilicz-pos-ca288f934c2f412f99ec19b31bda1f8b
+        uid: atl-ref-qc-hilicz-pos-473e5d7126e74a79aee3c24feb176064
       PARAMS:
           use_existing_rt_alignment: true
           ppm_error: 20.0
@@ -40,7 +40,7 @@ WORKFLOWS:
       POS:
         QC:
           ATLAS:
-            uid: atl-ref-qc-hilicz-pos-ca288f934c2f412f99ec19b31bda1f8b
+            uid: atl-ref-qc-hilicz-pos-473e5d7126e74a79aee3c24feb176064
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -51,7 +51,7 @@ WORKFLOWS:
             ms2_min_matches: 1
         ISTD:
           ATLAS:
-            uid: atl-ref-istd-hilicz-pos-87f809ef6515472dbda5dfc80401a166
+            uid: atl-ref-istd-hilicz-pos-faca66523a364537a7ba8a0bc28bd8d9
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -62,7 +62,7 @@ WORKFLOWS:
             ms2_min_matches: 2
         EMA:
           ATLAS:
-            uid: atl-ref-ema-hilicz-pos-5958e29307ad4e90a26211be8b03abc0
+            uid: atl-ref-ema-hilicz-pos-07557610cbde442080f5ad20312a6251
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false

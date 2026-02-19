@@ -1,20 +1,20 @@
 ENV:
   PATHS:
-    main_database: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb
+    main_database: /Users/BKieft/Metabolomics/metatlas_lite_data/databases/metatlas.duckdb
 
 ATLASES:
   HILICZ:
     POS:
       QC:
-        path: /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_QC_POS.tsv
+        path: /Users/BKieft/Metabolomics/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_QC_POS.tsv
         name: Default HILICZ QC Atlas Positive
         desc: Default QC compounds used for RT alignment
       ISTD:
-        path: /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_ISTD_POS.tsv
+        path: /Users/BKieft/Metabolomics/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_ISTD_POS.tsv
         name: Default HILICZ ISTD Atlas Positive
         desc: Default internal standard compounds used for checking performance
       EMA:
-        path: /pscratch/sd/b/bkieft/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_EMA_POS.tsv
+        path: /Users/BKieft/Metabolomics/metatlas_lite_data/atlas_tables/HILICZ/HILICZ_EMA_POS.tsv
         name: Default HILICZ EMA Atlas Positive
         desc: Default experimental compounds used for targeted analysis
     NEG:

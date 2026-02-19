@@ -1,5 +1,4 @@
 import pandas as pd
-import pubchempy as pcp
 import pickle
 import time
 import re
@@ -8,6 +7,10 @@ from pathlib import Path
 import sys
 from typing import Dict, Any, List
 from tqdm.notebook import tqdm
+import ast
+import traceback
+
+import pubchempy as pcp
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import load_tools as ldt
@@ -47,13 +50,15 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
         # Get detailed compound information
         compound = pcp.Compound.from_cid(cid)
         
+        # Filter synonyms to remove some common problematic entries
+        filtered_synonyms = _filter_synonym_list(compound.synonyms) if compound.synonyms else []
+        
         # Extract all available properties
         compound_data = {
             "pubchem_cid": str(compound.cid) if compound.cid else "",
             "iupac_name": compound.iupac_name or "",
-            "synonyms": compound.synonyms or [],
+            "synonyms": filtered_synonyms,
             "inchi": compound.inchi or "",
-            "inchi_key": compound.inchikey or inchi_key,
             "smiles": smiles if smiles else "",
             "formula": compound.molecular_formula or "",
             "mono_isotopic_molecular_weight": str(compound.monoisotopic_mass) if compound.monoisotopic_mass else "",
@@ -75,7 +80,7 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
         logger.error(f"Error retrieving PubChem data for {inchi_key}: {e}")
         return None
 
-def filter_synonym_list(synonyms: List[str]) -> str:
+def _filter_synonym_list(synonyms: List[str]) -> str:
     """Filter synonym list to find the best name."""
     if not synonyms or synonyms == ["Undefined"]:
         return "Undefined"
@@ -108,66 +113,112 @@ def filter_synonym_list(synonyms: List[str]) -> str:
     # Return the shortest remaining synonym
     return min(filtered_synonyms, key=len)
 
-def load_or_create_pubchem_cache(cache_filename: str, use_cache: bool = True) -> Dict[str, Dict]:
-    """Load existing global PubChem cache or create new one"""
-    cache_file = Path(cache_filename)
-    if use_cache and cache_file.exists():
-        try:
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-            logger.info(f"Loaded global PubChem cache with {len(cache)} entries from {cache_file}")
-            return cache
-        except Exception as e:
-            logger.error(f"Error loading cache: {e}. Creating new cache.")
+def load_or_create_pubchem_cache(pubchem_cache_path: str, use_cache: bool = True) -> Dict[str, Dict[str, Any]]:
+    """
+    Load existing PubChem cache or create new one.
     
-    logger.info("Creating new global PubChem cache")
-    return {}
+    Args:
+        pubchem_cache_path: Path to cache parquet file
+        use_cache: If True, load existing cache; if False, return empty cache
+        
+    Returns:
+        Dictionary mapping inchi_keys to PubChem data
+    """
+    if not use_cache:
+        logger.info("Cache disabled - starting with empty cache")
+        return {}
+    
+    try:
+        cache_path = Path(pubchem_cache_path)
+        if cache_path.exists():
+            cache_df = pd.read_parquet(pubchem_cache_path)
+            pubchem_cache = cache_df.set_index('inchi_key').to_dict('index')
+            logger.info(f"Loaded PubChem cache with {len(pubchem_cache)} entries from {pubchem_cache_path}")
+            return pubchem_cache
+        else:
+            logger.info(f"Cache file not found at {pubchem_cache_path} - creating new cache")
+            return {}
+    except Exception as e:
+        logger.error(f"Error loading PubChem cache: {e}")
+        logger.info("Starting with empty cache")
+        return {}
 
 def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
-    """Save global PubChem cache to file"""
+    """Save global PubChem cache to Parquet file"""
     cache_file = Path(cache_filename)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(cache, f)
-        logger.info(f"Saved global PubChem cache with {len(cache)} entries to {cache_file}")
+        # Convert dict of dicts to DataFrame
+        df = pd.DataFrame.from_dict(cache, orient='index')
+        df.index.name = 'inchi_key'
+        df = df.reset_index()
+        
+        # Remove any duplicate inchi_keys
+        df = df.drop_duplicates(subset='inchi_key', keep='last')
+        
+        # Convert list columns to strings for Parquet compatibility
+        if 'synonyms' in df.columns:
+            df['synonyms'] = df['synonyms'].apply(lambda x: str(x) if isinstance(x, list) else x)
+        
+        # Save to Parquet
+        df.to_parquet(cache_file, engine='pyarrow', compression='snappy', index=False)
+        logger.info(f"Saved global PubChem cache with {len(df)} unique entries to {cache_file}")
     except Exception as e:
         logger.error(f"Error saving cache: {e}")
+        logger.error(traceback.format_exc())
 
-def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, use_pubchem_cache: bool = True) -> None:
-    """Retrieve PubChem information for compounds and update global cache."""
+def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, 
+                         use_pubchem_cache: bool = True, update_pubchem_cache: bool = False) -> pd.DataFrame:
+    """
+    Retrieve PubChem information for compounds and optionally update global cache.
+    
+    Args:
+        compounds: DataFrame with 'inchi_key' column
+        pubchem_cache_path: Path to cache file
+        use_pubchem_cache: If True, try to use existing cache entries
+        update_pubchem_cache: If True, force API lookup and update cache for all compounds
+        
+    Returns:
+        DataFrame with PubChem data merged into compounds
+    """
 
     # Load existing global cache
-    pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path)
+    pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path, use_cache=use_pubchem_cache)
 
     prov = ldt.get_provenance()
-
-    # Determine which compounds need to be fetched
     unique_inchi_keys = compounds['inchi_key'].dropna().unique()
 
-    if use_pubchem_cache is False:
+    # Determine which compounds need API lookup
+    if update_pubchem_cache:
+        # Force update mode: lookup all compounds via API
         compounds_to_fetch = list(unique_inchi_keys)
         compounds_in_cache = []
-        logger.info(f"Force update enabled - will query all {len(compounds_to_fetch)} compounds")
-    else:
-        # Normal mode: only query compounds not in cache
+        logger.info(f"Force update enabled - will query all {len(compounds_to_fetch)} compounds via PubChem API")
+    elif use_pubchem_cache:
+        # Normal mode: only lookup compounds not in cache
         compounds_to_fetch = [key for key in unique_inchi_keys if key not in pubchem_cache]
         compounds_in_cache = [key for key in unique_inchi_keys if key in pubchem_cache]
         logger.info(f"Compounds already in cache: {len(compounds_in_cache)}")
         logger.info(f"Compounds needing PubChem lookup: {len(compounds_to_fetch)}")
+    else:
+        # No cache mode: lookup all compounds but don't necessarily update cache
+        compounds_to_fetch = list(unique_inchi_keys)
+        compounds_in_cache = []
+        logger.info(f"Cache disabled - will query all {len(compounds_to_fetch)} compounds via PubChem API")
 
+    # Fetch data from PubChem API if needed
     if compounds_to_fetch:
         logger.info(f"Fetching PubChem data for {len(compounds_to_fetch)} compounds...")
         logger.info("This may take several minutes depending on the number of compounds.")
         
-        # Track how many were actually updated
         new_entries = 0
         updated_entries = 0
         
-        # Fetch data for compounds
         for inchi_key in tqdm(compounds_to_fetch, desc="Fetching PubChem data"):
             was_in_cache = inchi_key in pubchem_cache
             
-            # Get PubChem data
+            # Get PubChem data via API
             pubchem_data = fetch_pubchem_entry(inchi_key, prov['timestamp'])
 
             if pubchem_data:
@@ -183,25 +234,46 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, use_
             # Be respectful to PubChem API
             time.sleep(0.25)
         
-        # Save updated cache
-        save_pubchem_cache(pubchem_cache, pubchem_cache_path)
-        
-        # Report what was done
-        logger.info(f"Cache update completed: {new_entries} new entries added")
+        # Save cache IMMEDIATELY after fetching to persist for next file
+        if use_pubchem_cache or update_pubchem_cache:
+            save_pubchem_cache(pubchem_cache, pubchem_cache_path)
+            logger.info(f"Cache update completed: {new_entries} new entries added, {updated_entries} entries updated")
+        else:
+            logger.info(f"Retrieved {new_entries} compounds from PubChem (cache not updated)")
         
     else:
         logger.info("All compounds already in cache!")
 
+    # Merge PubChem data back into compounds DataFrame
+    pubchem_df = pd.DataFrame.from_dict(pubchem_cache, orient='index')
+    pubchem_df.index.name = 'inchi_key'
+    pubchem_df = pubchem_df.reset_index()
+    
+    # Merge PubChem data with compounds
+    compounds = compounds.merge(pubchem_df, on='inchi_key', how='left', suffixes=('', '_pubchem'))
+    
+    # Update columns with PubChem data if not already present
+    for col in pubchem_df.columns:
+        if col != 'inchi_key' and col in compounds.columns:
+            # Fill missing values with PubChem data
+            pubchem_col = f"{col}_pubchem"
+            if pubchem_col in compounds.columns:
+                compounds[col] = compounds[col].fillna(compounds[pubchem_col])
+                compounds = compounds.drop(columns=[pubchem_col])
+
+    # Report statistics
     successful_retrievals = [k for k, v in pubchem_cache.items() 
                             if v.get('pubchem_cid') and v.get('pubchem_cid') != '']
     failed_retrievals = [k for k, v in pubchem_cache.items() 
                         if not v.get('pubchem_cid') or v.get('pubchem_cid') == '']
                         
     if failed_retrievals:
-        logger.warning(f"Some compounds not found in PubChem: {failed_retrievals}...")
+        logger.warning(f"Some compounds not found in PubChem: {failed_retrievals[:5]}...")
         logger.warning("These will be created with minimal information from the input table.")
 
     logger.info(f"PubChem data retrieval complete!")
     logger.info(f"    Total compounds in global cache: {len(pubchem_cache)}")
     logger.info(f"    Successful PubChem retrievals in cache: {len(successful_retrievals)}")
     logger.info(f"    Failed retrievals in cache: {len(failed_retrievals)}")
+    
+    return

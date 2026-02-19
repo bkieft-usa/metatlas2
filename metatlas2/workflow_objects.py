@@ -19,6 +19,7 @@ import pubchem_retrieval as pcr
 import ms2_hit_detection as mhd
 import extract_data_from_parquet as pdx
 import ms1_ms2_summarizer as mss
+import extract_data_from_parquet as edp
 
 logger = lcf.get_logger('workflow_objects')
 
@@ -328,10 +329,11 @@ class DatabaseManager:
     config: Dict[str, Any]
     overwrite_db: bool
     use_pubchem_cache: bool
+    update_puchem_cache: bool
     main_db_path: str
     pubchem_cache_path: str
 
-    def __init__(self, config: Dict[str, Any], overwrite_db: bool = False, use_pubchem_cache: bool = True):
+    def __init__(self, config: Dict[str, Any], overwrite_db: bool = False, use_pubchem_cache: bool = False, update_pubchem_cache: bool = False):
         """
         Initialize DatabaseManager with configuration.
 
@@ -339,10 +341,12 @@ class DatabaseManager:
             config: Configuration dictionary loaded from YAML
             overwrite_db: Whether to overwrite the main database if it exists
             use_pubchem_cache: Whether to use PubChem cache
+            update_pubchem_cache: Whether to update PubChem cache
         """
         self.config = config
         self.overwrite_db = overwrite_db
         self.use_pubchem_cache = config["PARAMS"].get("use_pubchem_cache", use_pubchem_cache)
+        self.update_pubchem_cache = config["PARAMS"].get("update_pubchem_cache", update_pubchem_cache)
         self.main_db_path = config["ENV"]["PATHS"]["main_database"]
         self.pubchem_cache_path = config["ENV"]["PATHS"]["pubchem_cache"]
 
@@ -383,7 +387,7 @@ class DatabaseManager:
             compounds_df = ldt.load_compound_input(file_path)
             
             # Step 2: Retrieve PubChem information if requested
-            pcr.retrieve_pubchem_info(compounds_df, self.pubchem_cache_path, self.use_pubchem_cache)
+            pcr.retrieve_pubchem_info(compounds_df, self.pubchem_cache_path, self.use_pubchem_cache, self.update_pubchem_cache)
 
             # Step 3: Create Compound and CompoundReference objects from DataFrame
             compounds, compound_references = self._create_compounds_and_references_from_dataframe(
@@ -775,20 +779,26 @@ def run_rt_alignment(project_name: str,
                                                         file_types=['qc'],
                                                         file_format='parquet',
                                                         chromatography=rta_ref_atlas_chromatography)
+        
+        logger.info("Loading alignment template atlas...")
+        atlas_dataframe = dbi.get_atlas_compounds_table(database_path=workflow_paths['main_db_path'], 
+                                                        atlas_uid=rta_ref_atlas_atlas_uid)
 
-        logger.info(f"Extracting QC atlas compound data from QC files...")
-        qc_matches = rat.extract_matches_from_qc_files(
-            workflow_paths['main_db_path'],
-            rta_ref_atlas_atlas_uid,
-            database_files,
-            rt_alignment_parameters)
+        logger.info("Extracting EIC data from QC parquet files...")
+        eic_results = edp.extract_eic_and_ms2_from_parquet(atlas_df=atlas_dataframe,
+                                                            project_files=database_files,
+                                                            ppm_tolerance=rt_alignment_parameters['ppm_error'],
+                                                            extra_time=rt_alignment_parameters['extra_time'],
+                                                            only_ms_level=1)
 
-        logger.info(f"Evaluating QC compound matching stats for {len(qc_matches)} matches...")
-        rat.create_qc_matching_summary(qc_matches)
+        logger.info(f"Evaluating QC compound matching stats for {len(eic_results)} matches...")
+        rat.create_qc_matching_summary(experimental_data=eic_results,
+                                       atlas_dataframe=atlas_dataframe)
 
-        logger.info(f"Building RT alignment model using {len(qc_matches)} matches")
-        rta_model, modeling_data, _ = rat.build_rt_alignment_model(qc_matches, 
-                                                                    rt_alignment_parameters)
+        logger.info(f"Building RT alignment model using {len(eic_results)} matches")
+        rta_model, modeling_data, _ = rat.build_rt_alignment_model(experimental_data=eic_results,
+                                                                   atlas_dataframe=atlas_dataframe, 
+                                                                   rt_align_settings=rt_alignment_parameters)
         
         logger.info("Saving RT model to database...")
         dbi.save_rt_alignment_model_to_db(rta_ref_atlas_atlas_uid,
@@ -859,8 +869,6 @@ def run_auto_identification(
     atlas_dataframe = dbi.get_atlas_compounds_table(database_path=workflow_paths['project_db_path'], 
                                                     atlas_uid=rt_aligned_atlas_info['atlas_uid'],
                                                     main_db_path=workflow_paths['main_db_path'])
-    logger.info(f"Created Atlas dataframe with {len(atlas_dataframe)} compounds")
-    display(atlas_dataframe.head())
 
     logger.info("Loading experimental files from project database...")
     project_files = dbi.get_lcmsruns_from_db(project_db_path=workflow_paths['project_db_path'], 
@@ -870,33 +878,36 @@ def run_auto_identification(
                                                      polarity=rt_aligned_atlas_info['polarity'])
 
     logger.info("Extracting EIC and MS2 data from parquet files...")
-    experimental_data_no_hits = pdx.extract_eic_and_ms2_from_parquet(atlas_df=atlas_dataframe,
+    experimental_data = pdx.extract_eic_and_ms2_from_parquet(atlas_df=atlas_dataframe,
                                                                      project_files=project_files,
                                                                      ppm_tolerance=workflow_params["default_ppm_error"],
                                                                      extra_time=workflow_params["extra_time"])
     
     logger.info("Finding MS2 reference hits...")
-    experimental_data_with_hits = mhd.find_ms2_hits(experimental_data=experimental_data_no_hits, 
+    experimental_data_with_hits = mhd.find_ms2_hits(experimental_data=experimental_data, 
                                                     msms_refs_path=msms_refs_path)
     
     logger.info("Calculating MS1 and MS2 summary statistics for each compound and file...")
-    experimental_data_with_hits_and_summaries = mss.create_ms_summaries(experimental_data_with_hits)
+    experimental_data_with_hits_and_summaries = mss.create_ms_summaries(exp_data=experimental_data_with_hits,
+                                                                        atlas_dataframe=atlas_dataframe)
 
     logger.info("Saving experimental data to project database...")
-    dbi.save_experimental_data_to_db(project_db_path=workflow_paths['project_db_path'],
+    dbi.save_analysis_results_to_db(project_db_path=workflow_paths['project_db_path'],
                                      main_db_path=workflow_paths['main_db_path'],
                                      exp_data=experimental_data_with_hits_and_summaries,
                                      rt_alignment_number=rt_alignment_number,
                                      analysis_number=analysis_number)
 
-    logger.info("Setting up targeted analysis results structure...")
-    analysis_results = tga.create_analysis_results_dict(exp_data=experimental_data_with_hits_and_summaries,
-                                                      target_atlas_uid=rt_aligned_atlas_info['atlas_uid'],
-                                                      project_db_path=workflow_paths['project_db_path'],
-                                                      atlas_dataframe=atlas_dataframe)
 
-    logger.info("Calculating summary statistics for analysis results...")
-    tga.run_analysis_summary(analysis_results)
+
+    # logger.info("Setting up targeted analysis results structure...")
+    # analysis_results = tga.create_analysis_results_dict(exp_data=experimental_data_with_hits_and_summaries,
+    #                                                   target_atlas_uid=rt_aligned_atlas_info['atlas_uid'],
+    #                                                   project_db_path=workflow_paths['project_db_path'],
+    #                                                   atlas_dataframe=atlas_dataframe)
+
+    # logger.info("Calculating summary statistics for analysis results...")
+    # tga.run_analysis_summary(analysis_results)
 
 def run_targeted_analysis(
     project_name: str,

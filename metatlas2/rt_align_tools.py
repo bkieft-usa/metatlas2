@@ -15,8 +15,6 @@ from typing import Dict, Tuple, List
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
 import logging_config as lcf
-import extract_data_from_parquet as edp
-import ms1_ms2_summarizer as mss
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('rt_align_tools')
@@ -275,52 +273,66 @@ def visualize_RT_model(modeling_results_df: pd.DataFrame, best_model: dict, outp
 
     return
 
-def build_rt_alignment_model(experimental_data: Dict, rt_align_settings: Dict) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
+def build_rt_alignment_model(
+    experimental_data: Dict[str, Dict[str, Dict[str, Dict]]],
+    atlas_dataframe: pd.DataFrame,
+    rt_align_settings: Dict
+) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
     """
-    Build RT alignment model from QC compound matches in experimental_data dict.
-    
+    Build RT alignment model directly from experimental_data and atlas_dataframe.
     Args:
-        experimental_data: Dictionary containing compound experimental data (with atlas metadata)
-        rt_align_settings: Dictionary containing RT modeling settings
-    
+        experimental_data: {inchi_key: {adduct: {file_path: {'ms1_data': DataFrame, ...}}}}
+        atlas_dataframe: DataFrame with atlas metadata (must include inchi_key, adduct, rt_peak, mz, etc.)
+        rt_align_settings: RT alignment settings dict
     Returns:
         Tuple of (best_model, modeling_results_df, compound_rt_stats)
     """
-    logger.info("Building RT alignment model from experimental_data dict...")
+    logger.info("Building RT alignment model from experimental_data and atlas_dataframe...")
     exclude_inchikeys = rt_align_settings.get('exclude_inchikeys', [])
 
-    # Aggregate per-compound statistics
     compound_stats = []
-    for compound_uid, compound_data in experimental_data.items():
-        inchi_key = compound_data.get('inchi_key')
-        compound_name = compound_data.get('compound_name')
-        atlas_rt_peak = compound_data.get('rt_peak')
-        atlas_rt_min = compound_data.get('rt_min')
-        atlas_rt_max = compound_data.get('rt_max')
-        atlas_mz = compound_data.get('mz')
+    for _, atlas_row in atlas_dataframe.iterrows():
+        inchi_key = atlas_row.get('inchi_key')
+        adduct = atlas_row.get('adduct')
+        compound_uid = atlas_row.get('compound_uid')
+        compound_name = atlas_row.get('compound_name')
+        atlas_rt_peak = atlas_row.get('rt_peak')
+        atlas_rt_min = atlas_row.get('rt_min')
+        atlas_rt_max = atlas_row.get('rt_max')
+        atlas_mz = atlas_row.get('mz')
+
         if exclude_inchikeys and inchi_key in exclude_inchikeys:
-            logger.info(f"Excluding compound {compound_name} (InChI Key: {inchi_key}) from modeling")
             continue
+        if inchi_key not in experimental_data or adduct not in experimental_data[inchi_key]:
+            continue
+
         observed_rts = []
         observed_mzs = []
         observed_intensities = []
         rt_diffs = []
         mz_errors = []
-        if 'eic_files' in compound_data:
-            for file_data in compound_data['eic_files'].values():
-                if file_data and 'intensity_peak' in file_data:
-                    observed_rt = file_data.get('rt_peak')
-                    observed_mz = file_data.get('mz_peak')
-                    observed_intensity = file_data.get('intensity_peak')
-                    ppm_diff = file_data.get('ppm_diff', 0)
-                    rt_diff = observed_rt - atlas_rt_peak if observed_rt is not None and atlas_rt_peak is not None else None
-                    observed_rts.append(observed_rt)
-                    observed_mzs.append(observed_mz)
-                    observed_intensities.append(observed_intensity)
-                    rt_diffs.append(rt_diff)
-                    mz_errors.append(ppm_diff)
-        if len(observed_rts) == 0:
+
+        for file_data in experimental_data[inchi_key][adduct].values():
+            ms1_data = file_data.get('ms1_data', pd.DataFrame())
+            if ms1_data.empty:
+                continue
+            sum_intensity = ms1_data['i'].sum()
+            if sum_intensity > 0:
+                idx = ms1_data['i'].idxmax()
+                observed_rt = float(ms1_data.loc[idx, 'rt'])
+                observed_mz = float((ms1_data['i'] * ms1_data['mz']).sum() / sum_intensity)
+                observed_intensity = float(ms1_data.loc[idx, 'i'])
+                ppm_diff = ((observed_mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
+                rt_diff = observed_rt - atlas_rt_peak if observed_rt is not None and atlas_rt_peak is not None else None
+                observed_rts.append(observed_rt)
+                observed_mzs.append(observed_mz)
+                observed_intensities.append(observed_intensity)
+                rt_diffs.append(rt_diff)
+                mz_errors.append(ppm_diff)
+
+        if not observed_rts:
             continue
+
         compound_stats.append({
             'compound_uid': compound_uid,
             'compound_name': compound_name,
@@ -344,17 +356,16 @@ def build_rt_alignment_model(experimental_data: Dict, rt_align_settings: Dict) -
             'mz_error_mean': np.mean(mz_errors),
             'mz_error_std': np.std(mz_errors)
         })
+
     compound_rt_stats = pd.DataFrame(compound_stats)
     if compound_rt_stats.empty:
         raise ValueError("No compounds with matches found for RT alignment model.")
 
-    # Display summary statistics
     logger.info(f"RT Statistics Summary:")
     logger.info(f"  Atlas RT range: {compound_rt_stats['atlas_rt_peak'].min():.2f} - {compound_rt_stats['atlas_rt_peak'].max():.2f} min")
     logger.info(f"  Observed RT range (median): {compound_rt_stats['exp_rt_median'].min():.2f} - {compound_rt_stats['exp_rt_median'].max():.2f} min")
     logger.info(f"  Mean RT difference (observed - atlas): {compound_rt_stats['rt_diff_median'].mean():.3f} ± {compound_rt_stats['rt_diff_median'].std():.3f} min")
 
-    # Filter compounds with sufficient observations for reliable modeling
     reliable_compounds = compound_rt_stats[
         compound_rt_stats['observation_count'] >= rt_align_settings['min_observations_per_compound']
     ]
@@ -362,216 +373,222 @@ def build_rt_alignment_model(experimental_data: Dict, rt_align_settings: Dict) -
     if len(reliable_compounds) < rt_align_settings['min_compounds_for_modeling']:
         raise ValueError(f"Insufficient compounds for modeling. Need at least {rt_align_settings['min_compounds_for_modeling']}, but found {len(reliable_compounds)}")
 
-    # Extract X (Atlas RT) and y (observed median RT) for modeling
     X_atlas_rt = reliable_compounds['atlas_rt_peak'].values
     y_observed_rt = reliable_compounds['exp_rt_median'].values
 
-    # Create modeling dataset
     modeling_results_df = reliable_compounds.copy()
 
-    # Build polynomial model
     logger.info(f"Building polynomial model (degree {rt_align_settings['polynomial_degree']})...")
     best_model = build_polynomial_model(X_atlas_rt, y_observed_rt, rt_align_settings['polynomial_degree'])
 
-    # Add predictions and residuals to modeling results
     modeling_results_df['predicted_rt'] = best_model['y_pred']
     modeling_results_df['residual'] = y_observed_rt - best_model['y_pred']
     modeling_results_df['abs_residual'] = np.abs(modeling_results_df['residual'])
 
-    # Model evaluation
     logger.info(f"Model built successfully:")
     logger.info(f"  Model type: Polynomial degree {best_model['degree']}")
     logger.info(f"  R² = {best_model['r2']:.4f}")
     logger.info(f"  RMSE = {best_model['rmse']:.4f} min")
     logger.info(f"  Max residual = {modeling_results_df['abs_residual'].max():.4f} min")
 
-    # Display polynomial equation
     equation = format_polynomial_equation(best_model)
     logger.info(f"  Equation: {equation}")
     best_model['equation'] = equation
 
-    # Check model quality
     if best_model['r2'] < rt_align_settings['r2_threshold']:
         logger.warning(f"Model R² ({best_model['r2']:.4f}) is below threshold ({rt_align_settings['r2_threshold']})")
 
-    # Add compounds used for modeling
     best_model['compounds_used_for_modeling'] = reliable_compounds['compound_uid'].tolist()
 
-    # Display compound statistics table
     logger.info(f"Compound RT Statistics:")
     display(compound_rt_stats[['compound_name', 'inchi_key', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 
-                            'observation_count', 'exp_rt_std']])
+                               'observation_count', 'exp_rt_std']])
 
     return best_model, modeling_results_df, compound_rt_stats
 
-def extract_matches_from_qc_files(main_db_path: str,
-                                  qc_atlas_uid: str,
-                                  qc_files_dict: dict,
-                                  rt_align_settings: Dict) -> Dict: 
-    """
-    Use same approach as feature extraction to extract EIC data for QC compounds.
-    Adds atlas metadata to each compound in experimental_data by inchi_key.
-    """
+# def extract_matches_from_qc_files(main_db_path: str,
+#                                   qc_atlas_uid: str,
+#                                   qc_files_dict: dict,
+#                                   rt_align_settings: Dict) -> Dict: 
+#     """
+#     Use same approach as feature extraction to extract EIC data for QC compounds.
+#     Adds atlas metadata to each compound in experimental_data by inchi_key.
+#     """
 
-    logger.info("Loading QC atlas...")
-    atlas_dataframe = dbi.get_atlas_compounds_table(database_path=main_db_path, 
-                                                    atlas_uid=qc_atlas_uid)
+#     logger.info("Loading QC atlas...")
+#     atlas_dataframe = dbi.get_atlas_compounds_table(database_path=main_db_path, 
+#                                                     atlas_uid=qc_atlas_uid)
 
-    logger.info("Extracting EIC data from QC parquet files...")
-    eic_results = edp.extract_eic_and_ms2_from_parquet(
-        atlas_df=atlas_dataframe,
-        project_files=qc_files_dict,
-        ppm_tolerance=rt_align_settings['ppm_error'],
-        extra_time=rt_align_settings['extra_time'],
-        use_parallel=True,
-        only_ms_level=1,
-    )
-    eic_results_with_summary = mss.create_ms_summaries(eic_results, 
-                                                           only_ms_level=1)
+#     logger.info("Extracting EIC data from QC parquet files...")
+#     eic_results = edp.extract_eic_and_ms2_from_parquet(
+#         atlas_df=atlas_dataframe,
+#         project_files=qc_files_dict,
+#         ppm_tolerance=rt_align_settings['ppm_error'],
+#         extra_time=rt_align_settings['extra_time'],
+#         use_parallel=True,
+#         only_ms_level=1,
+#     )
 
-    logger.info("Formatting results for RT alignment...")
-    experimental_data = _format_eic_results_for_rt_alignment(
-        eic_results_with_summary, 
-        atlas_dataframe
-    )
+#     # for inchi_key, adduct_data in eic_results.items():
+#     #     for adduct, file_data in adduct_data.items():
+#     #         for filename, data in file_data.items():
+#     #             ms1_data = data.get('ms1_data', pd.DataFrame())
+#     #             if not ms1_data.empty:
+#     #                 display(ms1_data.head())
+#     #             ms2_data = data.get('ms2_data', pd.DataFrame())
+#     #             if not ms2_data.empty:
+#     #                 display(ms2_data.head())
 
-    return experimental_data
+#     logger.info("Formatting results for RT alignment...")
+#     experimental_data_formatted = _format_eic_results_for_rt_alignment(eic_results, 
+#                                                                        atlas_dataframe)
 
+#     return experimental_data_formatted
 
-def _format_eic_results_for_rt_alignment(
-    eic_results: Dict[str, Dict],
+# def _format_eic_results_for_rt_alignment(
+#     eic_results: Dict[str, Dict[str, Dict[str, Dict]]],
+#     atlas_dataframe: pd.DataFrame
+# ) -> Dict:
+#     """
+#     Format EIC results to match the structure expected by RT alignment.
+    
+#     Args:
+#         eic_results: Output from extract_eic_and_ms2_from_parquet, structured as:
+#             {inchi_key: {adduct: {file_path: {'ms1_data': DataFrame, 'ms2_data': DataFrame}}}}
+#         atlas_dataframe: Atlas DataFrame with compound metadata
+    
+#     Returns:
+#         Dict with structure {inchi_key: {adduct: {compound_data_with_eic_files}}}
+#     """
+#     experimental_data = {}
+#     compounds_processed = 0
+#     compounds_with_data = 0
+    
+#     for _, atlas_row in atlas_dataframe.iterrows():
+#         inchi_key = atlas_row.get('inchi_key')
+#         adduct = atlas_row.get('adduct')
+#         compounds_processed += 1
+        
+#         if inchi_key not in eic_results:
+#             logger.warning(f"No EIC results found for {inchi_key} - skipping")
+#             continue
+        
+#         if adduct not in eic_results[inchi_key]:
+#             logger.warning(f"No EIC results found for {inchi_key} with adduct {adduct} - skipping")
+#             continue
+        
+#         # Initialize nested dict structure 
+#         if inchi_key not in experimental_data:
+#             experimental_data[inchi_key] = {}
+        
+#         # Initialize compound entry with atlas metadata
+#         compound_data = atlas_row.to_dict()
+#         compound_data['eic_files'] = {}
+        
+#         # Process each file's data for this compound/adduct
+#         for parquet_file, file_data in eic_results[inchi_key][adduct].items():
+#             ms1_data = file_data.get('ms1_data', pd.DataFrame())
+#             if ms1_data.empty:
+#                 continue
+            
+#             sum_intensity = ms1_data['i'].sum()
+#             if sum_intensity > 0:
+#                 num_datapoints = int(ms1_data['i'].count())
+#                 peak_area = float(sum_intensity)
+#                 idx = ms1_data['i'].idxmax()
+#                 observed_intensity = float(ms1_data.loc[idx, 'i'])
+#                 peak_mz = float(ms1_data.loc[idx, 'mz'])
+#                 observed_rt = float(ms1_data.loc[idx, 'rt'])
+#                 observed_mz = float((ms1_data['i'] * ms1_data['mz']).sum() / sum_intensity)
+#             else:
+#                 continue
+            
+#             # Calculate PPM error
+#             atlas_mz = atlas_row['mz']
+#             ppm_diff = ((observed_mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
+            
+#             # Store in eic_files format expected by RT alignment
+#             compound_data['eic_files'][parquet_file] = {
+#                 'rt_peak': observed_rt,
+#                 'mz_peak': observed_mz,
+#                 'intensity_peak': observed_intensity,
+#                 'ppm_diff': ppm_diff,
+#                 'peak_area': peak_area,
+#                 'num_datapoints': num_datapoints
+#             }
+        
+#         # Only add compounds that have at least one match
+#         if compound_data['eic_files']:
+#             experimental_data[inchi_key][adduct] = compound_data
+#             compounds_with_data += 1
+    
+#     logger.info(f"Formatted data for {compounds_with_data} of {compounds_processed} compounds with matches")
+    
+#     return experimental_data
+
+def create_qc_matching_summary(
+    experimental_data: Dict[str, Dict[str, Dict[str, Dict]]],
     atlas_dataframe: pd.DataFrame
-) -> Dict:
+) -> None:
     """
-    Format EIC results to match the structure expected by RT alignment.
-    
-    Args:
-        eic_results: Output from extract_eic_and_ms2_from_parquet
-        atlas_dataframe: Atlas DataFrame with compound metadata
-    
-    Returns:
-        Dict matching experimental_data structure with eic_files and atlas metadata
-    """
-    experimental_data = {}
-    
-    for _, atlas_row in atlas_dataframe.iterrows():
-        inchi_key = atlas_row.get('inchi_key')
-        
-        if inchi_key not in eic_results:
-            continue
-        
-        # Initialize compound entry with atlas metadata
-        compound_data = atlas_row.to_dict()
-        compound_data['eic_files'] = {}
-        
-        # Process each file's data for this compound
-        for parquet_file, file_data in eic_results[inchi_key].items():
-            ms1_summary = file_data.get('ms1_summary', pd.DataFrame())
-            
-            if ms1_summary.empty or ms1_summary['peak_height'].iloc[0] == 0:
-                # No valid peak found in this file
-                continue
-            
-            # Extract peak properties
-            summary_row = ms1_summary.iloc[0]
-            observed_mz = summary_row['mz_centroid']
-            observed_rt = summary_row['rt_peak']
-            observed_intensity = summary_row['peak_height']
-            
-            # Calculate PPM error
-            atlas_mz = atlas_row['mz']
-            ppm_diff = ((observed_mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
-            
-            # Store in eic_files format expected by RT alignment
-            compound_data['eic_files'][parquet_file] = {
-                'rt_peak': observed_rt,
-                'mz_peak': observed_mz,
-                'intensity_peak': observed_intensity,
-                'ppm_diff': ppm_diff,
-                'peak_area': summary_row['peak_area'],
-                'num_datapoints': summary_row['num_datapoints']
-            }
-        
-        # Only add compounds that have at least one match
-        if compound_data['eic_files']:
-            experimental_data[inchi_key] = compound_data
-    
-    logger.info(f"Formatted data for {len(experimental_data)} compounds with matches")
-    
-    return experimental_data
+    Evaluate QC compound matching statistics directly from native experimental_data and atlas_dataframe.
 
-def create_qc_matching_summary(experimental_data: Dict) -> None:
-    """
-    Evaluate QC compound matching statistics from experimental_data.
-    
     Args:
-        experimental_data: Dictionary containing compound experimental data from feature extraction
-    
+        experimental_data: {inchi_key: {adduct: {file_path: {'ms1_data': DataFrame, ...}}}}
+        atlas_dataframe: DataFrame with atlas metadata (must include inchi_key, adduct, etc.)
+
     Returns:
-        Dictionary with comprehensive matching statistics
+        None (logs statistics)
     """
-    logger.info("Evaluating QC compound matching statistics...")
-    
-    total_compounds = len(experimental_data)
+    logger.info("Evaluating QC compound matching statistics from native experimental_data...")
+
+    total_compounds = 0
     compounds_with_matches = 0
     compounds_without_matches = 0
     total_peaks_extracted = 0
     file_match_counts = {}
-    
-    for compound_uid, compound_data in experimental_data.items():
+
+    for _, atlas_row in atlas_dataframe.iterrows():
+        inchi_key = atlas_row.get('inchi_key')
+        adduct = atlas_row.get('adduct')
+        total_compounds += 1
         has_matches = False
         compound_peaks = 0
-        compound_files_with_matches = set()
-        
-        # Check EIC files for matches
-        if 'eic_files' in compound_data and compound_data['eic_files']:
-            for file_path, file_data in compound_data['eic_files'].items():
-                # Each file entry represents one peak/match for this compound
-                if file_data and 'intensity_peak' in file_data:
-                    has_matches = True
-                    compound_peaks += 1  # Each file entry is one peak
-                    compound_files_with_matches.add(file_path)
-                    
-                    # Track file-level statistics
-                    if file_path not in file_match_counts:
-                        file_match_counts[file_path] = {'compounds_matched': 0, 'total_peaks': 0}
-                    file_match_counts[file_path]['compounds_matched'] += 1
-                    file_match_counts[file_path]['total_peaks'] += 1
-        
-        # Update compound-level statistics
+
+        if inchi_key not in experimental_data or adduct not in experimental_data[inchi_key]:
+            compounds_without_matches += 1
+            continue
+
+        for file_path, file_data in experimental_data[inchi_key][adduct].items():
+            ms1_data = file_data.get('ms1_data', pd.DataFrame())
+            if ms1_data.empty:
+                continue
+            
+            sum_intensity = ms1_data['i'].sum()
+            if float(sum_intensity) > 0:
+                has_matches = True
+                compound_peaks += 1
+                # Track file-level statistics
+                if file_path not in file_match_counts:
+                    file_match_counts[file_path] = {'compounds_matched': 0, 'total_peaks': 0}
+                file_match_counts[file_path]['compounds_matched'] += 1
+                file_match_counts[file_path]['total_peaks'] += 1
+
         if has_matches:
             compounds_with_matches += 1
         else:
             compounds_without_matches += 1
-        
+
         total_peaks_extracted += compound_peaks
-    
-    # Calculate file-level statistics
+
     total_files_analyzed = len(file_match_counts)
     total_files_with_matches = sum(1 for stats in file_match_counts.values() if stats['compounds_matched'] > 0)
     total_files_without_matches = total_files_analyzed - total_files_with_matches
-    
-    # Calculate averages and percentages
+
     match_percentage = (compounds_with_matches / total_compounds * 100) if total_compounds > 0 else 0
     avg_peaks_per_compound = (total_peaks_extracted / compounds_with_matches) if compounds_with_matches > 0 else 0
     avg_compounds_per_file = sum(stats['compounds_matched'] for stats in file_match_counts.values()) / total_files_analyzed if total_files_analyzed > 0 else 0
-    
-    # Compile comprehensive statistics
-    stats = {
-        'total_compounds': total_compounds,
-        'compounds_with_matches': compounds_with_matches,
-        'compounds_without_matches': compounds_without_matches,
-        'match_percentage': round(match_percentage, 2),
-        'total_files_analyzed': total_files_analyzed,
-        'total_files_with_matches': total_files_with_matches,
-        'total_files_without_matches': total_files_without_matches,
-        'total_peaks_extracted': total_peaks_extracted,
-        'avg_peaks_per_compound_with_matches': round(avg_peaks_per_compound, 2),
-        'avg_compounds_matched_per_file': round(avg_compounds_per_file, 2),
-        'file_match_statistics': file_match_counts
-    }
-    
-    # Log summary statistics
+
     logger.info(f"QC Compound Matching Summary:")
     logger.info(f"  Total compounds: {total_compounds}")
     logger.info(f"  Compounds with matches: {compounds_with_matches} ({match_percentage:.1f}%)")
@@ -581,7 +598,7 @@ def create_qc_matching_summary(experimental_data: Dict) -> None:
     logger.info(f"  Total peaks extracted: {total_peaks_extracted}")
     logger.info(f"  Average peaks per matched compound: {avg_peaks_per_compound:.1f}")
     logger.info(f"  Average compounds matched per file: {avg_compounds_per_file:.1f}")
-    
+
     return
 
 

@@ -313,7 +313,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                     pass
 
     if df.empty:
-        logger.warning(f"No compounds found for atlas {atlas_uid}")
+        raise ValueError(f"No compounds found for atlas UID {atlas_uid} in database at {database_path}")
     else:
         df['label'] = df['compound_name'] if 'compound_name' in df.columns else ''
         logger.info(f"Retrieved {len(df)} compounds for atlas: {df['atlas_name'].iloc[0]}")
@@ -1529,7 +1529,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt REAL,
                 mz REAL,
                 i REAL,
-                in_feature BOOLEAN,
                 created_by TEXT,
                 created_date TEXT,
             )
@@ -1549,7 +1548,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 precursor_MZ REAL,
                 precursor_intensity REAL,
                 collision_energy REAL,
-                in_feature BOOLEAN,
                 created_by TEXT,
                 created_date TEXT,
             )
@@ -1594,14 +1592,15 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
                 file_path TEXT,
-                label TEXT,
                 num_datapoints INTEGER,
                 peak_area REAL,
                 peak_height REAL,
                 mz_centroid REAL,
                 rt_peak REAL,
+                ppm_error REAL,
+                rt_error REAL,
                 created_by TEXT,
-                created_date TEXT,
+                created_date TEXT
             )
         """)
         
@@ -1614,17 +1613,12 @@ def _create_database_tables(conn, db_type: str = "main"):
                 file_path TEXT,
                 num_scans INTEGER,
                 num_fragments INTEGER,
-                best_ms2_rt REAL,
-                best_ms2_mz REAL,
-                best_ms2_intensity REAL,
-                num_hits INTEGER,
-                best_hit_score REAL,
-                best_hit_database TEXT,
-                best_hit_ref_id TEXT,
-                best_hit_ref_name TEXT,
-                best_hit_num_matches INTEGER,
+                best_scan_rt REAL,
+                best_scan_precursor_mz REAL,
+                best_scan_precursor_intensity REAL,
+                total_hits INTEGER,
                 created_by TEXT,
-                created_date TEXT,
+                created_date TEXT
             )
         """)
 
@@ -1634,40 +1628,49 @@ def _create_database_tables(conn, db_type: str = "main"):
                 compound_uid TEXT,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
+                adduct TEXT,
                 
-                -- Computed metadata (not raw data)
+                -- RT bounds
+                original_rt_peak REAL,
+                original_rt_min REAL,
+                original_rt_max REAL,
+                rt_peak REAL,
+                rt_min REAL,
+                rt_max REAL,
+                
+                -- Suggested RT bounds
                 suggested_rt_min REAL,
                 suggested_rt_max REAL,
                 suggested_rt_peak REAL,
-                rt_bounds_confidence REAL,
+                rt_suggestion_confidence REAL,
                 
+                -- Best EIC across all files
                 best_eic_file TEXT,
                 best_eic_rt REAL,
                 best_eic_mz REAL,
                 best_eic_intensity REAL,
                 best_eic_ppm_error REAL,
+                best_eic_rt_error REAL,
                 
-                best_ms2_file TEXT,
-                best_ms2_database TEXT,
-                best_ms2_score REAL,
-                best_ms2_num_matches INTEGER,
-                best_ms2_matched_fragments TEXT,
-                
+                -- File counts
                 total_files_detected INTEGER,
                 ms2_files_with_data INTEGER,
                 
-                -- Isomers stored as JSON list of dicts
+                -- Isomers (JSON list)
                 isomers TEXT,
                 
-                -- Curation fields
+                -- Annotations
                 ms1_notes TEXT DEFAULT 'keep',
                 ms2_notes TEXT DEFAULT 'no selection',
                 analyst_notes TEXT,
                 identification_notes TEXT,
-                curation_status TEXT DEFAULT 'pending',
+                
+                -- Modification tracking
+                is_rt_modified BOOLEAN DEFAULT FALSE,
+                is_annotation_modified BOOLEAN DEFAULT FALSE,
                 
                 created_by TEXT,
-                created_date TEXT,
+                created_date TEXT
             )
         """)
 
@@ -1764,180 +1767,371 @@ def get_compound_by_uid(db_path: str, compound_uid: str) -> Optional[Dict]:
         
         return dict(zip(columns, result))
 
-def save_experimental_data_to_db(
+def save_analysis_results_to_db(
     project_db_path: str,
     main_db_path: str,
-    exp_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
+    results: Dict[str, Dict[str, Dict]],
     rt_alignment_number: int,
     analysis_number: int
 ) -> None:
     """
-    Save experimental data from analysis results structure to project database.
-    Uses bulk inserts for efficiency.
+    Save complete analysis results to project database.
+    Handles both raw experimental data and MS summaries in one unified function.
     
     Args:
         project_db_path: Path to project database
         main_db_path: Path to main database
-        exp_data: Nested dict {inchi_key: {filename: {data_type: DataFrame}}}
+        results: Output from create_ms_summaries() with structure:
+            {inchi_key: {adduct: {'compound_info': df, 'file_summaries': {...}}}}
         rt_alignment_number: RT alignment number
         analysis_number: Analysis number
     """
-    logger.info("Preparing bulk data for database save...")
+    logger.info("Preparing complete analysis data for database save...")
     
-    # Get compound_uid mappings from main database
-    inchi_keys = list(exp_data.keys())
+    # Get compound_uid mappings
+    inchi_keys = list(results.keys())
     compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
     prov = ldt.get_provenance()
     
-    # Collect all records in memory first
-    ms1_records = []
-    ms2_records = []
-    ms2_hits_records = []
+    # Collect all records
+    compound_metadata_records = []
     ms1_summary_records = []
     ms2_summary_records = []
+    ms2_hits_records = []
+    ms1_data_records = []
+    ms2_data_records = []
     
-    for inchi_key, file_results in exp_data.items():
+    for inchi_key, adduct_dict in results.items():
         compound_uid = compound_uid_map.get(inchi_key)
         if not compound_uid:
             logger.warning(f"Could not find compound_uid for {inchi_key}, skipping")
             continue
-            
-        for filename, ms_level_results in file_results.items():
-            for ms_level, data in ms_level_results.items():
-                if data.empty:
-                    logger.debug(f"Skipping empty dataframe for {ms_level} for {inchi_key} in file {filename}")
-                    continue
-                    
-                try:
-                    if ms_level == "ms1_data":
-                        for _, row in data.iterrows():
-                            ms1_records.append((
-                                _generate_uid("ms1_data"),
-                                compound_uid,
-                                rt_alignment_number,
-                                analysis_number,
-                                filename,
-                                row.get('label', ''),
-                                float(row.get('rt', 0.0)),
-                                float(row.get('mz', 0.0)),
-                                float(row.get('i', 0.0)),
-                                bool(row.get('in_feature', False)),
-                                prov["analyst"],
-                                prov["timestamp"]
-                            ))
-                    
-                    elif ms_level == "ms2_data":
-                        for _, row in data.iterrows():
-                            ms2_records.append((
-                                _generate_uid("ms2_data"),
-                                compound_uid,
-                                rt_alignment_number,
-                                analysis_number,
-                                filename,
-                                row.get('label', ''),
-                                float(row.get('rt', 0.0)),
-                                float(row.get('mz', 0.0)),
-                                float(row.get('i', 0.0)),
-                                float(row.get('precursor_MZ', 0.0)),
-                                float(row.get('precursor_intensity', 0.0)),
-                                float(row.get('collision_energy', 0.0)),
-                                bool(row.get('in_feature', False)),
-                                prov["analyst"],
-                                prov["timestamp"]
-                            ))
-                    
-                    elif ms_level == "ms2_hits":
-                        import json
-                        for _, row in data.iterrows():
-                            ms2_hits_records.append((
-                                _generate_uid("ms2_hits"),
-                                compound_uid,
-                                rt_alignment_number,
-                                analysis_number,
-                                filename,
-                                row.get('inchi_key', ''),
-                                row.get('database', ''),
-                                row.get('ref_id', ''),
-                                row.get('ref_name', ''),
-                                float(row.get('score', 0.0)),
-                                int(row.get('num_matches', 0)),
-                                float(row.get('mz_theoretical', 0.0)),
-                                float(row.get('mz_measured', 0.0)),
-                                float(row.get('rt_measured', 0.0)),
-                                float(row.get('qry_intensity_peak', 0.0)),
-                                int(row.get('ref_frags', 0)),
-                                int(row.get('data_frags', 0)),
-                                json.dumps(row.get('matched_fragments', [])),
-                                json.dumps(row.get('qry_frag_colors', [])),
-                                json.dumps(row.get('qry_spectrum', [])),
-                                json.dumps(row.get('ref_spectrum', [])),
-                                json.dumps(row.get('qry_spectrum_original', [])),
-                                json.dumps(row.get('ref_spectrum_original', [])),
-                                prov["analyst"],
-                                prov["timestamp"],
-                                '',
-                                'pending'
-                            ))
-                    
-                    elif ms_level == "ms1_summary":
-                        for _, row in data.iterrows():
-                            ms1_summary_records.append((
-                                _generate_uid("ms1_summary"),
-                                compound_uid,
-                                rt_alignment_number,
-                                analysis_number,
-                                filename,
-                                row.get('label', ''),
-                                int(row.get('num_datapoints', 0)),
-                                float(row.get('peak_area', 0.0)),
-                                float(row.get('peak_height', 0.0)),
-                                float(row.get('mz_centroid', 0.0)),
-                                float(row.get('rt_peak', 0.0)),
-                                prov["analyst"],
-                                prov["timestamp"]
-                            ))
-                    
-                    elif ms_level == "ms2_summary":
-                        for _, row in data.iterrows():
-                            ms2_summary_records.append((
-                                _generate_uid("ms2_summary"),
-                                compound_uid,
-                                rt_alignment_number,
-                                analysis_number,
-                                filename,
-                                int(row.get('num_scans', 0)),
-                                int(row.get('num_fragments', 0)),
-                                float(row.get('best_ms2_rt', 0.0)),
-                                float(row.get('best_ms2_mz', 0.0)),
-                                float(row.get('best_ms2_intensity', 0.0)),
-                                int(row.get('num_hits', 0)),
-                                float(row.get('best_hit_score', 0.0)),
-                                row.get('best_hit_database', ''),
-                                row.get('best_hit_ref_id', ''),
-                                row.get('best_hit_ref_name', ''),
-                                int(row.get('best_hit_num_matches', 0)),
-                                prov["analyst"],
-                                prov["timestamp"]
-                            ))
-                            
-                except Exception as e:
-                    logger.error(f"Error preparing {ms_level} data for {inchi_key} in file {filename}: {e}")
-                    continue
-    
-    # Now do bulk inserts with a single connection
-    logger.info("Performing bulk database inserts...")
-    with get_db_connection(project_db_path) as conn:
-        if ms1_records:
-            logger.info(f"Inserting {len(ms1_records)} MS1 data records...")
-            conn.executemany("""
-                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms1_records)
         
-        if ms2_records:
-            logger.info(f"Inserting {len(ms2_records)} MS2 data records...")
+        for adduct, data in adduct_dict.items():
+            compound_info = data['compound_info']
+            file_summaries = data['file_summaries']
+            
+            # 1. Save compound-level metadata
+            metadata_record = _prepare_compound_metadata_record(
+                compound_info, compound_uid, adduct, 
+                rt_alignment_number, analysis_number, prov
+            )
+            if metadata_record:
+                compound_metadata_records.append(metadata_record)
+            
+            # 2. Process each file's data
+            for filename, summaries in file_summaries.items():
+                # MS1 summary
+                if 'ms1_summary' in summaries and not summaries['ms1_summary'].empty:
+                    ms1_sum_record = _prepare_ms1_summary_record(
+                        summaries['ms1_summary'].iloc[0], compound_uid,
+                        filename, rt_alignment_number, analysis_number, prov
+                    )
+                    if ms1_sum_record:
+                        ms1_summary_records.append(ms1_sum_record)
+                
+                # MS1 raw data (if present)
+                if 'ms1_data' in summaries and not summaries['ms1_data'].empty:
+                    for _, row in summaries['ms1_data'].iterrows():
+                        ms1_data_record = _prepare_ms1_data_record(
+                            row, compound_uid, filename, 
+                            rt_alignment_number, analysis_number, prov
+                        )
+                        if ms1_data_record:
+                            ms1_data_records.append(ms1_data_record)
+                
+                # MS2 summary
+                if 'ms2_summary' in summaries and not summaries['ms2_summary'].empty:
+                    ms2_sum_record = _prepare_ms2_summary_record(
+                        summaries['ms2_summary'].iloc[0], compound_uid,
+                        filename, rt_alignment_number, analysis_number, prov
+                    )
+                    if ms2_sum_record:
+                        ms2_summary_records.append(ms2_sum_record)
+                
+                # MS2 raw data (if present, from file_summaries)
+                if 'ms2_data' in summaries and not summaries['ms2_data'].empty:
+                    for _, row in summaries['ms2_data'].iterrows():
+                        ms2_data_record = _prepare_ms2_data_record(
+                            row, compound_uid, filename,
+                            rt_alignment_number, analysis_number, prov
+                        )
+                        if ms2_data_record:
+                            ms2_data_records.append(ms2_data_record)
+                
+                # MS2 hits
+                if 'ms2_hits' in summaries and not summaries['ms2_hits'].empty:
+                    for _, hit in summaries['ms2_hits'].iterrows():
+                        ms2_hit_record = _prepare_ms2_hit_record(
+                            hit, compound_uid, filename,
+                            rt_alignment_number, analysis_number, prov
+                        )
+                        if ms2_hit_record:
+                            ms2_hits_records.append(ms2_hit_record)
+    
+    # Bulk insert all records
+    logger.info("Performing bulk database inserts...")
+    _bulk_insert_analysis_data(
+        project_db_path,
+        compound_metadata_records,
+        ms1_summary_records,
+        ms2_summary_records,
+        ms2_hits_records,
+        ms1_data_records,
+        ms2_data_records
+    )
+    
+    logger.info("Complete analysis data saved to database")
+    return
+
+
+def _prepare_compound_metadata_record(
+    compound_info: pd.DataFrame,
+    compound_uid: str,
+    adduct: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    prov: Dict
+) -> Optional[tuple]:
+    """Prepare compound metadata record for database insertion."""
+    try:
+        import json
+        isomers_json = json.dumps(compound_info['isomers'].iloc[0]) if compound_info['isomers'].iloc[0] else '[]'
+        
+        return (
+            _generate_uid("compound_metadata"),
+            compound_uid,
+            rt_alignment_number,
+            analysis_number,
+            adduct,
+            float(compound_info['original_rt_peak'].iloc[0]),
+            float(compound_info['original_rt_min'].iloc[0]),
+            float(compound_info['original_rt_max'].iloc[0]),
+            float(compound_info['rt_peak'].iloc[0]),
+            float(compound_info['rt_min'].iloc[0]),
+            float(compound_info['rt_max'].iloc[0]),
+            float(compound_info['suggested_rt_min'].iloc[0]),
+            float(compound_info['suggested_rt_max'].iloc[0]),
+            float(compound_info['suggested_rt_peak'].iloc[0]),
+            float(compound_info['rt_suggestion_confidence'].iloc[0]),
+            str(compound_info['best_eic_file'].iloc[0]),
+            float(compound_info['best_eic_rt'].iloc[0]),
+            float(compound_info['best_eic_mz'].iloc[0]),
+            float(compound_info['best_eic_intensity'].iloc[0]),
+            float(compound_info['best_eic_ppm_error'].iloc[0]),
+            float(compound_info['best_eic_rt_error'].iloc[0]),
+            int(compound_info['total_files_detected'].iloc[0]),
+            int(compound_info['ms2_files_with_data'].iloc[0]),
+            isomers_json,
+            str(compound_info['ms1_notes'].iloc[0]),
+            str(compound_info['ms2_notes'].iloc[0]),
+            str(compound_info['analyst_notes'].iloc[0]),
+            str(compound_info['identification_notes'].iloc[0]),
+            bool(compound_info['is_rt_modified'].iloc[0]),
+            bool(compound_info['is_annotation_modified'].iloc[0]),
+            prov["analyst"],
+            prov["timestamp"]
+        )
+    except Exception as e:
+        logger.error(f"Error preparing compound metadata record: {e}")
+        return None
+
+
+def _prepare_ms1_summary_record(
+    ms1_summary: pd.Series,
+    compound_uid: str,
+    filename: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    prov: Dict
+) -> Optional[tuple]:
+    """Prepare MS1 summary record for database insertion."""
+    try:
+        return (
+            _generate_uid("ms1_summary"),
+            compound_uid,
+            rt_alignment_number,
+            analysis_number,
+            filename,
+            int(ms1_summary['num_datapoints']),
+            float(ms1_summary['peak_area']),
+            float(ms1_summary['peak_height']),
+            float(ms1_summary['mz_centroid']),
+            float(ms1_summary['rt_peak']),
+            float(ms1_summary['ppm_error']),
+            float(ms1_summary['rt_error']),
+            prov["analyst"],
+            prov["timestamp"]
+        )
+    except Exception as e:
+        logger.error(f"Error preparing MS1 summary record: {e}")
+        return None
+
+
+def _prepare_ms2_summary_record(
+    ms2_summary: pd.Series,
+    compound_uid: str,
+    filename: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    prov: Dict
+) -> Optional[tuple]:
+    """Prepare MS2 summary record for database insertion."""
+    try:
+        return (
+            _generate_uid("ms2_summary"),
+            compound_uid,
+            rt_alignment_number,
+            analysis_number,
+            filename,
+            int(ms2_summary['num_scans']),
+            int(ms2_summary['num_fragments']),
+            float(ms2_summary['best_scan_rt']),
+            float(ms2_summary['best_scan_precursor_mz']),
+            float(ms2_summary['best_scan_precursor_intensity']),
+            int(ms2_summary['total_hits']),
+            prov["analyst"],
+            prov["timestamp"]
+        )
+    except Exception as e:
+        logger.error(f"Error preparing MS2 summary record: {e}")
+        return None
+
+
+def _prepare_ms2_hit_record(
+    hit: pd.Series,
+    compound_uid: str,
+    filename: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    prov: Dict
+) -> Optional[tuple]:
+    """Prepare MS2 hit record for database insertion."""
+    try:
+        import json
+        return (
+            _generate_uid("ms2_hits"),
+            compound_uid,
+            rt_alignment_number,
+            analysis_number,
+            filename,
+            hit.get('inchi_key', ''),
+            hit.get('database', ''),
+            hit.get('ref_id', ''),
+            hit.get('ref_name', ''),
+            float(hit.get('score', 0.0)),
+            int(hit.get('num_matches', 0)),
+            float(hit.get('mz_theoretical', 0.0)),
+            float(hit.get('mz_measured', 0.0)),
+            float(hit.get('rt_measured', 0.0)),
+            float(hit.get('qry_intensity_peak', 0.0)),
+            int(hit.get('ref_frags', 0)),
+            int(hit.get('data_frags', 0)),
+            json.dumps(hit.get('matched_fragments', [])),
+            json.dumps(hit.get('qry_frag_colors', [])),
+            json.dumps(hit.get('qry_spectrum', [])),
+            json.dumps(hit.get('ref_spectrum', [])),
+            json.dumps(hit.get('qry_spectrum_original', [])),
+            json.dumps(hit.get('ref_spectrum_original', [])),
+            prov["analyst"],
+            prov["timestamp"],
+            '',  # analyst_notes
+            'pending'  # curation_status
+        )
+    except Exception as e:
+        logger.error(f"Error preparing MS2 hit record: {e}")
+        return None
+
+
+def _prepare_ms1_data_record(
+    row: pd.Series,
+    compound_uid: str,
+    filename: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    prov: Dict
+) -> Optional[tuple]:
+    """Prepare MS1 raw data record for database insertion."""
+    try:
+        return (
+            _generate_uid("ms1_data"),
+            compound_uid,
+            rt_alignment_number,
+            analysis_number,
+            filename,
+            row.get('label', ''),
+            float(row.get('rt', 0.0)),
+            float(row.get('mz', 0.0)),
+            float(row.get('i', 0.0)),
+            prov["analyst"],
+            prov["timestamp"]
+        )
+    except Exception as e:
+        logger.error(f"Error preparing MS1 data record: {e}")
+        return None
+
+
+def _prepare_ms2_data_record(
+    row: pd.Series,
+    compound_uid: str,
+    filename: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    prov: Dict
+) -> Optional[tuple]:
+    """Prepare MS2 raw data record for database insertion."""
+    try:
+        return (
+            _generate_uid("ms2_data"),
+            compound_uid,
+            rt_alignment_number,
+            analysis_number,
+            filename,
+            row.get('label', ''),
+            float(row.get('rt', 0.0)),
+            float(row.get('mz', 0.0)),
+            float(row.get('i', 0.0)),
+            float(row.get('precursor_MZ', 0.0)),
+            float(row.get('precursor_intensity', 0.0)),
+            float(row.get('collision_energy', 0.0)),
+            prov["analyst"],
+            prov["timestamp"]
+        )
+    except Exception as e:
+        logger.error(f"Error preparing MS2 data record: {e}")
+        return None
+
+
+def _bulk_insert_analysis_data(
+    project_db_path: str,
+    compound_metadata_records: List[tuple],
+    ms1_summary_records: List[tuple],
+    ms2_summary_records: List[tuple],
+    ms2_hits_records: List[tuple],
+    ms1_data_records: List[tuple],
+    ms2_data_records: List[tuple]
+) -> None:
+    """Perform bulk inserts for all analysis data types."""
+    
+    with get_db_connection(project_db_path) as conn:
+        if compound_metadata_records:
+            logger.info(f"Inserting {len(compound_metadata_records)} compound metadata records...")
             conn.executemany("""
-                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms2_records)
+                INSERT INTO compound_analysis_metadata VALUES 
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, compound_metadata_records)
+        
+        if ms1_summary_records:
+            logger.info(f"Inserting {len(ms1_summary_records)} MS1 summary records...")
+            conn.executemany("""
+                INSERT INTO ms1_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, ms1_summary_records)
+        
+        if ms2_summary_records:
+            logger.info(f"Inserting {len(ms2_summary_records)} MS2 summary records...")
+            conn.executemany("""
+                INSERT INTO ms2_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, ms2_summary_records)
         
         if ms2_hits_records:
             logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
@@ -1945,188 +2139,14 @@ def save_experimental_data_to_db(
                 INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_hits_records)
         
-        if ms1_summary_records:
-            logger.info(f"Inserting {len(ms1_summary_records)} MS1 summary records...")
+        if ms1_data_records:
+            logger.info(f"Inserting {len(ms1_data_records)} MS1 raw data records...")
             conn.executemany("""
-                INSERT INTO ms1_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms1_summary_records)
+                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, ms1_data_records)
         
-        if ms2_summary_records:
-            logger.info(f"Inserting {len(ms2_summary_records)} MS2 summary records...")
+        if ms2_data_records:
+            logger.info(f"Inserting {len(ms2_data_records)} MS2 raw data records...")
             conn.executemany("""
-                INSERT INTO ms2_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms2_summary_records)
-    
-    logger.info("Experimental data saved to database")
-    return
-
-def get_experimental_data_from_db(
-    project_db_path: str,
-    main_db_path: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    inchi_keys: List[str] = None
-) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
-    """
-    Retrieve all experimental data in the same nested structure as save function.
-    
-    Args:
-        project_db_path: Path to project database
-        main_db_path: Path to main database
-        rt_alignment_number: RT alignment number
-        analysis_number: Analysis number
-        inchi_keys: Optional list of inchi_keys to filter (if None, gets all)
-    
-    Returns:
-        Nested dict: {inchi_key: {filename: {data_type: DataFrame}}}
-    """
-    logger.info("Retrieving all experimental data from database...")
-    
-    # Get compound_uid mappings
-    if inchi_keys:
-        compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
-    else:
-        # Get all inchi_keys for this analysis
-        with get_db_connection(main_db_path) as conn:
-            all_inchi_keys = conn.execute("SELECT DISTINCT inchi_key FROM compounds").df()['inchi_key'].tolist()
-        compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, all_inchi_keys)
-    
-    # Reverse map: compound_uid -> inchi_key
-    uid_to_inchi = {v: k for k, v in compound_uid_map.items()}
-    
-    exp_data = {}
-    
-    # Get all data types with consistent structure
-    data_types = ['ms1_data', 'ms2_data', 'ms2_hits', 'ms1_summary', 'ms2_summary']
-    
-    with get_db_connection(project_db_path) as conn:
-        for data_type in data_types:
-            logger.info(f"Retrieving {data_type}...")
-            
-            query = f"""
-                SELECT * FROM {data_type} 
-                WHERE rt_alignment_number = ? AND analysis_number = ?
-            """
-            df = conn.execute(query, [rt_alignment_number, analysis_number]).df()
-            
-            if df.empty:
-                continue
-            
-            if data_type == "ms2_hits":
-                json_columns = [
-                    'matched_fragments', 'qry_frag_colors', 'qry_spectrum', 
-                    'ref_spectrum', 'qry_spectrum_original', 'ref_spectrum_original'
-                ]
-                
-                for col in json_columns:
-                    if col in df.columns:
-                        df[col] = df[col].apply(lambda x: json.loads(x) if pd.notna(x) and x else [])
-            
-            # Group by compound_uid and filename
-            for (compound_uid, filename), group_df in df.groupby(['compound_uid', 'filename']):
-                inchi_key = uid_to_inchi.get(compound_uid)
-                if not inchi_key:
-                    logger.warning(f"No inchi_key found for compound_uid {compound_uid}")
-                    continue
-                
-                # Initialize nested structure
-                if inchi_key not in exp_data:
-                    exp_data[inchi_key] = {}
-                if filename not in exp_data[inchi_key]:
-                    exp_data[inchi_key][filename] = {}
-                
-                # Store dataframe
-                exp_data[inchi_key][filename][data_type] = group_df.reset_index(drop=True)
-    
-    logger.info(f"Retrieved experimental data for {len(exp_data)} compounds")
-    return exp_data
-
-def save_atlas_to_database(atlas_obj, db_path: str, db_type: str = "main") -> None:
-    """
-    Save an Atlas object to the database (typing not included to avoid circular imports).
-    Only creates new mz_rt_references entries for references that don't already exist.
-    
-    Args:
-        atlas_obj: Atlas object to save
-    """
-    logger.info("Veryfing compounds in atlas exist in database before saving...")
-    if not _verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_references.values()], db_path):
-        raise ValueError(f"Some compounds in atlas {atlas_obj.atlas_uid} don't exist in database")
-
-    prov = ldt.get_provenance()
-    with get_db_connection(db_path) as conn:
-        if db_type == "main":
-            # Create atlas entry
-            conn.execute("""
-                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                atlas_obj.atlas_uid,
-                atlas_obj.atlas_name,
-                atlas_obj.atlas_description,
-                atlas_obj.chromatography,
-                atlas_obj.polarity,
-                atlas_obj.analysis_type,
-                atlas_obj.atlas_type,
-                prov["analyst"],
-                prov["timestamp"]
-            ))
-            
-            # Process each CompoundReference
-            association_order = 0
-            references_created = 0
-            references_reused = 0
-            for inchi_key, compound_ref in atlas_obj.compound_references.items():
-                # Check if this reference already exists in database
-                existing_check = conn.execute("""
-                    SELECT mz_rt_reference_uid FROM mz_rt_references 
-                    WHERE mz_rt_reference_uid = ?
-                """, [compound_ref.mz_rt_reference_uid]).fetchone()
-                
-                mz_rt_reference_uid = compound_ref.mz_rt_reference_uid
-                
-                # Create new reference if it doesn't exist
-                if not existing_check:
-                    conn.execute("""
-                        INSERT INTO mz_rt_references VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        mz_rt_reference_uid,
-                        compound_ref.compound_uid,
-                        compound_ref.rt_peak,
-                        compound_ref.rt_min,
-                        compound_ref.rt_max,
-                        compound_ref.mz,
-                        compound_ref.mz_tolerance,
-                        compound_ref.adduct,
-                        compound_ref.chromatography,
-                        compound_ref.polarity,
-                        compound_ref.confidence,
-                        'atlas_creation',  # source
-                        prov["analyst"],
-                        prov["timestamp"]
-                    ))
-                    references_created += 1
-                else:
-                    references_reused += 1
-                
-                # Create atlas-compound association
-                assoc_uid = _generate_uid("association")
-                conn.execute("""
-                    INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    assoc_uid,
-                    atlas_obj.atlas_uid,
-                    compound_ref.compound_uid,
-                    mz_rt_reference_uid,
-                    association_order,
-                    prov["analyst"],
-                    prov["timestamp"]
-                ))
-                
-                association_order += 1
-        
-            logger.info(f"Saved atlas {atlas_obj.atlas_name} to database with UID: {atlas_obj.atlas_uid}")
-            logger.info(f"  References created: {references_created}")
-            logger.info(f"  References reused: {references_reused}")
-            logger.info(f"  Total associations: {association_order}")
-
-        association_order += 1
+                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, ms2_data_records)

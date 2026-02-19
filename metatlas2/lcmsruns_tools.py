@@ -83,17 +83,17 @@ def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None
         files_dict[chromatography][ms_level][polarity][analysis_type].append(str(file_path))
 
 
-def get_project_files(project_path: str) -> dict:
+def get_project_files(project_raw_files_path: str) -> dict:
     """
     Scan project directory for LCMS files and organize by chromatography/ms_level/polarity/analysis type.
     
     Args:
-        project_path: Path to directory containing .parquet files
+        project_raw_files_path: Path to directory containing .parquet files
         
     Returns:
         Nested dictionary: {chromatography: {ms_level: {polarity: {analysis_type: [file_paths]}}}}
     """
-    project_path = Path(project_path)
+    project_path = Path(project_raw_files_path)
     if not project_path.exists():
         raise FileNotFoundError(f"Project path does not exist: {project_path}")
     
@@ -104,10 +104,19 @@ def get_project_files(project_path: str) -> dict:
             logger.error(f"  - {f.name}")
         raise ValueError(f"Please address the .failed files before proceeding. Found {len(failed_conversion_files)} .failed files in {project_path}.")
     
-    raw_files = list(project_path.glob("raw/*.raw"))
-    parquet_files = list(project_path.glob("parquet/*.parquet"))
-    mzML_files = list(project_path.glob("mzML/*.mzML"))
-    
+    # Check on directories and files
+    raw_dir = project_path / "raw"
+    parquet_dir = project_path / "parquet"
+    mzML_dir = project_path / "mzML"
+    if not raw_dir.exists():
+        raise FileNotFoundError(f"raw/ directory does not exist in {project_path}")
+    if not parquet_dir.exists():
+        raise FileNotFoundError(f"parquet/ directory does not exist in {project_path}")
+    if not mzML_dir.exists():
+        raise FileNotFoundError(f"mzML/ directory does not exist in {project_path}")
+    raw_files = list(raw_dir.glob("*.raw"))
+    parquet_files = list(parquet_dir.glob("*.parquet"))
+    mzML_files = list(mzML_dir.glob("*.mzML"))
     if not parquet_files or not raw_files or not mzML_files:
         raise ValueError(f"Missing .parquet, .raw, or .mzML files for {project_path}")
     
