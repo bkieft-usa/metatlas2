@@ -28,7 +28,7 @@ def apply_rt_alignment_to_target_atlases(
 
     main_db_path = rt_align_obj.paths['main_db_path']
     targeted_analyses = rt_align_obj.project.config['WORKFLOWS']['TARGETED_ANALYSES']
-    best_model = rt_align_obj.best_model
+    rt_alignment_model = rt_align_obj.rt_alignment_model
     rt_align_settings = rt_align_obj.rt_alignment_params
     rt_alignment_number = rt_align_obj.rt_alignment_number
 
@@ -49,10 +49,10 @@ def apply_rt_alignment_to_target_atlases(
                 aligned_compound_mzrts = {}
                 for inchi_key, comp_ref in atlas_obj.compound_mzrts.items():
                     # Apply RT alignment model
-                    aligned_rt_peak = float(_apply_rt_model([comp_ref.rt_peak], best_model)[0])
+                    aligned_rt_peak = float(_apply_rt_model([comp_ref.rt_peak], rt_alignment_model)[0])
                     if rt_align_settings['apply_model_to_min_max']:
-                        aligned_rt_min = float(_apply_rt_model([comp_ref.rt_min], best_model)[0])
-                        aligned_rt_max = float(_apply_rt_model([comp_ref.rt_max], best_model)[0])
+                        aligned_rt_min = float(_apply_rt_model([comp_ref.rt_min], rt_alignment_model)[0])
+                        aligned_rt_max = float(_apply_rt_model([comp_ref.rt_max], rt_alignment_model)[0])
                     else:
                         window = comp_ref.rt_max - comp_ref.rt_min
                         aligned_rt_min = aligned_rt_peak - window / 2
@@ -192,7 +192,7 @@ def visualize_RT_model(rt_align_obj: "RTAlign", save_plot: bool = True):
     logger.info("Plotting RT alignment model results to figure...")
 
     modeling_results_df = rt_align_obj.modeling_data
-    best_model = rt_align_obj.best_model
+    rt_alignment_model = rt_align_obj.rt_alignment_model
     output_dir = rt_align_obj.paths['rt_alignment_output_dir']
 
     # Sort by Atlas RT before numbering and plotting
@@ -213,7 +213,7 @@ def visualize_RT_model(rt_align_obj: "RTAlign", save_plot: bool = True):
             'k--', alpha=0.5, label='Perfect Correlation')
     ax1.set_xlabel('Atlas RT (min)')
     ax1.set_ylabel('Observed RT (min)')
-    ax1.set_title(f'RT Correlation (R² = {best_model["r2"]:.4f})')
+    ax1.set_title(f'RT Correlation (R² = {rt_alignment_model["r2"]:.4f})')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
@@ -232,7 +232,7 @@ def visualize_RT_model(rt_align_obj: "RTAlign", save_plot: bool = True):
     ax2.axhline(y=-modeling_results_df['residual'].std(), color='orange', linestyle=':', alpha=0.7, label='-1 σ')
     ax2.set_xlabel('Atlas RT (min)')
     ax2.set_ylabel('Residual (min)')
-    ax2.set_title(f'Residuals vs Atlas RT (RMSE = {best_model["rmse"]:.4f})')
+    ax2.set_title(f'Residuals vs Atlas RT (RMSE = {rt_alignment_model["rmse"]:.4f})')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
@@ -272,7 +272,7 @@ def visualize_RT_model(rt_align_obj: "RTAlign", save_plot: bool = True):
         try:
             plot_save_dir = Path(output_dir) / "rt_alignment_results"
             plot_save_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = plot_save_dir / f"summary-for-{best_model['rt_alignment_uid']}.pdf"
+            pdf_path = plot_save_dir / f"summary-for-{rt_alignment_model['rt_alignment_uid']}.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
             logger.info(f"Plot saved to {pdf_path}")
             plt.close()
@@ -295,7 +295,7 @@ def build_rt_alignment_model(
         atlas: Atlas object with compound references
         rt_align: RTAlign object with alignment settings
     Returns:
-        Tuple of (best_model, modeling_results_df, compound_rt_stats)
+        Tuple of (rt_alignment_model, modeling_results_df, compound_rt_stats)
     """
     logger.info("Building RT alignment model from experimental data and atlas...")
     exclude_inchikeys = rt_align.rt_alignment_params.get('exclude_inchikeys', [])
@@ -384,6 +384,7 @@ def build_rt_alignment_model(
     logger.info(f"  Observed RT range (median): {compound_rt_stats['exp_rt_median'].min():.2f} - {compound_rt_stats['exp_rt_median'].max():.2f} min")
     logger.info(f"  Mean RT difference (observed - atlas): {compound_rt_stats['rt_diff_median'].mean():.3f} ± {compound_rt_stats['rt_diff_median'].std():.3f} min")
 
+    rt_align_settings = rt_align.rt_alignment_params
     reliable_compounds = compound_rt_stats[
         compound_rt_stats['observation_count'] >= rt_align_settings['min_observations_per_compound']
     ]
@@ -422,8 +423,8 @@ def build_rt_alignment_model(
     display(compound_rt_stats[['compound_name', 'inchi_key', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 
                                'observation_count', 'exp_rt_std']])
 
-    rt_align_obj.rta_model = best_model
-    rt_align_obj.modeling_data = modeling_results_df
+    rt_align.rt_alignment_model = best_model
+    rt_align.modeling_data = modeling_results_df
 
     return
 
@@ -634,7 +635,7 @@ def run_rt_alignment_summary(rt_align_obj: "RTAlign") -> None:
     """
     Log a concise summary of the RT alignment model and RT shift statistics using RTAlign object.
     """
-    model = rt_align_obj.best_model
+    model = rt_align_obj.rt_alignment_model
     stats = getattr(rt_align_obj, "rt_shift_stats", None)
 
     if model is None:
@@ -656,7 +657,6 @@ def run_rt_alignment_summary(rt_align_obj: "RTAlign") -> None:
     logger.info(f"  Compounds used for modeling: {n_compounds}")
 
     if stats:
-        logger.info(f"RT Shift Statistics: {stats}")
         logger.info("RT Shift Statistics (across all aligned compounds):")
         logger.info(f"  Min RT shift: {stats.get('rt_shift_min', 'N/A'):.4f} min")
         logger.info(f"  Max RT shift: {stats.get('rt_shift_max', 'N/A'):.4f} min")

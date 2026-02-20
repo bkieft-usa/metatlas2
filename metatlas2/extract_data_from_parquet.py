@@ -60,7 +60,7 @@ def extract_eic_and_ms2_from_parquet(
     """
     from workflow_objects import ExperimentalData, MS1Data, MS2Data
 
-    logger.info(f"Starting data extraction based on {atlas.atlas_uid} ({atlas.name}) for stage '{stage}' from {len(lcmsruns)} LCMS runs...")
+    logger.info(f"Starting data extraction based on {atlas.atlas_uid} ({atlas.atlas_name}) for stage '{stage}' from {len(lcmsruns)} LCMS runs...")
 
     logger.info("Initiating an experimental data object to hold results during analysis...")
     experimental_data_obj = ExperimentalData()

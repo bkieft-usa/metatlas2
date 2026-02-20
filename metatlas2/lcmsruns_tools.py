@@ -9,6 +9,39 @@ import logging_config as lcf
 logger = lcf.get_logger('lcmsruns_tools')
 
 
+def filter_lcmsruns_list(
+    lcmsruns: List["LCMSRun"], 
+    file_type: List[str] = None,
+    file_format: str = "parquet",
+    chromatography: str = None,
+    polarity: str = None
+) -> List["LCMSRun"]:
+    """
+    Filter a list of LCMSRun objects by file type, file format, chromatography, and polarity.
+    """
+    if chromatography:
+        if chromatography == "HILICZ":
+            chromatography = "HILIC"
+
+    if polarity:
+        if polarity.lower() in ["pos", "positive"]:
+            polarity = "positive"
+        elif polarity.lower() in ["neg", "negative"]:
+            polarity = "negative"
+
+    filtered_runs = lcmsruns
+    if file_type:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() in [ft.lower() for ft in file_type]]
+    if file_format:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_format', '').lower() == file_format.lower()]
+    if chromatography:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'chromatography', '').lower() == chromatography.lower()]
+    if polarity:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'polarity', '').lower() == polarity.lower()]
+
+    logger.info(f"Filtered {len(filtered_runs)} LCMS runs with parameters file_type={file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity} from total of {len(lcmsruns)} runs.")
+    return filtered_runs
+
 def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list:
     """
     Scan project directory for LCMS files and return a flat list of LCMS run metadata dicts.

@@ -22,7 +22,7 @@ def create_ms_summaries(
 
     from workflow_objects import MS1Summary, MS2Summary
 
-    # Build lookups for each data type by (inchi_key, adduct, filename)
+    logger.info("Building lookups for each data type...")
     ms1_lookup = {}
     for ms1 in exp_data_obj.ms1_data:
         key = (ms1.inchi_key, ms1.adduct, ms1.filename)
@@ -38,7 +38,7 @@ def create_ms_summaries(
         key = (ms2_hit.inchi_key, ms2_hit.adduct, ms2_hit.filename)
         ms2_hits_lookup[key] = ms2_hit.data
 
-    # Iterate through Atlas compound_mzrts
+    logger.info("Calculating summaries for each Atlas entry across files...")
     for compound_mzrt in atlas_obj.compound_mzrts.values():
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct

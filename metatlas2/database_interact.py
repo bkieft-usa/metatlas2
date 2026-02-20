@@ -84,133 +84,6 @@ def find_rt_aligned_atlases_in_db(
             logger.info(f"Found {len(atlases)} RT-aligned atlases in project database for RT alignment number {rt_alignment_number}")
         return atlases
 
-# def save_rt_aligned_atlas_to_db(
-#     project_db_path: str,
-#     main_db_path: str,
-#     aligned_atlases_info: dict,
-#     best_model: dict,
-#     rt_alignment_number: int,
-#     analysis_number: Optional[int] = None
-# ) -> Tuple[str, str]:
-#     """
-#     Create RT-aligned atlas in project database and apply RT alignment to compounds.
-    
-#     Args:
-#         project_db_path: Path to project database
-#         main_db_path: Path to main database
-#         aligned_atlases_info: dataframe and stats for each RT-aligned atlas
-#         target_atlas_uid: UID of the target atlas
-#         best_model: RT alignment model dictionary
-#         rt_alignment_number: RT alignment number
-#         analysis_number: Optional analysis number for this RT alignment (if not provided, will be NULL in database)
-#     Returns:
-#         Tuple of (aligned_atlas_uid, aligned_atlas_name)
-#     """
-#     logger.info("Creating RT-aligned atlases in project database...")
-
-#     for target_atlas_uid, atlas_data in aligned_atlases_info.items():
-
-#         aligned_atlas_df = atlas_data['aligned_df']
-#         logger.info("Verifying all compounds in RT-aligned atlas exist in main database...")
-#         _verify_compounds_exist_in_db(aligned_atlas_df['compound_uid'].tolist(), main_db_path)
-
-#         prov = ldt.get_provenance()
-
-#         # Use some info from the target atlas for the new RT-aligned target atlas
-#         target_atlas_info = get_atlas_metadata_from_db(main_db_path, target_atlas_uid)
-
-#         # Generate new atlas UID for RT-aligned version
-#         target_atlas_decorator = get_decorator_from_uid(target_atlas_uid)
-#         aligned_atlas_uid = _generate_uid("rt_atlas", decorator=target_atlas_decorator)
-#         aligned_atlas_name = f"{target_atlas_info['atlas_name']} (RT aligned)"
-#         aligned_atlas_description = f"RT-aligned version of {target_atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
-#         aligned_atlas_type = aligned_atlas_df['atlas_type'].iloc[0] if 'atlas_type' in aligned_atlas_df.columns else target_atlas_info['atlas_type']
-#         aligned_atlas_chrom = aligned_atlas_df['chromatography'].iloc[0] if 'chromatography' in aligned_atlas_df.columns else target_atlas_info['chromatography']
-#         aligned_atlas_polarity = aligned_atlas_df['polarity'].iloc[0] if 'polarity' in aligned_atlas_df.columns else target_atlas_info['polarity']
-#         aligned_atlas_analysis_type = aligned_atlas_df['analysis_type'].iloc[0] if 'analysis_type' in aligned_atlas_df.columns else "custom"
-#         aligned_atlas_source = target_atlas_info['source']
-#         logger.info(f"From the {target_atlas_info['atlas_uid']} template, generated new atlas UID: {aligned_atlas_uid} for RT-aligned atlas: {aligned_atlas_name}")
-
-#         logger.info("Saving RT-aligned atlas and compounds to project database...")
-#         with get_db_connection(project_db_path) as conn:
-            
-#             # Create new atlas entry
-#             conn.execute("""
-#                 INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-#             """, (
-#                 aligned_atlas_uid,
-#                 aligned_atlas_name,
-#                 aligned_atlas_description,
-#                 aligned_atlas_chrom,
-#                 aligned_atlas_polarity,
-#                 aligned_atlas_analysis_type,
-#                 aligned_atlas_type,
-#                 target_atlas_info['atlas_uid'],
-#                 rt_alignment_number,
-#                 analysis_number,
-#                 prov["analyst"],
-#                 prov["timestamp"],
-#                 source
-#             ))
-
-#             association_order = 0
-#             for _, row in aligned_atlas_df.iterrows():
-#                 compound_uid = row['compound_uid']
-#                 aligned_rt_peak = row.get('rt_peak')
-#                 aligned_rt_min = row.get('rt_min')
-#                 aligned_rt_max = row.get('rt_max')
-#                 rt_shift = row.get('rt_shift')
-#                 exp_uid = _generate_uid("compound_mzrt")
-#                 assoc_uid = _generate_uid("association")
-#                 mz_rt_reference_uid = row.get('mz_rt_reference_uid')
-
-#                 conn.execute("""
-#                     INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-#                 """, (
-#                     exp_uid,
-#                     compound_uid,
-#                     rt_alignment_number,
-#                     analysis_number,
-#                     aligned_rt_peak,
-#                     aligned_rt_min,
-#                     aligned_rt_max,
-#                     '',  # ms1_notes
-#                     '',  # ms2_notes
-#                     row.get('mz'),
-#                     row.get('mz_tolerance', 5.0),
-#                     row.get('adduct', ''),
-#                     target_atlas_info['chromatography'],
-#                     target_atlas_info['polarity'],
-#                     row.get('rt_alignment_applied', True),
-#                     rt_shift,
-#                     mz_rt_reference_uid,
-#                     prov["analyst"],
-#                     prov["timestamp"]
-#                 ))
-                
-#                 # Create atlas-compound association
-#                 conn.execute("""
-#                     INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
-#                 """, (
-#                     assoc_uid,
-#                     aligned_atlas_uid,
-#                     compound_uid,
-#                     exp_uid,
-#                     association_order,
-#                     prov["analyst"],
-#                     prov["timestamp"]
-#                 ))
-
-#                 association_order += 1
-
-#         logger.info(f"Created and deposited RT-aligned atlas: {aligned_atlas_uid} with name: {aligned_atlas_name}")
-
-#         aligned_atlases_info[target_atlas_uid]['aligned_atlas_uid'] = aligned_atlas_uid
-#         aligned_atlases_info[target_atlas_uid]['aligned_atlas_name'] = aligned_atlas_name
-    
-#     return aligned_atlases_info
-
-
 def create_new_atlas_from_dataframe(
     atlas_df: pd.DataFrame, 
     atlas_name: str, 
@@ -218,8 +91,10 @@ def create_new_atlas_from_dataframe(
     analysis_type: str,
     chromatography: str = None, 
     polarity: str = None,
-    atlas_file_path: str = None
+    atlas_file_path: str = None,
+    main_db_path: str = None
 ) -> "Atlas":
+    from workflow_objects import Atlas, CompoundMZRT
 
     if not chromatography:
         chromatography = ldt.detect_atlas_input_chromatography(atlas_df)
@@ -227,7 +102,7 @@ def create_new_atlas_from_dataframe(
         polarity = ldt.detect_atlas_input_polarity(atlas_df)        
 
     inchi_keys = atlas_df['inchi_key'].dropna().unique().tolist()
-    compound_lookup = dbi.get_compound_uids_by_inchi_keys(self.main_db_path, inchi_keys)
+    compound_lookup = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
 
     compound_mzrts = {}
     for _, row in atlas_df.iterrows():
@@ -246,8 +121,8 @@ def create_new_atlas_from_dataframe(
             raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference.")
         confidence_level = row.get('confidence_level', None)
         identification_notes = row.get('identification_notes', '')
-        mz_rt_uid, _ = dbi.get_or_create_compound_mz_rt_uid(
-            self.main_db_path,
+        mz_rt_uid, _ = get_or_create_compound_mz_rt_uid(
+            main_db_path,
             compound_uid,
             chromatography,
             polarity,
@@ -275,7 +150,7 @@ def create_new_atlas_from_dataframe(
         )
         compound_mzrts[inchi_key] = compound_mzrt
 
-    atlas_uid = dbi._generate_uid("ref_atlas", decorator=f"{analysis_type.lower()}-{chromatography.lower()}-{polarity.lower()}")
+    atlas_uid = _generate_uid("ref_atlas", decorator=f"{analysis_type.lower()}-{chromatography.lower()}-{polarity.lower()}")
     atlas_obj = Atlas(
         atlas_uid=atlas_uid,
         atlas_name=atlas_name,
@@ -339,7 +214,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
@@ -354,6 +229,8 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                         compound_mzrt.confidence,
                         compound_mzrt.identification_notes,
                         compound_mzrt.source,
+                        'False',  # rt_alignment_applied
+                        'False',  # manual_curation_applied
                         prov["analyst"],
                         prov["timestamp"]
                     ))
@@ -622,23 +499,22 @@ def create_project_database(project_db_path: str, overwrite: bool = False) -> No
     logger.info(f"Project database created at {project_db_path}")
     return
 
-def create_metatlas_database(new_compoound_obj: "NewCompound") -> None:
+def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
     """
     Create main metatlas database with required tables.
     """
-    db_path = Path(new_compoound_obj.main_db_path)
-    overwrite_existing = new_compoound_obj.overwrite_db
+    db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     
-    if overwrite_existing and db_path.exists():
-        logger.warning("Overwriting existing main database because overwrite_existing=True")
+    if overwrite and db_path.exists():
+        logger.warning("Overwriting existing main database because overwrite=True")
         db_path.unlink()
         logger.info(f"Deleted existing database at {db_path} and creating new database.")
-    elif overwrite_existing and not db_path.exists():
+    elif overwrite and not db_path.exists():
         logger.info(f"No existing main database found at {db_path}. Creating new database.")
-    elif not overwrite_existing and db_path.exists():
-        raise ValueError(f"Database already exists at {db_path}. Use overwrite_existing=True to replace it.")
-    elif not overwrite_existing and not db_path.exists():
+    elif not overwrite and db_path.exists():
+        raise ValueError(f"Database already exists at {db_path}. Use overwrite=True to replace it.")
+    elif not overwrite and not db_path.exists():
         logger.info(f"No existing main database found at {db_path}. Creating new database.")
 
     with get_db_connection(db_path) as conn:
@@ -827,7 +703,7 @@ def save_rt_alignment_model_to_db(
     project_name = project_db_path.stem.replace('.duckdb', '')
     prov = ldt.get_provenance()
 
-    best_model = rt_align_obj.best_model
+    rt_alignment_model = rt_align_obj.rt_alignment_model
     modeling_data = (
         rt_align_obj.modeling_data.to_dict('records')
         if hasattr(rt_align_obj.modeling_data, 'to_dict')
@@ -840,11 +716,11 @@ def save_rt_alignment_model_to_db(
         "alignment_timestamp": prov["timestamp"],
         "alignment_method": "polynomial_qc_based",
         "analyst": prov["analyst"],
-        "poly_degree": int(best_model['degree']),
-        "poly_include_bias": bool(best_model.get('poly_features').include_bias if best_model.get('poly_features') else True),
-        "poly_interaction_only": bool(best_model.get('poly_features').interaction_only if best_model.get('poly_features') else False),
-        "model_intercept": float(best_model.get('intercept', 0.0)),
-        "model_coefficients": best_model['coefficients'].tolist() if hasattr(best_model['coefficients'], 'tolist') else list(best_model['coefficients'])
+        "poly_degree": int(rt_alignment_model['degree']),
+        "poly_include_bias": bool(rt_alignment_model.get('poly_features').include_bias if rt_alignment_model.get('poly_features') else True),
+        "poly_interaction_only": bool(rt_alignment_model.get('poly_features').interaction_only if rt_alignment_model.get('poly_features') else False),
+        "model_intercept": float(rt_alignment_model.get('intercept', 0.0)),
+        "model_coefficients": rt_alignment_model['coefficients'].tolist() if hasattr(rt_alignment_model['coefficients'], 'tolist') else list(rt_alignment_model['coefficients'])
     }
 
     with get_db_connection(project_db_path) as conn:
@@ -856,11 +732,11 @@ def save_rt_alignment_model_to_db(
             rt_align_obj.rt_alignment_number,
             rt_align_obj.qc_atlas_uid,
             "polynomial",
-            best_model['degree'],
-            best_model['r2'],
-            best_model['rmse'],
-            json.dumps(best_model['coefficients'].tolist()),
-            best_model['equation'],
+            rt_alignment_model['degree'],
+            rt_alignment_model['r2'],
+            rt_alignment_model['rmse'],
+            json.dumps(rt_alignment_model['coefficients'].tolist()),
+            rt_alignment_model['equation'],
             len(qc_files),
             len(modeling_data),
             prov["analyst"],
@@ -870,7 +746,7 @@ def save_rt_alignment_model_to_db(
 
     logger.info(f"RT alignment model saved to database with UID: {rt_alignment_uid}")
 
-    best_model['rt_alignment_uid'] = rt_alignment_uid
+    rt_alignment_model['rt_alignment_uid'] = rt_alignment_uid
 
     return rt_alignment_uid
 
@@ -1035,7 +911,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
             # Batch insert filtered references
             if filtered_reference_records:
                 conn.executemany("""
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, filtered_reference_records)
         
         # Get final counts
@@ -1193,6 +1069,8 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
             reference_data.get('confidence', 'Unknown'),
             reference_data.get('identification_notes', ''),
             reference_data.get('source', 'Unknown'),
+            reference_data.get('rt_alignment_applied', False),
+            reference_data.get('manual_curation_applied', False),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -1381,7 +1259,9 @@ def get_lcmsruns_from_db(project_db_path: str,
     return database_files
 
 def batch_save_compounds_and_mzrts(
-    new_compound_obj: "NewCompound"
+    db_path: str,
+    compounds: List["Compound"],
+    compound_mzrts: List["CompoundMZRT"]
 ) -> Tuple[int, int]:
     """
     Schema-compliant batch save for compounds and references from raw input data.
@@ -1401,9 +1281,8 @@ def batch_save_compounds_and_mzrts(
         Tuple of (compounds_created, mzrts_created)
     """
 
-    compounds_data = [compound.to_dict() for compound in new_compound_obj.compounds]
-    mzrts_data = [compound_mzrt.to_dict() for compound_mzrt in new_compound_obj.compound_mzrts]
-    db_path = new_compound_obj.main_db_path
+    compounds_data = [compound.to_dict() for compound in compounds]
+    mzrts_data = [compound_mzrt.to_dict() for compound_mzrt in compound_mzrts]
 
     compounds_created = 0
     mzrts_created = 0
@@ -1498,7 +1377,7 @@ def batch_save_compounds_and_mzrts(
             if reference_records:
                 logger.info(f"Creating {len(reference_records)} new references...")
                 conn.executemany("""
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, reference_records)
     
     # Log summary
@@ -1603,9 +1482,10 @@ def _create_database_tables(conn, db_type: str = "main"):
                 confidence TEXT,
                 identification_notes TEXT,
                 source TEXT,
+                rt_alignment_applied BOOL,
+                manual_curation_applied BOOL,
                 created_by TEXT,
                 created_date TEXT,
-                FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid)
             )
         """)
         
@@ -2026,6 +1906,7 @@ def save_analysis_results_to_db(
     ms2_data_records = []
 
     # CompoundInfo
+    logger.info(f"Processing {len(exp_data_obj.compound_infos)} compounds for metadata records...")
     for ci in exp_data_obj.compound_infos:
         compound_uid = compound_uid_map.get(ci.inchi_key)
         if not compound_uid:
@@ -2040,6 +1921,7 @@ def save_analysis_results_to_db(
             compound_metadata_records.append(metadata_record)
 
     # MS1Summary
+    logger.info(f"Processing {len(exp_data_obj.ms1_summaries)} MS1 summaries for records...")
     for ms1_sum in exp_data_obj.ms1_summaries:
         compound_uid = compound_uid_map.get(ms1_sum.inchi_key)
         if not compound_uid or ms1_sum.data.empty:
@@ -2052,6 +1934,7 @@ def save_analysis_results_to_db(
             ms1_summary_records.append(ms1_sum_record)
 
     # MS2Summary
+    logger.info(f"Processing {len(exp_data_obj.ms2_summaries)} MS2 summaries for records...")
     for ms2_sum in exp_data_obj.ms2_summaries:
         compound_uid = compound_uid_map.get(ms2_sum.inchi_key)
         if not compound_uid or ms2_sum.data.empty:
@@ -2064,6 +1947,7 @@ def save_analysis_results_to_db(
             ms2_summary_records.append(ms2_sum_record)
 
     # MS2Hits
+    logger.info(f"Processing {len(exp_data_obj.ms2_hits)} MS2 hits for records...")
     for ms2_hit in exp_data_obj.ms2_hits:
         compound_uid = compound_uid_map.get(ms2_hit.inchi_key)
         if not compound_uid or ms2_hit.data.empty:
@@ -2077,6 +1961,7 @@ def save_analysis_results_to_db(
                 ms2_hits_records.append(ms2_hit_record)
 
     # MS1Data
+    logger.info(f"Processing MS1 data for {len(exp_data_obj.ms1_data)} compounds...")
     for ms1 in exp_data_obj.ms1_data:
         compound_uid = compound_uid_map.get(ms1.inchi_key)
         if not compound_uid or ms1.data.empty:
@@ -2090,6 +1975,7 @@ def save_analysis_results_to_db(
                 ms1_data_records.append(ms1_data_record)
 
     # MS2Data
+    logger.info(f"Processing MS2 data for {len(exp_data_obj.ms2_data)} compounds...")
     for ms2 in exp_data_obj.ms2_data:
         compound_uid = compound_uid_map.get(ms2.inchi_key)
         if not compound_uid or ms2.data.empty:
@@ -2114,8 +2000,10 @@ def save_analysis_results_to_db(
         ms2_data_records
     )
 
-    logger.info("Complete analysis data saved to database. Summary:")
+    logger.info("Compiling analysis summary for experimental data...")
     exp_data_obj_summary = _display_analysis_summary(exp_data_obj)
+
+    logger.info("Complete analysis data saved to database. Summary:")
     display(exp_data_obj_summary)
 
     return
