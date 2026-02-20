@@ -10,176 +10,125 @@ import logging_config as lcf
 
 logger = lcf.get_logger('ms1_ms2_summarizer')
 
-
 def create_ms_summaries(
-    exp_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]],
-    atlas_dataframe: pd.DataFrame,
-    only_ms_level: Optional[int] = None
-) -> Dict[str, Dict[str, Dict]]:
+    exp_data_obj: "ExperimentalData",
+    atlas_obj: "Atlas",
+) -> "ExperimentalData":
     """
-    Create comprehensive summary structure combining experimental data with atlas metadata.
-    
+    Create MS1Summary and MS2Summary objects for each compound/adduct/file and add them to ExperimentalData.
     Returns:
-        Dict with structure:
-        {
-            inchi_key: {
-                adduct: {
-                    'compound_info': pd.DataFrame (1 row with compound-level data),
-                    'file_summaries': {
-                        filename: {
-                            'ms1_summary': pd.DataFrame (1 row),
-                            'ms2_summary': pd.DataFrame (1 row),
-                            'ms2_hits': pd.DataFrame (multiple rows, one per hit)
-                        }
-                    }
-                }
-            }
-        }
+        Updated ExperimentalData object.
     """
-    results = {}
-    
-    # Iterate through atlas entries (ensures all compounds are included)
-    for _, atlas_row in atlas_dataframe.iterrows():
-        inchi_key = atlas_row['inchi_key']
-        adduct = atlas_row['adduct']
-        
-        # Initialize nested dict structure if needed
-        if inchi_key not in results:
-            results[inchi_key] = {}
-        
-        # Create compound-level summary from atlas
-        compound_info = _create_compound_info(atlas_row)
-        
-        # Get experimental data for this inchi_key (may be empty)
-        file_dict = exp_data.get(inchi_key, {})
-        
-        # Create file-level summaries for this adduct
-        file_summaries = {}
-        for filename, data_dict in file_dict.items():
-            ms1_df = data_dict.get('ms1_data', pd.DataFrame())
-            ms2_df = data_dict.get('ms2_data', pd.DataFrame())
-            ms2_hits_df = data_dict.get('ms2_hits', pd.DataFrame())
-            
-            # Filter data for this specific adduct
-            if not ms1_df.empty and 'adduct' in ms1_df.columns:
-                ms1_df = ms1_df[ms1_df['adduct'] == adduct]
-            if not ms2_df.empty and 'adduct' in ms2_df.columns:
-                ms2_df = ms2_df[ms2_df['adduct'] == adduct]
-            if not ms2_hits_df.empty and 'adduct' in ms2_hits_df.columns:
-                ms2_hits_df = ms2_hits_df[ms2_hits_df['adduct'] == adduct]
-            
-            file_summary = {}
-            
-            if only_ms_level is None or only_ms_level == 1:
-                file_summary['ms1_summary'] = _calculate_ms1_summary(
-                    ms1_df, 
-                    compound_info
-                )
-                # Store raw EIC data for RT suggestions
-                file_summary['ms1_raw_data'] = ms1_df
-            
-            if only_ms_level is None or only_ms_level == 2:
-                file_summary['ms2_summary'] = _calculate_ms2_summary(
-                    ms2_df, 
-                    ms2_hits_df,
-                    compound_info
-                )
-                file_summary['ms2_hits'] = ms2_hits_df
-            
-            file_summaries[filename] = file_summary
-        
-        # Calculate best EIC across all files for this adduct
-        compound_info = _calculate_best_eic_across_files(compound_info, file_summaries)
-        
-        results[inchi_key][adduct] = {
-            'compound_info': compound_info,
-            'file_summaries': file_summaries
-        }
-    
-    # Add isomers and RT suggestions
-    logger.info("Adding isomer detection to summaries...")
-    add_isomers_to_summaries(results, atlas_dataframe)
-    
-    logger.info("Adding RT bound suggestions to summaries...")
-    add_rt_suggestions_to_summaries(results)
-    
-    logger.info("Calculating analysis summary statistics")
-    print_summary_statistics(results)
 
-    return results
+    from workflow_objects import MS1Summary, MS2Summary
 
+    # Build lookups for each data type by (inchi_key, adduct, filename)
+    ms1_lookup = {}
+    for ms1 in exp_data_obj.ms1_data:
+        key = (ms1.inchi_key, ms1.adduct, ms1.filename)
+        ms1_lookup[key] = ms1.data
 
-def _create_compound_info(atlas_row: pd.Series) -> pd.DataFrame:
+    ms2_lookup = {}
+    for ms2 in exp_data_obj.ms2_data:
+        key = (ms2.inchi_key, ms2.adduct, ms2.filename)
+        ms2_lookup[key] = ms2.data
+
+    ms2_hits_lookup = {}
+    for ms2_hit in exp_data_obj.ms2_hits:
+        key = (ms2_hit.inchi_key, ms2_hit.adduct, ms2_hit.filename)
+        ms2_hits_lookup[key] = ms2_hit.data
+
+    # Iterate through Atlas compound_mzrts
+    for compound_mzrt in atlas_obj.compound_mzrts.values():
+        inchi_key = compound_mzrt.inchi_key
+        adduct = compound_mzrt.adduct
+
+        # Find all filenames for this compound/adduct
+        filenames = set(
+            fname for _, _, fname in ms1_lookup.keys()
+            if _ == inchi_key and __ == adduct
+        )
+        filenames.update(
+            fname for _, _, fname in ms2_lookup.keys()
+            if _ == inchi_key and __ == adduct
+        )
+        filenames.update(
+            fname for _, _, fname in ms2_hits_lookup.keys()
+            if _ == inchi_key and __ == adduct
+        )
+
+        for filename in filenames:
+            ms1_df = ms1_lookup.get((inchi_key, adduct, filename), pd.DataFrame())
+            ms2_df = ms2_lookup.get((inchi_key, adduct, filename), pd.DataFrame())
+            ms2_hits_df = ms2_hits_lookup.get((inchi_key, adduct, filename), pd.DataFrame())
+
+            ms1_summary_df = _calculate_ms1_summary(ms1_df, None, compound_mzrt)
+            ms2_summary_df = _calculate_ms2_summary(ms2_df, ms2_hits_df, None, compound_mzrt)
+
+            ms1_summary_obj = MS1Summary(
+                inchi_key=inchi_key,
+                adduct=adduct,
+                filename=filename,
+                data=ms1_summary_df
+            )
+            ms2_summary_obj = MS2Summary(
+                inchi_key=inchi_key,
+                adduct=adduct,
+                filename=filename,
+                data=ms2_summary_df
+            )
+
+            exp_data_obj.ms1_summaries.append(ms1_summary_obj)
+            exp_data_obj.ms2_summaries.append(ms2_summary_obj)
+
+    return exp_data_obj
+
+def _create_compound_info(compound_mzrt: "CompoundMZRT") -> pd.DataFrame:
     """
-    Create compound-level information DataFrame from atlas entry.
+    Create compound-level information DataFrame from CompoundMZRT object.
     Returns single-row DataFrame with compound metadata and placeholders for analysis results.
-    Adduct is NOT included as a column since it's now a dict key.
     """
     compound_data = {
-        # Core identifiers
-        'inchi_key': atlas_row['inchi_key'],
-        'compound_uid': atlas_row['compound_uid'],
-        'compound_name': atlas_row.get('compound_name', atlas_row.get('label', '')),
-        'formula': atlas_row.get('formula', ''),
-        'polarity': atlas_row.get('polarity', ''),
-        'chromatography': atlas_row.get('chromatography', ''),
-        
-        # m/z and tolerances
-        'mz': atlas_row.get('mz', 0.0),
-        'mz_tolerance': atlas_row.get('mz_tolerance', 5.0),
-        
-        # Original RT bounds from atlas
-        'original_rt_peak': atlas_row.get('rt_peak', 0.0),
-        'original_rt_min': atlas_row.get('rt_min', 0.0),
-        'original_rt_max': atlas_row.get('rt_max', 0.0),
-        
-        # Current RT bounds (modifiable)
-        'rt_peak': atlas_row.get('rt_peak', 0.0),
-        'rt_min': atlas_row.get('rt_min', 0.0),
-        'rt_max': atlas_row.get('rt_max', 0.0),
-        
-        # Analysis annotations (compound-level)
+        'inchi_key': compound_mzrt.inchi_key,
+        'compound_uid': compound_mzrt.compound_uid,
+        'compound_name': getattr(compound_mzrt, 'compound_name', getattr(compound_mzrt, 'label', '')),
+        'formula': getattr(compound_mzrt, 'formula', ''),
+        'polarity': getattr(compound_mzrt, 'polarity', ''),
+        'chromatography': getattr(compound_mzrt, 'chromatography', ''),
+        'mz_tolerance': getattr(compound_mzrt, 'mz_tolerance', 5.0),
+        'atlas_mz': getattr(compound_mzrt, 'mz', 0.0),
+        'atlas_rt_peak': getattr(compound_mzrt, 'rt_peak', 0.0),
+        'atlas_rt_min': getattr(compound_mzrt, 'rt_min', 0.0),
+        'atlas_rt_max': getattr(compound_mzrt, 'rt_max', 0.0),
+        'extracted_mz': getattr(compound_mzrt, 'mz', 0.0),
+        'extracted_rt_peak': getattr(compound_mzrt, 'rt_peak', 0.0),
+        'extracted_rt_min': getattr(compound_mzrt, 'rt_min', 0.0),
+        'extracted_rt_max': getattr(compound_mzrt, 'rt_max', 0.0),
         'ms1_notes': 'keep',
         'ms2_notes': 'no selection',
         'analyst_notes': '',
         'identification_notes': '',
-        
-        # Modification tracking
         'is_rt_modified': False,
         'is_annotation_modified': False,
-        
-        # Placeholders for calculated fields (filled later)
         'total_files_detected': 0,
         'ms2_files_with_data': 0,
-        
-        # Best EIC results (across all files)
         'best_eic_file': '',
         'best_eic_rt': 0.0,
         'best_eic_mz': 0.0,
         'best_eic_intensity': 0.0,
         'best_eic_ppm_error': 0.0,
         'best_eic_rt_error': 0.0,
-        
-        # Isomers and RT suggestions
         'isomers': None,
         'suggested_rt_min': 0.0,
         'suggested_rt_max': 0.0,
         'suggested_rt_peak': 0.0,
         'rt_suggestion_confidence': 0.0
     }
-    
     return pd.DataFrame([compound_data])
 
 
-def _calculate_ms1_summary(df: pd.DataFrame, compound_info: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate summary properties for MS1 data from a single file.
-    Returns single-row DataFrame with MS1 metrics.
-    """
-    inchi_key = compound_info['inchi_key'].iloc[0]
-    atlas_mz = compound_info['mz'].iloc[0]
-    atlas_rt = compound_info['rt_peak'].iloc[0]
-    
+def _calculate_ms1_summary(df: pd.DataFrame, compound_info: pd.DataFrame, compound_mzrt: "CompoundMZRT") -> pd.DataFrame:
+    inchi_key = compound_mzrt.inchi_key
     summary_schema = {
         'inchi_key': inchi_key,
         'num_datapoints': 0,
@@ -190,42 +139,31 @@ def _calculate_ms1_summary(df: pd.DataFrame, compound_info: pd.DataFrame) -> pd.
         'ppm_error': 0.0,
         'rt_error': 0.0
     }
-    
     if df.empty:
-        return pd.DataFrame([summary_schema])
-    
+        return pd.DataFrame(columns=summary_schema.keys())
     sum_intensity = df['i'].sum()
     summary_schema['num_datapoints'] = int(df['i'].count())
     summary_schema['peak_area'] = float(sum_intensity)
-    
     if sum_intensity > 0:
         idx = df['i'].idxmax()
         peak_height = df.loc[idx, 'i']
         peak_mz = df.loc[idx, 'mz']
         peak_rt = df.loc[idx, 'rt']
-        
         mz_centroid = (df['i'] * df['mz']).sum() / sum_intensity
-        
         summary_schema['peak_height'] = float(peak_height)
         summary_schema['mz_centroid'] = float(mz_centroid)
         summary_schema['rt_peak'] = float(peak_rt)
-        summary_schema['ppm_error'] = float((mz_centroid - atlas_mz) / atlas_mz * 1e6)
-        summary_schema['rt_error'] = float(peak_rt - atlas_rt)
-    
+        summary_schema['ppm_error'] = float((mz_centroid - compound_mzrt.mz) / compound_mzrt.mz * 1e6)
+        summary_schema['rt_error'] = float(peak_rt - compound_mzrt.rt_peak)
     return pd.DataFrame([summary_schema])
-
 
 def _calculate_ms2_summary(
     ms2_df: pd.DataFrame,
     ms2_hits_df: pd.DataFrame,
-    compound_info: pd.DataFrame
+    compound_info: pd.DataFrame,
+    compound_mzrt: "CompoundMZRT"
 ) -> pd.DataFrame:
-    """
-    Calculate summary properties for MS2 data from a single file.
-    Returns single-row DataFrame with MS2 scan metrics.
-    """
-    inchi_key = compound_info['inchi_key'].iloc[0]
-    
+    inchi_key = compound_mzrt.inchi_key
     summary_schema = {
         'inchi_key': inchi_key,
         'num_scans': 0,
@@ -235,23 +173,17 @@ def _calculate_ms2_summary(
         'best_scan_precursor_intensity': 0.0,
         'total_hits': 0
     }
-    
     if ms2_df.empty:
-        return pd.DataFrame([summary_schema])
-    
+        return pd.DataFrame(columns=summary_schema.keys())
     summary_schema['num_scans'] = int(ms2_df['rt'].nunique())
     summary_schema['num_fragments'] = int(len(ms2_df))
-    
     best_scan_idx = ms2_df.groupby('rt')['precursor_intensity'].first().idxmax()
     best_scan = ms2_df[ms2_df['rt'] == best_scan_idx].iloc[0]
-    
     summary_schema['best_scan_rt'] = float(best_scan['rt'])
     summary_schema['best_scan_precursor_mz'] = float(best_scan['precursor_MZ'])
     summary_schema['best_scan_precursor_intensity'] = float(best_scan['precursor_intensity'])
-    
     if not ms2_hits_df.empty:
         summary_schema['total_hits'] = int(len(ms2_hits_df))
-    
     return pd.DataFrame([summary_schema])
 
 
@@ -380,9 +312,9 @@ def add_rt_suggestions_to_summaries(
             
             suggestion = _suggest_rt_bounds_from_eic(
                 eic_data,
-                atlas_rt_peak=compound_info['original_rt_peak'].iloc[0],
-                atlas_rt_min=compound_info['original_rt_min'].iloc[0],
-                atlas_rt_max=compound_info['original_rt_max'].iloc[0]
+                atlas_rt_peak=compound_info['atlas_rt_peak'].iloc[0],
+                atlas_rt_min=compound_info['atlas_rt_min'].iloc[0],
+                atlas_rt_max=compound_info['atlas_rt_max'].iloc[0]
             )
             
             if suggestion is not None:
@@ -391,9 +323,9 @@ def add_rt_suggestions_to_summaries(
                 compound_info.at[0, 'suggested_rt_peak'] = suggestion['rt_peak']
                 compound_info.at[0, 'rt_suggestion_confidence'] = suggestion['confidence']
             else:
-                compound_info.at[0, 'suggested_rt_min'] = compound_info['original_rt_min'].iloc[0]
-                compound_info.at[0, 'suggested_rt_max'] = compound_info['original_rt_max'].iloc[0]
-                compound_info.at[0, 'suggested_rt_peak'] = compound_info['original_rt_peak'].iloc[0]
+                compound_info.at[0, 'suggested_rt_min'] = compound_info['atlas_rt_min'].iloc[0]
+                compound_info.at[0, 'suggested_rt_max'] = compound_info['atlas_rt_max'].iloc[0]
+                compound_info.at[0, 'suggested_rt_peak'] = compound_info['atlas_rt_peak'].iloc[0]
                 compound_info.at[0, 'rt_suggestion_confidence'] = 0.0
 
 def _suggest_rt_bounds_from_eic(

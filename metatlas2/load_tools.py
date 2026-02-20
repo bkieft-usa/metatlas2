@@ -319,4 +319,5 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
         df['mz_tolerance'] = 5.0
     
     logger.info(f"Loaded {len(df)} atlas entries from {file_path}")
+    
     return df

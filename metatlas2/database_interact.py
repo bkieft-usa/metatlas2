@@ -84,151 +84,326 @@ def find_rt_aligned_atlases_in_db(
             logger.info(f"Found {len(atlases)} RT-aligned atlases in project database for RT alignment number {rt_alignment_number}")
         return atlases
 
-def save_rt_aligned_atlas_to_db(
-    project_db_path: str,
-    main_db_path: str,
-    aligned_atlases_info: dict,
-    best_model: dict,
-    rt_alignment_number: int,
-    analysis_number: Optional[int] = None
-) -> Tuple[str, str]:
+# def save_rt_aligned_atlas_to_db(
+#     project_db_path: str,
+#     main_db_path: str,
+#     aligned_atlases_info: dict,
+#     best_model: dict,
+#     rt_alignment_number: int,
+#     analysis_number: Optional[int] = None
+# ) -> Tuple[str, str]:
+#     """
+#     Create RT-aligned atlas in project database and apply RT alignment to compounds.
+    
+#     Args:
+#         project_db_path: Path to project database
+#         main_db_path: Path to main database
+#         aligned_atlases_info: dataframe and stats for each RT-aligned atlas
+#         target_atlas_uid: UID of the target atlas
+#         best_model: RT alignment model dictionary
+#         rt_alignment_number: RT alignment number
+#         analysis_number: Optional analysis number for this RT alignment (if not provided, will be NULL in database)
+#     Returns:
+#         Tuple of (aligned_atlas_uid, aligned_atlas_name)
+#     """
+#     logger.info("Creating RT-aligned atlases in project database...")
+
+#     for target_atlas_uid, atlas_data in aligned_atlases_info.items():
+
+#         aligned_atlas_df = atlas_data['aligned_df']
+#         logger.info("Verifying all compounds in RT-aligned atlas exist in main database...")
+#         _verify_compounds_exist_in_db(aligned_atlas_df['compound_uid'].tolist(), main_db_path)
+
+#         prov = ldt.get_provenance()
+
+#         # Use some info from the target atlas for the new RT-aligned target atlas
+#         target_atlas_info = get_atlas_metadata_from_db(main_db_path, target_atlas_uid)
+
+#         # Generate new atlas UID for RT-aligned version
+#         target_atlas_decorator = get_decorator_from_uid(target_atlas_uid)
+#         aligned_atlas_uid = _generate_uid("rt_atlas", decorator=target_atlas_decorator)
+#         aligned_atlas_name = f"{target_atlas_info['atlas_name']} (RT aligned)"
+#         aligned_atlas_description = f"RT-aligned version of {target_atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
+#         aligned_atlas_type = aligned_atlas_df['atlas_type'].iloc[0] if 'atlas_type' in aligned_atlas_df.columns else target_atlas_info['atlas_type']
+#         aligned_atlas_chrom = aligned_atlas_df['chromatography'].iloc[0] if 'chromatography' in aligned_atlas_df.columns else target_atlas_info['chromatography']
+#         aligned_atlas_polarity = aligned_atlas_df['polarity'].iloc[0] if 'polarity' in aligned_atlas_df.columns else target_atlas_info['polarity']
+#         aligned_atlas_analysis_type = aligned_atlas_df['analysis_type'].iloc[0] if 'analysis_type' in aligned_atlas_df.columns else "custom"
+#         aligned_atlas_source = target_atlas_info['source']
+#         logger.info(f"From the {target_atlas_info['atlas_uid']} template, generated new atlas UID: {aligned_atlas_uid} for RT-aligned atlas: {aligned_atlas_name}")
+
+#         logger.info("Saving RT-aligned atlas and compounds to project database...")
+#         with get_db_connection(project_db_path) as conn:
+            
+#             # Create new atlas entry
+#             conn.execute("""
+#                 INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#             """, (
+#                 aligned_atlas_uid,
+#                 aligned_atlas_name,
+#                 aligned_atlas_description,
+#                 aligned_atlas_chrom,
+#                 aligned_atlas_polarity,
+#                 aligned_atlas_analysis_type,
+#                 aligned_atlas_type,
+#                 target_atlas_info['atlas_uid'],
+#                 rt_alignment_number,
+#                 analysis_number,
+#                 prov["analyst"],
+#                 prov["timestamp"],
+#                 source
+#             ))
+
+#             association_order = 0
+#             for _, row in aligned_atlas_df.iterrows():
+#                 compound_uid = row['compound_uid']
+#                 aligned_rt_peak = row.get('rt_peak')
+#                 aligned_rt_min = row.get('rt_min')
+#                 aligned_rt_max = row.get('rt_max')
+#                 rt_shift = row.get('rt_shift')
+#                 exp_uid = _generate_uid("compound_mzrt")
+#                 assoc_uid = _generate_uid("association")
+#                 mz_rt_reference_uid = row.get('mz_rt_reference_uid')
+
+#                 conn.execute("""
+#                     INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+#                 """, (
+#                     exp_uid,
+#                     compound_uid,
+#                     rt_alignment_number,
+#                     analysis_number,
+#                     aligned_rt_peak,
+#                     aligned_rt_min,
+#                     aligned_rt_max,
+#                     '',  # ms1_notes
+#                     '',  # ms2_notes
+#                     row.get('mz'),
+#                     row.get('mz_tolerance', 5.0),
+#                     row.get('adduct', ''),
+#                     target_atlas_info['chromatography'],
+#                     target_atlas_info['polarity'],
+#                     row.get('rt_alignment_applied', True),
+#                     rt_shift,
+#                     mz_rt_reference_uid,
+#                     prov["analyst"],
+#                     prov["timestamp"]
+#                 ))
+                
+#                 # Create atlas-compound association
+#                 conn.execute("""
+#                     INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+#                 """, (
+#                     assoc_uid,
+#                     aligned_atlas_uid,
+#                     compound_uid,
+#                     exp_uid,
+#                     association_order,
+#                     prov["analyst"],
+#                     prov["timestamp"]
+#                 ))
+
+#                 association_order += 1
+
+#         logger.info(f"Created and deposited RT-aligned atlas: {aligned_atlas_uid} with name: {aligned_atlas_name}")
+
+#         aligned_atlases_info[target_atlas_uid]['aligned_atlas_uid'] = aligned_atlas_uid
+#         aligned_atlases_info[target_atlas_uid]['aligned_atlas_name'] = aligned_atlas_name
+    
+#     return aligned_atlases_info
+
+
+def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str = None) -> None:
     """
-    Create RT-aligned atlas in project database and apply RT alignment to compounds.
+    Save an Atlas object to the database (typing not included to avoid circular imports).
+    Only creates new compound_mzrt entries for references that don't already exist.
     
     Args:
-        project_db_path: Path to project database
-        main_db_path: Path to main database
-        aligned_atlases_info: dataframe and stats for each RT-aligned atlas
-        target_atlas_uid: UID of the target atlas
-        best_model: RT alignment model dictionary
-        rt_alignment_number: RT alignment number
-        analysis_number: Optional analysis number for this RT alignment (if not provided, will be NULL in database)
-    Returns:
-        Tuple of (aligned_atlas_uid, aligned_atlas_name)
+        atlas_obj: Atlas object to save
     """
-    logger.info("Creating RT-aligned atlases in project database...")
 
-    for target_atlas_uid, atlas_data in aligned_atlases_info.items():
-
-        aligned_atlas_df = atlas_data['aligned_df']
-        logger.info("Verifying all compounds in RT-aligned atlas exist in main database...")
-        _verify_compounds_exist_in_db(aligned_atlas_df['compound_uid'].tolist(), main_db_path)
-
-        prov = ldt.get_provenance()
-
-        # Use some info from the target atlas for the new RT-aligned target atlas
-        target_atlas_info = get_atlas_metadata_from_db(main_db_path, target_atlas_uid)
-
-        # Generate new atlas UID for RT-aligned version
-        target_atlas_decorator = get_decorator_from_uid(target_atlas_uid)
-        aligned_atlas_uid = _generate_uid("rt_atlas", decorator=target_atlas_decorator)
-        aligned_atlas_name = f"{target_atlas_info['atlas_name']} (RT aligned)"
-        aligned_atlas_description = f"RT-aligned version of {target_atlas_info['atlas_name']} using polynomial model (R²={best_model['r2']:.4f})"
-        aligned_atlas_type = aligned_atlas_df['atlas_type'].iloc[0] if 'atlas_type' in aligned_atlas_df.columns else target_atlas_info['atlas_type']
-        aligned_atlas_chrom = aligned_atlas_df['chromatography'].iloc[0] if 'chromatography' in aligned_atlas_df.columns else target_atlas_info['chromatography']
-        aligned_atlas_polarity = aligned_atlas_df['polarity'].iloc[0] if 'polarity' in aligned_atlas_df.columns else target_atlas_info['polarity']
-        aligned_atlas_analysis_type = aligned_atlas_df['analysis_type'].iloc[0] if 'analysis_type' in aligned_atlas_df.columns else "custom"
-        logger.info(f"From the {target_atlas_info['atlas_uid']} template, generated new atlas UID: {aligned_atlas_uid} for RT-aligned atlas: {aligned_atlas_name}")
-
-        logger.info("Saving RT-aligned atlas and compounds to project database...")
-        with get_db_connection(project_db_path) as conn:
+    prov = ldt.get_provenance()
+    with get_db_connection(db_path) as conn:
+        if not main_db_path: # This will be a main database save
             
-            # Create new atlas entry
+            # Verify all compounds exist in main database
+            if not _verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_mzrts.values()], db_path):
+                raise ValueError(f"Some compounds in atlas {atlas_obj.atlas_uid} don't exist in database")
+
+            # Create atlas entry
             conn.execute("""
-                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                aligned_atlas_uid,
-                aligned_atlas_name,
-                aligned_atlas_description,
-                aligned_atlas_chrom,
-                aligned_atlas_polarity,
-                aligned_atlas_analysis_type,
-                aligned_atlas_type,
-                target_atlas_info['atlas_uid'],
-                rt_alignment_number,
-                analysis_number,
+                atlas_obj.atlas_uid,
+                atlas_obj.atlas_name,
+                atlas_obj.atlas_description,
+                atlas_obj.chromatography,
+                atlas_obj.polarity,
+                atlas_obj.analysis_type,
+                atlas_obj.atlas_type,
                 prov["analyst"],
-                prov["timestamp"]
+                prov["timestamp"],
+                atlas_obj.source
             ))
-
+            
+            # Process each CompoundMZRT
             association_order = 0
-            for _, row in aligned_atlas_df.iterrows():
-                compound_uid = row['compound_uid']
-                aligned_rt_peak = row.get('rt_peak')
-                aligned_rt_min = row.get('rt_min')
-                aligned_rt_max = row.get('rt_max')
-                rt_shift = row.get('rt_shift')
-                exp_uid = _generate_uid("mz_rt_experimental")
-                assoc_uid = _generate_uid("association")
-                mz_rt_reference_uid = row.get('mz_rt_reference_uid')
-
-                conn.execute("""
-                    INSERT INTO mz_rt_experimental VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    exp_uid,
-                    compound_uid,
-                    rt_alignment_number,
-                    analysis_number,
-                    aligned_rt_peak,
-                    aligned_rt_min,
-                    aligned_rt_max,
-                    '',  # ms1_notes
-                    '',  # ms2_notes
-                    row.get('mz'),
-                    row.get('mz_tolerance', 5.0),
-                    row.get('adduct', ''),
-                    target_atlas_info['chromatography'],
-                    target_atlas_info['polarity'],
-                    row.get('rt_alignment_applied', True),
-                    rt_shift,
-                    mz_rt_reference_uid,
-                    prov["analyst"],
-                    prov["timestamp"]
-                ))
+            mzrts_created = 0
+            mzrts_reused = 0
+            for inchi_key, compound_mzrt in atlas_obj.compound_mzrts.items():
+                # Check if this reference already exists in database
+                existing_check = conn.execute("""
+                    SELECT mz_rt_uid FROM compound_mzrt 
+                    WHERE mz_rt_uid = ?
+                """, [compound_mzrt.mz_rt_uid]).fetchone()
+                
+                mz_rt_uid = compound_mzrt.mz_rt_uid
+                
+                # Create new reference if it doesn't exist
+                if not existing_check:
+                    conn.execute("""
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        mz_rt_uid,
+                        compound_mzrt.compound_uid,
+                        compound_mzrt.rt_peak,
+                        compound_mzrt.rt_min,
+                        compound_mzrt.rt_max,
+                        compound_mzrt.mz,
+                        compound_mzrt.mz_tolerance,
+                        compound_mzrt.adduct,
+                        compound_mzrt.chromatography,
+                        compound_mzrt.polarity,
+                        compound_mzrt.confidence,
+                        compound_mzrt.identification_notes,
+                        compound_mzrt.source,
+                        prov["analyst"],
+                        prov["timestamp"]
+                    ))
+                    mzrts_created += 1
+                else:
+                    mzrts_reused += 1
                 
                 # Create atlas-compound association
+                assoc_uid = _generate_uid("association")
                 conn.execute("""
                     INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
                     assoc_uid,
-                    aligned_atlas_uid,
-                    compound_uid,
-                    exp_uid,
+                    atlas_obj.atlas_uid,
+                    compound_mzrt.compound_uid,
+                    mz_rt_uid,
                     association_order,
                     prov["analyst"],
                     prov["timestamp"]
                 ))
-
+                
                 association_order += 1
+        
+            logger.info(f"Saved atlas {atlas_obj.atlas_name} to database with UID: {atlas_obj.atlas_uid}")
+            logger.info(f"  References created: {mzrts_created}")
+            logger.info(f"  References reused: {mzrts_reused}")
+            logger.info(f"  Total associations: {association_order}")
 
-        logger.info(f"Created and deposited RT-aligned atlas: {aligned_atlas_uid} with name: {aligned_atlas_name}")
+        else: # This will be a project database save, so we need to attach the main db for verification of compounds
 
-        aligned_atlases_info[target_atlas_uid]['aligned_atlas_uid'] = aligned_atlas_uid
-        aligned_atlases_info[target_atlas_uid]['aligned_atlas_name'] = aligned_atlas_name
-    
-    return aligned_atlases_info
+            # Attach main database for compound verification
+            conn.execute(f"ATTACH '{main_db_path}' AS main_db")
+            verify_db_path = main_db_path
 
+            # Verify all compounds exist in database
+            if not _verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_mzrts.values()], verify_db_path):
+                raise ValueError(f"Some compounds in atlas {atlas_obj.atlas_uid} don't exist in main database")
+
+            # Create new atlas entry
+            conn.execute("""
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                atlas_obj.atlas_uid,
+                atlas_obj.atlas_name,
+                atlas_obj.atlas_description,
+                atlas_obj.chromatography,
+                atlas_obj.polarity,
+                atlas_obj.analysis_type,
+                atlas_obj.atlas_type,
+                atlas_obj.source_atlas_uid,
+                atlas_obj.rt_alignment_number,
+                atlas_obj.analysis_number,
+                prov["analyst"],
+                prov["timestamp"],
+                atlas_obj.source
+            ))
+
+            # Process each CompoundMZRT
+            association_order = 0
+            mzrts_created = 0
+            mzrts_reused = 0
+            for inchi_key, compound_mzrt in atlas_obj.compound_mzrts.items():
+                # Check if this reference already exists in database
+                existing_check = conn.execute("""
+                    SELECT mz_rt_uid FROM compound_mzrt 
+                    WHERE mz_rt_uid = ?
+                """, [compound_mzrt.mz_rt_uid]).fetchone()
+                
+                mz_rt_uid = compound_mzrt.mz_rt_uid
+
+                # Create new reference if it doesn't exist
+                if not existing_check:
+                    conn.execute("""
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        mz_rt_uid,
+                        compound_mzrt.compound_uid,
+                        compound_mzrt.rt_peak,
+                        compound_mzrt.rt_min,
+                        compound_mzrt.rt_max,
+                        compound_mzrt.mz,
+                        compound_mzrt.mz_tolerance,
+                        compound_mzrt.adduct,
+                        compound_mzrt.chromatography,
+                        compound_mzrt.polarity,
+                        compound_mzrt.confidence,
+                        compound_mzrt.identification_notes,
+                        compound_mzrt.source,
+                        compound_mzrt.rt_alignment_applied,
+                        compound_mzrt.manual_curation_applied,
+                        prov["analyst"],
+                        prov["timestamp"]
+                    ))
+                    mzrts_created += 1
+                else:
+                    mzrts_reused += 1
+                
+                # Create atlas-compound association
+                assoc_uid = _generate_uid("association")
+                conn.execute("""
+                    INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    assoc_uid,
+                    atlas_obj.atlas_uid,
+                    compound_mzrt.compound_uid,
+                    mz_rt_uid,
+                    association_order,
+                    prov["analyst"],
+                    prov["timestamp"]
+                ))
+                
+                association_order += 1
+        
+            conn.execute("DETACH main_db")
+
+    logger.info(f"Saved atlas {atlas_obj.atlas_name} to database with UID {atlas_obj.atlas_uid}, chromatography {atlas_obj.chromatography}, polarity {atlas_obj.polarity}, and analysis type {atlas_obj.analysis_type}")
+    logger.info(f"  References created: {mzrts_created}")
+    logger.info(f"  References reused: {mzrts_reused}")
+    logger.info(f"  Total associations: {association_order}")
 
 def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: str = None) -> pd.DataFrame:
     """
     Extract all compound information for a given atlas UID from the database.
-    Handles both main database (with mz_rt_references) and project database (with mz_rt_experimental).
+    Handles both main database and project database.
     """
     with get_db_connection(database_path) as conn:
-        
-        # Detect database type
-        try:
-            result = conn.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='mz_rt_experimental'
-            """).fetchall()
-            is_project_db = len(result) > 0
-        except Exception as e:
-            logger.error(f"Error checking database type: {e}")
-            return pd.DataFrame()
 
         # Attach main database if needed for compound metadata
-        if is_project_db and main_db_path:
+        if main_db_path:
             try:
                 conn.execute(f"ATTACH '{main_db_path}' AS main_db")
                 logger.info("Attached main database for compound metadata")
@@ -237,7 +412,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                 return pd.DataFrame()
 
         try:
-            if is_project_db:
+            if main_db_path:
                 # Project DB: Join through associations to experimental entries
                 query = """
                     SELECT
@@ -246,24 +421,26 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.atlas_description,
                         a.chromatography,
                         a.polarity,
+                        a.analysis_type,
+                        a.atlas_type,
                         aca.compound_uid,
                         COALESCE(main_db.compounds.name, '') AS compound_name,
                         COALESCE(main_db.compounds.inchi_key, '') AS inchi_key,
                         COALESCE(main_db.compounds.inchi, '') AS inchi,
-                        mzrt_exp.adduct,
-                        mzrt_exp.mz,
-                        mzrt_exp.rt_peak,
-                        mzrt_exp.rt_min,
-                        mzrt_exp.rt_max,
-                        mzrt_exp.mz_tolerance,
-                        mzrt_exp.mz_rt_experimental_uid AS mz_rt_reference_uid,
-                        mzrt_exp.rt_alignment_applied,
-                        mzrt_exp.rt_shift
+                        mzrt.adduct,
+                        mzrt.mz,
+                        mzrt.rt_peak,
+                        mzrt.rt_min,
+                        mzrt.rt_max,
+                        mzrt.mz_tolerance,
+                        mzrt.mz_rt_uid AS mz_rt_uid,
+                        mzrt.rt_alignment_applied,
+                        mzrt.manual_curation_applied
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     LEFT JOIN main_db.compounds ON aca.compound_uid = main_db.compounds.compound_uid
-                    LEFT JOIN mz_rt_experimental mzrt_exp 
-                        ON aca.mz_rt_reference_uid = mzrt_exp.mz_rt_experimental_uid
+                    LEFT JOIN compound_mzrt mzrt 
+                        ON aca.mz_rt_uid = mzrt.mz_rt_uid
                     WHERE a.atlas_uid = ?
                     ORDER BY aca.association_order
                 """
@@ -276,6 +453,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.atlas_description,
                         a.chromatography,
                         a.polarity,
+                        a.analysis_type,
+                        a.atlas_type,
                         c.compound_uid,
                         c.name AS compound_name,
                         c.inchi_key,
@@ -286,14 +465,14 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.rt_min,
                         mzrt.rt_max,
                         mzrt.mz_tolerance,
-                        mzrt.mz_rt_reference_uid,
-                        FALSE AS rt_alignment_applied,
-                        NULL AS rt_shift
+                        mzrt.mz_rt_uid,
+                        mzrt.rt_alignment_applied,
+                        mzrt.manual_curation_applied
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     JOIN compounds c ON aca.compound_uid = c.compound_uid
-                    LEFT JOIN mz_rt_references mzrt 
-                        ON aca.mz_rt_reference_uid = mzrt.mz_rt_reference_uid
+                    LEFT JOIN compound_mzrt mzrt 
+                        ON aca.mz_rt_uid = mzrt.mz_rt_uid
                     WHERE a.atlas_uid = ?
                     ORDER BY aca.association_order
                 """
@@ -305,21 +484,16 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
             return pd.DataFrame()
         
         finally:
-            # Detach if attached
-            if is_project_db and main_db_path:
-                try:
-                    conn.execute("DETACH main_db")
-                except:
-                    pass
+            if main_db_path:
+                conn.execute("DETACH main_db")
 
     if df.empty:
         raise ValueError(f"No compounds found for atlas UID {atlas_uid} in database at {database_path}")
     else:
         df['label'] = df['compound_name'] if 'compound_name' in df.columns else ''
-        logger.info(f"Retrieved {len(df)} compounds for atlas: {df['atlas_name'].iloc[0]}")
-        #_verify_compounds_exist_in_db(df['compound_uid'].tolist(), database_path)
-        #display(df.head())
+        logger.info(f"Retrieved {len(df)} compounds for atlas {atlas_uid} ({df['atlas_name'].iloc[0]})")
 
+    display(df.head())
     return df
 
 # def check_rt_and_analysis_numbers(project_db_path: str, rt_alignment_number: int, analysis_number: int) -> None:
@@ -336,7 +510,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
 
 #         analysis_exists = conn.execute("""
 #             SELECT COUNT(*) 
-#             FROM mz_rt_experimental 
+#             FROM compound_mzrt 
 #             WHERE analysis_number = ?
 #             AND rt_alignment_number = ?
 #         """, [analysis_number, rt_alignment_number]).fetchone()[0] > 0
@@ -543,19 +717,19 @@ def validate_database(database_path: str, database_type: str = "main") -> None:
         if database_type == "main":
             # Main DB: compounds, references, atlases, associations
             compounds_count = conn.execute("SELECT COUNT(*) FROM compounds").fetchone()[0]
-            references_count = conn.execute("SELECT COUNT(*) FROM mz_rt_references").fetchone()[0]
+            mzrts_count = conn.execute("SELECT COUNT(*) FROM compound_mzrt").fetchone()[0]
             atlases_count = conn.execute("SELECT COUNT(*) FROM atlases").fetchone()[0]
             atlas_compound_associations_count = conn.execute("SELECT COUNT(*) FROM atlas_compound_associations").fetchone()[0]
             atlas_info = list_available_atlases(db_path)
 
             method_combinations = conn.execute("""
                 SELECT chromatography, polarity, COUNT(*) as reference_count 
-                FROM mz_rt_references 
+                FROM compound_mzrt 
                 GROUP BY chromatography, polarity
             """).fetchall()
 
             logger.info(f"   Compounds: {compounds_count}")
-            logger.info(f"   RT/MZ References: {references_count}")
+            logger.info(f"   RT/MZ References: {mzrts_count}")
             logger.info(f"   Atlases: {atlases_count}")
             logger.info(f"   Atlas-Compound associations: {atlas_compound_associations_count}")
 
@@ -573,12 +747,12 @@ def validate_database(database_path: str, database_type: str = "main") -> None:
                     logger.debug(f"            {row['compound_count']} compounds")
                     logger.debug(f"            {row['created_date']}")
         else:
-            # Project DB: atlases, targeted_analysis, rt_alignment, mz_rt_experimental
+            # Project DB: atlases, targeted_analysis, rt_alignment, compound_mzrt
             atlases_count = conn.execute("SELECT COUNT(*) FROM atlases").fetchone()[0]
             # Count unique analysis_uid values in targeted_analysis table
             #targeted_count = len(conn.execute("SELECT DISTINCT analysis_uid FROM targeted_analysis").fetchall())
             rt_alignment_count = conn.execute("SELECT COUNT(*) FROM rt_alignment").fetchone()[0]
-            mz_rt_exp_count = conn.execute("SELECT COUNT(*) FROM mz_rt_experimental").fetchone()[0]
+            mz_rt_exp_count = conn.execute("SELECT COUNT(*) FROM compound_mzrt").fetchone()[0]
 
             logger.info(f"   Atlases: {atlases_count}")
             #logger.info(f"   Targeted analyses: {targeted_count}")
@@ -622,7 +796,7 @@ def validate_database(database_path: str, database_type: str = "main") -> None:
             # List experimental RT/MZ entries summary
             exp_df = conn.execute("""
                 SELECT chromatography, polarity, COUNT(*) as entry_count
-                FROM mz_rt_experimental
+                FROM compound_mzrt
                 GROUP BY chromatography, polarity
             """).df()
             if not exp_df.empty:
@@ -804,7 +978,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
                     reference_records.append(reference_record)
 
         # Batch insert compounds
-        references_created = 0
+        mzrts_created = 0
         if compound_records:
             logger.info(f"Batch inserting {len(compound_records)} compounds...")
             conn.executemany("""
@@ -818,13 +992,13 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
             existing_refs = set()
             existing_ref_result = conn.execute("""
                 SELECT compound_uid, chromatography, polarity, adduct 
-                FROM mz_rt_references
+                FROM compound_mzrt
             """).fetchall()
             existing_refs = {(row[0], row[1], row[2], row[3]) for row in existing_ref_result}
 
             # Filter out duplicates
             filtered_reference_records = []
-            references_skipped = 0
+            mzrts_skipped = 0
             
             for record in reference_records:
                 # Extract compound_uid, chromatography, polarity, adduct from record
@@ -837,29 +1011,29 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
                 if ref_key not in existing_refs:
                     filtered_reference_records.append(record)
                     existing_refs.add(ref_key)  # Add to set to prevent duplicates within this batch
-                    references_created += 1
+                    mzrts_created += 1
                 else:
-                    references_skipped += 1
+                    mzrts_skipped += 1
 
             # Batch insert filtered references
             if filtered_reference_records:
                 conn.executemany("""
-                    INSERT INTO mz_rt_references VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, filtered_reference_records)
         
         # Get final counts
         compounds_count = conn.execute("SELECT COUNT(*) FROM compounds").fetchone()[0]
-        references_count = conn.execute("SELECT COUNT(*) FROM mz_rt_references").fetchone()[0]
+        mzrts_count = conn.execute("SELECT COUNT(*) FROM compound_mzrt").fetchone()[0]
     
     logger.info("Compounds added successfully!")
     logger.info(f"   Total compounds in database: {compounds_count}")
     logger.info(f"   New compounds created: {compounds_created}")
     if compounds_skipped > 0:
         logger.info(f"   Compounds skipped (already existed): {compounds_skipped}")
-    logger.info(f"   Total RT/MZ references in database: {references_count}")
-    logger.info(f"   New RT/MZ references created: {references_created}")
-    if 'references_skipped' in locals() and references_skipped > 0:
-        logger.info(f"   RT/MZ references skipped (duplicates): {references_skipped}")
+    logger.info(f"   Total RT/MZ references in database: {mzrts_count}")
+    logger.info(f"   New RT/MZ references created: {mzrts_created}")
+    if 'mzrts_skipped' in locals() and mzrts_skipped > 0:
+        logger.info(f"   RT/MZ references skipped (duplicates): {mzrts_skipped}")
     
     return
 
@@ -911,7 +1085,7 @@ def _prepare_reference_record(row: pd.Series, compound_uid: str, chromatography:
                             polarity: str, input_file_path: str, prov: Dict) -> tuple:
     """Prepare a reference record tuple for batch insertion."""
     try:
-        uid = _generate_uid("mz_rt_reference")
+        uid = _generate_uid("mz_rt")
         
         # Extract RT/MZ data
         rt_peak = float(row.get('rt_peak'))
@@ -989,7 +1163,7 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
         prov = ldt.get_provenance()
         
         return (
-            _generate_uid("mz_rt_reference"),
+            _generate_uid("mz_rt", decorator="ref"),
             reference_data.get('compound_uid'),
             float(reference_data.get('rt_peak')),
             float(reference_data.get('rt_min')),
@@ -1000,6 +1174,7 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
             reference_data.get('chromatography'),
             reference_data.get('polarity'),
             reference_data.get('confidence', 'Unknown'),
+            reference_data.get('identification_notes', ''),
             reference_data.get('source', 'Unknown'),
             prov["analyst"],
             prov["timestamp"]
@@ -1008,7 +1183,7 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
         logger.error(f"Error preparing reference record: {e}")
         return None
 
-def get_atlas_metadata_from_db(db_path: str, atlas_uid: str, validation: bool = False) -> pd.DataFrame:
+def get_atlas_metadata_from_db(db_path: str, atlas_uid: str) -> pd.DataFrame:
     """
     Retrieve atlas metadata from database for a specific atlas.
     Returns DataFrame with atlas information including name, description, chromatography, polarity, etc.
@@ -1027,7 +1202,8 @@ def get_atlas_metadata_from_db(db_path: str, atlas_uid: str, validation: bool = 
                 analysis_type,
                 atlas_type,
                 created_by,
-                created_date
+                created_date,
+                source
             FROM atlases 
             WHERE atlas_uid = ?
             """
@@ -1039,9 +1215,10 @@ def get_atlas_metadata_from_db(db_path: str, atlas_uid: str, validation: bool = 
             raise ValueError(f"Atlas not found in database")
         if len(df) > 1:
             raise ValueError(f"Multiple entries found for atlas in the database.")
-        if validation is False:
-            logger.info(f"Retrieved atlas metadata for: {df['atlas_name'].iloc[0]}")
+        
+        logger.info(f"Retrieved atlas metadata for: {df['atlas_name'].iloc[0]}")
         return df.iloc[0].to_dict()
+
     except Exception as e:
         logger.warning(f"Did not find atlas {atlas_uid} in database {db_path}: {e}")
         return {}
@@ -1061,12 +1238,10 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"atl-rta-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-rta-{uuid.uuid4().hex[:32]}"
     elif entity_type == "analyzed_atlas":
         return f"atl-tga-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-tga-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "mz_rt_experimental":
-        return f"mzrt-exp-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "mz_rt":
+        return f"mzrt-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"mzrt-{uuid.uuid4().hex[:32]}"
     elif entity_type == "compound":
         return f"cmp-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "mz_rt_reference":
-        return f"mzrt-ref-{uuid.uuid4().hex[:32]}"
     elif entity_type == "association":
         return f"assoc-{uuid.uuid4().hex[:32]}"
     elif entity_type == "rt_alignment":
@@ -1088,37 +1263,20 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
 
 
 def get_lcmsruns_from_db(project_db_path: str, 
-                              file_types: List[str], 
-                              file_format: str = "parquet",
-                              chromatography: str = None,
-                              polarity: str = None
+                        file_types: List[str], 
+                        file_format: str = "parquet",
+                        chromatography: str = None,
+                        polarity: str = None
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Get files of a specific type from the project database.
-    
-    Args:
-        project_db_path: Path to project database
-        file_types: List of file types to retrieve ('qc', 'experimental', 'istd', 'injbl', 'exctrl')
-        file_format: Format of files to retrieve ('parquet', 'raw', 'mzML')
-        chromatography: Optional chromatography filter (e.g., 'HILIC', 'C18')
-        polarity: Optional polarity filter (e.g., 'positive', 'pos', 'negative', 'neg')
-    
-    Returns:
-        DataFrame with columns: file_path, chromatography, polarity, file_type
-    """
 
     database_files = {}
-
-    # If specific category requested, return only that category
     for type in file_types:
         if type not in ['qc', 'experimental', 'istd', 'exctrl']:
             raise ValueError(f"Invalid file category: {type}. Must be one of ['qc', 'experimental', 'istd', 'exctrl']")
-
+        
         with get_db_connection(project_db_path) as conn:
-            placeholders = ','.join(['?' for _ in file_types])
-            params = file_types + [file_format]
-            
-            where_conditions = [f"file_type IN ({placeholders})", "file_format = ?"]
+            params = [type, file_format]
+            where_conditions = ["file_type = ?", "file_format = ?"]
             
             if chromatography:
                 if chromatography == "HILICZ":
@@ -1135,7 +1293,7 @@ def get_lcmsruns_from_db(project_db_path: str,
                 params.append(polarity)
             
             where_clause = " AND ".join(where_conditions)
-
+            
             files_df = conn.execute(f"""
                 SELECT file_path, chromatography, ms_level, polarity, file_type 
                 FROM lcmsruns 
@@ -1143,18 +1301,18 @@ def get_lcmsruns_from_db(project_db_path: str,
                 ORDER BY chromatography, ms_level, polarity, file_path
             """, params).df()
         
-        if files_df.empty:
-            raise ValueError(f"No {file_types} files found in the project database with filters: chromatography={chromatography}, polarity={polarity}, format={file_format}")
-        else:
-            logger.info(f"Retrieved {len(files_df)} {type} files from project database with filters: chromatography={chromatography}, polarity={polarity}, format={file_format}")
-
         database_files[type] = files_df
-
+    
+    logger.info(f"Retrieved {sum(len(df) for df in database_files.values())} LC/MS run files from database with filters: file_types={file_types}, chromatography={chromatography}, polarity={polarity}, format={file_format}")
+    logger.info(f"File counts by category:")
+    for file_type, df in database_files.items():
+        logger.info(f"  {file_type}: {len(df)} files")
+    
     return database_files
 
-def batch_save_compounds_and_references(
+def batch_save_compounds_and_mzrts(
     compounds_data: List[Dict],
-    references_data: List[Dict],
+    mzrts_data: List[Dict],
     db_path: str
 ) -> Tuple[int, int]:
     """
@@ -1164,21 +1322,21 @@ def batch_save_compounds_and_references(
     1. For each compound_data: check if inchi_key exists in database
        - If exists: get existing compound_uid, skip compound creation
        - If not exists: create new compound with new compound_uid
-    2. For each reference_data: find corresponding compound_uid, then check if identical reference exists
-       - If identical: skip reference creation
-       - If different: create new reference entry
+    2. For each mzrt_data: find corresponding compound_uid, then check if identical mzrt exists
+       - If identical: skip mzrt creation
+       - If different: create new mzrt entry
     
     Args:
         compounds_data: List of compound dictionaries
-        references_data: List of reference dictionaries
+        mzrts_data: List of mzrt dictionaries
         db_path: str
 
     Returns:
-        Tuple of (compounds_created, references_created)
+        Tuple of (compounds_created, mzrts_created)
     """
     compounds_created = 0
-    references_created = 0
-    references_skipped_identical = 0
+    mzrts_created = 0
+    mzrts_skipped_identical = 0
     compounds_skipped_existing = 0
     
     with get_db_connection(db_path) as conn:
@@ -1228,11 +1386,11 @@ def batch_save_compounds_and_references(
             """, compound_records)
         
         # Step 4: Process reference data - match to compounds and check for duplicates
-        if references_data:
-            logger.info(f"Processing {len(references_data)} reference entries...")
+        if mzrts_data:
+            logger.info(f"Processing {len(mzrts_data)} reference entries...")
             reference_records = []
             
-            for reference_data in references_data:
+            for reference_data in mzrts_data:
                 # Find the compound_uid for this reference using inchi_key
                 ref_inchi_key = reference_data.get('inchi_key')
                 if not ref_inchi_key:
@@ -1254,7 +1412,7 @@ def batch_save_compounds_and_references(
                 identical_ref_exists = _check_identical_reference_exists(conn, reference_with_uid)
                 
                 if identical_ref_exists:
-                    references_skipped_identical += 1
+                    mzrts_skipped_identical += 1
                     logger.debug(f"Identical reference already exists for compound {compound_uid}")
                     continue
                 
@@ -1262,24 +1420,24 @@ def batch_save_compounds_and_references(
                 reference_record = _prepare_reference_record_from_dict(reference_with_uid)
                 if reference_record:
                     reference_records.append(reference_record)
-                    references_created += 1
+                    mzrts_created += 1
                     logger.debug(f"New reference prepared for compound {compound_uid}")
             
             # Step 5: Batch insert new references
             if reference_records:
                 logger.info(f"Creating {len(reference_records)} new references...")
                 conn.executemany("""
-                    INSERT INTO mz_rt_references VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, reference_records)
     
     # Log summary
     logger.info("Batch save completed:")
     logger.info(f"  Compounds created: {compounds_created}")
     logger.info(f"  Compounds skipped (already exist): {compounds_skipped_existing}")
-    logger.info(f"  References created: {references_created}")
-    logger.info(f"  References skipped (identical data): {references_skipped_identical}")
+    logger.info(f"  References created: {mzrts_created}")
+    logger.info(f"  References skipped (identical data): {mzrts_skipped_identical}")
     
-    return compounds_created, references_created
+    return compounds_created, mzrts_created
 
 
 def _check_identical_reference_exists(conn, reference_data: Dict) -> bool:
@@ -1307,8 +1465,8 @@ def _check_identical_reference_exists(conn, reference_data: Dict) -> bool:
         
         # Check for IDENTICAL reference (using small tolerance for floating point comparison)
         existing_ref = conn.execute("""
-            SELECT mz_rt_reference_uid 
-            FROM mz_rt_references 
+            SELECT mz_rt_uid 
+            FROM compound_mzrt 
             WHERE compound_uid = ? 
             AND chromatography = ? 
             AND polarity = ? 
@@ -1360,8 +1518,8 @@ def _create_database_tables(conn, db_type: str = "main"):
         """)
         
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS mz_rt_references (
-                mz_rt_reference_uid TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS compound_mzrt (
+                mz_rt_uid TEXT PRIMARY KEY,
                 compound_uid TEXT,
                 rt_peak REAL,
                 rt_min REAL,
@@ -1372,6 +1530,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 chromatography TEXT,
                 polarity TEXT,
                 confidence TEXT,
+                identification_notes TEXT,
                 source TEXT,
                 created_by TEXT,
                 created_date TEXT,
@@ -1389,7 +1548,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 analysis_type TEXT,
                 atlas_type TEXT,
                 created_by TEXT,
-                created_date TEXT
+                created_date TEXT,
+                source TEXT
             )
         """)
         
@@ -1398,13 +1558,13 @@ def _create_database_tables(conn, db_type: str = "main"):
                 association_uid TEXT PRIMARY KEY,
                 atlas_uid TEXT,
                 compound_uid TEXT,
-                mz_rt_reference_uid TEXT,
+                mz_rt_uid TEXT,
                 association_order INTEGER,
                 created_by TEXT,
                 created_date TEXT,
                 FOREIGN KEY (atlas_uid) REFERENCES atlases (atlas_uid),
                 FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid),
-                FOREIGN KEY (mz_rt_reference_uid) REFERENCES mz_rt_references (mz_rt_reference_uid)
+                FOREIGN KEY (mz_rt_uid) REFERENCES compound_mzrt (mz_rt_uid)
             )
         """)
         
@@ -1436,7 +1596,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
                 created_by TEXT,
-                created_date TEXT
+                created_date TEXT,
+                source TEXT
             )
         """)
         
@@ -1462,26 +1623,24 @@ def _create_database_tables(conn, db_type: str = "main"):
         """)
         
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS mz_rt_experimental (
-                mz_rt_experimental_uid TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS compound_mzrt (
+                mz_rt_uid TEXT PRIMARY KEY,
                 compound_uid TEXT,
-                rt_alignment_number INTEGER,
-                analysis_number INTEGER,
                 rt_peak REAL,
                 rt_min REAL,
                 rt_max REAL,
-                ms1_notes TEXT,
-                ms2_notes TEXT,
                 mz REAL,
                 mz_tolerance REAL,
                 adduct TEXT,
                 chromatography TEXT,
                 polarity TEXT,
-                rt_alignment_applied BOOLEAN,
-                rt_shift REAL,
-                mz_rt_reference_uid TEXT,
+                confidence TEXT,
+                identification_notes TEXT,
+                source TEXT,
+                rt_alignment_applied BOOL,
+                manual_curation_applied BOOL,
                 created_by TEXT,
-                created_date TEXT
+                created_date TEXT,
             )
         """)
         
@@ -1490,7 +1649,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 association_uid TEXT PRIMARY KEY,
                 atlas_uid TEXT,
                 compound_uid TEXT,
-                mz_rt_reference_uid TEXT,
+                mz_rt_uid TEXT,
                 association_order INTEGER,
                 created_by TEXT,
                 created_date TEXT,
@@ -1708,7 +1867,7 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
             return {}
         return {row[0]: row[1] for row in rows}
 
-def get_or_create_mz_rt_reference_uid(
+def get_or_create_compound_mz_rt_uid(
     db_path: str,
     compound_uid: str,
     chromatography: str,
@@ -1716,14 +1875,15 @@ def get_or_create_mz_rt_reference_uid(
     adduct: str,
     rt_peak: float,
     mz: float,
-    mz_tolerance: float
+    mz_tolerance: float,
+    decorator: str = None
 ) -> tuple[str, bool]:
     """
-    Return (mz_rt_reference_uid, reused_flag). If not found, generate a new UID (do not insert).
+    Return (mz_rt_uid, reused_flag). If not found, generate a new UID (do not insert).
     """
     with get_db_connection(db_path) as conn:
         existing = conn.execute("""
-            SELECT mz_rt_reference_uid FROM mz_rt_references
+            SELECT mz_rt_uid FROM compound_mzrt
             WHERE compound_uid = ?
             AND chromatography = ? AND polarity = ? AND adduct = ?
             AND ABS(rt_peak - ?) < 0.0001 AND ABS(mz - ?) < 0.0001
@@ -1735,7 +1895,7 @@ def get_or_create_mz_rt_reference_uid(
         if existing:
             return existing[0], True
         else:
-            return _generate_uid("mz_rt_reference"), False
+            return _generate_uid("mz_rt", decorator), False
 
 def get_compound_by_uid(db_path: str, compound_uid: str) -> Optional[Dict]:
     """
@@ -1770,29 +1930,22 @@ def get_compound_by_uid(db_path: str, compound_uid: str) -> Optional[Dict]:
 def save_analysis_results_to_db(
     project_db_path: str,
     main_db_path: str,
-    results: Dict[str, Dict[str, Dict]],
+    exp_data_obj: "ExperimentalData",
     rt_alignment_number: int,
     analysis_number: int
 ) -> None:
     """
-    Save complete analysis results to project database.
+    Save complete analysis results to project database from ExperimentalData object.
     Handles both raw experimental data and MS summaries in one unified function.
-    
-    Args:
-        project_db_path: Path to project database
-        main_db_path: Path to main database
-        results: Output from create_ms_summaries() with structure:
-            {inchi_key: {adduct: {'compound_info': df, 'file_summaries': {...}}}}
-        rt_alignment_number: RT alignment number
-        analysis_number: Analysis number
     """
     logger.info("Preparing complete analysis data for database save...")
-    
-    # Get compound_uid mappings
-    inchi_keys = list(results.keys())
-    compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
+
     prov = ldt.get_provenance()
-    
+
+    # Get compound_uid mappings
+    inchi_keys = [ci.inchi_key for ci in exp_data_obj.compound_infos]
+    compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
+
     # Collect all records
     compound_metadata_records = []
     ms1_summary_records = []
@@ -1800,75 +1953,84 @@ def save_analysis_results_to_db(
     ms2_hits_records = []
     ms1_data_records = []
     ms2_data_records = []
-    
-    for inchi_key, adduct_dict in results.items():
-        compound_uid = compound_uid_map.get(inchi_key)
+
+    # CompoundInfo
+    for ci in exp_data_obj.compound_infos:
+        compound_uid = compound_uid_map.get(ci.inchi_key)
         if not compound_uid:
-            logger.warning(f"Could not find compound_uid for {inchi_key}, skipping")
+            logger.warning(f"Could not find compound_uid for {ci.inchi_key}, skipping")
             continue
-        
-        for adduct, data in adduct_dict.items():
-            compound_info = data['compound_info']
-            file_summaries = data['file_summaries']
-            
-            # 1. Save compound-level metadata
-            metadata_record = _prepare_compound_metadata_record(
-                compound_info, compound_uid, adduct, 
+        # Assume ci.data is a single-row DataFrame
+        metadata_record = _prepare_compound_metadata_record(
+            ci.data.iloc[0:1], compound_uid, ci.adduct,
+            rt_alignment_number, analysis_number, prov
+        )
+        if metadata_record:
+            compound_metadata_records.append(metadata_record)
+
+    # MS1Summary
+    for ms1_sum in exp_data_obj.ms1_summaries:
+        compound_uid = compound_uid_map.get(ms1_sum.inchi_key)
+        if not compound_uid or ms1_sum.data.empty:
+            continue
+        ms1_sum_record = _prepare_ms1_summary_record(
+            ms1_sum.data.iloc[0], compound_uid, ms1_sum.filename,
+            rt_alignment_number, analysis_number, prov
+        )
+        if ms1_sum_record:
+            ms1_summary_records.append(ms1_sum_record)
+
+    # MS2Summary
+    for ms2_sum in exp_data_obj.ms2_summaries:
+        compound_uid = compound_uid_map.get(ms2_sum.inchi_key)
+        if not compound_uid or ms2_sum.data.empty:
+            continue
+        ms2_sum_record = _prepare_ms2_summary_record(
+            ms2_sum.data.iloc[0], compound_uid, ms2_sum.filename,
+            rt_alignment_number, analysis_number, prov
+        )
+        if ms2_sum_record:
+            ms2_summary_records.append(ms2_sum_record)
+
+    # MS2Hits
+    for ms2_hit in exp_data_obj.ms2_hits:
+        compound_uid = compound_uid_map.get(ms2_hit.inchi_key)
+        if not compound_uid or ms2_hit.data.empty:
+            continue
+        for _, hit in ms2_hit.data.iterrows():
+            ms2_hit_record = _prepare_ms2_hit_record(
+                hit, compound_uid, ms2_hit.filename,
                 rt_alignment_number, analysis_number, prov
             )
-            if metadata_record:
-                compound_metadata_records.append(metadata_record)
-            
-            # 2. Process each file's data
-            for filename, summaries in file_summaries.items():
-                # MS1 summary
-                if 'ms1_summary' in summaries and not summaries['ms1_summary'].empty:
-                    ms1_sum_record = _prepare_ms1_summary_record(
-                        summaries['ms1_summary'].iloc[0], compound_uid,
-                        filename, rt_alignment_number, analysis_number, prov
-                    )
-                    if ms1_sum_record:
-                        ms1_summary_records.append(ms1_sum_record)
-                
-                # MS1 raw data (if present)
-                if 'ms1_data' in summaries and not summaries['ms1_data'].empty:
-                    for _, row in summaries['ms1_data'].iterrows():
-                        ms1_data_record = _prepare_ms1_data_record(
-                            row, compound_uid, filename, 
-                            rt_alignment_number, analysis_number, prov
-                        )
-                        if ms1_data_record:
-                            ms1_data_records.append(ms1_data_record)
-                
-                # MS2 summary
-                if 'ms2_summary' in summaries and not summaries['ms2_summary'].empty:
-                    ms2_sum_record = _prepare_ms2_summary_record(
-                        summaries['ms2_summary'].iloc[0], compound_uid,
-                        filename, rt_alignment_number, analysis_number, prov
-                    )
-                    if ms2_sum_record:
-                        ms2_summary_records.append(ms2_sum_record)
-                
-                # MS2 raw data (if present, from file_summaries)
-                if 'ms2_data' in summaries and not summaries['ms2_data'].empty:
-                    for _, row in summaries['ms2_data'].iterrows():
-                        ms2_data_record = _prepare_ms2_data_record(
-                            row, compound_uid, filename,
-                            rt_alignment_number, analysis_number, prov
-                        )
-                        if ms2_data_record:
-                            ms2_data_records.append(ms2_data_record)
-                
-                # MS2 hits
-                if 'ms2_hits' in summaries and not summaries['ms2_hits'].empty:
-                    for _, hit in summaries['ms2_hits'].iterrows():
-                        ms2_hit_record = _prepare_ms2_hit_record(
-                            hit, compound_uid, filename,
-                            rt_alignment_number, analysis_number, prov
-                        )
-                        if ms2_hit_record:
-                            ms2_hits_records.append(ms2_hit_record)
-    
+            if ms2_hit_record:
+                ms2_hits_records.append(ms2_hit_record)
+
+    # MS1Data
+    for ms1 in exp_data_obj.ms1_data:
+        compound_uid = compound_uid_map.get(ms1.inchi_key)
+        if not compound_uid or ms1.data.empty:
+            continue
+        for _, row in ms1.data.iterrows():
+            ms1_data_record = _prepare_ms1_data_record(
+                row, compound_uid, ms1.filename,
+                rt_alignment_number, analysis_number, prov
+            )
+            if ms1_data_record:
+                ms1_data_records.append(ms1_data_record)
+
+    # MS2Data
+    for ms2 in exp_data_obj.ms2_data:
+        compound_uid = compound_uid_map.get(ms2.inchi_key)
+        if not compound_uid or ms2.data.empty:
+            continue
+        for _, row in ms2.data.iterrows():
+            ms2_data_record = _prepare_ms2_data_record(
+                row, compound_uid, ms2.filename,
+                rt_alignment_number, analysis_number, prov
+            )
+            if ms2_data_record:
+                ms2_data_records.append(ms2_data_record)
+
     # Bulk insert all records
     logger.info("Performing bulk database inserts...")
     _bulk_insert_analysis_data(
@@ -1880,10 +2042,56 @@ def save_analysis_results_to_db(
         ms1_data_records,
         ms2_data_records
     )
-    
-    logger.info("Complete analysis data saved to database")
+
+    logger.info("Complete analysis data saved to database. Summary:")
+    exp_data_obj_summary = _display_analysis_summary(exp_data_obj)
+    display(exp_data_obj_summary)
+
     return
 
+def _display_analysis_summary(exp_data_obj: "ExperimentalData") -> None:
+    """
+    Display a summary table of analysis results to the logger.
+    Shows number of compounds, MS1/MS2 datapoints, MS2 hits, etc.
+    """
+
+    summary_rows = []
+    for ci in exp_data_obj.compound_infos:
+        inchi_key = ci.inchi_key
+        adduct = ci.adduct
+
+        ms1_count = sum(
+            len(ms1.data) for ms1 in exp_data_obj.ms1_data
+            if ms1.inchi_key == inchi_key and ms1.adduct == adduct
+        )
+        ms2_count = sum(
+            len(ms2.data) for ms2 in exp_data_obj.ms2_data
+            if ms2.inchi_key == inchi_key and ms2.adduct == adduct
+        )
+        ms2_hits_count = sum(
+            len(ms2_hit.data) for ms2_hit in exp_data_obj.ms2_hits
+            if ms2_hit.inchi_key == inchi_key and ms2_hit.adduct == adduct
+        )
+        ms1_summary_count = sum(
+            1 for ms1_sum in exp_data_obj.ms1_summaries
+            if ms1_sum.inchi_key == inchi_key and ms1_sum.adduct == adduct
+        )
+        ms2_summary_count = sum(
+            1 for ms2_sum in exp_data_obj.ms2_summaries
+            if ms2_sum.inchi_key == inchi_key and ms2_sum.adduct == adduct
+        )
+
+        summary_rows.append({
+            "inchi_key": inchi_key,
+            "adduct": adduct,
+            "MS1 datapoints": ms1_count,
+            "MS2 datapoints": ms2_count,
+            "MS2 hits": ms2_hits_count,
+            "MS1 summaries": ms1_summary_count,
+            "MS2 summaries": ms2_summary_count
+        })
+
+    return pd.DataFrame(summary_rows)
 
 def _prepare_compound_metadata_record(
     compound_info: pd.DataFrame,

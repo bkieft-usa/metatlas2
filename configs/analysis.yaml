@@ -9,7 +9,7 @@ WORKFLOWS:
   RT_ALIGNMENT:
     HILICZ:
       ATLAS:
-        uid: atl-ref-qc-hilicz-pos-473e5d7126e74a79aee3c24feb176064
+        uid: atl-ref-qc-hilicz-pos-48aec49795074ac991767b88ee9f3822
       PARAMS:
           use_existing_rt_alignment: true
           ppm_error: 20.0
@@ -40,33 +40,33 @@ WORKFLOWS:
       POS:
         QC:
           ATLAS:
-            uid: atl-ref-qc-hilicz-pos-473e5d7126e74a79aee3c24feb176064
+            uid: atl-ref-qc-hilicz-pos-48aec49795074ac991767b88ee9f3822
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
             ms2_min_matches: 1
         ISTD:
           ATLAS:
-            uid: atl-ref-istd-hilicz-pos-faca66523a364537a7ba8a0bc28bd8d9
+            uid: atl-ref-istd-hilicz-pos-af46f137d0b14529890073b07d18fbba
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
             ms2_min_matches: 2
         EMA:
           ATLAS:
-            uid: atl-ref-ema-hilicz-pos-07557610cbde442080f5ad20312a6251
+            uid: atl-ref-ema-hilicz-pos-ac67a351cdec4b068d546f7ec48a4723
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -78,7 +78,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -89,7 +89,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -100,7 +100,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -114,7 +114,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -125,7 +125,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -136,7 +136,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -148,7 +148,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -159,7 +159,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1
@@ -170,7 +170,7 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
-            default_ppm_error: 5.0
+            ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 0.0
             ms2_min_score: 0.1

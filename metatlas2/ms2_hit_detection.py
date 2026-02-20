@@ -9,7 +9,8 @@ from matchms import Spectrum
 from scipy.optimize import linear_sum_assignment
 
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 
 from typing import Dict, List, Tuple
 
@@ -20,96 +21,77 @@ import logging_config as lcf
 # Initialize logger properly at module level
 logger = lcf.get_logger('ms2_hit_detection')
 
-def find_ms2_hits(experimental_data: Dict[str, Dict], msms_refs_path: str) -> Dict[str, Dict]:
+def process_job(job, reference_df):
+    inchi_key, adduct, file_path, ms2_df = job
+    try:
+        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df)
+        return (inchi_key, adduct, file_path, ms2_hits_df)
+    except Exception as e:
+        logger.error(f"Error in hit detection for {inchi_key} {adduct} {file_path}: {e}")
+        return (inchi_key, adduct, file_path, pd.DataFrame())
+
+def find_ms2_hits(
+    exp_data_obj: "ExperimentalData",
+    msms_refs_path: str
+) -> "ExperimentalData":
     """
-    Orchestration function to calculate MS2 hits and process results.
-    Find MS2 reference hits for previously extracted experimental data.
-    Uses parallel processing to match extracted MS2 spectra against reference database.
-    
-    Args:
-        experimental_data: Data returned from extract_eic_and_ms2_from_parquet()
-            Format: {inchi_key: {filename: {'ms1_data': df, 'ms2_data': df}}}
-        msms_refs_path: Path to the MSMS reference database file
-        
-    Returns:
-        Updated experimental_data with 'ms2_hits' dataframe added
+    Find MS2 hits for all compounds with MS2 data in the experimental dataset using a reference spectra database.
+    Uses MatchMS cosine similarity scoring and Hungarian algorithm for peak alignment.
+    Parallelized across compounds/files with MS2 data for faster processing.
     """
-    # Load reference database
+    from workflow_objects import MS2Hit
+
     reference_df = ldt.load_msms_refs_file(Path(msms_refs_path))
-    
     if reference_df.empty:
         raise FileNotFoundError("No reference database found - skipping hit detection")
-    
+
     logger.info(f"Finding MS2 hits using reference database with {len(reference_df)} entries...")
-    
-    # Prepare data for parallel processing
-    hit_input_data = []
-    for inchi_key, file_results in experimental_data.items():
-        # Check if there's any MS2 data across all files
-        has_ms2 = any(
-            not file_data.get('ms2_data', pd.DataFrame()).empty 
-            for file_data in file_results.values()
-        )
-        if has_ms2:
-            hit_input_data.append({
-                'inchi_key': inchi_key,
-                'file_results': file_results
-            })
-    
-    if not hit_input_data:
-        logger.info("No MS2 data found for any compounds, skipping hit detection")
-        return experimental_data
+
+    jobs = []
+    for ms2 in exp_data_obj.ms2_data:
+        if not ms2.data.empty:
+            jobs.append((ms2.inchi_key, ms2.adduct, ms2.filename, ms2.data))
+
+    if not jobs:
+        logger.warning("No MS2 data found for any compounds, skipping hit detection")
+        return exp_data_obj
     else:
-        logger.info(f"Prepared hit detection input for {len(hit_input_data)}/{len(experimental_data)} compounds with MS2 data")
-    
-    # Use parallel processing for hit detection
-    max_workers = min(mp.cpu_count(), len(hit_input_data), 8)
-    use_parallel = max_workers > 1 and len(hit_input_data) > 1
-    
+        logger.info(f"Prepared hit detection input for {len(jobs)} files with MS2 data")
+
+    max_workers = min(mp.cpu_count(), len(jobs), 8)
+    use_parallel = max_workers > 1 and len(jobs) > 1
+
+    results = []
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for i, hit_input in enumerate(hit_input_data):
-                future = executor.submit(_process_compound_hits, hit_input, reference_df)
-                futures.append((future, hit_input['inchi_key'], i))
-            
-            # Collect results
-            for future, inchi_key, i in futures:
-                try:
-                    compound_results = future.result()
-                    experimental_data[inchi_key] = compound_results['file_results']         
-                except Exception as e:
-                    logger.error(f"  Error in parallel hit detection for {inchi_key}: {e}")
-                    continue
-    
+            futures = [executor.submit(process_job, job, reference_df) for job in jobs]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Finding MS2 hits"):
+                results.append(future.result())
     else:
         logger.info("Using sequential processing for hit detection...")
-        for i, hit_input in enumerate(tqdm(hit_input_data, desc="Finding MS2 hits")):
-            inchi_key = hit_input['inchi_key']
-            try:
-                compound_results = _process_compound_hits(hit_input, reference_df)
-                experimental_data[inchi_key] = compound_results['file_results']
-                
-                logger.info(f"  Hit detection for {inchi_key} complete")
-                
-            except Exception as e:
-                logger.error(f"  Error in hit detection for {inchi_key}: {e}")
-                continue
-    
+        results = [process_job(job, reference_df) for job in tqdm(jobs, desc="Finding MS2 hits")]
+
+    # Assign results to ExperimentalData.ms2_hits as MS2Hit objects
+    for inchi_key, adduct, filename, ms2_hits_df in results:
+        ms2_hit_obj = MS2Hit(
+            inchi_key=inchi_key,
+            adduct=adduct,
+            filename=filename,
+            data=ms2_hits_df
+        )
+        exp_data_obj.ms2_hits.append(ms2_hit_obj)
+
     # Print summary
     compounds_with_hits = sum(
-        1 for file_results in experimental_data.values()
-        if any(not file_data.get('ms2_hits', pd.DataFrame()).empty for file_data in file_results.values())
+        1 for ms2_hit in exp_data_obj.ms2_hits if not ms2_hit.data.empty
     )
     total_hits = sum(
-        len(file_data.get('ms2_hits', pd.DataFrame())) 
-        for file_results in experimental_data.values() 
-        for file_data in file_results.values()
+        len(ms2_hit.data) for ms2_hit in exp_data_obj.ms2_hits if not ms2_hit.data.empty
     )
-    logger.info(f"Hit detection complete: {compounds_with_hits} compounds with {total_hits} total reference hits")
-    
-    return experimental_data
+    logger.info(f"Hit detection complete: {compounds_with_hits} compounds with reference hits and {total_hits} total hits")
+
+    return exp_data_obj
 
 
 def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame) -> pd.DataFrame:
@@ -222,26 +204,6 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
         return pd.DataFrame(all_hits)
     else:
         return pd.DataFrame()
-
-
-def _process_compound_hits(hit_input: Dict, reference_df: pd.DataFrame) -> Dict:
-    """Process hit detection for a single compound across all its files."""
-    inchi_key = hit_input['inchi_key']
-    file_results = hit_input['file_results'].copy()
-    
-    # Process each file for this compound
-    for filename, file_data in file_results.items():
-        ms2_df = file_data.get('ms2_data', pd.DataFrame())
-        
-        if ms2_df.empty:
-            file_data['ms2_hits'] = pd.DataFrame()
-            continue
-        
-        # Find hits directly from ms2_data DataFrame
-        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df)
-        file_data['ms2_hits'] = ms2_hits_df
-    
-    return {'inchi_key': inchi_key, 'file_results': file_results}
 
 
 def _align_spectra_for_plotting(query_spectrum: np.ndarray, ref_spectrum: np.ndarray, 
