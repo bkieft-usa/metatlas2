@@ -211,6 +211,84 @@ def find_rt_aligned_atlases_in_db(
 #     return aligned_atlases_info
 
 
+def create_new_atlas_from_dataframe(
+    atlas_df: pd.DataFrame, 
+    atlas_name: str, 
+    atlas_description: str, 
+    analysis_type: str,
+    chromatography: str = None, 
+    polarity: str = None,
+    atlas_file_path: str = None
+) -> "Atlas":
+
+    if not chromatography:
+        chromatography = ldt.detect_atlas_input_chromatography(atlas_df)
+    if not polarity:
+        polarity = ldt.detect_atlas_input_polarity(atlas_df)        
+
+    inchi_keys = atlas_df['inchi_key'].dropna().unique().tolist()
+    compound_lookup = dbi.get_compound_uids_by_inchi_keys(self.main_db_path, inchi_keys)
+
+    compound_mzrts = {}
+    for _, row in atlas_df.iterrows():
+        inchi_key = row.get('inchi_key', '')
+        if not inchi_key or inchi_key not in compound_lookup:
+            logger.warning(f"Compound with inchi_key {inchi_key} missing from metatlas database, skipping.")
+            continue
+        compound_uid = compound_lookup[inchi_key]
+        rt_peak = row.get('rt_peak', None)
+        rt_min = row.get('rt_min', rt_peak - 0.5)
+        rt_max = row.get('rt_max', rt_peak + 0.5)
+        mz = row.get('mz', None)
+        mz_tolerance = row.get('mz_tolerance', 5.0)
+        adduct = str(row.get('adduct', None))
+        if rt_peak is None or mz is None or adduct is None:
+            raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference.")
+        confidence_level = row.get('confidence_level', None)
+        identification_notes = row.get('identification_notes', '')
+        mz_rt_uid, _ = dbi.get_or_create_compound_mz_rt_uid(
+            self.main_db_path,
+            compound_uid,
+            chromatography,
+            polarity,
+            adduct,
+            rt_peak,
+            mz,
+            mz_tolerance,
+            decorator="ref"
+        )
+        compound_mzrt = CompoundMZRT(
+            mz_rt_uid=mz_rt_uid,
+            compound_uid=compound_uid,
+            inchi_key=inchi_key,
+            rt_peak=rt_peak,
+            rt_min=rt_min,
+            rt_max=rt_max,
+            mz=mz,
+            mz_tolerance=mz_tolerance,
+            adduct=adduct,
+            chromatography=chromatography,
+            polarity=polarity,
+            confidence=confidence_level,
+            identification_notes=identification_notes,
+            source=atlas_file_path
+        )
+        compound_mzrts[inchi_key] = compound_mzrt
+
+    atlas_uid = dbi._generate_uid("ref_atlas", decorator=f"{analysis_type.lower()}-{chromatography.lower()}-{polarity.lower()}")
+    atlas_obj = Atlas(
+        atlas_uid=atlas_uid,
+        atlas_name=atlas_name,
+        atlas_description=atlas_description,
+        chromatography=chromatography,
+        polarity=polarity,
+        analysis_type=analysis_type,
+        atlas_type="REFERENCE",
+        compound_mzrts=compound_mzrts,
+        source=atlas_file_path
+    )
+    return atlas_obj
+
 def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str = None) -> None:
     """
     Save an Atlas object to the database (typing not included to avoid circular imports).
@@ -220,6 +298,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
         atlas_obj: Atlas object to save
     """
 
+    logger.info(f"Saving atlas {atlas_obj.atlas_name} to database at {db_path}...")
     prov = ldt.get_provenance()
     with get_db_connection(db_path) as conn:
         if not main_db_path: # This will be a main database save
@@ -297,11 +376,6 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 ))
                 
                 association_order += 1
-        
-            logger.info(f"Saved atlas {atlas_obj.atlas_name} to database with UID: {atlas_obj.atlas_uid}")
-            logger.info(f"  References created: {mzrts_created}")
-            logger.info(f"  References reused: {mzrts_reused}")
-            logger.info(f"  Total associations: {association_order}")
 
         else: # This will be a project database save, so we need to attach the main db for verification of compounds
 
@@ -548,95 +622,29 @@ def create_project_database(project_db_path: str, overwrite: bool = False) -> No
     logger.info(f"Project database created at {project_db_path}")
     return
 
-def create_metatlas_database(db_path: str, overwrite_existing: bool) -> None:
+def create_metatlas_database(new_compoound_obj: "NewCompound") -> None:
     """
     Create main metatlas database with required tables.
     """
-    db_path = Path(db_path)
+    db_path = Path(new_compoound_obj.main_db_path)
+    overwrite_existing = new_compoound_obj.overwrite_db
     db_path.parent.mkdir(parents=True, exist_ok=True)
     
     if overwrite_existing and db_path.exists():
-        logger.warning("Overwriting existing main database (overwrite_existing=True)")
+        logger.warning("Overwriting existing main database because overwrite_existing=True")
         db_path.unlink()
-        logger.info(f"Deleted existing database at {db_path}")
+        logger.info(f"Deleted existing database at {db_path} and creating new database.")
+    elif overwrite_existing and not db_path.exists():
+        logger.info(f"No existing main database found at {db_path}. Creating new database.")
     elif not overwrite_existing and db_path.exists():
-        logger.warning(f"Database already exists at {db_path}. Use overwrite_existing=True to replace it.")
-        return
+        raise ValueError(f"Database already exists at {db_path}. Use overwrite_existing=True to replace it.")
+    elif not overwrite_existing and not db_path.exists():
+        logger.info(f"No existing main database found at {db_path}. Creating new database.")
 
     with get_db_connection(db_path) as conn:
         _create_database_tables(conn, db_type="main")
 
     logger.info(f"Main metatlas database created at {db_path}")
-    return
-
-def save_lcmsruns_to_db(
-    project_db_path: str,
-    project_name: str,
-    project_lcmsruns_path: str,
-    new_lcmsruns: str = False
-) -> Dict:
-    """
-    Save LCMS run files to project database and return file paths grouped by chromatography/polarity/analysis type.
-    Chromatography and polarity are inferred from filenames.
-    If the lcmsruns table exists and has rows, do not overwrite unless new_lcmsruns is true
-    """
-
-    with get_db_connection(project_db_path) as conn:
-
-        files_by_group = lrt.get_project_files(project_lcmsruns_path)
-        prov = ldt.get_provenance()
-
-        # Check if lcmsruns table exists
-        table_exists = conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'lcmsruns'"
-        ).fetchone()[0] > 0
-
-        # Check if lcmsruns table has rows
-        has_rows = False
-        if table_exists:
-            has_rows = conn.execute("SELECT COUNT(*) FROM lcmsruns").fetchone()[0] > 0
-            if has_rows:
-                if not new_lcmsruns:
-                    logger.info("LCMS runs already exist in the database and new_lcmsruns is False. Proceeding with these files.")
-                    conn.close()
-                    print_files_summary(files_by_group)
-                    return files_by_group
-                elif new_lcmsruns:
-                    logger.info(f"LCMS runs already exist in the database for {project_name} and new_lcmsruns is True. Creating a new table...")
-                    conn.execute("DELETE FROM lcmsruns")
-            else:
-                logger.info(f"No LCMS runs detected in project database for {project_name}. Creating a new table...")
-        else:
-            logger.info(f"No LCMS runs detected in project database for {project_name}. Creating a new table...")
-        
-        total_files = 0
-        for file_format, chrom_dict in files_by_group.items():
-            for chrom, ms_level_dict in chrom_dict.items():
-                for ms_level, pol_dict in ms_level_dict.items():
-                    for pol, analysis_dict in pol_dict.items():
-                        for file_type, file_list in analysis_dict.items():
-                            for file_path in file_list:
-                                filename = os.path.basename(file_path)
-                                conn.execute(
-                                    "INSERT INTO lcmsruns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                    (
-                                        file_path,
-                                        filename,
-                                        file_format,
-                                        file_type,
-                                        chrom,
-                                        ms_level,
-                                        pol,
-                                        prov["analyst"],
-                                        prov["timestamp"],
-                                    ),
-                                )
-                                total_files += 1
-
-    logger.info(f"Saved {total_files} LCMS runs to database:")
-    print_files_summary(files_by_group)
-
-    return files_by_group
 
 def print_files_summary(file_list: Dict[str, Any]):
     for file_format, chrom_dict in file_list.items():
@@ -806,20 +814,25 @@ def validate_database(database_path: str, database_type: str = "main") -> None:
 
     return
 
-def save_rt_alignment_model_to_db(qc_atlas_uid: str,
-                                  project_db_path: Path, 
-                                  rt_alignment_number: int,
-                                  best_model: dict, 
-                                  qc_files_info: pd.DataFrame, 
-                                  modeling_data: list) -> str:
-    """Save RT alignment model to project database."""
+def save_rt_alignment_model_to_db(
+    rt_align_obj: "RTAlign",
+) -> str:
+    """Save RT alignment model to project database using RTAlign object and LCMSRun list."""
+
+    logger.info("Saving RT alignment model to project database...")
+
     rt_alignment_uid = _generate_uid("rt_alignment")
-    
-    # Extract project name from path
-    qc_files = qc_files_info['file_path'].tolist()
-    project_db_path = Path(project_db_path)
+    qc_files = [run.file_path for run in rt_align_obj.aligner_lcmsruns]
+    project_db_path = Path(rt_align_obj.paths['project_db_path'])
     project_name = project_db_path.stem.replace('.duckdb', '')
     prov = ldt.get_provenance()
+
+    best_model = rt_align_obj.best_model
+    modeling_data = (
+        rt_align_obj.modeling_data.to_dict('records')
+        if hasattr(rt_align_obj.modeling_data, 'to_dict')
+        else rt_align_obj.modeling_data
+    )
 
     model_metadata = {
         "qc_files": [os.path.basename(f) for f in qc_files],
@@ -833,15 +846,15 @@ def save_rt_alignment_model_to_db(qc_atlas_uid: str,
         "model_intercept": float(best_model.get('intercept', 0.0)),
         "model_coefficients": best_model['coefficients'].tolist() if hasattr(best_model['coefficients'], 'tolist') else list(best_model['coefficients'])
     }
-    
+
     with get_db_connection(project_db_path) as conn:
         conn.execute("""
             INSERT INTO rt_alignment VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             rt_alignment_uid,
             project_name,
-            rt_alignment_number,
-            qc_atlas_uid,
+            rt_align_obj.rt_alignment_number,
+            rt_align_obj.qc_atlas_uid,
             "polynomial",
             best_model['degree'],
             best_model['r2'],
@@ -854,14 +867,16 @@ def save_rt_alignment_model_to_db(qc_atlas_uid: str,
             prov["timestamp"],
             json.dumps(model_metadata)
         ))
-    
+
     logger.info(f"RT alignment model saved to database with UID: {rt_alignment_uid}")
 
     best_model['rt_alignment_uid'] = rt_alignment_uid
 
     return rt_alignment_uid
 
-def get_rt_alignment_model_from_db(project_db_path: Path, qc_atlas_uid: str, rt_alignment_number: int) -> dict:
+def get_rt_alignment_model_from_db(
+    rt_align_obj: "RTAlign"
+) -> dict:
     """
     Retrieve RT alignment model from project database and reconstruct sklearn objects.
     
@@ -871,7 +886,9 @@ def get_rt_alignment_model_from_db(project_db_path: Path, qc_atlas_uid: str, rt_
         rt_alignment_number: RT alignment number to retrieve
     """
     
-    project_db_path = Path(project_db_path)
+    project_db_path = Path(rt_align_obj.paths['project_db_path'])
+    rt_alignment_number = rt_align_obj.rt_alignment_number
+    qc_atlas_uid = rt_align_obj.qc_atlas_uid
     
     with get_db_connection(project_db_path) as conn:
         results = conn.execute("""
@@ -1262,6 +1279,59 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
 
+def save_lcmsruns_to_db(
+    project_db_path: str,
+    project_name: str,
+    lcmsruns_list: List[Dict],
+    overwrite_existing: bool = False
+) -> int:
+    """
+    Save LCMS run files to project database from a flat list of run dicts.
+    If the lcmsruns table exists and has rows, do not overwrite unless overwrite_existing is True.
+    Returns the number of files saved.
+    """
+    with get_db_connection(project_db_path) as conn:
+        prov = ldt.get_provenance()
+
+        # Check if lcmsruns table exists and has rows
+        table_exists = conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'lcmsruns'"
+        ).fetchone()[0] > 0
+
+        has_rows = False
+        if table_exists:
+            has_rows = conn.execute("SELECT COUNT(*) FROM lcmsruns").fetchone()[0] > 0
+            if has_rows:
+                if not overwrite_existing:
+                    logger.info("LCMS runs already exist in the database and overwrite_existing is False. Skipping save.")
+                    return 0
+                else:
+                    logger.info(f"Overwriting existing LCMS runs in the database for {project_name}.")
+                    conn.execute("DELETE FROM lcmsruns")
+        else:
+            logger.info(f"No LCMS runs detected in project database for {project_name}. Creating a new table...")
+
+        total_files = 0
+        for run in lcmsruns_list:
+            conn.execute(
+                "INSERT INTO lcmsruns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run["file_path"],
+                    run["filename"],
+                    run["file_format"],
+                    run["file_type"],
+                    run["chromatography"],
+                    run["ms_level"],
+                    run["polarity"],
+                    prov["analyst"],
+                    prov["timestamp"],
+                ),
+            )
+            total_files += 1
+
+    logger.info(f"Saved {total_files} LCMS runs to database.")
+    return total_files
+
 def get_lcmsruns_from_db(project_db_path: str, 
                         file_types: List[str], 
                         file_format: str = "parquet",
@@ -1311,9 +1381,7 @@ def get_lcmsruns_from_db(project_db_path: str,
     return database_files
 
 def batch_save_compounds_and_mzrts(
-    compounds_data: List[Dict],
-    mzrts_data: List[Dict],
-    db_path: str
+    new_compound_obj: "NewCompound"
 ) -> Tuple[int, int]:
     """
     Schema-compliant batch save for compounds and references from raw input data.
@@ -1327,13 +1395,16 @@ def batch_save_compounds_and_mzrts(
        - If different: create new mzrt entry
     
     Args:
-        compounds_data: List of compound dictionaries
-        mzrts_data: List of mzrt dictionaries
-        db_path: str
+        new_compound_obj: NewCompound object containing compounds and mzrts data
 
     Returns:
         Tuple of (compounds_created, mzrts_created)
     """
+
+    compounds_data = [compound.to_dict() for compound in new_compound_obj.compounds]
+    mzrts_data = [compound_mzrt.to_dict() for compound_mzrt in new_compound_obj.compound_mzrts]
+    db_path = new_compound_obj.main_db_path
+
     compounds_created = 0
     mzrts_created = 0
     mzrts_skipped_identical = 0
@@ -1437,7 +1508,7 @@ def batch_save_compounds_and_mzrts(
     logger.info(f"  References created: {mzrts_created}")
     logger.info(f"  References skipped (identical data): {mzrts_skipped_identical}")
     
-    return compounds_created, mzrts_created
+    return
 
 
 def _check_identical_reference_exists(conn, reference_data: Dict) -> bool:

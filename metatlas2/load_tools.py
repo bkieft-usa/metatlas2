@@ -14,6 +14,43 @@ import logging_config as lcf
 # Initialize logger properly at module level
 logger = lcf.get_logger('load_tools')
 
+def load_new_compound_files(compounds_config: dict) -> List[str]:
+    """
+    Extract all valid file paths from a compounds config dictionary.
+    Args:
+        compounds_config: config['COMPOUNDS'] dictionary
+    Returns:
+        List of non-empty file paths (strings)
+    """
+    file_paths = []
+    for chrom, pol_dict in compounds_config.items():
+        for pol, pol_config in pol_dict.items():
+            paths = pol_config.get('PATHS', [])
+            # Filter out empty or None paths
+            valid_paths = [p for p in paths if p and str(p).strip()]
+            file_paths.extend(valid_paths)
+    return file_paths
+
+def load_new_atlas_files(atlases_config: dict) -> Dict[str, Dict[str, Dict[str, str]]]:
+    """
+    Extract all valid file paths from an atlas config dictionary.
+    Args:
+        atlases_config: config['ATLASES'] dictionary
+    Returns:
+        Nested dict of file paths: {chrom: {pol: {atlas_type: path}}}
+    """
+    file_paths = {}
+    for chrom, pol_dict in atlases_config.items():
+        for pol, pol_config in pol_dict.items():
+            for atlas_type, atlas_info in pol_config.items():
+                path = atlas_info.get('path', None)
+                if path and str(path).strip():
+                    if Path(path).exists():
+                        file_paths.setdefault(chrom, {}).setdefault(pol, {})[atlas_type] = str(path)
+                    else:
+                        raise ValueError(f"Atlas file listed in config not found: {path} for {chrom}/{pol}/{atlas_type}")
+    return file_paths
+
 def load_msms_refs_file(file_path):
     """
     Load the msms_refs.tab file and convert it to a DataFrame format suitable for MS2 matching.

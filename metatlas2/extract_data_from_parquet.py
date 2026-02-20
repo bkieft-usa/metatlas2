@@ -35,7 +35,7 @@ def view_parquet_file_contents(parquet_file: str, num_rows: int = 5, rt_slice: f
 def extract_eic_and_ms2_from_parquet(
     atlas: "Atlas",
     stage: str,
-    project_files: dict,
+    lcmsruns: List["LCMSRun"],
     workflow_params: dict,
     use_parallel: bool = True,
     only_ms_level: int = None,
@@ -47,7 +47,7 @@ def extract_eic_and_ms2_from_parquet(
     
     Args:
         atlas: Atlas object with attributes [atlas_uid, atlas_name, ...]
-        project_files_df: DataFrame with columns ['file_path', 'ms_level', 'polarity']
+        lcmsruns: List of LCMSRun objects
         ppm_tolerance: m/z tolerance in ppm
         extra_time: Extra RT time to extract beyond feature bounds
         use_parallel: Whether to use parallel processing (default: True)
@@ -60,18 +60,20 @@ def extract_eic_and_ms2_from_parquet(
     """
     from workflow_objects import ExperimentalData, MS1Data, MS2Data
 
-    logger.info("Initiate an experimental data object to hold results during analysis...")
+    logger.info(f"Starting data extraction based on {atlas.atlas_uid} ({atlas.name}) for stage '{stage}' from {len(lcmsruns)} LCMS runs...")
+
+    logger.info("Initiating an experimental data object to hold results during analysis...")
     experimental_data_obj = ExperimentalData()
 
-    project_files_df = pd.concat(project_files.values(), ignore_index=True)
-    logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_df)} project files...")
+    project_files_list = [run.file_path for run in lcmsruns]
+    logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_list)} project files...")
 
     ppm_tolerance = workflow_params.get("ppm_error", 20.0)
     extra_time = workflow_params.get("extra_time", 0.1)
     logger.info(f"Using ppm_tolerance={ppm_tolerance} and extra_time={extra_time} for data extraction.")
 
-    project_files_list = project_files_df['file_path'].tolist()
     if max_workers is None:
+        import multiprocessing as mp
         max_workers = min(mp.cpu_count(), len(project_files_list), 8)
     use_parallel = use_parallel and max_workers > 1 and len(project_files_list) > 1
 
@@ -79,6 +81,8 @@ def extract_eic_and_ms2_from_parquet(
 
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers...")
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from tqdm.notebook import tqdm
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_file = {
                 executor.submit(_process_single_parquet_file, parquet_file, compound_mzrts, ppm_tolerance, extra_time, only_ms_level): parquet_file
@@ -112,6 +116,7 @@ def extract_eic_and_ms2_from_parquet(
                     continue
     else:
         logger.info("Using sequential processing...")
+        from tqdm.notebook import tqdm
         for parquet_file in tqdm(project_files_list, desc="Processing parquet files"):
             try:
                 file_results = _process_single_parquet_file(
