@@ -206,7 +206,7 @@ def _extract_ms1_from_parquet(
     rt_min: float,
     rt_max: float,
     ppm_tolerance: float,
-    extra_time: float = 0.1
+    extra_time: float = 1
 ) -> pd.DataFrame:
     """
     Extract a single feature from a parquet file.

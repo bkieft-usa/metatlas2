@@ -31,7 +31,7 @@ def process_job(job, reference_df):
         return (inchi_key, adduct, file_path, pd.DataFrame())
 
 def find_ms2_hits(
-    exp_data_obj: "ExperimentalData",
+    auto_id_obj: "AutoID",
     msms_refs_path: str
 ) -> "ExperimentalData":
     """
@@ -48,13 +48,13 @@ def find_ms2_hits(
     logger.info(f"Finding MS2 hits using reference database with {len(reference_df)} entries...")
 
     jobs = []
-    for ms2 in exp_data_obj.ms2_data:
+    for ms2 in auto_id_obj.experimental_data.ms2_data:
         if not ms2.data.empty:
             jobs.append((ms2.inchi_key, ms2.adduct, ms2.filename, ms2.data))
 
     if not jobs:
         logger.warning("No MS2 data found for any compounds, skipping hit detection")
-        return exp_data_obj
+        return
     else:
         logger.info(f"Prepared hit detection input for {len(jobs)} files with MS2 data")
 
@@ -80,18 +80,18 @@ def find_ms2_hits(
             filename=filename,
             data=ms2_hits_df
         )
-        exp_data_obj.ms2_hits.append(ms2_hit_obj)
+        auto_id_obj.experimental_data.ms2_hits.append(ms2_hit_obj)
 
     # Print summary
     compounds_with_hits = sum(
-        1 for ms2_hit in exp_data_obj.ms2_hits if not ms2_hit.data.empty
+        1 for ms2_hit in auto_id_obj.experimental_data.ms2_hits if not ms2_hit.data.empty
     )
     total_hits = sum(
-        len(ms2_hit.data) for ms2_hit in exp_data_obj.ms2_hits if not ms2_hit.data.empty
+        len(ms2_hit.data) for ms2_hit in auto_id_obj.experimental_data.ms2_hits if not ms2_hit.data.empty
     )
     logger.info(f"Hit detection complete: {compounds_with_hits} compounds with reference hits and {total_hits} total hits")
 
-    return exp_data_obj
+    return
 
 
 def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame) -> pd.DataFrame:
@@ -149,11 +149,11 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
                 if len(ref_mz) == 0 or len(ref_intensity) == 0:
                     continue
                 
-                # # Filter reference spectrum to remove peaks above precursor + 2.5 Da
+                # Get precursor m/z from reference for ppm error calculation
                 precursor_mz_ref = ref_row.get('precursor_mz', 0.0)
                 
                 # Create MatchMS reference spectrum
-                mms_ref = Spectrum(mz=ref_mz, intensities=ref_intensity, metadata={'precursor_mz': np.nan})
+                mms_ref = Spectrum(mz=ref_mz, intensities=ref_intensity, metadata={'precursor_mz': precursor_mz_ref})
                 
                 # Calculate MatchMS score
                 mms_comparison = cos.pair(mms_query, mms_ref)

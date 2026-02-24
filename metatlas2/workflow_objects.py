@@ -13,12 +13,11 @@ sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
 import logging_config as lcf
 import rt_align_tools as rat
-import targeted_analysis as tga
 import load_tools as ldt
 import pubchem_retrieval as pcr
 import ms2_hit_detection as mhd
 import extract_data_from_parquet as pdx
-import ms1_ms2_summarizer as mss
+import manual_curation_summarizer as mcs
 import extract_data_from_parquet as edp
 import lcmsruns_tools as lrt
 
@@ -598,28 +597,12 @@ class MS2Hit:
         self.filename = filename
         self.data = data
 
-class MS1Summary:
-    def __init__(self, inchi_key: str, adduct: str, filename: str, data: pd.DataFrame):
-        self.inchi_key = inchi_key
-        self.adduct = adduct
-        self.filename = filename
-        self.data = data
-
-class MS2Summary:
-    def __init__(self, inchi_key: str, adduct: str, filename: str, data: pd.DataFrame):
-        self.inchi_key = inchi_key
-        self.adduct = adduct
-        self.filename = filename
-        self.data = data
-
 class ExperimentalData:
     def __init__(self):
         self.manual_curation: List[ManualCuration] = []
         self.ms1_data: List[MS1Data] = []
         self.ms2_data: List[MS2Data] = []
         self.ms2_hits: List[MS2Hit] = []
-        self.ms1_summaries: List[MS1Summary] = []
-        self.ms2_summaries: List[MS2Summary] = []
 
 @dataclass
 class AutoIdentification:
@@ -850,19 +833,18 @@ def run_auto_identification(
     )
 
     logger.info("Passing ExperimentalData to MS2 hit finder...")
-    auto_id_obj.experimental_data = mhd.find_ms2_hits(
-        exp_data_obj=auto_id_obj.experimental_data,
+    mhd.find_ms2_hits(
+        auto_id_obj=auto_id_obj,
         msms_refs_path=auto_id_obj.paths['msms_refs_path']
     )
 
-    logger.info("Passing ExperimentalData and Atlas to MS1/MS2 summarizer...")
-    auto_id_obj.experimental_data = mss.create_ms_summaries(
-        exp_data_obj=auto_id_obj.experimental_data,
-        atlas_obj=auto_id_obj.atlas_obj
+    logger.info("Passing ExperimentalData and Atlas to ManualCuration creator...")
+    mcs.create_manual_curation_obj(
+        auto_id_obj=auto_id_obj
     )
 
-    logger.info("Passing AutoIdentification object to results and summary database saver...")
-    dbi.save_analysis_results_to_db(
+    logger.info("Passing finalized AutoIdentification object to database saver...")
+    dbi.save_auto_identification_results_to_db(
         auto_id_obj=auto_id_obj
     )
 
