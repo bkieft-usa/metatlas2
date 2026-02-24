@@ -30,60 +30,6 @@ def get_db_connection(db_path: str):
     finally:
         conn.close()
 
-def find_rt_aligned_atlases_in_db(
-    project_db_path: str,
-    rt_alignment_number: int,
-    workflow: Tuple[str, str, str]
-) -> List[Dict]:
-    """
-    Get all RT-aligned atlases for given RT alignment number.
-    
-    """
-    params = [rt_alignment_number, workflow[0], workflow[1]]  # rt_alignment_number, chromatography, polarity
-    query = """
-        SELECT 
-            atlas_uid,
-            atlas_name,
-            atlas_description,
-            chromatography,
-            polarity,
-            atlas_type,
-            source_atlas_uid,
-            rt_alignment_number,
-            created_by,
-            created_date
-        FROM atlases
-        WHERE rt_alignment_number = ? AND chromatography = ? AND polarity = ?
-        ORDER BY created_date, chromatography, polarity
-    """
-        
-    with get_db_connection(project_db_path) as conn:
-        results = conn.execute(query, params).fetchall()
-        atlases = []
-        for row in results:
-            # Infer workflow from chromatography
-            workflow = row[3].upper()  # chromatography -> workflow
-            
-            atlases.append({
-                'atlas_uid': row[0],
-                'atlas_name': row[1],
-                'atlas_description': row[2],
-                'chromatography': row[3],
-                'polarity': row[4],
-                'atlas_type': row[5],
-                'source_atlas_uid': row[6],
-                'rt_alignment_number': row[7],
-                'created_by': row[8],
-                'created_date': row[9],
-                'workflow': workflow
-            })
-        
-        if not atlases:
-            raise ValueError(f"No RT-aligned atlases found in project database for RT alignment number {rt_alignment_number}")
-        else:
-            logger.info(f"Found {len(atlases)} RT-aligned atlases in project database for RT alignment number {rt_alignment_number}")
-        return atlases
-
 def create_new_atlas_from_dataframe(
     atlas_df: pd.DataFrame, 
     atlas_name: str, 
@@ -492,18 +438,6 @@ def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
 
     logger.info(f"Main metatlas database created at {db_path}")
 
-def print_files_summary(file_list: Dict[str, Any]):
-    for file_format, chrom_dict in file_list.items():
-        logger.info(f"File format: {file_format}")
-        for chrom, ms_level_dict in chrom_dict.items():
-            logger.info(f"  Chromatography: {chrom}")
-            for ms_level, pol_dict in ms_level_dict.items():
-                logger.info(f"    MS level: {ms_level}")
-                for pol, filetype_dict in pol_dict.items():
-                    logger.info(f"      Polarity: {pol}")
-                    for file_type, files_list in filetype_dict.items():
-                        logger.info(f"          {file_type}: {len(files_list)} files")
-
 def list_available_atlases(db_path: str) -> pd.DataFrame:
     """List all available atlases with optional filtering."""
 
@@ -535,24 +469,6 @@ def list_available_atlases(db_path: str) -> pd.DataFrame:
     except:
         #logger.warning(f"Did not find any atlases in database at {db_path}")
         return pd.DataFrame()
-
-def get_most_recent_QC_atlas_id(config: Dict, database_path: str = "main"):
-    with get_db_connection(database_path) as conn:
-
-        query = """
-        SELECT *
-        FROM atlases
-        WHERE atlas_name LIKE '%QC%' OR atlas_description LIKE '%QC%'
-        ORDER BY created_date DESC
-        LIMIT 1
-        """
-        df = conn.execute(query).df()
-
-    if df.empty:
-        logger.warning("No QC atlas found.")
-        return None
-
-    return df.iloc[0]['atlas_uid']
 
 def validate_database(database_path: str, database_type: str = "main") -> None:
     """
@@ -623,18 +539,6 @@ def validate_database(database_path: str, database_type: str = "main") -> None:
                     logger.debug(f"            {row['chromatography']} {row['polarity']}")
                     logger.debug(f"            {row['compound_count']} compounds")
                     logger.debug(f"            {row['created_date']}")
-
-            # List targeted analyses
-            # targeted_df = conn.execute("""
-            #     SELECT analysis_uid, project_name, atlas_uid, COUNT(*) as compound_count
-            #     FROM targeted_analysis
-            #     GROUP BY analysis_uid, project_name, atlas_uid
-            #     ORDER BY analysis_uid
-            # """).df()
-            # if not targeted_df.empty:
-            #     logger.info("   Targeted analysis entries:")
-            #     for _, row in targeted_df.iterrows():
-            #         logger.info(f"      {row['analysis_uid']} ({row['project_name']}) - Atlas: {row['atlas_uid']} - {row['compound_count']} compounds")
 
             # List RT alignment models
             rt_df = conn.execute("""
@@ -782,7 +686,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
     """Add compounds and RT/MZ references to database using batch operations."""
 
     if not os.path.exists(db_path):
-        logger.error(f"Database not found at {db_path}. Check path or create it first using create_metatlas_database().")
+        logger.error(f"Database not found at {db_path}. Check path or create it first!")
         raise FileNotFoundError(f"Database not found at {db_path}")
 
     unique_inchi_keys = input_df['inchi_key'].dropna().unique()
@@ -1048,53 +952,6 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
         logger.error(f"Error preparing reference record: {e}")
         return None
 
-def get_atlas_metadata_from_db(db_path: str, atlas_uid: str) -> pd.DataFrame:
-    """
-    Retrieve atlas metadata from database for a specific atlas.
-    Returns DataFrame with atlas information including name, description, chromatography, polarity, etc.
-    """
-    
-    try:
-        logger.debug(f"Retrieving atlas metadata for UID: {atlas_uid} from database: {db_path}")
-        with get_db_connection(db_path) as conn: 
-            query = """
-            SELECT 
-                atlas_uid,
-                atlas_name,
-                atlas_description,
-                chromatography,
-                polarity,
-                analysis_type,
-                atlas_type,
-                created_by,
-                created_date,
-                source
-            FROM atlases 
-            WHERE atlas_uid = ?
-            """
-            
-            df = conn.execute(query, [atlas_uid]).df()
-            logger.debug(f"Query executed successfully, retrieved {len(df)} records")
-        
-        if df.empty:
-            raise ValueError(f"Atlas not found in database")
-        if len(df) > 1:
-            raise ValueError(f"Multiple entries found for atlas in the database.")
-        
-        logger.info(f"Retrieved atlas metadata for: {df['atlas_name'].iloc[0]}")
-        return df.iloc[0].to_dict()
-
-    except Exception as e:
-        logger.warning(f"Did not find atlas {atlas_uid} in database {db_path}: {e}")
-        return {}
-
-def get_decorator_from_uid(uid: str) -> Optional[str]:
-    """Extract decorator from UID if present."""
-    parts = uid.split('-')
-    if len(parts) >= 5 and parts[0] == 'atl' and parts[1] in ['ref', 'rta', 'tga']:
-        return f"{parts[2]}-{parts[3]}-{parts[4]}"
-    return None
-
 def _generate_uid(entity_type: str, decorator: str = None) -> str:
     """Generate a unique identifier for database entities."""
     if entity_type == "ref_atlas":
@@ -1123,7 +980,6 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"cmp-info-{uuid.uuid4().hex[:32]}"
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
-
 
 def save_lcmsruns_to_db(
     project_db_path: str,
@@ -1781,36 +1637,6 @@ def get_or_create_compound_mz_rt_uid(
         else:
             return _generate_uid("mz_rt", decorator), False
 
-def get_compound_by_uid(db_path: str, compound_uid: str) -> Optional[Dict]:
-    """
-    Retrieve a single compound from the database by compound_uid.
-    
-    Args:
-        db_path: Path to database
-        compound_uid: Compound UID to retrieve
-        
-    Returns:
-        Dictionary with compound data, or None if not found
-    """
-    with get_db_connection(db_path) as conn:
-        result = conn.execute("""
-            SELECT * FROM compounds WHERE compound_uid = ?
-        """, [compound_uid]).fetchone()
-        
-        if not result:
-            logger.warning(f"Compound {compound_uid} not found in database")
-            return None
-        
-        # Convert to dictionary with column names
-        columns = [
-            'compound_uid', 'name', 'inchi_key', 'inchi', 'smiles', 'formula',
-            'compound_classes', 'compound_pathways', 'compound_tags',
-            'mono_isotopic_molecular_weight', 'iupac_name', 'pubchem_cid',
-            'cas_number', 'synonyms', 'created_by', 'created_date'
-        ]
-        
-        return dict(zip(columns, result))
-
 def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> None:
     """
     Check for existing AutoIdentification results in the project database for the given
@@ -1946,11 +1772,7 @@ def save_auto_identification_results_to_db(
         ms2_data_records
     )
 
-    logger.info("Compiling auto identification summary for experimental data...")
-    exp_data_obj_summary = _display_auto_id_summary(exp_data_obj)
-
     logger.info("Database save complete. ")
-    display(exp_data_obj_summary)
 
     return
     
@@ -1981,40 +1803,6 @@ def _check_identical_manual_curation_exists(conn, manual_curation_records: List[
                 f"inchi_key {inchi_key}, adduct {adduct}, rt_alignment_number {rt_alignment_number}, "
                 f"and analysis_number {analysis_number}. Please incremement the analysis number or run a new RT alignment to avoid duplicates."
             )
-
-def _display_auto_id_summary(exp_data_obj: "ExperimentalData") -> None:
-    """
-    Display a summary table of auto identification results to the logger.
-    Shows number of compounds, MS1/MS2 datapoints, MS2 hits, etc.
-    """
-
-    summary_rows = []
-    for ci in exp_data_obj.manual_curation:
-        inchi_key = ci.inchi_key
-        adduct = ci.adduct
-
-        ms1_count = sum(
-            len(ms1.data) for ms1 in exp_data_obj.ms1_data
-            if ms1.inchi_key == inchi_key and ms1.adduct == adduct
-        )
-        ms2_count = sum(
-            len(ms2.data) for ms2 in exp_data_obj.ms2_data
-            if ms2.inchi_key == inchi_key and ms2.adduct == adduct
-        )
-        ms2_hits_count = sum(
-            len(ms2_hit.data) for ms2_hit in exp_data_obj.ms2_hits
-            if ms2_hit.inchi_key == inchi_key and ms2_hit.adduct == adduct
-        )
-
-        summary_rows.append({
-            "inchi_key": inchi_key,
-            "adduct": adduct,
-            "MS1 datapoints": ms1_count,
-            "MS2 datapoints": ms2_count,
-            "MS2 hits": ms2_hits_count,
-        })
-
-    return pd.DataFrame(summary_rows)
 
 def _prepare_manual_curation_record(
     manual_curation: pd.DataFrame,
@@ -2221,3 +2009,38 @@ def _bulk_insert_analysis_data(
             conn.executemany("""
                 INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_data_records)
+
+def display_auto_id_summary(exp_data_obj: "ExperimentalData") -> None:
+    """
+    Display a summary table of auto identification results to the logger.
+    Shows number of compounds, MS1/MS2 datapoints, MS2 hits, etc.
+    """
+
+    summary_rows = []
+    for ci in exp_data_obj.manual_curation:
+        inchi_key = ci.inchi_key
+        adduct = ci.adduct
+
+        ms1_count = sum(
+            len(ms1.data) for ms1 in exp_data_obj.ms1_data
+            if ms1.inchi_key == inchi_key and ms1.adduct == adduct
+        )
+        ms2_count = sum(
+            len(ms2.data) for ms2 in exp_data_obj.ms2_data
+            if ms2.inchi_key == inchi_key and ms2.adduct == adduct
+        )
+        ms2_hits_count = sum(
+            len(ms2_hit.data) for ms2_hit in exp_data_obj.ms2_hits
+            if ms2_hit.inchi_key == inchi_key and ms2_hit.adduct == adduct
+        )
+
+        summary_rows.append({
+            "inchi_key": inchi_key,
+            "adduct": adduct,
+            "MS1 datapoints": ms1_count,
+            "MS2 datapoints": ms2_count,
+            "MS2 hits": ms2_hits_count,
+        })
+
+    display(pd.DataFrame(summary_rows))
+    return

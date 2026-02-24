@@ -184,7 +184,7 @@ def format_polynomial_equation(model_info):
     else:
         return f"Polynomial degree {degree} (coefficients: {coeffs})"
 
-def visualize_RT_model(rt_align_obj: "RTAlign", save_plot: bool = True):
+def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True):
     """
     Visualize RT alignment model results using RTAlign object.
     """
@@ -428,127 +428,7 @@ def build_rt_alignment_model(
 
     return
 
-# def extract_matches_from_qc_files(main_db_path: str,
-#                                   qc_atlas_uid: str,
-#                                   qc_files_dict: dict,
-#                                   rt_align_settings: Dict) -> Dict: 
-#     """
-#     Use same approach as feature extraction to extract EIC data for QC compounds.
-#     Adds atlas metadata to each compound in experimental_data by inchi_key.
-#     """
-
-#     logger.info("Loading QC atlas...")
-#     atlas_dataframe = dbi.get_atlas_compounds_table(database_path=main_db_path, 
-#                                                     atlas_uid=qc_atlas_uid)
-
-#     logger.info("Extracting EIC data from QC parquet files...")
-#     eic_results = edp.extract_eic_and_ms2_from_parquet(
-#         atlas_df=atlas_dataframe,
-#         project_files=qc_files_dict,
-#         ppm_tolerance=rt_align_settings['ppm_error'],
-#         extra_time=rt_align_settings['extra_time'],
-#         use_parallel=True,
-#         only_ms_level=1,
-#     )
-
-#     # for inchi_key, adduct_data in eic_results.items():
-#     #     for adduct, file_data in adduct_data.items():
-#     #         for filename, data in file_data.items():
-#     #             ms1_data = data.get('ms1_data', pd.DataFrame())
-#     #             if not ms1_data.empty:
-#     #                 display(ms1_data.head())
-#     #             ms2_data = data.get('ms2_data', pd.DataFrame())
-#     #             if not ms2_data.empty:
-#     #                 display(ms2_data.head())
-
-#     logger.info("Formatting results for RT alignment...")
-#     experimental_data_formatted = _format_eic_results_for_rt_alignment(eic_results, 
-#                                                                        atlas_dataframe)
-
-#     return experimental_data_formatted
-
-# def _format_eic_results_for_rt_alignment(
-#     eic_results: Dict[str, Dict[str, Dict[str, Dict]]],
-#     atlas_dataframe: pd.DataFrame
-# ) -> Dict:
-#     """
-#     Format EIC results to match the structure expected by RT alignment.
-    
-#     Args:
-#         eic_results: Output from extract_eic_and_ms2_from_parquet, structured as:
-#             {inchi_key: {adduct: {file_path: {'ms1_data': DataFrame, 'ms2_data': DataFrame}}}}
-#         atlas_dataframe: Atlas DataFrame with compound metadata
-    
-#     Returns:
-#         Dict with structure {inchi_key: {adduct: {compound_data_with_eic_files}}}
-#     """
-#     experimental_data = {}
-#     compounds_processed = 0
-#     compounds_with_data = 0
-    
-#     for _, atlas_row in atlas_dataframe.iterrows():
-#         inchi_key = atlas_row.get('inchi_key')
-#         adduct = atlas_row.get('adduct')
-#         compounds_processed += 1
-        
-#         if inchi_key not in eic_results:
-#             logger.warning(f"No EIC results found for {inchi_key} - skipping")
-#             continue
-        
-#         if adduct not in eic_results[inchi_key]:
-#             logger.warning(f"No EIC results found for {inchi_key} with adduct {adduct} - skipping")
-#             continue
-        
-#         # Initialize nested dict structure 
-#         if inchi_key not in experimental_data:
-#             experimental_data[inchi_key] = {}
-        
-#         # Initialize compound entry with atlas metadata
-#         compound_data = atlas_row.to_dict()
-#         compound_data['eic_files'] = {}
-        
-#         # Process each file's data for this compound/adduct
-#         for parquet_file, file_data in eic_results[inchi_key][adduct].items():
-#             ms1_data = file_data.get('ms1_data', pd.DataFrame())
-#             if ms1_data.empty:
-#                 continue
-            
-#             sum_intensity = ms1_data['i'].sum()
-#             if sum_intensity > 0:
-#                 num_datapoints = int(ms1_data['i'].count())
-#                 peak_area = float(sum_intensity)
-#                 idx = ms1_data['i'].idxmax()
-#                 observed_intensity = float(ms1_data.loc[idx, 'i'])
-#                 peak_mz = float(ms1_data.loc[idx, 'mz'])
-#                 observed_rt = float(ms1_data.loc[idx, 'rt'])
-#                 observed_mz = float((ms1_data['i'] * ms1_data['mz']).sum() / sum_intensity)
-#             else:
-#                 continue
-            
-#             # Calculate PPM error
-#             atlas_mz = atlas_row['mz']
-#             ppm_diff = ((observed_mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
-            
-#             # Store in eic_files format expected by RT alignment
-#             compound_data['eic_files'][parquet_file] = {
-#                 'rt_peak': observed_rt,
-#                 'mz_peak': observed_mz,
-#                 'intensity_peak': observed_intensity,
-#                 'ppm_diff': ppm_diff,
-#                 'peak_area': peak_area,
-#                 'num_datapoints': num_datapoints
-#             }
-        
-#         # Only add compounds that have at least one match
-#         if compound_data['eic_files']:
-#             experimental_data[inchi_key][adduct] = compound_data
-#             compounds_with_data += 1
-    
-#     logger.info(f"Formatted data for {compounds_with_data} of {compounds_processed} compounds with matches")
-    
-#     return experimental_data
-
-def create_qc_matching_summary(
+def create_file_matching_summary(
     experimental_data: "ExperimentalData",
     atlas: "Atlas"
 ) -> None:
@@ -631,7 +511,7 @@ def create_qc_matching_summary(
 
     return
 
-def run_rt_alignment_summary(rt_align_obj: "RTAlign") -> None:
+def display_rt_alignment_summary(rt_align_obj: "RTAlign") -> None:
     """
     Log a concise summary of the RT alignment model and RT shift statistics using RTAlign object.
     """

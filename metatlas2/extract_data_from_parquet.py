@@ -16,21 +16,7 @@ from concurrent.futures import as_completed
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
 
-# Initialize logger properly at module level
 logger = lcf.get_logger('extract_data_from_parquet')
-
-def view_parquet_file_contents(parquet_file: str, num_rows: int = 5, rt_slice: float = None) -> pd.DataFrame:
-    """Utility function to view contents of a parquet file."""
-    try:
-        df = pq.read_table(parquet_file).to_pandas()
-        logger.info(f"Successfully read {parquet_file} with {len(df)} rows.")
-        if rt_slice:
-            df = df[df['rt'] == rt_slice]
-            logger.info(f"Filtered to {len(df)} rows with rt == {rt_slice}.")
-        return df.head(num_rows)
-    except Exception as e:
-        logger.error(f"Error reading {parquet_file}: {e}")
-        return pd.DataFrame()
 
 def extract_eic_and_ms2_from_parquet(
     atlas: "Atlas",

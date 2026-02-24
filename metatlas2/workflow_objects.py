@@ -756,7 +756,7 @@ def run_rt_alignment(
         )
 
         logger.info("Passing ExperimentalData and Atlas to summarizer...")
-        rat.create_qc_matching_summary(
+        rat.create_file_matching_summary(
             experimental_data=experimental_data_obj,
             atlas=template_atlas_obj
         )
@@ -774,7 +774,7 @@ def run_rt_alignment(
         )
         
         logger.info("Passing RTAlign object to model visualizer...")
-        rat.visualize_RT_model(
+        rat.visualize_rt_alignment_model(
             rt_align_obj=rt_align_obj
         )
     
@@ -792,7 +792,7 @@ def run_rt_alignment(
         )
 
     logger.info("Passing RTAlign object to RT alignment summary generator...")
-    rat.run_rt_alignment_summary(
+    rat.display_rt_alignment_summary(
         rt_align_obj=rt_align_obj
     )
 
@@ -845,6 +845,11 @@ def run_auto_identification(
 
     logger.info("Passing finalized AutoIdentification object to database saver...")
     dbi.save_auto_identification_results_to_db(
+        auto_id_obj=auto_id_obj
+    )
+
+    logger.info("Passing AutoIdentification object to summary generator...")
+    dbi.display_auto_id_summary(
         auto_id_obj=auto_id_obj
     )
 
