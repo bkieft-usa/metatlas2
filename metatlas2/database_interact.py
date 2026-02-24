@@ -1153,6 +1153,8 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"ms2-sum-{uuid.uuid4().hex[:32]}"
     elif entity_type == "ms2_hits":
         return f"ms2-hits-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "manual_curation":
+        return f"cmp-info-{uuid.uuid4().hex[:32]}"
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
@@ -1210,53 +1212,57 @@ def save_lcmsruns_to_db(
     logger.info(f"Saved {total_files} LCMS runs to database.")
     return total_files
 
-def get_lcmsruns_from_db(project_db_path: str, 
-                        file_types: List[str], 
-                        file_format: str = "parquet",
-                        chromatography: str = None,
-                        polarity: str = None
-) -> Dict[str, pd.DataFrame]:
+def get_lcmsruns_from_db(
+    project_db_path: str,
+    file_types: Optional[List[str]] = None,
+    file_format: str = "parquet",
+    chromatography: str = None,
+    polarity: str = None
+) -> List["LCMSRun"]:
+    """
+    Retrieve LCMS runs from the database, optionally filtering by file_types, file_format, chromatography, and polarity.
+    Returns a flat list of LCMSRun objects.
+    """
 
-    database_files = {}
-    for type in file_types:
-        if type not in ['qc', 'experimental', 'istd', 'exctrl']:
-            raise ValueError(f"Invalid file category: {type}. Must be one of ['qc', 'experimental', 'istd', 'exctrl']")
-        
-        with get_db_connection(project_db_path) as conn:
-            params = [type, file_format]
-            where_conditions = ["file_type = ?", "file_format = ?"]
-            
-            if chromatography:
-                if chromatography == "HILICZ":
-                    chromatography = "HILIC"
-                where_conditions.append("UPPER(chromatography) = UPPER(?)")
-                params.append(chromatography)
-            
-            if polarity:
-                if polarity.lower() in ["pos", "positive"]:
-                    polarity = "positive"
-                elif polarity.lower() in ["neg", "negative"]:
-                    polarity = "negative"
-                where_conditions.append("UPPER(polarity) = UPPER(?)")
-                params.append(polarity)
-            
-            where_clause = " AND ".join(where_conditions)
-            
-            files_df = conn.execute(f"""
-                SELECT file_path, chromatography, ms_level, polarity, file_type 
-                FROM lcmsruns 
-                WHERE {where_clause}
-                ORDER BY chromatography, ms_level, polarity, file_path
-            """, params).df()
-        
-        database_files[type] = files_df
-    
-    logger.info(f"Retrieved {sum(len(df) for df in database_files.values())} LC/MS run files from database with filters: file_types={file_types}, chromatography={chromatography}, polarity={polarity}, format={file_format}")
-    logger.info(f"File counts by category:")
-    for file_type, df in database_files.items():
-        logger.info(f"  {file_type}: {len(df)} files")
-    
-    return database_files
+    from workflow_objects import LCMSRun
+
+    where_conditions = ["file_format = ?"]
+    params = [file_format]
+
+    if chromatography:
+        if chromatography == "HILICZ":
+            chromatography = "HILIC"
+        where_conditions.append("UPPER(chromatography) = UPPER(?)")
+        params.append(chromatography)
+
+    if polarity:
+        if polarity.lower() in ["pos", "positive"]:
+            polarity = "positive"
+        elif polarity.lower() in ["neg", "negative"]:
+            polarity = "negative"
+        where_conditions.append("UPPER(polarity) = UPPER(?)")
+        params.append(polarity)
+
+    if file_types:
+        for ft in file_types:
+            if ft not in ['qc', 'experimental', 'istd', 'exctrl']:
+                raise ValueError(f"Invalid file category: {ft}. Must be one of ['qc', 'experimental', 'istd', 'exctrl']")
+        where_conditions.append(f"file_type IN ({','.join(['?']*len(file_types))})")
+        params.extend(file_types)
+
+    where_clause = " AND ".join(where_conditions)
+    with get_db_connection(project_db_path) as conn:
+        files_df = conn.execute(f"""
+            SELECT file_path, filename, file_format, file_type, chromatography, ms_level, polarity, created_by, created_date
+            FROM lcmsruns
+            WHERE {where_clause}
+            ORDER BY chromatography, ms_level, polarity, file_path
+        """, params).df()
+
+    lcmsruns_list = [LCMSRun(**row) for _, row in files_df.iterrows()]
+
+    logger.info(f"Retrieved {len(lcmsruns_list)} LC/MS run files from database with filters: file_types={file_types}, chromatography={chromatography}, polarity={polarity}, format={file_format}")
+    return lcmsruns_list
 
 def batch_save_compounds_and_mzrts(
     db_path: str,
@@ -1678,6 +1684,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 num_matches INTEGER,
                 mz_theoretical REAL,
                 mz_measured REAL,
+                ppm_error REAL,
                 rt_measured REAL,
                 qry_intensity_peak REAL,
                 ref_frags INTEGER,
@@ -1721,20 +1728,42 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
                 file_path TEXT,
+                inchi_key TEXT,
+                adduct TEXT,
                 num_scans INTEGER,
                 num_fragments INTEGER,
                 best_scan_rt REAL,
                 best_scan_precursor_mz REAL,
                 best_scan_precursor_intensity REAL,
+                rt_error REAL,
+                ppm_error REAL,
                 total_hits INTEGER,
+                ref_id TEXT,
+                ref_name TEXT,
+                database TEXT,
+                score REAL,
+                num_matches INTEGER,
+                mz_theoretical REAL,
+                mz_measured REAL,
+                ppm_error_hit REAL,
+                rt_measured REAL,
+                qry_intensity_peak REAL,
+                ref_frags INTEGER,
+                data_frags INTEGER,
+                matched_fragments TEXT,
+                qry_frag_colors TEXT,
+                qry_spectrum TEXT,
+                ref_spectrum TEXT,
+                qry_spectrum_original TEXT,
+                ref_spectrum_original TEXT,
                 created_by TEXT,
                 created_date TEXT
             )
         """)
 
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS compound_analysis_metadata (
-                metadata_uid TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS manual_curation (
+                curation_uid TEXT PRIMARY KEY,
                 compound_uid TEXT,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
@@ -1755,12 +1784,12 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_suggestion_confidence REAL,
                 
                 -- Best EIC across all files
-                best_eic_file TEXT,
-                best_eic_rt REAL,
-                best_eic_mz REAL,
-                best_eic_intensity REAL,
-                best_eic_ppm_error REAL,
-                best_eic_rt_error REAL,
+                best_ms1_file TEXT,
+                best_ms1_rt REAL,
+                best_ms1_mz REAL,
+                best_ms1_intensity REAL,
+                best_ms1_ppm_error REAL,
+                best_ms1_rt_error REAL,
                 
                 -- File counts
                 total_files_detected INTEGER,
@@ -1878,27 +1907,112 @@ def get_compound_by_uid(db_path: str, compound_uid: str) -> Optional[Dict]:
         
         return dict(zip(columns, result))
 
+def _check_identical_ms2_summary_exists(conn, ms2_summary_record: tuple) -> bool:
+    """
+    Check if an identical MS2 summary record exists in the database (excluding created_by and created_date).
+    """
+    query = """
+        SELECT ms2_summary_uid FROM ms2_summary WHERE
+            compound_uid = ? AND rt_alignment_number = ? AND analysis_number = ? AND file_path = ?
+            AND inchi_key = ? AND adduct = ? AND num_scans = ? AND num_fragments = ?
+            AND best_scan_rt = ? AND best_scan_precursor_mz = ? AND best_scan_precursor_intensity = ?
+            AND rt_error = ? AND ppm_error = ? AND total_hits = ? AND ref_id IS ? AND ref_name IS ?
+            AND database IS ? AND score IS ? AND num_matches IS ? AND mz_theoretical IS ?
+            AND mz_measured IS ? AND ppm_error_hit IS ? AND rt_measured IS ? AND qry_intensity_peak IS ?
+            AND ref_frags IS ? AND data_frags IS ? AND matched_fragments = ? AND qry_frag_colors = ?
+            AND qry_spectrum = ? AND ref_spectrum = ? AND qry_spectrum_original = ? AND ref_spectrum_original = ?
+    """
+    params = ms2_summary_record[1:33]  # Exclude UID, created_by, created_date
+    result = conn.execute(query, params).fetchone()
+    return result is not None
+
+def _check_identical_ms1_summary_exists(conn, ms1_summary_record: tuple) -> bool:
+    """
+    Check if an identical MS1 summary record exists in the database (excluding created_by and created_date).
+    """
+    query = """
+        SELECT ms1_summary_uid FROM ms1_summary WHERE
+            compound_uid = ? AND rt_alignment_number = ? AND analysis_number = ? AND file_path = ?
+            AND num_datapoints = ? AND peak_area = ? AND peak_height = ? AND mz_centroid = ?
+            AND rt_peak = ? AND ppm_error = ? AND rt_error = ?
+    """
+    params = ms1_summary_record[1:12]  # Exclude UID, created_by, created_date
+    result = conn.execute(query, params).fetchone()
+    return result is not None
+
+def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> None:
+    """
+    Check for existing AutoIdentification results in the project database for the given
+    RT alignment number and analysis number. If found, raise an error.
+    """
+    project_db_path = auto_id_obj.paths['project_db_path']
+    rt_alignment_number = auto_id_obj.rt_alignment_number
+    analysis_number = auto_id_obj.analysis_number
+
+    if not Path(project_db_path).exists():
+        raise FileNotFoundError(f"Project database not found: {project_db_path}")
+
+    with get_db_connection(project_db_path) as conn:
+        # Check MS1 and MS2 summary tables for existing entries
+
+        ms1_data_exists = conn.execute(
+            "SELECT COUNT(*) FROM ms1_data WHERE rt_alignment_number = ? AND analysis_number = ?",
+            [rt_alignment_number, analysis_number]
+        ).fetchone()[0] > 0
+
+        ms2_data_exists = conn.execute(
+            "SELECT COUNT(*) FROM ms2_data WHERE rt_alignment_number = ? AND analysis_number = ?",
+            [rt_alignment_number, analysis_number]
+        ).fetchone()[0] > 0
+
+        ms1_summary_exists = conn.execute(
+            "SELECT COUNT(*) FROM ms1_summary WHERE rt_alignment_number = ? AND analysis_number = ?",
+            [rt_alignment_number, analysis_number]
+        ).fetchone()[0] > 0
+
+        ms2_summary_exists = conn.execute(
+            "SELECT COUNT(*) FROM ms2_summary WHERE rt_alignment_number = ? AND analysis_number = ?",
+            [rt_alignment_number, analysis_number]
+        ).fetchone()[0] > 0
+
+        manual_curation_exists = conn.execute(
+            "SELECT COUNT(*) FROM manual_curation WHERE rt_alignment_number = ? AND analysis_number = ?",
+            [rt_alignment_number, analysis_number]
+        ).fetchone()[0] > 0
+
+    if ms1_data_exists or ms2_data_exists or ms1_summary_exists or ms2_summary_exists or manual_curation_exists:
+        raise ValueError(
+            f"AutoIdentification results already exist for RT alignment number {rt_alignment_number} "
+            f"and analysis number {analysis_number}. Please increment the analysis number or run a new RT alignment."
+        )
+    else:
+        logger.info(f"No existing AutoIdentification results found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}. Proceeding.")
+
 def save_analysis_results_to_db(
-    project_db_path: str,
-    main_db_path: str,
-    exp_data_obj: "ExperimentalData",
-    rt_alignment_number: int,
-    analysis_number: int
+    auto_id_obj: "AutoIdentification"
 ) -> None:
     """
-    Save complete analysis results to project database from ExperimentalData object.
+    Save complete analysis results to project database from AutoIdentification object.
     Handles both raw experimental data and MS summaries in one unified function.
     """
     logger.info("Preparing complete analysis data for database save...")
 
+    # Extract paths and numbers from auto_id_obj
+    project_db_path = auto_id_obj.paths['project_db_path']
+    main_db_path = auto_id_obj.paths['main_db_path']
+    rt_alignment_number = auto_id_obj.rt_alignment_number
+    analysis_number = auto_id_obj.analysis_number
+    exp_data_obj = auto_id_obj.experimental_data
+
+    # Get time and analyst for provenance
     prov = ldt.get_provenance()
 
     # Get compound_uid mappings
-    inchi_keys = [ci.inchi_key for ci in exp_data_obj.compound_infos]
+    inchi_keys = [ci.inchi_key for ci in exp_data_obj.manual_curation]
     compound_uid_map = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
 
     # Collect all records
-    compound_metadata_records = []
+    manual_curation_records = []
     ms1_summary_records = []
     ms2_summary_records = []
     ms2_hits_records = []
@@ -1906,22 +2020,19 @@ def save_analysis_results_to_db(
     ms2_data_records = []
 
     # CompoundInfo
-    logger.info(f"Processing {len(exp_data_obj.compound_infos)} compounds for metadata records...")
-    for ci in exp_data_obj.compound_infos:
+    for ci in exp_data_obj.manual_curation:
         compound_uid = compound_uid_map.get(ci.inchi_key)
         if not compound_uid:
             logger.warning(f"Could not find compound_uid for {ci.inchi_key}, skipping")
             continue
-        # Assume ci.data is a single-row DataFrame
-        metadata_record = _prepare_compound_metadata_record(
+        metadata_record = _prepare_manual_curation_record(
             ci.data.iloc[0:1], compound_uid, ci.adduct,
             rt_alignment_number, analysis_number, prov
         )
         if metadata_record:
-            compound_metadata_records.append(metadata_record)
+            manual_curation_records.append(metadata_record)
 
     # MS1Summary
-    logger.info(f"Processing {len(exp_data_obj.ms1_summaries)} MS1 summaries for records...")
     for ms1_sum in exp_data_obj.ms1_summaries:
         compound_uid = compound_uid_map.get(ms1_sum.inchi_key)
         if not compound_uid or ms1_sum.data.empty:
@@ -1934,7 +2045,6 @@ def save_analysis_results_to_db(
             ms1_summary_records.append(ms1_sum_record)
 
     # MS2Summary
-    logger.info(f"Processing {len(exp_data_obj.ms2_summaries)} MS2 summaries for records...")
     for ms2_sum in exp_data_obj.ms2_summaries:
         compound_uid = compound_uid_map.get(ms2_sum.inchi_key)
         if not compound_uid or ms2_sum.data.empty:
@@ -1947,7 +2057,6 @@ def save_analysis_results_to_db(
             ms2_summary_records.append(ms2_sum_record)
 
     # MS2Hits
-    logger.info(f"Processing {len(exp_data_obj.ms2_hits)} MS2 hits for records...")
     for ms2_hit in exp_data_obj.ms2_hits:
         compound_uid = compound_uid_map.get(ms2_hit.inchi_key)
         if not compound_uid or ms2_hit.data.empty:
@@ -1961,7 +2070,6 @@ def save_analysis_results_to_db(
                 ms2_hits_records.append(ms2_hit_record)
 
     # MS1Data
-    logger.info(f"Processing MS1 data for {len(exp_data_obj.ms1_data)} compounds...")
     for ms1 in exp_data_obj.ms1_data:
         compound_uid = compound_uid_map.get(ms1.inchi_key)
         if not compound_uid or ms1.data.empty:
@@ -1975,7 +2083,6 @@ def save_analysis_results_to_db(
                 ms1_data_records.append(ms1_data_record)
 
     # MS2Data
-    logger.info(f"Processing MS2 data for {len(exp_data_obj.ms2_data)} compounds...")
     for ms2 in exp_data_obj.ms2_data:
         compound_uid = compound_uid_map.get(ms2.inchi_key)
         if not compound_uid or ms2.data.empty:
@@ -1988,11 +2095,22 @@ def save_analysis_results_to_db(
             if ms2_data_record:
                 ms2_data_records.append(ms2_data_record)
 
+
+    # Check for identical MS2 summary records before inserting any data
+    logger.info("Checking for identical existing MS1 and MS2 summary records before database insert...")
+    with get_db_connection(project_db_path) as conn:
+        for record in ms2_summary_records:
+            if _check_identical_ms2_summary_exists(conn, record):
+                raise ValueError("Identical MS2 summary record already exists. Have you incremented the analysis number?")
+        for record in ms1_summary_records:
+            if _check_identical_ms1_summary_exists(conn, record):
+                raise ValueError("Identical MS1 summary record already exists. Have you incremented the analysis number?")
+
     # Bulk insert all records
     logger.info("Performing bulk database inserts...")
     _bulk_insert_analysis_data(
         project_db_path,
-        compound_metadata_records,
+        manual_curation_records,
         ms1_summary_records,
         ms2_summary_records,
         ms2_hits_records,
@@ -2003,7 +2121,7 @@ def save_analysis_results_to_db(
     logger.info("Compiling analysis summary for experimental data...")
     exp_data_obj_summary = _display_analysis_summary(exp_data_obj)
 
-    logger.info("Complete analysis data saved to database. Summary:")
+    logger.info("Complete analysis data saved to database.")
     display(exp_data_obj_summary)
 
     return
@@ -2015,7 +2133,7 @@ def _display_analysis_summary(exp_data_obj: "ExperimentalData") -> None:
     """
 
     summary_rows = []
-    for ci in exp_data_obj.compound_infos:
+    for ci in exp_data_obj.manual_curation:
         inchi_key = ci.inchi_key
         adduct = ci.adduct
 
@@ -2052,8 +2170,8 @@ def _display_analysis_summary(exp_data_obj: "ExperimentalData") -> None:
 
     return pd.DataFrame(summary_rows)
 
-def _prepare_compound_metadata_record(
-    compound_info: pd.DataFrame,
+def _prepare_manual_curation_record(
+    manual_curation: pd.DataFrame,
     compound_uid: str,
     adduct: str,
     rt_alignment_number: int,
@@ -2062,40 +2180,39 @@ def _prepare_compound_metadata_record(
 ) -> Optional[tuple]:
     """Prepare compound metadata record for database insertion."""
     try:
-        import json
-        isomers_json = json.dumps(compound_info['isomers'].iloc[0]) if compound_info['isomers'].iloc[0] else '[]'
+        isomers_json = json.dumps(manual_curation['isomers'].iloc[0]) if manual_curation['isomers'].iloc[0] else '[]'
         
         return (
-            _generate_uid("compound_metadata"),
+            _generate_uid("manual_curation"),
             compound_uid,
             rt_alignment_number,
             analysis_number,
             adduct,
-            float(compound_info['original_rt_peak'].iloc[0]),
-            float(compound_info['original_rt_min'].iloc[0]),
-            float(compound_info['original_rt_max'].iloc[0]),
-            float(compound_info['rt_peak'].iloc[0]),
-            float(compound_info['rt_min'].iloc[0]),
-            float(compound_info['rt_max'].iloc[0]),
-            float(compound_info['suggested_rt_min'].iloc[0]),
-            float(compound_info['suggested_rt_max'].iloc[0]),
-            float(compound_info['suggested_rt_peak'].iloc[0]),
-            float(compound_info['rt_suggestion_confidence'].iloc[0]),
-            str(compound_info['best_eic_file'].iloc[0]),
-            float(compound_info['best_eic_rt'].iloc[0]),
-            float(compound_info['best_eic_mz'].iloc[0]),
-            float(compound_info['best_eic_intensity'].iloc[0]),
-            float(compound_info['best_eic_ppm_error'].iloc[0]),
-            float(compound_info['best_eic_rt_error'].iloc[0]),
-            int(compound_info['total_files_detected'].iloc[0]),
-            int(compound_info['ms2_files_with_data'].iloc[0]),
+            float(manual_curation['original_rt_peak'].iloc[0]),
+            float(manual_curation['original_rt_min'].iloc[0]),
+            float(manual_curation['original_rt_max'].iloc[0]),
+            float(manual_curation['rt_peak'].iloc[0]),
+            float(manual_curation['rt_min'].iloc[0]),
+            float(manual_curation['rt_max'].iloc[0]),
+            float(manual_curation['suggested_rt_min'].iloc[0]),
+            float(manual_curation['suggested_rt_max'].iloc[0]),
+            float(manual_curation['suggested_rt_peak'].iloc[0]),
+            float(manual_curation['rt_suggestion_confidence'].iloc[0]),
+            str(manual_curation['best_ms1_file'].iloc[0]),
+            float(manual_curation['best_ms1_rt'].iloc[0]),
+            float(manual_curation['best_ms1_mz'].iloc[0]),
+            float(manual_curation['best_ms1_intensity'].iloc[0]),
+            float(manual_curation['best_ms1_ppm_error'].iloc[0]),
+            float(manual_curation['best_ms1_rt_error'].iloc[0]),
+            int(manual_curation['total_files_detected'].iloc[0]),
+            int(manual_curation['ms2_files_with_data'].iloc[0]),
             isomers_json,
-            str(compound_info['ms1_notes'].iloc[0]),
-            str(compound_info['ms2_notes'].iloc[0]),
-            str(compound_info['analyst_notes'].iloc[0]),
-            str(compound_info['identification_notes'].iloc[0]),
-            bool(compound_info['is_rt_modified'].iloc[0]),
-            bool(compound_info['is_annotation_modified'].iloc[0]),
+            str(manual_curation['ms1_notes'].iloc[0]),
+            str(manual_curation['ms2_notes'].iloc[0]),
+            str(manual_curation['analyst_notes'].iloc[0]),
+            str(manual_curation['identification_notes'].iloc[0]),
+            bool(manual_curation['is_rt_modified'].iloc[0]),
+            bool(manual_curation['is_annotation_modified'].iloc[0]),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -2151,12 +2268,34 @@ def _prepare_ms2_summary_record(
             rt_alignment_number,
             analysis_number,
             filename,
-            int(ms2_summary['num_scans']),
-            int(ms2_summary['num_fragments']),
-            float(ms2_summary['best_scan_rt']),
-            float(ms2_summary['best_scan_precursor_mz']),
-            float(ms2_summary['best_scan_precursor_intensity']),
-            int(ms2_summary['total_hits']),
+            ms2_summary.get('inchi_key', ''),
+            ms2_summary.get('adduct', ''),
+            int(ms2_summary.get('num_scans', 0)),
+            int(ms2_summary.get('num_fragments', 0)),
+            float(ms2_summary.get('best_scan_rt', 0.0)),
+            float(ms2_summary.get('best_scan_precursor_mz', 0.0)),
+            float(ms2_summary.get('best_scan_precursor_intensity', 0.0)),
+            float(ms2_summary.get('rt_error', 0.0)),
+            float(ms2_summary.get('ppm_error', 0.0)),
+            int(ms2_summary.get('total_hits', 0)),
+            ms2_summary.get('ref_id', None),
+            ms2_summary.get('ref_name', None),
+            ms2_summary.get('database', None),
+            float(ms2_summary.get('score', 0.0)) if ms2_summary.get('score', None) is not None else None,
+            int(ms2_summary.get('num_matches', 0)) if ms2_summary.get('num_matches', None) is not None else None,
+            float(ms2_summary.get('mz_theoretical', 0.0)) if ms2_summary.get('mz_theoretical', None) is not None else None,
+            float(ms2_summary.get('mz_measured', 0.0)) if ms2_summary.get('mz_measured', None) is not None else None,
+            float(ms2_summary.get('ppm_error_hit', 0.0)) if ms2_summary.get('ppm_error_hit', None) is not None else None,
+            float(ms2_summary.get('rt_measured', 0.0)) if ms2_summary.get('rt_measured', None) is not None else None,
+            float(ms2_summary.get('qry_intensity_peak', 0.0)) if ms2_summary.get('qry_intensity_peak', None) is not None else None,
+            int(ms2_summary.get('ref_frags', 0)) if ms2_summary.get('ref_frags', None) is not None else None,
+            int(ms2_summary.get('data_frags', 0)) if ms2_summary.get('data_frags', None) is not None else None,
+            json.dumps(ms2_summary.get('matched_fragments', [])),
+            json.dumps(ms2_summary.get('qry_frag_colors', [])),
+            json.dumps(ms2_summary.get('qry_spectrum', [])),
+            json.dumps(ms2_summary.get('ref_spectrum', [])),
+            json.dumps(ms2_summary.get('qry_spectrum_original', [])),
+            json.dumps(ms2_summary.get('ref_spectrum_original', [])),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -2175,7 +2314,6 @@ def _prepare_ms2_hit_record(
 ) -> Optional[tuple]:
     """Prepare MS2 hit record for database insertion."""
     try:
-        import json
         return (
             _generate_uid("ms2_hits"),
             compound_uid,
@@ -2190,6 +2328,7 @@ def _prepare_ms2_hit_record(
             int(hit.get('num_matches', 0)),
             float(hit.get('mz_theoretical', 0.0)),
             float(hit.get('mz_measured', 0.0)),
+            float(hit.get('ppm_error', 0.0)),
             float(hit.get('rt_measured', 0.0)),
             float(hit.get('qry_intensity_peak', 0.0)),
             int(hit.get('ref_frags', 0)),
@@ -2271,7 +2410,7 @@ def _prepare_ms2_data_record(
 
 def _bulk_insert_analysis_data(
     project_db_path: str,
-    compound_metadata_records: List[tuple],
+    manual_curation_records: List[tuple],
     ms1_summary_records: List[tuple],
     ms2_summary_records: List[tuple],
     ms2_hits_records: List[tuple],
@@ -2281,12 +2420,12 @@ def _bulk_insert_analysis_data(
     """Perform bulk inserts for all analysis data types."""
     
     with get_db_connection(project_db_path) as conn:
-        if compound_metadata_records:
-            logger.info(f"Inserting {len(compound_metadata_records)} compound metadata records...")
+        if manual_curation_records:
+            logger.info(f"Inserting {len(manual_curation_records)} compound metadata records...")
             conn.executemany("""
-                INSERT INTO compound_analysis_metadata VALUES 
+                INSERT INTO manual_curation VALUES 
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, compound_metadata_records)
+            """, manual_curation_records)
         
         if ms1_summary_records:
             logger.info(f"Inserting {len(ms1_summary_records)} MS1 summary records...")
@@ -2297,23 +2436,25 @@ def _bulk_insert_analysis_data(
         if ms2_summary_records:
             logger.info(f"Inserting {len(ms2_summary_records)} MS2 summary records...")
             conn.executemany("""
-                INSERT INTO ms2_summary VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_summary VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
             """, ms2_summary_records)
         
         if ms2_hits_records:
             logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
             conn.executemany("""
-                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_hits_records)
         
         if ms1_data_records:
             logger.info(f"Inserting {len(ms1_data_records)} MS1 raw data records...")
             conn.executemany("""
-                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms1_data_records)
         
         if ms2_data_records:
             logger.info(f"Inserting {len(ms2_data_records)} MS2 raw data records...")
             conn.executemany("""
-                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_data_records)

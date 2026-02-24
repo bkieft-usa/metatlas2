@@ -29,8 +29,13 @@ def filter_lcmsruns_list(
         elif polarity.lower() in ["neg", "negative"]:
             polarity = "negative"
 
-    filtered_runs = lcmsruns
+    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: file_type={file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}...")
+    filtered_runs = lcmsruns.copy()
+
+    # Fix: ensure file_type is always a list
     if file_type:
+        if isinstance(file_type, str):
+            file_type = [file_type]
         filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() in [ft.lower() for ft in file_type]]
     if file_format:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'file_format', '').lower() == file_format.lower()]
@@ -39,7 +44,7 @@ def filter_lcmsruns_list(
     if polarity:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'polarity', '').lower() == polarity.lower()]
 
-    logger.info(f"Filtered {len(filtered_runs)} LCMS runs with parameters file_type={file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity} from total of {len(lcmsruns)} runs.")
+    logger.info(f"Filtered to {len(filtered_runs)} out of {len(lcmsruns)} total files.")
     return filtered_runs
 
 def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list:

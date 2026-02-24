@@ -27,7 +27,7 @@ def apply_rt_alignment_to_target_atlases(
     logger.info("Applying RT alignment model to target atlases and generating RT-aligned Atlas objects...")
 
     main_db_path = rt_align_obj.paths['main_db_path']
-    targeted_analyses = rt_align_obj.project.config['WORKFLOWS']['TARGETED_ANALYSES']
+    targeted_analyses = rt_align_obj.config['WORKFLOWS']['TARGETED_ANALYSES']
     rt_alignment_model = rt_align_obj.rt_alignment_model
     rt_align_settings = rt_align_obj.rt_alignment_params
     rt_alignment_number = rt_align_obj.rt_alignment_number
@@ -635,6 +635,9 @@ def run_rt_alignment_summary(rt_align_obj: "RTAlign") -> None:
     """
     Log a concise summary of the RT alignment model and RT shift statistics using RTAlign object.
     """
+
+    logger.info("Generating RT alignment model summary...")
+
     model = rt_align_obj.rt_alignment_model
     stats = getattr(rt_align_obj, "rt_shift_stats", None)
 

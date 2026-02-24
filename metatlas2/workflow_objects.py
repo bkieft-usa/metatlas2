@@ -334,17 +334,106 @@ class Atlas:
         logger.info(f"Loading atlas with UID {atlas_uid} from database...")
         return cls.from_dataframe(dbi.get_atlas_compounds_table(database_path, atlas_uid, main_db_path))
 
+
+@dataclass
+class NewCompound:
+    config: Dict[str, Any]
+    overwrite_db: bool = False
+
+    def run(self) -> Tuple[List[Compound], List[CompoundMZRT]]:
+        main_db_path = self.config["ENV"]["PATHS"]["main_database"]
+
+        compounds = []
+        compound_mzrts = []
+        dbi.create_metatlas_database(main_db_path, overwrite=self.overwrite_db)
+
+        for chrom, pol_dict in self.config['COMPOUNDS'].items():
+            for pol, pol_config in pol_dict.items():
+                for file_path in pol_config.get('PATHS', []):
+                    if not file_path:
+                        logger.debug(f"Skipping empty file path for {chrom}/{pol}")
+                        continue
+                    logger.info(f"Processing compound file: {file_path}")
+                    compounds_df = ldt.load_compound_input(file_path)
+                    pcr.retrieve_pubchem_info(
+                        compounds=compounds_df, 
+                        pubchem_cache_path=self.config["ENV"]["PATHS"]["pubchem_cache"], 
+                        use_pubchem_cache=self.config["PARAMS"].get("use_pubchem_cache", True), 
+                        update_pubchem_cache=self.config["PARAMS"].get("update_pubchem_cache", False)
+                        )
+                    for _, row in compounds_df.iterrows():
+                        try:
+                            compound = Compound.from_atlas_row(row)
+                            compounds.append(compound)
+                            compound_mzrt = CompoundMZRT.from_atlas_row(row)
+                            compound_mzrt.source = file_path
+                            compound_mzrts.append(compound_mzrt)
+                        except Exception as e:
+                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('name', 'Unknown')}: {e}")
+
+        dbi.batch_save_compounds_and_mzrts(main_db_path, compounds, compound_mzrts)
+        dbi.validate_database(main_db_path)
+
+        return
+
+@dataclass
+class NewAtlas:
+    config: Dict[str, Any]
+
+    def run(self) -> List[Atlas]:
+        summary = []
+        for chrom, pol_dict in self.config['ATLASES'].items():
+            for pol, pol_config in pol_dict.items():
+                for analysis_type, atlas_info in pol_config.items():
+                    if not atlas_info.get('path'):
+                        logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
+                        continue
+                    try:
+                        atlas_compounds_df = ldt.load_atlas_input(atlas_info['path'])
+                        atlas_obj = dbi.create_new_atlas_from_dataframe(
+                            atlas_df=atlas_compounds_df,
+                            atlas_name=atlas_info.get('name', 'Unnamed Atlas'),
+                            atlas_description=atlas_info.get('desc', 'No Description'),
+                            analysis_type=analysis_type,
+                            chromatography=chrom,
+                            polarity=pol,
+                            atlas_file_path=atlas_info['path'],
+                            main_db_path=self.config["ENV"]["PATHS"]["main_database"]
+                        )
+                        dbi.save_atlas_to_database(atlas_obj, self.config["ENV"]["PATHS"]["main_database"])
+                        logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
+                        atlas_obj.validate()
+                        summary.append({
+                            'atlas_uid': atlas_obj.atlas_uid,
+                            'atlas_name': atlas_obj.atlas_name,
+                            'compound_count': len(atlas_obj.compound_mzrts)
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
+        logger.info("Atlas creation summary:")
+        for info in summary:
+            logger.info(f"Atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
+
+        return
+
 @dataclass
 class Project:
-    name: str
-    config: Dict
+    project_name: str = field(default_factory=str)
+    config: Dict = field(default_factory=dict)
     paths: Dict[str, str] = field(default_factory=dict)
     lcmsruns: List['LCMSRun'] = field(default_factory=list)
 
-    def setup(self, overwrite_existing: bool = False):
+    def setup(self, project_name: str, config: dict, overwrite_existing: bool = False):
 
-        logger.info(f"Setting up workflow paths for project {self.name}...")
-        self.paths = _set_up_paths(self.config, self.name, "project_setup")
+        self.project_name = project_name
+        self.config = config
+
+        logger.info(f"Setting up workflow paths for project {self.project_name}...")
+        self.paths = _set_up_paths(
+            self.config, 
+            self.project_name, 
+            "project_setup"
+        )
 
         logger.info(f"Creating project database at {self.paths['project_db_path']}...")
         dbi.create_project_database(
@@ -360,7 +449,7 @@ class Project:
         logger.info("Saving LCMS runs metadata to database...")
         dbi.save_lcmsruns_to_db(
             self.paths['project_db_path'],
-            self.name,
+            self.project_name,
             lcmsruns_list,
             overwrite_existing
         )
@@ -403,9 +492,9 @@ class RTAlign:
     created_date: str = None
     use_existing_model: bool = False
     chromatography: str = None
+    project_name: str = None
 
     # Attributes added during analysis
-    project: Optional[Project] = None
     rt_alignment_params: Dict[str, Any] = field(default_factory=dict)
     aligner_lcmsruns: List[LCMSRun] = field(default_factory=list)
     modeling_data: Optional[pd.DataFrame] = field(default_factory=pd.DataFrame)
@@ -422,32 +511,40 @@ class RTAlign:
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, project: 'Project', chromatography: str, rt_alignment_number: int):
+    def setup(self, config: dict, project_name: str, chromatography: str, rt_alignment_number: int):
         """
         Set up RTAlign object using a Project object and RT alignment parameters.
         Populates paths, config, and relevant atlas UID.
         """
 
         logger.info(f"Setting up RTAlign object for {chromatography} chromatography and RT alignment number {rt_alignment_number}...")
-        self.project = project
         self.rt_alignment_number = rt_alignment_number
         self.chromatography = chromatography
-        self.config = project.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography]
-        self.qc_atlas_uid = self.config.get('ATLAS', {}).get('uid', None)
-        self.rt_alignment_params = self.config.get('PARAMS', {})
+        self.project_name = project_name
+        self.config = config
+        self.qc_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
+        self.rt_alignment_params = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('PARAMS', {})
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
-            config=self.project.config,
-            project_name=self.project.name,
+            config=self.config,
+            project_name=self.project_name,
             stage="rt_alignment",
             rt_alignment_number=self.rt_alignment_number
         )
 
-        logger.info(f"Identifying LCMS runs to use as aligners for RT alignment...")
+        logger.info(f"Checking for existing RT model in database with UID {self.qc_atlas_uid} ({self.chromatography}) and RT Alignment number {self.rt_alignment_number}")
+        self.check_existing_rt_alignment()
+
+        logger.info(f"Retrieving all LCMS runs for project...")
+        project_lcmsruns = dbi.get_lcmsruns_from_db(
+            project_db_path=self.paths['project_db_path'],
+        )
+
+        logger.info(f"Filtering {len(project_lcmsruns)} LCMS runs...")
         self.aligner_lcmsruns = lrt.filter_lcmsruns_list(
-            lcmsruns=self.project.lcmsruns,
-            file_type='qc',
+            lcmsruns=project_lcmsruns,
+            file_type=['qc'],
             chromatography=self.chromatography
         )
 
@@ -456,7 +553,6 @@ class RTAlign:
         Check for an existing RT alignment model in the database and handle logic for reuse or creation.
         """
 
-        logger.info(f"Checking on status of RT Alignment for {self.qc_atlas_uid} ({self.chromatography}) and RT Alignment number {self.rt_alignment_number}")
         rta_model = None
         use_existing_rt_alignment = self.rt_alignment_params.get('use_existing_rt_alignment', False)
         existing_rt_aln_model = dbi.get_rt_alignment_model_from_db(self)
@@ -475,27 +571,7 @@ class RTAlign:
 
         self.rt_alignment_model = rta_model
 
-    def save_model_to_db(self):
-        dbi.save_rt_alignment_model_to_db(rt_align_obj=self)
-
-    def visualize_model(self):
-        rat.visualize_RT_model(rt_align_obj=self)
-
-    def apply_model_to_target_atlases(self):
-        rat.apply_rt_alignment_to_target_atlases(rt_align_obj=self)
-
-    def create_rt_alignment_summary(self):
-        rat.run_rt_alignment_summary(rt_align_obj=self)
-
-    def save_rt_aligned_atlases_to_db(self):
-        for aligned_atlas_uid, aligned_atlas_obj in self.rt_aligned_atlases.items():
-            dbi.save_atlas_to_database(
-                atlas_obj=aligned_atlas_obj, 
-                db_path=self.paths['project_db_path'],
-                main_db_path=self.paths['main_db_path']
-            )
-
-class CompoundInfo:
+class ManualCuration:
     def __init__(self, inchi_key: str, adduct: str, data: pd.DataFrame):
         self.inchi_key = inchi_key
         self.adduct = adduct
@@ -538,7 +614,7 @@ class MS2Summary:
 
 class ExperimentalData:
     def __init__(self):
-        self.compound_infos: List[CompoundInfo] = []
+        self.manual_curation: List[ManualCuration] = []
         self.ms1_data: List[MS1Data] = []
         self.ms2_data: List[MS2Data] = []
         self.ms2_hits: List[MS2Hit] = []
@@ -558,7 +634,6 @@ class AutoIdentification:
     created_date: str = None
 
     # Attributes added during analysis
-    project: Optional[Project] = None
     workflow_params: Dict[str, Any] = field(default_factory=dict)
     autoid_lcmsruns: List[LCMSRun] = field(default_factory=list)
     experimental_data: Optional[ExperimentalData] = None
@@ -571,157 +646,51 @@ class AutoIdentification:
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, project: 'Project', rt_alignment_number: int, analysis_number: int, analysis_atlas_uid: str):
+    def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int, analysis_atlas_uid: str):
         """
         Set up AutoIdentification object using a Project object and analysis parameters.
         Populates paths, config, and relevant atlas UID.
         """
         logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number}...")
-        self.project = project
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.analysis_atlas_uid = analysis_atlas_uid
-        self.config = project.config
+        self.config = config
+        self.project_name = project_name
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
-            config=self.project.config,
-            project_name=self.project.name,
+            config=self.config,
+            project_name=self.project_name,
             stage="auto_identification",
             rt_alignment_number=self.rt_alignment_number,
             analysis_number=self.analysis_number
         )
 
-        logger.info(f"Loading target atlas from database...")
+        logger.info(f"Checking for existing Auto Identification results within RT Alignment number {self.rt_alignment_number} and analysis number {self.analysis_number}...")
+        dbi.check_existing_auto_identification(self)
+
+        logger.info(f"Retrieving all LCMS runs for project...")
+        project_lcmsruns = dbi.get_lcmsruns_from_db(
+            project_db_path=self.paths['project_db_path'],
+        )
+
         self.atlas_obj = Atlas.from_database(
             database_path=self.paths['project_db_path'],
             atlas_uid=self.analysis_atlas_uid,
             main_db_path=self.paths['main_db_path']
         )
-        self.chromatography = self.atlas_obj.chromatography
-        self.polarity = self.atlas_obj.polarity
-        self.workflow_params = self.config['WORKFLOWS']['TARGETED_ANALYSES'][self.chromatography][self.polarity][self.atlas_obj.analysis_type]['PARAMS']
 
-        logger.info(f"Identifying LCMS runs for auto identification...")
+        logger.info(f"Loading workflow parameters for targeted analysis from config...")
+        self.workflow_params = self.config['WORKFLOWS']['TARGETED_ANALYSES'][self.atlas_obj.chromatography][self.atlas_obj.polarity][self.atlas_obj.analysis_type]['PARAMS']
+
+        logger.info("Finding LCMSRuns matching criteria for auto-identification...")
         self.autoid_lcmsruns = lrt.filter_lcmsruns_list(
-            lcmsruns=self.project.lcmsruns,
+            lcmsruns=project_lcmsruns,
             file_type=['experimental', 'istd', 'exctrl'],
-            chromatography=self.chromatography,
-            polarity=self.polarity
+            chromatography=self.atlas_obj.chromatography,
+            polarity=self.atlas_obj.polarity
         )
-
-    def extract_experimental_data(self):
-        logger.info("Extracting EIC and MS2 data from LCMS runs using Atlas object...")
-        self.experimental_data = pdx.extract_eic_and_ms2_from_parquet(
-            atlas=self.atlas_obj,
-            stage="auto_identification",
-            lcmsruns=self.autoid_lcmsruns,
-            workflow_params=self.workflow_params
-        )
-        print(self.experimental_data)
-
-    def find_ms2_hits(self):
-        logger.info("Finding MS2 reference hits...")
-        self.experimental_data = mhd.find_ms2_hits(
-            exp_data_obj=self.experimental_data,
-            msms_refs_path=self.config["ENV"]["PATHS"]["msms_refs"]
-        )
-        print(self.experimental_data)
-
-    def summarize(self):
-        logger.info("Calculating MS1 and MS2 summary statistics for each compound and file...")
-        self.experimental_data = mss.create_ms_summaries(
-            exp_data_obj=self.experimental_data,
-            atlas_obj=self.atlas_obj
-        )
-        print(self.experimental_data)
-
-    def save_to_db(self):
-        logger.info("Saving experimental data to project database...")
-        dbi.save_analysis_results_to_db(
-            project_db_path=self.paths['project_db_path'],
-            main_db_path=self.paths['main_db_path'],
-            exp_data_obj=self.experimental_data,
-            rt_alignment_number=self.rt_alignment_number,
-            analysis_number=self.analysis_number
-        )
-
-@dataclass
-class NewCompound:
-    config: Dict[str, Any]
-    overwrite_db: bool = False
-
-    def run(self) -> Tuple[List[Compound], List[CompoundMZRT]]:
-        main_db_path = self.config["ENV"]["PATHS"]["main_database"]
-
-        compounds = []
-        compound_mzrts = []
-        dbi.create_metatlas_database(main_db_path, overwrite=self.overwrite_db)
-
-        for chrom, pol_dict in self.config['COMPOUNDS'].items():
-            for pol, pol_config in pol_dict.items():
-                for file_path in pol_config.get('PATHS', []):
-                    if not file_path:
-                        logger.debug(f"Skipping empty file path for {chrom}/{pol}")
-                        continue
-                    logger.info(f"Processing compound file: {file_path}")
-                    compounds_df = ldt.load_compound_input(file_path)
-                    pcr.retrieve_pubchem_info(
-                        compounds=compounds_df, 
-                        pubchem_cache_path=self.config["ENV"]["PATHS"]["pubchem_cache"], 
-                        use_pubchem_cache=self.config["PARAMS"].get("use_pubchem_cache", True), 
-                        update_pubchem_cache=self.config["PARAMS"].get("update_pubchem_cache", False)
-                        )
-                    for _, row in compounds_df.iterrows():
-                        try:
-                            compound = Compound.from_atlas_row(row)
-                            compounds.append(compound)
-                            compound_mzrt = CompoundMZRT.from_atlas_row(row)
-                            compound_mzrt.source = file_path
-                            compound_mzrts.append(compound_mzrt)
-                        except Exception as e:
-                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('name', 'Unknown')}: {e}")
-
-        dbi.batch_save_compounds_and_mzrts(main_db_path, compounds, compound_mzrts)
-        dbi.validate_database(main_db_path)
-
-@dataclass
-class NewAtlas:
-    config: Dict[str, Any]
-
-    def run(self) -> List[Atlas]:
-        summary = []
-        for chrom, pol_dict in self.config['ATLASES'].items():
-            for pol, pol_config in pol_dict.items():
-                for analysis_type, atlas_info in pol_config.items():
-                    if not atlas_info.get('path'):
-                        logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
-                        continue
-                    try:
-                        atlas_compounds_df = ldt.load_atlas_input(atlas_info['path'])
-                        atlas_obj = dbi.create_new_atlas_from_dataframe(
-                            atlas_df=atlas_compounds_df,
-                            atlas_name=atlas_info.get('name', 'Unnamed Atlas'),
-                            atlas_description=atlas_info.get('desc', 'No Description'),
-                            analysis_type=analysis_type,
-                            chromatography=chrom,
-                            polarity=pol,
-                            atlas_file_path=atlas_info['path'],
-                            main_db_path=self.config["ENV"]["PATHS"]["main_database"]
-                        )
-                        dbi.save_atlas_to_database(atlas_obj, self.config["ENV"]["PATHS"]["main_database"])
-                        logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
-                        atlas_obj.validate()
-                        summary.append({
-                            'atlas_uid': atlas_obj.atlas_uid,
-                            'atlas_name': atlas_obj.atlas_name,
-                            'compound_count': len(atlas_obj.compound_mzrts)
-                        })
-                    except Exception as e:
-                        logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
-        logger.info("Atlas creation summary:")
-        for info in summary:
-            logger.info(f"Atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
 
 # =============================================================================
 # INDEPENDENT WORKFLOW FUNCTIONS
@@ -730,23 +699,26 @@ class NewAtlas:
 def add_compounds_to_db(
     config: Dict[str, Any],
     overwrite_db: bool = False,
-) -> Tuple[List[Compound], List[CompoundMZRT]]:
+) -> None:
     """
-    Stage: Add Compounds to Database
     Creates main database (if needed) and loads compounds from config file paths.
     """
-    new_compound_obj = NewCompound(config=config, overwrite_db=overwrite_db)
+    new_compound_obj = NewCompound(
+        config=config, 
+        overwrite_db=overwrite_db
+    )
     
     new_compound_obj.run()
 
 def add_atlases_to_db(
     config: Dict[str, Any]
-) -> List[Atlas]:
+) -> None:
     """
-    Stage: Add Atlases to Database
     Creates atlases from config file paths and saves them to the database.
     """
-    new_atlas_obj = NewAtlas(config=config)
+    new_atlas_obj = NewAtlas(
+        config=config
+    )
     
     new_atlas_obj.run()
 
@@ -754,28 +726,22 @@ def run_project_setup(
     project_name: str,
     config: Dict,
     overwrite_existing: bool = False
-) -> str:
+) -> None:
     """
-    Stage 1: Project Setup
     Creates project database and loads LCMS run files.
-    
-    Returns:
-        project_obj: The created Project object
     """
 
-    project_obj = Project(
-        name=project_name,
-        config=config
-    )
+    project_obj = Project()
 
     project_obj.setup(
+        project_name=project_name,
+        config=config,
         overwrite_existing=overwrite_existing
     )
 
-    return project_obj
-
 def run_rt_alignment(
-    project: Project,
+    config: dict,
+    project_name: str,
     rt_alignment_number: int,
     chromatography: str
 ) -> None:
@@ -784,12 +750,11 @@ def run_rt_alignment(
     rt_align_obj = RTAlign()
 
     rt_align_obj.setup(
-        project=project,
+        config=config,
+        project_name=project_name,
         chromatography=chromatography,
         rt_alignment_number=rt_alignment_number
     )
-
-    rt_align_obj.check_existing_rt_alignment()
 
     if rt_align_obj.rt_alignment_model is None:
         
@@ -798,6 +763,7 @@ def run_rt_alignment(
             atlas_uid=rt_align_obj.qc_atlas_uid
         )
 
+        logger.info("Passing Atlas and LCMSRuns to data extractor...")
         experimental_data_obj = edp.extract_eic_and_ms2_from_parquet(
             atlas=template_atlas_obj,
             stage="rt_alignment",
@@ -806,40 +772,58 @@ def run_rt_alignment(
             only_ms_level=1
         )
 
+        logger.info("Passing ExperimentalData and Atlas to summarizer...")
         rat.create_qc_matching_summary(
             experimental_data=experimental_data_obj,
             atlas=template_atlas_obj
         )
 
+        logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
         rat.build_rt_alignment_model(
             experimental_data=experimental_data_obj,
             atlas=template_atlas_obj, 
             rt_align=rt_align_obj
         )
 
-        logger.info("Saving RT model to database...")
-        rt_align_obj.save_model_to_db()
+        logger.info("Passing RTAlign object to model database table saver...")
+        dbi.save_rt_alignment_model_to_db(
+            rt_align_obj=rt_align_obj
+        )
         
-        logger.info(f"Creating RT alignment plot and saving to RT alignment directory...")
-        rt_align_obj.visualize_model()
+        logger.info("Passing RTAlign object to model visualizer...")
+        rat.visualize_RT_model(
+            rt_align_obj=rt_align_obj
+        )
     
-    logger.info(f"Applying RT alignment to all targeted analysis atlases...")
-    rt_align_obj.apply_model_to_target_atlases()
+    logger.info("Passing RTAlign object to alignment applicator...")
+    rat.apply_rt_alignment_to_target_atlases(
+        rt_align_obj=rt_align_obj
+    )
 
-    logger.info(f"Saving RT-aligned atlases to project database...")
-    rt_align_obj.save_rt_aligned_atlases_to_db()
+    logger.info("Passing aligned Atlases to database saver...")
+    for aligned_atlas_uid, aligned_atlas_obj in rt_align_obj.rt_aligned_atlases.items():
+        dbi.save_atlas_to_database(
+            atlas_obj=aligned_atlas_obj, 
+            db_path=rt_align_obj.paths['project_db_path'],
+            main_db_path=rt_align_obj.paths['main_db_path']
+        )
 
-    logger.info(f"RT alignment procedure complete for RT alignment number {rt_alignment_number} and chromatography {chromatography}!")
-    rt_align_obj.create_rt_alignment_summary()
+    logger.info("Passing RTAlign object to RT alignment summary generator...")
+    rat.run_rt_alignment_summary(
+        rt_align_obj=rt_align_obj
+    )
+
+    logger.info(f"RT alignment procedure complete for RT alignment number {rt_align_obj.rt_alignment_number} and chromatography {rt_align_obj.chromatography}!")
+
 
 def run_auto_identification(
-    project: Project,
+    config: dict,
+    project_name: str,
     rt_alignment_number: int = None,
     analysis_number: int = None,
     analysis_atlas: str = None
 ) -> Dict[str, int]:
     """
-    Stage 3: Auto Identification
     Runs targeted analysis using RT-aligned atlases from database.
     Can be run independently if RT alignment has been completed.
     
@@ -847,91 +831,40 @@ def run_auto_identification(
         Dict with analysis statistics: {atlas_uid: num_identifications}
     """
     
-
     auto_id_obj = AutoIdentification()
-    auto_id_obj.setup(project, rt_alignment_number, analysis_number, analysis_atlas)
-    auto_id_obj.extract_experimental_data()
-    auto_id_obj.find_ms2_hits()
-    auto_id_obj.summarize()
-    auto_id_obj.save_to_db()
 
+    auto_id_obj.setup(
+        config=config, 
+        project_name=project_name,
+        rt_alignment_number=rt_alignment_number, 
+        analysis_number=analysis_number, 
+        analysis_atlas_uid=analysis_atlas
+    )
 
+    logger.info("Passing Atlas and LCMSRuns to data extractor...")
+    auto_id_obj.experimental_data = pdx.extract_eic_and_ms2_from_parquet(
+        atlas=auto_id_obj.atlas_obj,
+        stage="auto_identification",
+        lcmsruns=auto_id_obj.autoid_lcmsruns,
+        workflow_params=auto_id_obj.workflow_params
+    )
 
-    # logger.info("Setting up workflow paths for Auto Identification stage...")
-    # workflow_paths = _set_up_paths(
-    #     config=config, 
-    #     project_name=project_name, 
-    #     stage="auto_identification"
-    # )
- 
-    # logger.info("Loading target atlas...")
-    # atlas_obj = Atlas.from_database(
-    #     database_path=workflow_paths['project_db_path'],
-    #     atlas_uid=analysis_atlas,
-    #     main_db_path=workflow_paths['main_db_path']
-    # )
+    logger.info("Passing ExperimentalData to MS2 hit finder...")
+    auto_id_obj.experimental_data = mhd.find_ms2_hits(
+        exp_data_obj=auto_id_obj.experimental_data,
+        msms_refs_path=auto_id_obj.paths['msms_refs_path']
+    )
 
-    # logger.info("Setting up targeted analysis parameters from configuration...")
-    # workflow_params = config['WORKFLOWS']['TARGETED_ANALYSES'][atlas_obj.chromatography][atlas_obj.polarity][atlas_obj.analysis_type]['PARAMS']
+    logger.info("Passing ExperimentalData and Atlas to MS1/MS2 summarizer...")
+    auto_id_obj.experimental_data = mss.create_ms_summaries(
+        exp_data_obj=auto_id_obj.experimental_data,
+        atlas_obj=auto_id_obj.atlas_obj
+    )
 
-    # logger.info("Loading experimental files from project database...")
-    # project_files = dbi.get_lcmsruns_from_db(
-    #     project_db_path=workflow_paths['project_db_path'], 
-    #     file_types=['experimental', 'istd', 'exctrl'],
-    #     file_format='parquet',
-    #     chromatography=atlas_obj.chromatography,
-    #     polarity=atlas_obj.polarity
-    # )
-
-    # logger.info("Extracting EIC and MS2 data from parquet files using Atlas object...")
-    # experimental_data = pdx.extract_eic_and_ms2_from_parquet(
-    #     atlas=atlas_obj,
-    #     stage="auto_identification",
-    #     project_files=project_files,
-    #     workflow_params=workflow_params
-    # )
-    
-    # logger.info("Finding MS2 reference hits...")
-    # experimental_data = mhd.find_ms2_hits(
-    #     exp_data_obj=experimental_data, 
-    #     msms_refs_path=config["ENV"]["PATHS"]["msms_refs"]
-    # )
-    
-    # logger.info("Calculating MS1 and MS2 summary statistics for each compound and file...")
-    # experimental_data = mss.create_ms_summaries(
-    #     exp_data_obj=experimental_data,
-    #     atlas_obj=atlas_obj
-    # )
-
-    # logger.info("Saving experimental data to project database...")
-    # dbi.save_analysis_results_to_db(
-    #     project_db_path=workflow_paths['project_db_path'],
-    #     main_db_path=workflow_paths['main_db_path'],
-    #     exp_data_obj=experimental_data,
-    #     rt_alignment_number=rt_alignment_number,
-    #     analysis_number=analysis_number
-    # )
-
-    # logger.info(f"Auto Identification stage complete for rt alignment number {rt_alignment_number} and analysis number {analysis_number}!")
-
-def run_targeted_analysis(
-    project_name: str,
-    config: Dict,
-    rt_alignment_number: int = 1,
-    analysis_number: int = 1,
-    analysis_atlas: str = None):
-
-    logger.info("STAGE: Targeted Analysis")
-    if analysis_atlas is None:
-        raise ValueError("The analysis_atlas UID must be provided to specify which atlas to run targeted analysis on.")
-    
-    logger.info("Parsing configuration file...")
-    workflow_paths = _set_up_paths(config, project_name, "targeted_analysis")
-
-    dbi.get_experimental_data_from_db(project_db_path=workflow_paths['project_db_path'],
-                                      main_db_path=workflow_paths['main_db_path'],
-                                      rt_alignment_number=rt_alignment_number,
-                                      analysis_number=analysis_number)
+    logger.info("Passing AutoIdentification object to results and summary database saver...")
+    dbi.save_analysis_results_to_db(
+        auto_id_obj=auto_id_obj
+    )
 
 def _set_up_paths(
     config: Dict, 
@@ -948,7 +881,8 @@ def _set_up_paths(
     workflow_paths['project_directory'] = str(Path(config['ENV']['PATHS']['projects_dir']) / project_name)
     workflow_paths['project_db_path'] = str(Path(workflow_paths['project_directory']) / f"{project_name}.duckdb")
     workflow_paths['main_db_path'] = config["ENV"]["PATHS"]["main_database"]
-    
+    workflow_paths['msms_refs_path'] = config["ENV"]["PATHS"]["msms_refs"]
+
     if not Path(workflow_paths['raw_data_directory']).exists():
         raise ValueError(f"Raw data directory not found: {workflow_paths['raw_data_directory']}")
     
