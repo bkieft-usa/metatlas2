@@ -28,7 +28,7 @@ def create_manual_curation_obj(
             'adduct': atlas_compound_mzrt.adduct,
             'rt_alignment_number': auto_id_obj.rt_alignment_number,
             'analysis_number': auto_id_obj.analysis_number,
-            'compound_name': getattr(atlas_compound_mzrt, 'compound_name', getattr(atlas_compound_mzrt, 'label', '')),
+            'compound_name': getattr(atlas_compound_mzrt, 'name', getattr(atlas_compound_mzrt, 'label', getattr(atlas_compound_mzrt, 'compound_name', ''))),
             'formula': getattr(atlas_compound_mzrt, 'formula', ''),
             'polarity': getattr(atlas_compound_mzrt, 'polarity', ''),
             'chromatography': getattr(atlas_compound_mzrt, 'chromatography', ''),

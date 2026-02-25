@@ -46,7 +46,7 @@ WORKFLOWS:
             use_existing_analysis: false
             ppm_error: 5.0
             min_peak_intensity: 100000.0
-            extra_time: 0.0
+            extra_time: 1.0
             ms2_min_score: 0.1
             ms2_min_matches: 1
         ISTD:
@@ -57,7 +57,7 @@ WORKFLOWS:
             use_existing_analysis: false
             ppm_error: 5.0
             min_peak_intensity: 100000.0
-            extra_time: 0.0
+            extra_time: 1.0
             ms2_min_score: 0.1
             ms2_min_matches: 2
         EMA:
@@ -68,7 +68,7 @@ WORKFLOWS:
             use_existing_analysis: false
             ppm_error: 5.0
             min_peak_intensity: 100000.0
-            extra_time: 0.0
+            extra_time: 1.0
             ms2_min_score: 0.1
             ms2_min_matches: 2
       NEG:

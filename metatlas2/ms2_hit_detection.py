@@ -179,12 +179,12 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
                     'qry_intensity_peak': float(precursor_intensity),
                     'ref_frags': len(ref_mz),
                     'data_frags': len(fragment_mz),
-                    'matched_fragments': [alignment_data.get('matched_fragments', [])],
-                    'qry_frag_colors': [alignment_data.get('fragment_colors', [])],
-                    'qry_spectrum': [alignment_data.get('query_aligned', [])],
-                    'ref_spectrum': [alignment_data.get('ref_aligned', [])],
-                    'qry_spectrum_original': [[fragment_mz.tolist(), fragment_intensity.tolist()]],
-                    'ref_spectrum_original': [[ref_mz.tolist(), ref_intensity.tolist()]]
+                    'matched_fragments': alignment_data.get('matched_fragments', []),
+                    'aligned_fragment_colors': alignment_data.get('fragment_colors', []),
+                    'qry_spectrum': alignment_data.get('query_aligned', [[], []]),
+                    'ref_spectrum': alignment_data.get('ref_aligned', [[], []]),
+                    'qry_spectrum_original': [fragment_mz.tolist(), fragment_intensity.tolist()],
+                    'ref_spectrum_original': [ref_mz.tolist(), ref_intensity.tolist()]
                 }
                 
                 all_hits.append(hit_data)

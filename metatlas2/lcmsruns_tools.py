@@ -182,6 +182,8 @@ def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None
             analysis_type = 'exctrl'
         elif any(x in filename.upper() for x in ['-INJBL', 'BLANK']):
             analysis_type = 'injbl'
+        elif any(x in filename.upper() for x in ['-REFSTD', '-STANDARD']):
+            analysis_type = 'refstd'
         else:
             analysis_type = 'experimental'
         

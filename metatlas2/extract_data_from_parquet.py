@@ -55,7 +55,7 @@ def extract_eic_and_ms2_from_parquet(
     logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_list)} project files...")
 
     ppm_tolerance = workflow_params.get("ppm_error", 20.0)
-    extra_time = workflow_params.get("extra_time", 0.1)
+    extra_time = workflow_params.get("extra_time", 1)
     logger.info(f"Using ppm_tolerance={ppm_tolerance} and extra_time={extra_time} for data extraction.")
 
     if max_workers is None:
@@ -186,6 +186,16 @@ def _process_single_parquet_file(
     return results
 
 
+def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:
+    """Calculate m/z bounds given ppm tolerance."""
+    delta = mz * ppm_tolerance / 1e6
+    return (mz - delta, mz + delta)
+
+def calculate_rt_bounds(rt_min: float, rt_max: float, extra_time: float) -> tuple:
+    """Calculate RT bounds with extra time."""
+    return (rt_min - extra_time, rt_max + extra_time)
+
+
 def _extract_ms1_from_parquet(
     parquet_file: str,
     mz: float,
@@ -218,8 +228,8 @@ def _extract_ms1_from_parquet(
         filters=[
             ('mz', '>=', mz_min),
             ('mz', '<=', mz_max),
-            ('rt', '>=', rt_min - extra_time),
-            ('rt', '<=', rt_max + extra_time)
+            ('rt', '>=', rt_min),
+            ('rt', '<=', rt_max)
         ]
     ).to_pandas()
     
@@ -227,15 +237,6 @@ def _extract_ms1_from_parquet(
         return df[['rt', 'mz', 'i']]
     else:
         return pd.DataFrame(columns=['rt', 'mz', 'i'])
-
-def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:
-    """Calculate m/z bounds given ppm tolerance."""
-    delta = mz * ppm_tolerance / 1e6
-    return (mz - delta, mz + delta)
-
-def calculate_rt_bounds(rt_min: float, rt_max: float, extra_time: float) -> tuple:
-    """Calculate RT bounds with extra time."""
-    return (rt_min - extra_time, rt_max + extra_time)
 
 def _extract_ms2_from_parquet(
     parquet_file: str,
@@ -261,8 +262,8 @@ def _extract_ms2_from_parquet(
         filters=[
             ('precursor_MZ', '>=', mz_min),
             ('precursor_MZ', '<=', mz_max),
-            ('rt', '>=', rt_min - extra_time),
-            ('rt', '<=', rt_max + extra_time)
+            ('rt', '>=', rt_min),
+            ('rt', '<=', rt_max)
         ]
     ).to_pandas()
     

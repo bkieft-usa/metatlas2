@@ -1499,10 +1499,11 @@ def _create_database_tables(conn, db_type: str = "main"):
             CREATE TABLE IF NOT EXISTS ms2_hits (
                 ms2_hit_uid TEXT PRIMARY KEY,
                 compound_uid TEXT,
+                inchi_key TEXT,
+                adduct TEXT,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
                 file_path TEXT,
-                inchi_key TEXT,
                 database TEXT,
                 ref_id TEXT,
                 ref_name TEXT,
@@ -1516,7 +1517,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 ref_frags INTEGER,
                 data_frags INTEGER,
                 matched_fragments TEXT,
-                qry_frag_colors TEXT,
+                aligned_fragment_colors TEXT,
                 qry_spectrum TEXT,
                 ref_spectrum TEXT,
                 qry_spectrum_original TEXT,
@@ -1675,6 +1676,126 @@ def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> Non
     else:
         logger.info(f"No existing AutoIdentification results found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}. Proceeding.")
 
+def get_manual_curation_entries(
+    project_db_path: str,
+    rt_alignment_number: int,
+    analysis_number: int
+) -> pd.DataFrame:
+    """
+    Get all manual_curation entries for the given RT alignment and analysis number,
+    ordered by ascending RT peak.
+    """
+    with get_db_connection(project_db_path) as conn:
+        df = conn.execute("""
+            SELECT *
+            FROM manual_curation
+            WHERE rt_alignment_number = ? AND analysis_number = ?
+            ORDER BY rt_peak ASC
+        """, [rt_alignment_number, analysis_number]).df()
+    return df
+
+def get_ms1_data_for_compound(
+    project_db_path: str,
+    inchi_key: str = None,
+    adduct: str = None,
+    rt_alignment_number: int = None,
+    analysis_number: int = None
+) -> pd.DataFrame:
+    """
+    Get all MS1 data for a compound (inchi_key+adduct) for plotting EIC.
+    If inchi_key or adduct is None, do not filter on that field.
+    """
+    query = """
+        SELECT *
+        FROM ms1_data
+        WHERE 1=1
+    """
+    params = []
+    if inchi_key is not None:
+        query += " AND inchi_key = ?"
+        params.append(inchi_key)
+    if adduct is not None:
+        query += " AND adduct = ?"
+        params.append(adduct)
+    if rt_alignment_number is not None:
+        query += " AND rt_alignment_number = ?"
+        params.append(rt_alignment_number)
+    if analysis_number is not None:
+        query += " AND analysis_number = ?"
+        params.append(analysis_number)
+    query += " ORDER BY file_path, rt"
+    with get_db_connection(project_db_path) as conn:
+        df = conn.execute(query, params).df()
+    return df
+
+def get_ms2_hits_for_compound(
+    project_db_path: str,
+    inchi_key: str = None,
+    adduct: str = None,
+    rt_alignment_number: int = None,
+    analysis_number: int = None,
+) -> pd.DataFrame:
+    """
+    Get MS2 hits for a compound (inchi_key+adduct), ordered by score descending.
+    If inchi_key or adduct is None, do not filter on that field.
+    """
+    query = """
+        SELECT *
+        FROM ms2_hits
+        WHERE 1=1
+    """
+    params = []
+    if inchi_key is not None:
+        query += " AND inchi_key = ?"
+        params.append(inchi_key)
+    if adduct is not None:
+        query += " AND adduct = ?"
+        params.append(adduct)
+    if rt_alignment_number is not None:
+        query += " AND rt_alignment_number = ?"
+        params.append(rt_alignment_number)
+    if analysis_number is not None:
+        query += " AND analysis_number = ?"
+        params.append(analysis_number)
+    query += " ORDER BY score DESC"
+    with get_db_connection(project_db_path) as conn:
+        df = conn.execute(query, params).df()
+    return df
+
+def get_ms2_data_for_compound(
+    project_db_path: str,
+    inchi_key: str = None,
+    adduct: str = None,
+    rt_alignment_number: int = None,
+    analysis_number: int = None
+) -> pd.DataFrame:
+    """
+    Get all MS2 data for a compound (inchi_key+adduct) for plotting query spectrum if no hits.
+    If inchi_key or adduct is None, do not filter on that field.
+    """
+    query = """
+        SELECT *
+        FROM ms2_data
+        WHERE 1=1
+    """
+    params = []
+    if inchi_key is not None:
+        query += " AND inchi_key = ?"
+        params.append(inchi_key)
+    if adduct is not None:
+        query += " AND adduct = ?"
+        params.append(adduct)
+    if rt_alignment_number is not None:
+        query += " AND rt_alignment_number = ?"
+        params.append(rt_alignment_number)
+    if analysis_number is not None:
+        query += " AND analysis_number = ?"
+        params.append(analysis_number)
+    query += " ORDER BY file_path, rt, mz"
+    with get_db_connection(project_db_path) as conn:
+        df = conn.execute(query, params).df()
+    return df
+
 def save_auto_identification_results_to_db(
     auto_id_obj: "AutoIdentification"
 ) -> None:
@@ -1724,7 +1845,7 @@ def save_auto_identification_results_to_db(
             continue
         for _, hit in ms2_hit.data.iterrows():
             ms2_hit_record = _prepare_ms2_hit_record(
-                hit, compound_uid, ms2_hit.filename,
+                hit, compound_uid, ms2_hit.inchi_key, ms2_hit.adduct, ms2_hit.filename,
                 rt_alignment_number, analysis_number, prov
             )
             if ms2_hit_record:
@@ -1866,6 +1987,8 @@ def _prepare_manual_curation_record(
 def _prepare_ms2_hit_record(
     hit: pd.Series,
     compound_uid: str,
+    inchi_key: str,
+    adduct: str,
     filename: str,
     rt_alignment_number: int,
     analysis_number: int,
@@ -1876,10 +1999,11 @@ def _prepare_ms2_hit_record(
         return (
             _generate_uid("ms2_hits"),
             compound_uid,
+            inchi_key,
+            adduct,
             rt_alignment_number,
             analysis_number,
             filename,
-            hit.get('inchi_key', ''),
             hit.get('database', ''),
             hit.get('ref_id', ''),
             hit.get('ref_name', ''),
@@ -1893,7 +2017,7 @@ def _prepare_ms2_hit_record(
             int(hit.get('ref_frags', 0)),
             int(hit.get('data_frags', 0)),
             json.dumps(hit.get('matched_fragments', [])),
-            json.dumps(hit.get('qry_frag_colors', [])),
+            json.dumps(hit.get('aligned_fragment_colors', [])),
             json.dumps(hit.get('qry_spectrum', [])),
             json.dumps(hit.get('ref_spectrum', [])),
             json.dumps(hit.get('qry_spectrum_original', [])),
@@ -1995,7 +2119,7 @@ def _bulk_insert_analysis_data(
         if ms2_hits_records:
             logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
             conn.executemany("""
-                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_hits_records)
         
         if ms1_data_records:
@@ -2010,27 +2134,27 @@ def _bulk_insert_analysis_data(
                 INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_data_records)
 
-def display_auto_id_summary(exp_data_obj: "ExperimentalData") -> None:
+def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
     """
     Display a summary table of auto identification results to the logger.
     Shows number of compounds, MS1/MS2 datapoints, MS2 hits, etc.
     """
 
     summary_rows = []
-    for ci in exp_data_obj.manual_curation:
+    for ci in auto_id_obj.experimental_data.manual_curation:
         inchi_key = ci.inchi_key
         adduct = ci.adduct
 
         ms1_count = sum(
-            len(ms1.data) for ms1 in exp_data_obj.ms1_data
+            len(ms1.data) for ms1 in auto_id_obj.experimental_data.ms1_data
             if ms1.inchi_key == inchi_key and ms1.adduct == adduct
         )
         ms2_count = sum(
-            len(ms2.data) for ms2 in exp_data_obj.ms2_data
+            len(ms2.data) for ms2 in auto_id_obj.experimental_data.ms2_data
             if ms2.inchi_key == inchi_key and ms2.adduct == adduct
         )
         ms2_hits_count = sum(
-            len(ms2_hit.data) for ms2_hit in exp_data_obj.ms2_hits
+            len(ms2_hit.data) for ms2_hit in auto_id_obj.experimental_data.ms2_hits
             if ms2_hit.inchi_key == inchi_key and ms2_hit.adduct == adduct
         )
 

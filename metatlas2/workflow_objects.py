@@ -631,10 +631,10 @@ class AutoIdentification:
 
     def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int, analysis_atlas_uid: str):
         """
-        Set up AutoIdentification object using a Project object and analysis parameters.
+        Set up AutoIdentification object.
         Populates paths, config, and relevant atlas UID.
         """
-        logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number}...")
+        logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.analysis_atlas_uid = analysis_atlas_uid
@@ -670,9 +670,49 @@ class AutoIdentification:
         logger.info("Finding LCMSRuns matching criteria for auto-identification...")
         self.autoid_lcmsruns = lrt.filter_lcmsruns_list(
             lcmsruns=project_lcmsruns,
-            file_type=['experimental', 'istd', 'exctrl'],
+            file_type=['experimental', 'istd', 'exctrl', 'refstd'],
             chromatography=self.atlas_obj.chromatography,
             polarity=self.atlas_obj.polarity
+        )
+
+class AnalysisGUI:
+    # Core metadata
+    analysis_uid: str = None
+    rt_alignment_number: int = None
+    analysis_number: int = None
+    chromatography: str = None
+    polarity: str = None
+    created_by: str = None
+    created_date: str = None
+
+    # Attributes added during analysis
+    post_analysis_atlas_obj: Optional[Atlas] = None
+
+    # Paths and config
+    paths: Dict[str, str] = field(default_factory=dict)
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.__dict__
+
+    def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int):
+        """
+        Set up AnalysisGUI object.
+        Populates paths, config, and relevant atlas UID.
+        """
+        logger.info(f"Setting up AnalysisGUI object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
+        self.rt_alignment_number = rt_alignment_number
+        self.analysis_number = analysis_number
+        self.config = config
+        self.project_name = project_name
+
+        logger.info(f"Setting up workflow paths...")
+        self.paths = _set_up_paths(
+            config=self.config,
+            project_name=self.project_name,
+            stage="analysis_gui",
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number
         )
 
 # =============================================================================
@@ -876,23 +916,35 @@ def _set_up_paths(
     if not Path(workflow_paths['main_db_path']).exists():
         raise ValueError(f"Main database not found: {workflow_paths['main_db_path']}.")
 
-    if stage in ["rt_alignment", "auto_identification"]:
+    if stage == "project_setup":
+        Path(workflow_paths['project_directory']).mkdir(parents=True, exist_ok=True)
+
+    if stage in ["rt_alignment", "auto_identification", "analysis_gui"]:
         if not Path(workflow_paths['project_db_path']).exists():
             raise FileNotFoundError(
                 f"Project database not found: {workflow_paths['project_db_path']}. "
                 "Please run project setup first."
             )
+        if not Path(workflow_paths['project_directory']).exists():
+            raise FileNotFoundError(
+                f"Project directory not found: {workflow_paths['project_directory']}. "
+                "Please run project setup first."
+            )
 
-    if stage == "project_setup":
-        Path(workflow_paths['project_directory']).mkdir(parents=True, exist_ok=True)
+    if stage == "auto_identification":
+        if not Path(workflow_paths['msms_refs_path']).exists():
+            raise FileNotFoundError(
+                f"MS/MS reference file not found: {workflow_paths['msms_refs_path']}. "
+                "Please ensure the path is correct in the config file."
+            )
 
-    if stage == "rt_alignment":
+    if stage in ["rt_alignment", "auto_identification","analysis_gui"]:
         if rt_alignment_number is None:
             raise ValueError("RT alignment number must be provided for RT alignment stage.")
         workflow_paths['rt_alignment_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}")
         Path(workflow_paths['rt_alignment_output_dir']).mkdir(parents=True, exist_ok=True)
     
-    if stage == "auto_identification":
+    if stage in ["auto_identification", "analysis_gui"]:
         if rt_alignment_number is None or analysis_number is None:
             raise ValueError("Both RT alignment number and analysis number must be provided for auto identification stage.")
         workflow_paths['auto_id_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}_TGA{analysis_number}")
