@@ -1,13 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
-from enum import Enum
-from datetime import datetime
 import sys
-import json
 import numpy as np
 import pandas as pd
-from IPython.display import display, Markdown
+from IPython.display import display
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
@@ -32,7 +29,7 @@ class Compound:
     
     # Core identifiers (required)
     compound_uid: str
-    name: str
+    compound_name: str
     inchi_key: str
     
     # Chemical properties  
@@ -63,7 +60,7 @@ class Compound:
         """Create from atlas DataFrame row."""
         return cls(
             compound_uid=row.get('compound_uid', ''),
-            name=row.get('compound_name', row.get('label', row.get('name', ''))),
+            compound_name=row.get('compound_name', ''),
             inchi_key=row.get('inchi_key', ''),
             inchi=row.get('inchi', ''),
             smiles=row.get('smiles', ''),
@@ -84,7 +81,7 @@ class Compound:
         """Convert to dictionary for database serialization."""
         return {
             'compound_uid': self.compound_uid,
-            'name': self.name,
+            'compound_name': self.compound_name,
             'inchi_key': self.inchi_key,
             'inchi': self.inchi,
             'smiles': self.smiles,
@@ -115,7 +112,7 @@ class CompoundMZRT:
     # Link ref to compound for init
     inchi_key: str = ""
     adduct: str = ""
-    name: str = ""
+    compound_name: str = ""
 
     # RT data
     rt_peak: float = 0.0
@@ -148,7 +145,7 @@ class CompoundMZRT:
             mz_rt_uid=row.get('mz_rt_uid', ''),
             compound_uid=row.get('compound_uid', ''),
             inchi_key=row.get('inchi_key', ''),
-            name=row.get('compound_name', row.get('label', row.get('name', ''))),
+            compound_name=row.get('compound_name', ''),
             rt_peak=row.get('rt_peak', 0.0),
             rt_min=row.get('rt_min', 0.0),
             rt_max=row.get('rt_max', 0.0),
@@ -172,7 +169,7 @@ class CompoundMZRT:
             'mz_rt_uid': self.mz_rt_uid,
             'compound_uid': self.compound_uid,
             'inchi_key': self.inchi_key,
-            'name': self.name,
+            'compound_name': self.compound_name,
             'rt_peak': self.rt_peak,
             'rt_min': self.rt_min,
             'rt_max': self.rt_max,
@@ -229,12 +226,12 @@ class Atlas:
         logger.info(f"Validating atlas {self.atlas_name} (UID: {self.atlas_uid}) with {len(self.compound_mzrts)} compounds...")
 
         # Helper for required fields
-        def check_required(field, name):
+        def check_required(field, text):
             if not field:
-                raise ValueError(f"Atlas {name} is missing")
+                raise ValueError(f"Atlas {text} is missing")
 
         check_required(self.atlas_uid, "UID")
-        check_required(self.atlas_name, "name")
+        check_required(self.atlas_name, "atlas_name")
         check_required(self.chromatography, "chromatography")
         check_required(self.polarity, "polarity")
 
@@ -309,7 +306,6 @@ class Atlas:
             compound_mzrt = CompoundMZRT.from_atlas_row(row)
             compound_mzrts[key] = compound_mzrt
 
-
         return cls(
             atlas_uid=atlas_uid,
             atlas_name=atlas_name,
@@ -368,10 +364,9 @@ class NewCompound:
                             compound_mzrt.source = file_path
                             compound_mzrts.append(compound_mzrt)
                         except Exception as e:
-                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('name', 'Unknown')}: {e}")
+                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('compound_name', 'Unknown')}: {e}")
 
         dbi.batch_save_compounds_and_mzrts(main_db_path, compounds, compound_mzrts)
-        dbi.validate_database(main_db_path)
 
         return
 

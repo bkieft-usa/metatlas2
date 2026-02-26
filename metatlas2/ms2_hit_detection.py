@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm.notebook import tqdm
+from typing import Dict, List, Tuple
 
 from matchms.similarity import CosineHungarian
 from matchms import Spectrum
@@ -10,9 +11,6 @@ from scipy.optimize import linear_sum_assignment
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
-
-from typing import Dict, List, Tuple
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import load_tools as ldt
@@ -92,7 +90,6 @@ def find_ms2_hits(
     logger.info(f"Hit detection complete: {compounds_with_hits} compounds with reference hits and {total_hits} total hits")
 
     return
-
 
 def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -175,7 +172,7 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
                     'mz_theoretical': float(precursor_mz_ref),
                     'mz_measured': float(precursor_mz),
                     'ppm_error': ((precursor_mz - precursor_mz_ref) / precursor_mz_ref) * 1e6 if precursor_mz_ref != 0 else np.nan,
-                    'rt_measured': float(rt_val),
+                    'rt': float(rt_val),
                     'qry_intensity_peak': float(precursor_intensity),
                     'ref_frags': len(ref_mz),
                     'data_frags': len(fragment_mz),
@@ -183,8 +180,6 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
                     'aligned_fragment_colors': alignment_data.get('fragment_colors', []),
                     'qry_spectrum': alignment_data.get('query_aligned', [[], []]),
                     'ref_spectrum': alignment_data.get('ref_aligned', [[], []]),
-                    'qry_spectrum_original': [fragment_mz.tolist(), fragment_intensity.tolist()],
-                    'ref_spectrum_original': [ref_mz.tolist(), ref_intensity.tolist()]
                 }
                 
                 all_hits.append(hit_data)
@@ -198,7 +193,6 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
         return pd.DataFrame(all_hits)
     else:
         return pd.DataFrame()
-
 
 def _align_spectra_for_plotting(query_spectrum: np.ndarray, ref_spectrum: np.ndarray, 
                                frag_mz_tolerance: float) -> Dict:

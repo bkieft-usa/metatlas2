@@ -1,35 +1,16 @@
 import sys
-import copy
-from datetime import datetime
 from pathlib import Path
-import getpass
-import copy
 import pandas as pd
 import numpy as np
 import json
-import pickle
-import re
 import os
-import glob
 from typing import Dict, List, Optional, Any, Tuple
-from tqdm.notebook import tqdm
-import time
-import duckdb
-import uuid
-import glob
-import ast
-import threading
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
-from IPython.display import display, HTML
+from IPython.display import display
 import ipywidgets as widgets
-from ipywidgets import Output
-from scipy.signal import find_peaks, peak_widths, peak_prominences
-from scipy.ndimage import gaussian_filter1d
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
@@ -429,11 +410,12 @@ def run_analysis_gui(
         }
 
         plot_start, plot_end = get_plot_range(manual_curation_entry)
+        # Reduce vertical spacing and set initial subplot titles
         fig = make_subplots(
             rows=2, cols=1,
             row_heights=[0.4, 0.6],
-            vertical_spacing=0.35,
-            subplot_titles=('No MS2 data', 'No MS1 data'),
+            vertical_spacing=0.05,  # Reduced spacing
+            subplot_titles=("MS2 Spectrum", "MS1 EIC"),
             specs=[[{"secondary_y": False}], [{"secondary_y": False}]]
         )
         eic_row = 2
@@ -588,8 +570,10 @@ def run_analysis_gui(
                     ),
                     row=ms2_row, col=1)
 
-        fig.layout.annotations[0].update(text=ms2_title, font=dict(size=10))
-        fig.layout.annotations[1].update(text=ms1_title, font=dict(size=10))
+        # Update subplot titles with actual content
+        if fig.layout.annotations and len(fig.layout.annotations) >= 2:
+            fig.layout.annotations[0].update(text=ms2_title, font=dict(size=10))
+            fig.layout.annotations[1].update(text=ms1_title, font=dict(size=10))
 
         fig.update_layout(
             margin=dict(l=0, r=0, t=0, b=0),

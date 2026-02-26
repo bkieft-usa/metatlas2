@@ -3,14 +3,12 @@ import numpy as np
 import sys
 from pathlib import Path
 from IPython.display import display
+from typing import Dict, Tuple, List
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
-
-from typing import Dict, Tuple, List
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
@@ -311,7 +309,7 @@ def build_rt_alignment_model(
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
         compound_uid = compound_mzrt.compound_uid
-        compound_name = compound_mzrt.name
+        compound_name = compound_mzrt.compound_name
         atlas_rt_peak = compound_mzrt.rt_peak
         atlas_rt_min = compound_mzrt.rt_min
         atlas_rt_max = compound_mzrt.rt_max

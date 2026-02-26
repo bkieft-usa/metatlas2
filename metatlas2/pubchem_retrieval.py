@@ -1,14 +1,10 @@
 import pandas as pd
-import pickle
 import time
 import re
 import sys
 from pathlib import Path
-import sys
 from typing import Dict, Any, List
 from tqdm.notebook import tqdm
-import ast
-import traceback
 
 import pubchempy as pcp
 
@@ -166,7 +162,6 @@ def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
         logger.info(f"Saved global PubChem cache with {len(df)} unique entries to {cache_file}")
     except Exception as e:
         logger.error(f"Error saving cache: {e}")
-        logger.error(traceback.format_exc())
 
 def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str, 
                          use_pubchem_cache: bool = True, update_pubchem_cache: bool = False) -> pd.DataFrame:

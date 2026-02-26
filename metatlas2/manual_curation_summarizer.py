@@ -28,7 +28,7 @@ def create_manual_curation_obj(
             'adduct': atlas_compound_mzrt.adduct,
             'rt_alignment_number': auto_id_obj.rt_alignment_number,
             'analysis_number': auto_id_obj.analysis_number,
-            'compound_name': getattr(atlas_compound_mzrt, 'name', getattr(atlas_compound_mzrt, 'label', getattr(atlas_compound_mzrt, 'compound_name', ''))),
+            'compound_name': getattr(atlas_compound_mzrt, 'compound_name', ''),
             'formula': getattr(atlas_compound_mzrt, 'formula', ''),
             'polarity': getattr(atlas_compound_mzrt, 'polarity', ''),
             'chromatography': getattr(atlas_compound_mzrt, 'chromatography', ''),
@@ -141,7 +141,6 @@ def _add_isomers_to_manual_curation_obj(
     isomer_list = isomer_dict.get(inchi_key, [])
     manual_curation_obj.data.at[0, 'isomers'] = isomer_list
 
-
 def _build_isomer_dict(
     atlas_obj: "Atlas"
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -174,7 +173,7 @@ def _build_isomer_dict(
         isomer_dict[row["inchi_key"]] = [
             {
                 "inchi_key": r["inchi_key"],
-                "compound_name": r.get("compound_name", r.get("label", "")),
+                "compound_name": r.get("compound_name", ""),
                 "rt": r["rt_peak"],
                 "mz": r["mz"],
                 "mz_tolerance": r.get("mz_tolerance_ppm", r.get("mz_tolerance", 10.0)),

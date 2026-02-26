@@ -9,7 +9,7 @@ WORKFLOWS:
   RT_ALIGNMENT:
     HILICZ:
       ATLAS:
-        uid: atl-ref-qc-hilicz-pos-abe625936d724c77bc5162bc304767a7
+        uid: atl-ref-qc-hilicz-pos-1010aa397dbb4abcab7bb82ab09bc36d
       PARAMS:
           use_existing_rt_alignment: true
           ppm_error: 20.0
@@ -40,7 +40,7 @@ WORKFLOWS:
       POS:
         QC:
           ATLAS:
-            uid: atl-ref-qc-hilicz-pos-abe625936d724c77bc5162bc304767a7
+            uid: atl-ref-qc-hilicz-pos-1010aa397dbb4abcab7bb82ab09bc36d
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -51,7 +51,7 @@ WORKFLOWS:
             ms2_min_matches: 1
         ISTD:
           ATLAS:
-            uid: atl-ref-istd-hilicz-pos-f7ee5d452c274c3caa794518f6db37bc
+            uid: atl-ref-istd-hilicz-pos-c0148f1625374f14b8ddb068d359317c
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -62,7 +62,7 @@ WORKFLOWS:
             ms2_min_matches: 2
         EMA:
           ATLAS:
-            uid: atl-ref-ema-hilicz-pos-9fc8b14f2ecb4f4086b0ff36b93ce062
+            uid: atl-ref-ema-hilicz-pos-1e5e1f33caeb44bda5f4e38f3df37d6e
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false

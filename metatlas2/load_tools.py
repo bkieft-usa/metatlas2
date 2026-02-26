@@ -248,7 +248,7 @@ def load_compound_input(file_path: str) -> pd.DataFrame:
         df = pd.read_csv(file_path)
     
     # Check for required columns
-    required_columns = ['inchi_key', 'label']
+    required_columns = ['inchi_key', 'compound_name']
     check_missing_columns(df, required_columns)
     
     logger.info(f"Loaded {len(df)} compounds from {file_path}")
@@ -260,13 +260,6 @@ def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
         chrom_values = df['chromatography'].dropna().unique()
         if len(chrom_values) > 0:
             return str(chrom_values[0])
-    
-    # Try to infer from compound names or other columns
-    compound_names = ' '.join(df.get('label', df.get('compound_name', [''])).astype(str))
-    if 'HILIC' in compound_names.upper():
-        return 'HILIC'
-    elif 'C18' in compound_names.upper():
-        return 'C18'
     
     return 'Unknown'
 
@@ -307,7 +300,7 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
         df = pd.read_csv(file_path)
     
     # Check for required columns for atlas creation
-    required_columns = ['inchi_key', 'label', 'rt_peak', 'mz', 'adduct']
+    required_columns = ['inchi_key', 'compound_name', 'rt_peak', 'mz', 'adduct']
     check_missing_columns(df, required_columns)
     
     # Add default values for optional columns

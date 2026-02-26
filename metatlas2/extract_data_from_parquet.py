@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Dict, List
 
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm.notebook import tqdm
-from concurrent.futures import as_completed
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
@@ -59,7 +58,6 @@ def extract_eic_and_ms2_from_parquet(
     logger.info(f"Using ppm_tolerance={ppm_tolerance} and extra_time={extra_time} for data extraction.")
 
     if max_workers is None:
-        import multiprocessing as mp
         max_workers = min(mp.cpu_count(), len(project_files_list), 8)
     use_parallel = use_parallel and max_workers > 1 and len(project_files_list) > 1
 
@@ -67,8 +65,6 @@ def extract_eic_and_ms2_from_parquet(
 
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers...")
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        from tqdm.notebook import tqdm
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_file = {
                 executor.submit(_process_single_parquet_file, parquet_file, compound_mzrts, ppm_tolerance, extra_time, only_ms_level): parquet_file
@@ -102,7 +98,6 @@ def extract_eic_and_ms2_from_parquet(
                     continue
     else:
         logger.info("Using sequential processing...")
-        from tqdm.notebook import tqdm
         for parquet_file in tqdm(project_files_list, desc="Processing parquet files"):
             try:
                 file_results = _process_single_parquet_file(
@@ -130,7 +125,6 @@ def extract_eic_and_ms2_from_parquet(
                 continue
 
     return experimental_data_obj
-
 
 def _process_single_parquet_file(
     parquet_file: str, 
@@ -185,7 +179,6 @@ def _process_single_parquet_file(
         results[inchi_key][adduct] = compound_data
     return results
 
-
 def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:
     """Calculate m/z bounds given ppm tolerance."""
     delta = mz * ppm_tolerance / 1e6
@@ -194,7 +187,6 @@ def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:
 def calculate_rt_bounds(rt_min: float, rt_max: float, extra_time: float) -> tuple:
     """Calculate RT bounds with extra time."""
     return (rt_min - extra_time, rt_max + extra_time)
-
 
 def _extract_ms1_from_parquet(
     parquet_file: str,
@@ -209,7 +201,7 @@ def _extract_ms1_from_parquet(
     
     Args:
         parquet_file: Path to parquet file (e.g., *_ms1_pos.parquet)
-        label: Feature label from atlas
+        compound_name: Feature compound_name from atlas
         mz: Target m/z value
         rt_min: Minimum retention time
         rt_max: Maximum retention time
@@ -217,7 +209,7 @@ def _extract_ms1_from_parquet(
         extra_time: Extra time to extract beyond rt_min/rt_max
     
     Returns:
-        DataFrame with columns: [label, rt, mz, i]
+        DataFrame with columns: [compound_name, rt, mz, i]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, ppm_tolerance)
     rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, extra_time)
@@ -250,7 +242,7 @@ def _extract_ms2_from_parquet(
     Extract MS2 feature from parquet file.
     
     Returns:
-        DataFrame with columns: [label, rt, mz, i, precursor_MZ,
+        DataFrame with columns: [compound_name, rt, mz, i, precursor_MZ,
                                  precursor_intensity, collision_energy]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, ppm_tolerance)
