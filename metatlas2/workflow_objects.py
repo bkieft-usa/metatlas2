@@ -17,6 +17,7 @@ import extract_data_from_parquet as pdx
 import manual_curation_summarizer as mcs
 import extract_data_from_parquet as edp
 import lcmsruns_tools as lrt
+import analysis_gui_dash as agd
 
 logger = lcf.get_logger('workflow_objects')
 
@@ -887,6 +888,32 @@ def run_auto_identification(
     dbi.display_auto_id_summary(
         auto_id_obj=auto_id_obj
     )
+
+def run_analysis_gui(
+    config: dict,
+    project_name: str,
+    rt_alignment_number: int = None,
+    analysis_number: int = None,
+    dash_app_port: int = 8050
+) -> "CurationApp":
+    """
+    Runs the analysis GUI for interactive exploration of results.
+    Requires RT alignment and auto identification to have been completed.
+    """
+
+    analysis_gui_obj = AnalysisGUI()
+
+    analysis_gui_obj.setup(
+        config=config, 
+        project_name=project_name, 
+        rt_alignment_number=rt_alignment_number, 
+        analysis_number=analysis_number
+    )
+
+    logger.info("Launching Analysis GUI...")
+    dash_app = agd.build_dash_app(analysis_gui_obj, port=dash_app_port)
+
+    return dash_app
 
 def _set_up_paths(
     config: Dict, 

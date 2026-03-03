@@ -6,6 +6,7 @@ import sys
 import os
 import json
 import sys
+from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from contextlib import contextmanager
@@ -1154,9 +1155,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
                 file_path TEXT,
-                rt REAL,
-                mz REAL,
-                i REAL,
+                mz TEXT,
+                raw_spectrum TEXT,
                 created_by TEXT,
                 created_date TEXT,
             )
@@ -1587,7 +1587,6 @@ def get_ms1_data_for_compound(
     if analysis_number is not None:
         query += " AND analysis_number = ?"
         params.append(analysis_number)
-    query += " ORDER BY file_path, rt"
     with get_db_connection(project_db_path) as conn:
         df = conn.execute(query, params).df()
     return df
@@ -1690,7 +1689,8 @@ def save_auto_identification_results_to_db(
     ms2_data_records = []
 
     # CompoundInfo
-    for ci in exp_data_obj.manual_curation:
+    logger.info(f"Processing manual curation entries...")
+    for ci in tqdm(exp_data_obj.manual_curation, total=len(exp_data_obj.manual_curation), desc="Compounds"):
         compound_uid = compound_uid_map.get(ci.inchi_key)
         if not compound_uid:
             logger.warning(f"Could not find compound_uid for {ci.inchi_key}, skipping")
@@ -1703,11 +1703,23 @@ def save_auto_identification_results_to_db(
             manual_curation_records.append(metadata_record)
 
     # MS1Data
-    for ms1 in exp_data_obj.ms1_data:
+    logger.info(f"Processing MS1 data entries...")
+    for ms1 in tqdm(exp_data_obj.ms1_data, total=len(exp_data_obj.ms1_data), desc="MS1 data files"):
         compound_uid = compound_uid_map.get(ms1.inchi_key)
         if not compound_uid or ms1.data.empty:
             continue
-        for _, row in ms1.data.iterrows():
+        else:
+            filename = ms1.filename
+            ms1.data['filename'] = filename
+            ms1.data = ms1.data[['filename', 'mz', 'i', 'rt']]
+            ms1_data_grouped = ms1.data.groupby('filename', sort=False).agg({
+                'rt': list,
+                'mz': list,
+                'i': list,
+            }).reset_index()
+            ms1_data_grouped['raw_spectrum'] = list(zip(ms1_data_grouped['rt'], ms1_data_grouped['i']))
+
+        for _, row in ms1_data_grouped.iterrows():
             ms1_data_record = _prepare_ms1_data_record(
                 row, compound_uid, ms1.inchi_key, ms1.adduct, ms1.filename,
                 rt_alignment_number, analysis_number, prov
@@ -1716,7 +1728,8 @@ def save_auto_identification_results_to_db(
                 ms1_data_records.append(ms1_data_record)
 
     # MS2Data
-    for ms2 in exp_data_obj.ms2_data:
+    logger.info(f"Processing MS2 data entries...")
+    for ms2 in tqdm(exp_data_obj.ms2_data, total=len(exp_data_obj.ms2_data), desc="MS2 data scans"):
         compound_uid = compound_uid_map.get(ms2.inchi_key)
         if not compound_uid or ms2.data.empty:
             continue
@@ -1739,7 +1752,8 @@ def save_auto_identification_results_to_db(
                 ms2_data_records.append(ms2_data_record)
 
     # MS2Hits
-    for ms2_hit in exp_data_obj.ms2_hits:
+    logger.info(f"Processing MS2 hit entries...")
+    for ms2_hit in tqdm(exp_data_obj.ms2_hits, total=len(exp_data_obj.ms2_hits), desc="MS2 hit entries"):
         compound_uid = compound_uid_map.get(ms2_hit.inchi_key)
         if not compound_uid or ms2_hit.data.empty:
             continue
@@ -1810,7 +1824,6 @@ def _prepare_manual_curation_record(
     """Prepare compound metadata record for database insertion."""
     try:
         row = manual_curation.iloc[0]
-        isomers_json = json.dumps(row['isomers']) if row['isomers'] is not None else '[]'
         return (
             _generate_uid("manual_curation"),
             compound_uid,
@@ -1845,7 +1858,7 @@ def _prepare_manual_curation_record(
             float(row.get('best_ms1_intensity', 0.0)),
             float(row.get('best_ms1_ppm_error', 0.0)),
             float(row.get('best_ms1_rt_error', 0.0)),
-            isomers_json,
+            json.dumps(row['isomers']) if row['isomers'] is not None else '[]',
             float(row.get('suggested_rt_min', 0.0)),
             float(row.get('suggested_rt_max', 0.0)),
             float(row.get('suggested_rt_peak', 0.0)),
@@ -1877,9 +1890,8 @@ def _prepare_ms1_data_record(
             rt_alignment_number,
             analysis_number,
             filename,
-            float(row.get('rt', 0.0)),
-            float(row.get('mz', 0.0)),
-            float(row.get('i', 0.0)),
+            json.dumps(row.get('mz', [])),
+            json.dumps(row.get('raw_spectrum', ('[]', '[]'))),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -1989,7 +2001,7 @@ def _bulk_insert_analysis_data(
         if ms1_data_records:
             logger.info(f"Inserting {len(ms1_data_records)} MS1 raw data records...")
             conn.executemany("""
-                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms1_data_records)
         
         if ms2_data_records:
