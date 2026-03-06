@@ -193,7 +193,7 @@ def _extract_ms1_from_parquet(
     mz: float,
     rt_min: float,
     rt_max: float,
-    ppm_tolerance: float,
+    ppm_tolerance: float = 5,
     extra_time: float = 1
 ) -> pd.DataFrame:
     """
@@ -235,8 +235,8 @@ def _extract_ms2_from_parquet(
     mz: float,
     rt_min: float,
     rt_max: float,
-    ppm_tolerance: float,
-    extra_time: float = 0.1
+    ppm_tolerance: float = 5,
+    extra_time: float = 0.75
 ) -> pd.DataFrame:
     """
     Extract MS2 feature from parquet file.

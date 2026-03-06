@@ -6,6 +6,7 @@ import sys
 import os
 import json
 import sys
+import copy
 from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -35,8 +36,8 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"atl-ref-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-ref-{uuid.uuid4().hex[:32]}"
     elif entity_type == "rt_atlas":
         return f"atl-rta-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-rta-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "analyzed_atlas":
-        return f"atl-tga-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-tga-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "autoid_atlas":
+        return f"atl-aida-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-aida-{uuid.uuid4().hex[:32]}"
     elif entity_type == "mz_rt":
         return f"mzrt-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"mzrt-{uuid.uuid4().hex[:32]}"
     elif entity_type == "compound":
@@ -177,8 +178,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.rt_max,
                         mzrt.mz_tolerance,
                         mzrt.mz_rt_uid AS mz_rt_uid,
-                        mzrt.rt_alignment_applied,
-                        mzrt.manual_curation_applied
+                        mzrt.ms1_notes,
+                        mzrt.ms2_notes
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     LEFT JOIN main_db.compounds ON aca.compound_uid = main_db.compounds.compound_uid
@@ -209,8 +210,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.rt_max,
                         mzrt.mz_tolerance,
                         mzrt.mz_rt_uid,
-                        mzrt.rt_alignment_applied,
-                        mzrt.manual_curation_applied
+                        mzrt.ms1_notes,
+                        mzrt.ms2_notes
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     JOIN compounds c ON aca.compound_uid = c.compound_uid
@@ -663,8 +664,8 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
             reference_data.get('confidence', 'Unknown'),
             reference_data.get('identification_notes', ''),
             reference_data.get('source', 'Unknown'),
-            reference_data.get('rt_alignment_applied', False),
-            reference_data.get('manual_curation_applied', False),
+            reference_data.get('ms1_notes', ''),
+            reference_data.get('ms2_notes', ''),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -998,10 +999,12 @@ def _create_database_tables(conn, db_type: str = "main"):
                 chromatography TEXT,
                 polarity TEXT,
                 confidence TEXT,
-                identification_notes TEXT,
                 source TEXT,
-                rt_alignment_applied BOOL,
-                manual_curation_applied BOOL,
+                ms1_notes TEXT,
+                ms2_notes TEXT,
+                other_notes TEXT,
+                analyst_notes TEXT,
+                identification_notes TEXT,
                 created_by TEXT,
                 created_date TEXT,
             )
@@ -1104,10 +1107,12 @@ def _create_database_tables(conn, db_type: str = "main"):
                 chromatography TEXT,
                 polarity TEXT,
                 confidence TEXT,
-                identification_notes TEXT,
                 source TEXT,
-                rt_alignment_applied BOOL,
-                manual_curation_applied BOOL,
+                ms1_notes TEXT,
+                ms2_notes TEXT,
+                other_notes TEXT,
+                analyst_notes TEXT,
+                identification_notes TEXT,
                 created_by TEXT,
                 created_date TEXT,
             )
@@ -1208,7 +1213,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 ref_spectrum TEXT,
                 created_by TEXT,
                 created_date TEXT,
-                analyst_notes TEXT,
             )
         """)
 
@@ -1221,7 +1225,7 @@ def _create_database_tables(conn, db_type: str = "main"):
             rt_alignment_number INTEGER,
             analysis_number INTEGER,
             compound_name TEXT,
-            formula TEXT,
+            auto_ided BOOLEAN,
             polarity TEXT,
             chromatography TEXT,
             mz_tolerance REAL,
@@ -1235,12 +1239,11 @@ def _create_database_tables(conn, db_type: str = "main"):
             rt_peak REAL,
             rt_min REAL,
             rt_max REAL,
-            identification_notes TEXT,
             ms1_notes TEXT DEFAULT 'keep',
             ms2_notes TEXT DEFAULT 'no selection',
-            analyst_notes TEXT,
-            is_rt_modified BOOLEAN DEFAULT FALSE,
-            is_annotation_modified BOOLEAN DEFAULT FALSE,
+            other_notes TEXT DEFAULT 'no selection',
+            identification_notes TEXT DEFAULT '',
+            analyst_notes TEXT DEFAULT '',
             best_ms1_file TEXT,
             best_ms1_rt REAL,
             best_ms1_mz REAL,
@@ -1307,7 +1310,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
@@ -1319,11 +1322,13 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                         compound_mzrt.adduct,
                         compound_mzrt.chromatography,
                         compound_mzrt.polarity,
-                        compound_mzrt.confidence,
-                        compound_mzrt.identification_notes,
-                        compound_mzrt.source,
-                        'False',  # rt_alignment_applied
-                        'False',  # manual_curation_applied
+                        compound_mzrt.get("confidence", 'Unknown'),
+                        compound_mzrt.get("source", 'Unknown'),
+                        compound_mzrt.get("ms1_notes", ''),
+                        compound_mzrt.get("ms2_notes", ''),
+                        compound_mzrt.get("other_notes", ''),
+                        compound_mzrt.get("analyst_notes", ''),
+                        compound_mzrt.get("identification_notes", ''),
                         prov["analyst"],
                         prov["timestamp"]
                     ))
@@ -1391,7 +1396,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
@@ -1403,11 +1408,13 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                         compound_mzrt.adduct,
                         compound_mzrt.chromatography,
                         compound_mzrt.polarity,
-                        compound_mzrt.confidence,
-                        compound_mzrt.identification_notes,
-                        compound_mzrt.source,
-                        compound_mzrt.rt_alignment_applied,
-                        compound_mzrt.manual_curation_applied,
+                        compound_mzrt.get("confidence", 'Unknown'),
+                        compound_mzrt.get("source", 'Unknown'),
+                        compound_mzrt.get("ms1_notes", ''),
+                        compound_mzrt.get("ms2_notes", ''),
+                        compound_mzrt.get("other_notes", ''),
+                        compound_mzrt.get("analyst_notes", ''),
+                        compound_mzrt.get("identification_notes", ''),
                         prov["analyst"],
                         prov["timestamp"]
                     ))
@@ -1547,15 +1554,28 @@ def get_manual_curation_entries(
 ) -> pd.DataFrame:
     """
     Get all manual_curation entries for the given RT alignment and analysis number,
-    ordered by ascending RT peak.
+    ordered by ascending RT peak. Within each RT peak group, compounds without 'unlabeled'
+    in the name come before those with 'unlabeled'.
     """
-    with get_db_connection(project_db_path) as conn:
-        df = conn.execute("""
-            SELECT *
-            FROM manual_curation
-            WHERE rt_alignment_number = ? AND analysis_number = ?
-            ORDER BY rt_peak ASC
-        """, [rt_alignment_number, analysis_number]).df()
+    try:
+        with get_db_connection(project_db_path) as conn:
+            df = conn.execute("""
+                SELECT *
+                FROM manual_curation
+                WHERE rt_alignment_number = ? AND analysis_number = ?
+            """, [rt_alignment_number, analysis_number]).df()
+    except Exception as e:
+        logger.error(f"Error retrieving manual curation entries: {e}")
+        df = pd.DataFrame()
+
+    if df.empty:
+        raise ValueError(f"No manual curation entries found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}.")
+
+    df['compound_name'] = df['compound_name'].fillna('')
+    df['has_unlabeled'] = df['compound_name'].str.contains('unlabeled', case=False, na=False).astype(int)
+    df = df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, False])
+    df = df.drop('has_unlabeled', axis=1)
+
     return df
 
 def get_ms1_data_for_compound(
@@ -1574,21 +1594,29 @@ def get_ms1_data_for_compound(
         FROM ms1_data
         WHERE 1=1
     """
-    params = []
-    if inchi_key is not None:
-        query += " AND inchi_key = ?"
-        params.append(inchi_key)
-    if adduct is not None:
-        query += " AND adduct = ?"
-        params.append(adduct)
-    if rt_alignment_number is not None:
-        query += " AND rt_alignment_number = ?"
-        params.append(rt_alignment_number)
-    if analysis_number is not None:
-        query += " AND analysis_number = ?"
-        params.append(analysis_number)
-    with get_db_connection(project_db_path) as conn:
-        df = conn.execute(query, params).df()
+    try:
+        params = []
+        if inchi_key is not None:
+            query += " AND inchi_key = ?"
+            params.append(inchi_key)
+        if adduct is not None:
+            query += " AND adduct = ?"
+            params.append(adduct)
+        if rt_alignment_number is not None:
+            query += " AND rt_alignment_number = ?"
+            params.append(rt_alignment_number)
+        if analysis_number is not None:
+            query += " AND analysis_number = ?"
+            params.append(analysis_number)
+        with get_db_connection(project_db_path) as conn:
+            df = conn.execute(query, params).df()
+    except Exception as e:
+        logger.error(f"Error retrieving MS1 data: {e}")
+        df = pd.DataFrame()
+
+    if df.empty:
+        logger.warning(f"No MS1 data found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+
     return df
 
 def get_ms2_hits_for_compound(
@@ -1607,22 +1635,30 @@ def get_ms2_hits_for_compound(
         FROM ms2_hits
         WHERE 1=1
     """
-    params = []
-    if inchi_key is not None:
-        query += " AND inchi_key = ?"
-        params.append(inchi_key)
-    if adduct is not None:
-        query += " AND adduct = ?"
-        params.append(adduct)
-    if rt_alignment_number is not None:
-        query += " AND rt_alignment_number = ?"
-        params.append(rt_alignment_number)
-    if analysis_number is not None:
-        query += " AND analysis_number = ?"
-        params.append(analysis_number)
-    query += " ORDER BY score DESC"
-    with get_db_connection(project_db_path) as conn:
-        df = conn.execute(query, params).df()
+    try:
+        params = []
+        if inchi_key is not None:
+            query += " AND inchi_key = ?"
+            params.append(inchi_key)
+        if adduct is not None:
+            query += " AND adduct = ?"
+            params.append(adduct)
+        if rt_alignment_number is not None:
+            query += " AND rt_alignment_number = ?"
+            params.append(rt_alignment_number)
+        if analysis_number is not None:
+            query += " AND analysis_number = ?"
+            params.append(analysis_number)
+        query += " ORDER BY score DESC"
+        with get_db_connection(project_db_path) as conn:
+            df = conn.execute(query, params).df()
+    except Exception as e:
+        logger.error(f"Error retrieving MS2 hits: {e}")
+        df = pd.DataFrame()
+
+    if df.empty:
+        logger.warning(f"No MS2 hits found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+
     return df
 
 def get_ms2_data_for_compound(
@@ -1641,23 +1677,154 @@ def get_ms2_data_for_compound(
         FROM ms2_data
         WHERE 1=1
     """
-    params = []
-    if inchi_key is not None:
-        query += " AND inchi_key = ?"
-        params.append(inchi_key)
-    if adduct is not None:
-        query += " AND adduct = ?"
-        params.append(adduct)
-    if rt_alignment_number is not None:
-        query += " AND rt_alignment_number = ?"
-        params.append(rt_alignment_number)
-    if analysis_number is not None:
-        query += " AND analysis_number = ?"
-        params.append(analysis_number)
-    query += " ORDER BY file_path, rt"
-    with get_db_connection(project_db_path) as conn:
-        df = conn.execute(query, params).df()
+    try:
+        params = []
+        if inchi_key is not None:
+            query += " AND inchi_key = ?"
+            params.append(inchi_key)
+        if adduct is not None:
+            query += " AND adduct = ?"
+            params.append(adduct)
+        if rt_alignment_number is not None:
+            query += " AND rt_alignment_number = ?"
+            params.append(rt_alignment_number)
+        if analysis_number is not None:
+            query += " AND analysis_number = ?"
+            params.append(analysis_number)
+        query += " ORDER BY file_path, rt"
+        with get_db_connection(project_db_path) as conn:
+            df = conn.execute(query, params).df()
+    except Exception as e:
+        logger.error(f"Error retrieving MS2 data: {e}")
+        df = pd.DataFrame()
+
+    if df.empty:
+        logger.warning(f"No MS2 data found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+
     return df
+
+def create_new_atlas_after_manual_curation(
+    summary_obj: "AnalysisSummary",
+) -> "Atlas":
+    """
+    """
+    source_atlas = summary_obj.pre_curation_atlas_obj
+
+    # Build (inchi_key, adduct) -> first row of curated DataFrame
+    curation_lookup = {}
+    for mc in summary_obj.experimental_data.manual_curation:
+        curation_lookup[(mc.inchi_key, mc.adduct)] = mc.data.iloc[0]
+
+    # Deep-copy every CompoundMZRT and apply curation updates
+    new_compound_mzrts = {}
+    for dict_key, cmzrt in source_atlas.compound_mzrts.items():
+        new_cmzrt = copy.deepcopy(cmzrt)
+        curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
+        # Check if curation_row has ms2_notes still as 'no selection' and error out and print message to address it
+        if curation_row is not None and str(curation_row.get('ms2_notes', '')).lower() == 'no selection':
+            raise ValueError(
+                f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) has ms2_notes as 'no selection' in manual curation. "
+                "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
+            )
+        # Remove compounds from original atlas if the ms1 note has 'remove' in it
+        if curation_row is not None and 'remove' in str(curation_row.get('ms1_notes', '')).lower():
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove'.")
+            continue
+        if curation_row is not None:
+            new_cmzrt.rt_peak = float(curation_row.get('rt_peak', cmzrt.rt_peak))
+            new_cmzrt.rt_min  = float(curation_row.get('rt_min',  cmzrt.rt_min))
+            new_cmzrt.rt_max  = float(curation_row.get('rt_max',  cmzrt.rt_max))
+            new_cmzrt.ms1_notes = str(curation_row.get('ms1_notes', cmzrt.ms1_notes))
+            new_cmzrt.ms2_notes = str(curation_row.get('ms2_notes', cmzrt.ms2_notes))
+            new_cmzrt.other_notes = str(curation_row.get('other_notes', 'no selection'))
+            new_cmzrt.analyst_notes = str(curation_row.get('analyst_notes', cmzrt.analyst_notes))
+            new_cmzrt.identification_notes = str(curation_row.get('identification_notes', cmzrt.identification_notes))
+        else:
+            logger.warning(
+                f"No manual curation entry found for {cmzrt.inchi_key} / {cmzrt.adduct}, "
+                "keeping original RT values."
+            )
+        new_compound_mzrts[dict_key] = new_cmzrt
+
+    # Generate a new atlas UID
+    new_atlas_uid = _generate_uid(
+        "autoid_atlas",
+        decorator=(
+            f"{source_atlas.analysis_type.lower()}-"
+            f"{source_atlas.chromatography.lower()}-"
+            f"{source_atlas.polarity.lower()}"
+        )
+    )
+
+    # Shallow-copy the atlas, then replace the fields that must change
+    new_atlas = copy.copy(source_atlas)
+    new_atlas.atlas_uid        = new_atlas_uid
+    new_atlas.compound_mzrts   = new_compound_mzrts
+    new_atlas.source_atlas_uid = source_atlas.atlas_uid
+    new_atlas.atlas_name = source_atlas.atlas_name + " (post-manual-curation)"
+    new_atlas.atlas_description = source_atlas.atlas_description + " (post-manual-curation)"
+    save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
+
+    auto_id_obj.post_autoid_atlas_obj = new_atlas
+
+    logger.info(
+        f"Created and saved post-curation atlas {new_atlas_uid} (from source atlas {source_atlas.atlas_uid}) "
+        f"with ({len(new_compound_mzrts)} compounds)."
+    )
+
+    return
+
+def create_new_atlas_after_auto_id(
+    auto_id_obj: "AutoIdentification",
+    remove_unidentified_compounds: bool = True
+) -> "Atlas":
+    """
+    """
+    source_atlas = auto_id_obj.pre_autoid_atlas_obj
+
+    # Build (inchi_key, adduct) -> first row of curated DataFrame
+    curation_lookup = {}
+    for mc in auto_id_obj.experimental_data.manual_curation:
+        curation_lookup[(mc.inchi_key, mc.adduct)] = mc.data.iloc[0]
+
+    # Deep-copy every CompoundMZRT and apply curation updates
+    new_compound_mzrts = {}
+    for dict_key, cmzrt in source_atlas.compound_mzrts.items():
+        new_cmzrt = copy.deepcopy(cmzrt)
+        curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
+        # Remove compounds from original atlas that were not auto-identified (curation_row has auto_ided=False)
+        if remove_unidentified_compounds and curation_row is not None and not curation_row.get('auto_ided', False):
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it was not auto-identified and remove_unidentified_compounds is True.")
+            continue
+        new_compound_mzrts[dict_key] = new_cmzrt
+
+    # Generate a new atlas UID
+    new_atlas_uid = _generate_uid(
+        "autoid_atlas",
+        decorator=(
+            f"{source_atlas.analysis_type.lower()}-"
+            f"{source_atlas.chromatography.lower()}-"
+            f"{source_atlas.polarity.lower()}"
+        )
+    )
+
+    # Shallow-copy the atlas, then replace the fields that must change
+    new_atlas = copy.copy(source_atlas)
+    new_atlas.atlas_uid        = new_atlas_uid
+    new_atlas.compound_mzrts   = new_compound_mzrts
+    new_atlas.source_atlas_uid = source_atlas.atlas_uid
+    new_atlas.atlas_name = source_atlas.atlas_name + " (post-auto-identification)"
+    new_atlas.atlas_description = source_atlas.atlas_description + " (post-auto-identification)"
+    save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
+
+    auto_id_obj.post_autoid_atlas_obj = new_atlas
+
+    logger.info(
+        f"Created and saved post-auto-identification atlas {new_atlas_uid} (from source atlas {source_atlas.atlas_uid}) "
+        f"with ({len(new_compound_mzrts)} compounds)."
+    )
+
+    return
 
 def save_auto_identification_results_to_db(
     auto_id_obj: "AutoIdentification"
@@ -1783,7 +1950,41 @@ def save_auto_identification_results_to_db(
     logger.info("Database save complete. ")
 
     return
+
+def to_python_type(val):
+    if isinstance(val, np.generic):
+        return val.item()
+    return val
+ 
+def write_gui_updates_to_db(
+    project_db_path: str,
+    curation_uid: str,
+    updated_fields: dict
+) -> None:
+    """
+    Update a manual curation entry with new values for specified fields.
     
+    Args:
+        project_db_path: Path to the project database
+        curation_uid: UID of the manual curation entry to update
+        updated_fields: Dictionary of fields to update with their new values
+    """
+    if not updated_fields:
+        logger.warning("No fields provided for update.")
+        return
+
+    try:
+        curation_uid = to_python_type(curation_uid)
+        set_clause = ", ".join([f"{k} = ?" for k in updated_fields])
+        params = [to_python_type(v) for v in updated_fields.values()] + [curation_uid]
+        with get_db_connection(project_db_path) as conn:
+            conn.execute(f"UPDATE manual_curation SET {set_clause} WHERE curation_uid = ?", params)
+        
+        logger.info(f"Updated manual curation entry {curation_uid} with fields {list(updated_fields.keys())}")
+    except Exception as e:
+        logger.error(f"Error updating manual curation entry {curation_uid}: {e}")
+        raise ValueError(f"Failed to update manual curation entry {curation_uid}. See logs for details.")
+
 def _check_identical_manual_curation_exists(conn, manual_curation_records: List[tuple]) -> None:
     """
     Check for identical manual curation records in the database before inserting new ones.
@@ -1832,7 +2033,7 @@ def _prepare_manual_curation_record(
             rt_alignment_number,
             analysis_number,
             row.get('compound_name', ''),
-            row.get('formula', ''),
+            row.get('auto_ided', False),
             row.get('polarity', ''),
             row.get('chromatography', ''),
             float(row.get('mz_tolerance', 5.0)),
@@ -1850,8 +2051,7 @@ def _prepare_manual_curation_record(
             row.get('ms1_notes', ''),
             row.get('ms2_notes', ''),
             row.get('analyst_notes', ''),
-            bool(row.get('is_rt_modified', False)),
-            bool(row.get('is_annotation_modified', False)),
+            row.get('other_notes', ''),
             row.get('best_ms1_file', ''),
             float(row.get('best_ms1_rt', 0.0)),
             float(row.get('best_ms1_mz', 0.0)),
@@ -1969,7 +2169,6 @@ def _prepare_ms2_hit_record(
             json.dumps(hit.get('ref_spectrum', [[], []])),
             prov["analyst"],
             prov["timestamp"],
-            ''  # analyst_notes
         )
     except Exception as e:
         logger.error(f"Error preparing MS2 hit record: {e}")
@@ -1989,13 +2188,13 @@ def _bulk_insert_analysis_data(
             logger.info(f"Inserting {len(manual_curation_records)} compound metadata records...")
             conn.executemany("""
                 INSERT INTO manual_curation VALUES 
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, manual_curation_records)
         
         if ms2_hits_records:
             logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
             conn.executemany("""
-                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_hits_records)
         
         if ms1_data_records:

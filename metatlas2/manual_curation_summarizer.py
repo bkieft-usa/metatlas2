@@ -20,7 +20,7 @@ def create_manual_curation_obj(
     """
     from workflow_objects import ManualCuration
 
-    for atlas_compound_mzrt in tqdm(auto_id_obj.atlas_obj.compound_mzrts.values(), desc="Processing atlas compounds", unit="compound"):
+    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Processing atlas compounds", unit="compound"):
 
         compound_data = pd.DataFrame([{
             'compound_uid': atlas_compound_mzrt.compound_uid,
@@ -29,7 +29,7 @@ def create_manual_curation_obj(
             'rt_alignment_number': auto_id_obj.rt_alignment_number,
             'analysis_number': auto_id_obj.analysis_number,
             'compound_name': getattr(atlas_compound_mzrt, 'compound_name', ''),
-            'formula': getattr(atlas_compound_mzrt, 'formula', ''),
+            'auto_ided': False,
             'polarity': getattr(atlas_compound_mzrt, 'polarity', ''),
             'chromatography': getattr(atlas_compound_mzrt, 'chromatography', ''),
             'mz_tolerance': getattr(atlas_compound_mzrt, 'mz_tolerance', 5.0),
@@ -43,12 +43,11 @@ def create_manual_curation_obj(
             'rt_peak': getattr(atlas_compound_mzrt, 'rt_peak', 0.0),
             'rt_min': getattr(atlas_compound_mzrt, 'rt_min', 0.0),
             'rt_max': getattr(atlas_compound_mzrt, 'rt_max', 0.0),
+            'ms1_notes': getattr(atlas_compound_mzrt, 'ms1_notes', 'keep'),
+            'ms2_notes': getattr(atlas_compound_mzrt, 'ms2_notes', 'no selection'),
+            'other_notes': getattr(atlas_compound_mzrt, 'other_notes', 'no selection'),
             'identification_notes': getattr(atlas_compound_mzrt, 'identification_notes', ''),
-            'ms1_notes': 'keep',
-            'ms2_notes': 'no selection',
-            'analyst_notes': '',
-            'is_rt_modified': False,
-            'is_annotation_modified': False,
+            'analyst_notes': getattr(atlas_compound_mzrt, 'analyst_notes', ''),
             'best_ms1_file': '',
             'best_ms1_rt': 0.0,
             'best_ms1_mz': 0.0,
@@ -76,7 +75,7 @@ def create_manual_curation_obj(
 
         _add_isomers_to_manual_curation_obj(
             manual_curation_obj,
-            auto_id_obj.atlas_obj
+            auto_id_obj.pre_autoid_atlas_obj
         )
 
         _add_rt_suggestions_to_manual_curation_obj(
@@ -120,6 +119,7 @@ def _fill_best_ms1_to_manual_curation(
                     })
                 
     if all_files:
+        manual_curation_obj.data.loc[0, 'auto_ided'] = True
         best = max(all_files, key=lambda x: x['peak_height'])
         manual_curation_obj.data.loc[0, 'best_ms1_file'] = best['filename']
         manual_curation_obj.data.loc[0, 'best_ms1_rt'] = float(best['rt_peak'])
@@ -157,28 +157,28 @@ def _build_isomer_dict(
         mono_isotopic_molecular_weight = row.get("mono_isotopic_molecular_weight", None)
         inchi_prefix = row["inchi_key"].split("-")[0]
         
-        def is_isomer(r):
-            if r["inchi_key"] == row["inchi_key"]:
+        def is_isomer(atlas_row):
+            if atlas_row["inchi_key"] == row["inchi_key"]:
                 return False
-            mz_close = abs(r["mz"] - mz) <= 0.005
+            mz_close = abs(atlas_row["mz"] - mz) <= 0.005
             mass_close = (
                 mono_isotopic_molecular_weight is not None and 
-                r.get("mono_isotopic_molecular_weight", None) is not None and
-                abs(r["mono_isotopic_molecular_weight"] - mono_isotopic_molecular_weight) <= 0.005
+                atlas_row.get("mono_isotopic_molecular_weight", None) is not None and
+                abs(atlas_row["mono_isotopic_molecular_weight"] - mono_isotopic_molecular_weight) <= 0.005
             )
-            prefix_match = r["inchi_key"].split("-")[0] == inchi_prefix
+            prefix_match = atlas_row["inchi_key"].split("-")[0] == inchi_prefix
             return mz_close or mass_close or prefix_match
         
         isomers = atlas_df[atlas_df.apply(is_isomer, axis=1)]
         isomer_dict[row["inchi_key"]] = [
             {
-                "inchi_key": r["inchi_key"],
-                "compound_name": r.get("compound_name", ""),
-                "rt": r["rt_peak"],
-                "mz": r["mz"],
-                "mz_tolerance": r.get("mz_tolerance_ppm", r.get("mz_tolerance", 10.0)),
+                "inchi_key": atlas_row["inchi_key"],
+                "adduct": atlas_row["adduct"],
+                "compound_name": atlas_row.get("compound_name", ""),
+                "rt": atlas_row["rt_peak"],
+                "mz": atlas_row["mz"],
             }
-            for _, r in isomers.iterrows()
+            for _, atlas_row in isomers.iterrows()
         ]
     
     return isomer_dict

@@ -41,6 +41,7 @@ dependencies = [
     "pyparsing==3.3.2",
     "pytest==8.3.4",
     "python-dateutil>=2.9.0.post0",
+    "rdkit>=2024.9.6",
     "regex==2024.11.6",
     "scikit-learn==1.8.0",
     "scipy==1.17.1",

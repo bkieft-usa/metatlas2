@@ -76,8 +76,8 @@ def apply_rt_alignment_to_target_atlases(
                 aligned_atlas_uid = dbi._generate_uid("rt_atlas", decorator=f"{analysis_type.lower()}-{chrom.lower()}-{pol.lower()}")
                 aligned_atlas = Atlas(
                     atlas_uid=aligned_atlas_uid,
-                    atlas_name=f"{atlas_obj.atlas_name} (RT aligned)",
-                    atlas_description=f"RT-aligned version of {atlas_obj.atlas_name}",
+                    atlas_name=f"{atlas_obj.atlas_name} (post-rt-alignment)",
+                    atlas_description=f"{atlas_obj.atlas_description} (post-rt-alignment)",
                     chromatography=chrom,
                     polarity=pol,
                     analysis_type=analysis_type,

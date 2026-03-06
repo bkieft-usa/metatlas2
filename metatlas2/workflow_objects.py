@@ -4,7 +4,9 @@ from pathlib import Path
 import sys
 import numpy as np
 import pandas as pd
-from IPython.display import display
+
+import threading, time, os
+from IPython.display import display, HTML
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
@@ -18,6 +20,7 @@ import manual_curation_summarizer as mcs
 import extract_data_from_parquet as edp
 import lcmsruns_tools as lrt
 import analysis_gui_dash as agd
+import analysis_summary as asm
 
 logger = lcf.get_logger('workflow_objects')
 
@@ -528,21 +531,6 @@ class RTAlign:
             rt_alignment_number=self.rt_alignment_number
         )
 
-        logger.info(f"Checking for existing RT model in database with UID {self.qc_atlas_uid} ({self.chromatography}) and RT Alignment number {self.rt_alignment_number}")
-        self.check_existing_rt_alignment()
-
-        logger.info(f"Retrieving all LCMS runs for project...")
-        project_lcmsruns = dbi.get_lcmsruns_from_db(
-            project_db_path=self.paths['project_db_path'],
-        )
-
-        logger.info(f"Filtering {len(project_lcmsruns)} LCMS runs...")
-        self.aligner_lcmsruns = lrt.filter_lcmsruns_list(
-            lcmsruns=project_lcmsruns,
-            file_type=['qc'],
-            chromatography=self.chromatography
-        )
-
     def check_existing_rt_alignment(self) -> Optional[Dict]:
         """
         Check for an existing RT alignment model in the database and handle logic for reuse or creation.
@@ -616,7 +604,8 @@ class AutoIdentification:
     workflow_params: Dict[str, Any] = field(default_factory=dict)
     autoid_lcmsruns: List[LCMSRun] = field(default_factory=list)
     experimental_data: Optional[ExperimentalData] = None
-    atlas_obj: Optional[Atlas] = None
+    pre_autoid_atlas_obj: Optional[Atlas] = None
+    post_autoid_atlas_obj: Optional[Atlas] = None
 
     # Paths and config
     paths: Dict[str, str] = field(default_factory=dict)
@@ -646,31 +635,6 @@ class AutoIdentification:
             analysis_number=self.analysis_number
         )
 
-        logger.info(f"Checking for existing Auto Identification results within RT Alignment number {self.rt_alignment_number} and analysis number {self.analysis_number}...")
-        dbi.check_existing_auto_identification(self)
-
-        logger.info(f"Retrieving all LCMS runs for project...")
-        project_lcmsruns = dbi.get_lcmsruns_from_db(
-            project_db_path=self.paths['project_db_path'],
-        )
-
-        self.atlas_obj = Atlas.from_database(
-            database_path=self.paths['project_db_path'],
-            atlas_uid=self.analysis_atlas_uid,
-            main_db_path=self.paths['main_db_path']
-        )
-
-        logger.info(f"Loading workflow parameters for targeted analysis from config...")
-        self.workflow_params = self.config['WORKFLOWS']['TARGETED_ANALYSES'][self.atlas_obj.chromatography][self.atlas_obj.polarity][self.atlas_obj.analysis_type]['PARAMS']
-
-        logger.info("Finding LCMSRuns matching criteria for auto-identification...")
-        self.autoid_lcmsruns = lrt.filter_lcmsruns_list(
-            lcmsruns=project_lcmsruns,
-            file_type=['experimental', 'istd', 'exctrl', 'refstd'],
-            chromatography=self.atlas_obj.chromatography,
-            polarity=self.atlas_obj.polarity
-        )
-
 class AnalysisGUI:
     # Core metadata
     analysis_uid: str = None
@@ -681,9 +645,6 @@ class AnalysisGUI:
     created_by: str = None
     created_date: str = None
 
-    # Attributes added during analysis
-    post_analysis_atlas_obj: Optional[Atlas] = None
-
     # Paths and config
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
@@ -691,7 +652,7 @@ class AnalysisGUI:
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int):
+    def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int, curation_atlas_uid: str):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
@@ -709,6 +670,102 @@ class AnalysisGUI:
             stage="analysis_gui",
             rt_alignment_number=self.rt_alignment_number,
             analysis_number=self.analysis_number
+        )
+
+class AnalysisSummary:
+    # Core metadata
+    rt_alignment_number: int = None
+    analysis_number: int = None
+    chromatography: str = None
+    polarity: str = None
+
+    # Attributes added during analysis
+    pre_curation_atlas_obj: Optional[Atlas] = None
+    post_curation_atlas_obj: Optional[Atlas] = None
+    summary_data: Optional[pd.DataFrame] = None
+
+    # Pre-loaded data tables (populated by load_data())
+    manual_curation_df:  Optional[pd.DataFrame] = None
+    ms1_all_df:          Optional[pd.DataFrame] = None
+    ms2_raw_all_df:      Optional[pd.DataFrame] = None
+    ms2_hits_all_df:     Optional[pd.DataFrame] = None
+    per_file_metrics_df: Optional[pd.DataFrame] = None
+
+    # Paths and config
+    paths: Dict[str, str] = field(default_factory=dict)
+    config: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.__dict__
+
+    def setup(
+        self,
+        config: dict,
+        project_name: str,
+        rt_alignment_number: int,
+        analysis_number: int,
+        chromatography: str = None,
+    ):
+        """
+        Set up AnalysisSummary object.
+        Populates paths, config, and relevant atlas UID.
+        """
+        logger.info(f"Setting up AnalysisSummary object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
+        self.rt_alignment_number = rt_alignment_number
+        self.analysis_number = analysis_number
+        self.chromatography = chromatography
+        self.config = config
+        self.project_name = project_name
+
+        logger.info(f"Setting up workflow paths...")
+        self.paths = _set_up_paths(
+            config=self.config,
+            project_name=self.project_name,
+            stage="analysis_summary",
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number
+        )
+
+    def load_data(self) -> None:
+        """Load all analysis data tables from the project database and cache them as attributes.
+        """
+        if self.manual_curation_df is not None:
+            logger.debug("AnalysisSummary.load_data: data already loaded, skipping.")
+            return
+
+        project_db_path  = self.paths["project_db_path"]
+        rt_alignment_num = self.rt_alignment_number
+        analysis_num     = self.analysis_number
+
+        logger.info(
+            "AnalysisSummary.load_data: loading RT alignment %d, analysis %d…",
+            rt_alignment_num, analysis_num,
+        )
+
+        self.manual_curation_df = dbi.get_manual_curation_entries(
+            project_db_path, rt_alignment_num, analysis_num
+        )
+        if self.manual_curation_df.empty:
+            logger.error("load_data: no manual curation entries found.")
+            return
+
+        self.ms1_all_df = dbi.get_ms1_data_for_compound(
+            project_db_path, None, None, rt_alignment_num, analysis_num
+        )
+        self.ms2_raw_all_df = dbi.get_ms2_data_for_compound(
+            project_db_path, None, None, rt_alignment_num, analysis_num
+        )
+        self.ms2_hits_all_df = dbi.get_ms2_hits_for_compound(
+            project_db_path, None, None, rt_alignment_num, analysis_num
+        )
+        self.per_file_metrics_df = asm._extract_per_file_metrics(self.ms1_all_df)
+
+        logger.info(
+            "load_data complete: %d compounds, %d MS1 rows, %d MS2 raw rows, %d MS2 hit rows.",
+            len(self.manual_curation_df),
+            len(self.ms1_all_df),
+            len(self.ms2_raw_all_df),
+            len(self.ms2_hits_all_df),
         )
 
 # =============================================================================
@@ -773,6 +830,21 @@ def run_rt_alignment(
         project_name=project_name,
         chromatography=chromatography,
         rt_alignment_number=rt_alignment_number
+    )
+
+    logger.info(f"Checking for existing RT model in database with UID {rt_align_obj.qc_atlas_uid} ({rt_align_obj.chromatography}) and RT Alignment number {rt_align_obj.rt_alignment_number}")
+    rt_align_obj.check_existing_rt_alignment()
+
+    logger.info(f"Retrieving all LCMS runs for project...")
+    project_lcmsruns = dbi.get_lcmsruns_from_db(
+        project_db_path=rt_align_obj.paths['project_db_path'],
+    )
+
+    logger.info(f"Filtering {len(project_lcmsruns)} LCMS runs...")
+    rt_align_obj.aligner_lcmsruns = lrt.filter_lcmsruns_list(
+        lcmsruns=project_lcmsruns,
+        file_type=['qc'],
+        chromatography=rt_align_obj.chromatography
     )
 
     if rt_align_obj.rt_alignment_model is None:
@@ -860,9 +932,34 @@ def run_auto_identification(
         analysis_atlas_uid=analysis_atlas
     )
 
+    logger.info(f"Checking for existing Auto Identification results within RT Alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}...")
+    dbi.check_existing_auto_identification(auto_id_obj)
+
+    logger.info(f"Retrieving all LCMS runs for project...")
+    project_lcmsruns = dbi.get_lcmsruns_from_db(
+        project_db_path=auto_id_obj.paths['project_db_path'],
+    )
+
+    auto_id_obj.pre_autoid_atlas_obj = Atlas.from_database(
+        database_path=auto_id_obj.paths['project_db_path'],
+        atlas_uid=auto_id_obj.analysis_atlas_uid,
+        main_db_path=auto_id_obj.paths['main_db_path']
+    )
+
+    logger.info(f"Loading workflow parameters for targeted analysis from config...")
+    auto_id_obj.workflow_params = auto_id_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][auto_id_obj.pre_autoid_atlas_obj.chromatography][auto_id_obj.pre_autoid_atlas_obj.polarity][auto_id_obj.pre_autoid_atlas_obj.analysis_type]['PARAMS']
+
+    logger.info("Finding LCMSRuns matching criteria for auto-identification...")
+    auto_id_obj.autoid_lcmsruns = lrt.filter_lcmsruns_list(
+        lcmsruns=project_lcmsruns,
+        file_type=['experimental', 'istd', 'exctrl', 'refstd'],
+        chromatography=auto_id_obj.pre_autoid_atlas_obj.chromatography,
+        polarity=auto_id_obj.pre_autoid_atlas_obj.polarity
+    )
+
     logger.info("Passing Atlas and LCMSRuns to data extractor...")
     auto_id_obj.experimental_data = pdx.extract_eic_and_ms2_from_parquet(
-        atlas=auto_id_obj.atlas_obj,
+        atlas=auto_id_obj.pre_autoid_atlas_obj,
         stage="auto_identification",
         lcmsruns=auto_id_obj.autoid_lcmsruns,
         workflow_params=auto_id_obj.workflow_params
@@ -889,6 +986,12 @@ def run_auto_identification(
         auto_id_obj=auto_id_obj
     )
 
+    logger.info("Passing AutoIdentification object to new Atlas generator...")
+    dbi.create_new_atlas_after_auto_id(
+        auto_id_obj=auto_id_obj,
+        remove_unidentified_compounds=True
+    )
+
 def run_analysis_gui(
     config: dict,
     project_name: str,
@@ -913,7 +1016,63 @@ def run_analysis_gui(
     logger.info("Launching Analysis GUI...")
     dash_app = agd.build_dash_app(analysis_gui_obj, port=dash_app_port)
 
-    return dash_app
+    def _run():
+        dash_app.run(
+            host="0.0.0.0",
+            port=dash_app_port,
+            debug=False,
+            use_reloader=False,
+            dev_tools_hot_reload=False,
+        )
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    time.sleep(3)
+
+    service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')
+    url = f"{service_prefix}proxy/{dash_app_port}/"
+    
+    return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
+
+def run_analysis_summary(
+    config: dict,
+    project_name: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    analysis_atlas_uid: str = None,
+    overwrite: bool = False,
+) -> None:
+    """
+    Run all summary outputs for a completed analysis.
+
+    Creates and configures an :class:`AnalysisSummary` object, loads all
+    analysis data tables from the project database exactly once, then
+    produces all summary files in order:
+    """
+
+    summary_obj = AnalysisSummary()
+    
+    summary_obj.setup(
+        config=config,
+        project_name=project_name,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number
+    )
+
+    summary_obj.pre_curation_atlas_obj = Atlas.from_database(
+        database_path=summary_obj.paths['project_db_path'],
+        atlas_uid=summary_obj.analysis_atlas_uid,
+        main_db_path=summary_obj.paths['main_db_path']
+    )
+    
+    summary_obj.post_curation_atlas_obj = create_new_atlas_after_manual_curation(
+        summary_obj=summary_obj
+    )
+
+    asm.run_all_summaries(
+        summary_obj,
+        overwrite=overwrite,
+    )
 
 def _set_up_paths(
     config: Dict, 
@@ -960,16 +1119,16 @@ def _set_up_paths(
                 "Please ensure the path is correct in the config file."
             )
 
-    if stage in ["rt_alignment", "auto_identification","analysis_gui"]:
+    if stage in ["rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
         if rt_alignment_number is None:
-            raise ValueError("RT alignment number must be provided for RT alignment stage.")
+            raise ValueError("RT alignment number must be provided for this stage.")
         workflow_paths['rt_alignment_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}")
         Path(workflow_paths['rt_alignment_output_dir']).mkdir(parents=True, exist_ok=True)
     
-    if stage in ["auto_identification", "analysis_gui"]:
+    if stage in ["auto_identification", "analysis_gui", "analysis_summary"]:
         if rt_alignment_number is None or analysis_number is None:
-            raise ValueError("Both RT alignment number and analysis number must be provided for auto identification stage.")
-        workflow_paths['auto_id_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}_TGA{analysis_number}")
-        Path(workflow_paths['auto_id_output_dir']).mkdir(parents=True, exist_ok=True)
+            raise ValueError("Both RT alignment number and analysis number must be provided for this stage.")
+        workflow_paths['analysis_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}_TGA{analysis_number}")
+        Path(workflow_paths['analysis_output_dir']).mkdir(parents=True, exist_ok=True)
 
     return workflow_paths

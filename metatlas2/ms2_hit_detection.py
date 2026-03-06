@@ -15,6 +15,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import load_tools as ldt
 import logging_config as lcf
+import database_interact as dbi
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('ms2_hit_detection')
