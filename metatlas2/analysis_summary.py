@@ -1,0 +1,1742 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional, List, Tuple, Dict
+from pathlib import Path
+import sys
+import json
+import os
+
+if TYPE_CHECKING:
+    from workflow_objects import AnalysisSummary
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.patches import Rectangle
+
+sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
+import database_interact as dbi
+import logging_config as lcf
+
+logger = lcf.get_logger('analysis_summary')
+
+# ── colour palette for EIC traces (one colour per file) ──────────────────────
+_FILE_COLORS = list(mcolors.TABLEAU_COLORS.values())
+
+
+# =============================================================================
+# SPECTRUM PARSING HELPERS
+# =============================================================================
+
+def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
+    """Parse a JSON-encoded spectrum string into (x_array, y_array) lists.
+
+    The stored format is a JSON array of two lists: [[x0, x1, …], [y0, y1, …]].
+    For ms1_data.raw_spectrum the x-axis is retention time; for ms2_data and
+    ms2_hits spectra the x-axis is m/z.
+    """
+    if raw_spectrum_json is None:
+        return [], []
+    if isinstance(raw_spectrum_json, float) and np.isnan(raw_spectrum_json):
+        return [], []
+    try:
+        x_arr, y_arr = json.loads(raw_spectrum_json)
+        # Replace any NaN intensities with 0
+        y_arr = [0 if (isinstance(v, float) and np.isnan(v)) else v for v in y_arr]
+        return list(x_arr), list(y_arr)
+    except Exception:
+        return [], []
+
+
+# =============================================================================
+# COMPOUND STRUCTURE HELPER
+# =============================================================================
+
+def _get_compound_smiles(project_db_path: str, inchi_key: str) -> Optional[str]:
+    """Return the SMILES string for *inchi_key* from the project compounds table."""
+    try:
+        with dbi.get_db_connection(project_db_path) as conn:
+            row = conn.execute(
+                "SELECT smiles FROM compounds WHERE inchi_key = ? LIMIT 1",
+                [inchi_key],
+            ).fetchone()
+        return row[0] if row else None
+    except Exception as exc:
+        logger.warning("Could not retrieve SMILES for %s: %s", inchi_key, exc)
+        return None
+
+
+# =============================================================================
+# SUBPLOT HELPERS
+# =============================================================================
+
+def _plot_mirror(
+    ax,
+    qry_mz: List, qry_int: List,
+    ref_mz: List, ref_int: List,
+    frag_colors: Optional[List] = None,
+    score: float = np.nan,
+    rt: float = np.nan,
+    title: str = "",
+) -> None:
+    """Draw a mirror plot on *ax*: query spectrum above, reference below."""
+    ax.axhline(y=0, color="black", linewidth=1.0)
+
+    if frag_colors is None or len(frag_colors) != len(qry_mz):
+        frag_colors = ["tomato"] * len(qry_mz)
+
+    if qry_mz and qry_int:
+        for mz, intensity, color in zip(qry_mz, qry_int, frag_colors):
+            ax.bar(mz, intensity, color=color, width=0.5, alpha=0.85)
+
+    scale = 1.0
+    if ref_mz and ref_int:
+        scale = (max(qry_int) / max(ref_int)) if (qry_int and max(ref_int) > 0) else 1.0
+        for mz, intensity in zip(ref_mz, ref_int):
+            ax.bar(mz, -intensity * scale, color="steelblue", width=0.5, alpha=0.6)
+
+    ax.set_xlabel("m/z", fontsize=10, weight="bold")
+    ax.set_ylabel(f"Intensity (Ref ×{scale:.2f})", fontsize=10)
+    ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
+    ax.tick_params(labelsize=10)
+
+    score_str = f"{score:.3f}" if (isinstance(score, (int, float)) and not np.isnan(score)) else "N/A"
+    rt_str    = f"{rt:.2f}"    if (isinstance(rt,    (int, float)) and not np.isnan(rt))    else "N/A"
+
+    ax.text(0.5, 1.10, title,                   fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.04, f"Score: {score_str}",   fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 0.99, f"RT: {rt_str} min",     fontsize=9,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+
+def _plot_raw_ms2(
+    ax,
+    mz_arr: List, int_arr: List,
+    rt: float = np.nan,
+    title: str = "",
+) -> None:
+    """Draw a raw MS2 spectrum (query only, no reference match) on *ax*."""
+    ax.axhline(y=0, color="black", linewidth=1.0)
+    if mz_arr and int_arr:
+        for mz, intensity in zip(mz_arr, int_arr):
+            ax.bar(mz, intensity, color="tomato", width=0.5, alpha=0.85)
+    ax.set_xlabel("m/z", fontsize=10, weight="bold")
+    ax.set_ylabel("Intensity", fontsize=10)
+    ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
+    ax.tick_params(labelsize=10)
+
+    rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
+    ax.text(0.5, 1.10, title,               fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.04, "Score: N/A",        fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 0.99, f"RT: {rt_str} min", fontsize=9,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+
+def _plot_empty_ms2(ax, title: str = "") -> None:
+    """Draw a blank MS2 panel with a 'No MS2 Data' annotation."""
+    ax.set_xlim(0, 500)
+    ax.set_ylim(-100, 1000)
+    ax.axhline(y=0, color="black", linewidth=1.0)
+    ax.set_xlabel("m/z", fontsize=10, weight="bold")
+    ax.set_ylabel("Intensity", fontsize=10)
+    ax.tick_params(labelsize=10)
+    ax.text(0.5, 0.5, "No MS2 Data", transform=ax.transAxes,
+            ha="center", va="center", fontsize=14, weight="bold", color="gray")
+    ax.text(0.5, 1.10, title,        fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.04, "Score: N/A", fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 0.99, "RT: N/A",    fontsize=9,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+
+def _plot_structure(ax, smiles: Optional[str], inchi_key: str, size: int = 500) -> None:
+    """Draw the molecular structure from *smiles* using RDKit; fall back to InChIKey text."""
+    ax.axis("off")
+    if not smiles:
+        ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
+                ha="center", va="center", fontsize=10)
+        return
+    try:
+        import io
+        from PIL import Image
+        from rdkit import Chem
+        from rdkit.Chem.Draw import rdMolDraw2D
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError("Invalid SMILES")
+        drawer = rdMolDraw2D.MolDraw2DCairo(size, size)
+        drawer.drawOptions().addStereoAnnotation = True
+        drawer.DrawMolecule(mol)
+        drawer.FinishDrawing()
+        img = Image.open(io.BytesIO(drawer.GetDrawingText()))
+        ax.imshow(img, aspect="equal")
+    except Exception as exc:
+        logger.warning("Could not draw structure for %s: %s", inchi_key, exc)
+        ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
+                ha="center", va="center", fontsize=10)
+
+
+def _plot_eic(
+    ax,
+    ms1_compound_df: pd.DataFrame,
+    mc_row: pd.Series,
+    log_scale: bool = False,
+) -> None:
+    """Plot EIC traces for all files of one compound.
+
+    *ms1_compound_df* is already filtered to the target inchi_key + adduct.
+    Each row holds the full EIC for one file in ``raw_spectrum`` (JSON [rt_list, i_list]).
+    """
+    rt_min  = mc_row.get("rt_min",       np.nan)
+    rt_max  = mc_row.get("rt_max",       np.nan)
+    rt_peak = mc_row.get("atlas_rt_peak", np.nan)
+
+    # RT boundary and atlas peak lines
+    if not np.isnan(rt_min):
+        ax.axvline(rt_min,  color="red",   linestyle="--", linewidth=1.0, alpha=0.7, label="_rt_min")
+    if not np.isnan(rt_max):
+        ax.axvline(rt_max,  color="red",   linestyle="--", linewidth=1.0, alpha=0.7, label="_rt_max")
+    if not np.isnan(rt_peak):
+        ax.axvline(rt_peak, color="black", linestyle=":",  linewidth=1.2, alpha=0.7, label="_atlas_peak")
+
+    for file_idx, row in ms1_compound_df.iterrows():
+        rt_arr, i_arr = _parse_spectrum(row["raw_spectrum"])
+        if not rt_arr:
+            continue
+        color = _FILE_COLORS[file_idx % len(_FILE_COLORS)]
+        # Shorten file label: take the sample-name portion after the 11th underscore segment
+        raw_name  = os.path.basename(str(row["file_path"]))
+        name_parts = raw_name.split(".")[0].split("_")
+        fname_short = "_".join(name_parts[11:]) if len(name_parts) > 11 else raw_name
+        if log_scale:
+            i_arr = [np.log10(max(v, 1)) for v in i_arr]
+        ax.plot(rt_arr, i_arr, color=color, linewidth=1.0, alpha=0.7, label=fname_short)
+
+    ax.set_xlabel("Retention Time (min)", fontsize=12, weight="bold")
+    ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=12, weight="bold")
+    ax.tick_params(labelsize=11)
+    if not log_scale:
+        ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.2)
+
+    if ms1_compound_df.empty:
+        ax.text(0.5, 0.5, "No MS1 data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=13, color="gray")
+
+
+def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
+    """Render a two-column key/value table of compound metadata on *ax*."""
+    ax.axis("off")
+
+    def _fmt(val, fmt=None):
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "N/A"
+        return fmt.format(val) if fmt else str(val)
+
+    rt_err = mc_row.get("best_ms1_rt_error")
+    ppm    = mc_row.get("best_ms1_ppm_error")
+
+    rows = [
+        ("Compound",        _fmt(mc_row.get("compound_name"))),
+        ("Formula",         _fmt(mc_row.get("formula"))),
+        ("Adduct",          _fmt(mc_row.get("adduct"))),
+        ("Polarity",        _fmt(mc_row.get("polarity"))),
+        ("Chromatography",  _fmt(mc_row.get("chromatography"))),
+        ("Atlas m/z",       _fmt(mc_row.get("atlas_mz"),      "{:.4f}")),
+        ("Atlas RT peak",   _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
+        ("Atlas RT range",  f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} – {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
+        ("Best MS1 RT",     f"{_fmt(mc_row.get('best_ms1_rt'), '{:.3f} min')}  (Δ = {_fmt(rt_err, '{:.3f}')})"),
+        ("Best MS1 ppm Δ",  _fmt(ppm, "{:.2f}")),
+        ("MS1 note",        _fmt(mc_row.get("ms1_notes"))),
+        ("MS2 note",        _fmt(mc_row.get("ms2_notes"))),
+        ("ID notes",        _fmt(mc_row.get("identification_notes"))),
+    ]
+
+    y_start = 0.96
+    line_h  = 0.069
+    for label, value in rows:
+        ax.text(0.02, y_start, f"{label}:", fontsize=10, weight="bold", va="top", transform=ax.transAxes)
+        ax.text(0.38, y_start, value,        fontsize=10,                va="top", transform=ax.transAxes)
+        y_start -= line_h
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+
+def _plot_hit_info_table(
+    ax,
+    ms2_hits_compound_df: pd.DataFrame,
+    mc_row: pd.Series,
+    total_files: int,
+) -> None:
+    """Render a tabular MS2 hit summary on *ax* (Row 3, spans all columns)."""
+    ax.axis("off")
+
+    if ms2_hits_compound_df.empty:
+        ax.text(0.5, 0.5, "No MS2 hits found.", transform=ax.transAxes,
+                ha="center", va="center", fontsize=13, color="gray")
+        return
+
+    # Best hit per file, up to 20 rows
+    top_hits = (ms2_hits_compound_df
+                .sort_values("score", ascending=False)
+                .drop_duplicates("file_path")
+                .head(20)
+                .reset_index(drop=True))
+
+    col_labels  = ["File (abbreviated)", "Score", "Ref Name", "DB", "RT (scan)", "ppm Δ", "Matches"]
+    col_widths  = [0.30, 0.08, 0.25, 0.10, 0.09, 0.08, 0.08]
+    header_y    = 0.93
+    row_h       = min(0.08, 0.86 / (len(top_hits) + 1))
+
+    # Header row
+    for col_idx, label in enumerate(col_labels):
+        x = sum(col_widths[:col_idx]) + 0.01
+        ax.text(x, header_y, label, fontsize=9, weight="bold", va="top", transform=ax.transAxes)
+
+    # Data rows
+    for row_idx, hit in top_hits.iterrows():
+        y = header_y - row_h * (row_idx + 1)
+        bg = "#f0f0f0" if row_idx % 2 == 0 else "white"
+        ax.add_patch(Rectangle(
+            (0, y - row_h * 0.3), 1.0, row_h,
+            transform=ax.transAxes, color=bg, zorder=0, clip_on=False,
+        ))
+
+        raw_name   = os.path.basename(str(hit["file_path"]))
+        name_parts = raw_name.split(".")[0].split("_")
+        fname_abbr = "_".join(name_parts[11:]) if len(name_parts) > 11 else raw_name
+
+        row_vals = [
+            fname_abbr,
+            f"{hit.get('score', 0):.4f}",
+            str(hit.get("ref_name", ""))[:32],
+            str(hit.get("database", "")),
+            f"{hit.get('rt', 0):.3f}",
+            f"{hit.get('ppm_error', 0):.2f}",
+            f"{int(hit.get('num_matches', 0))}/{int(hit.get('ref_frags', 0))}",
+        ]
+        for col_idx, val in enumerate(row_vals):
+            x = sum(col_widths[:col_idx]) + 0.01
+            ax.text(x, y, val, fontsize=8, va="top", transform=ax.transAxes)
+
+    n_unique = ms2_hits_compound_df["file_path"].nunique()
+    ax.text(0.01, 0.04,
+            f"Files with ≥1 MS2 hit: {n_unique} / {total_files} total",
+            fontsize=9, style="italic", transform=ax.transAxes)
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
+def make_identification_figure(
+    summary_obj: AnalysisSummary,
+    output_loc: Optional[Path] = None,
+    overwrite: bool = True,
+) -> None:
+    """Generate per-compound identification figures for an analysis.
+
+    Each figure is a 3-row × 4-column PDF:
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  Best MS2 mirror  │  2nd best MS2  │  3rd best MS2  │ Structure │  Row 1
+    ├──────────────────────────────────────────────────────────────────┤
+    │   EIC (linear)   │   EIC (log)    │  Compound info table        │  Row 2
+    ├──────────────────────────────────────────────────────────────────┤
+    │           MS2 hit summary (file × score × ref × …)              │  Row 3
+    └──────────────────────────────────────────────────────────────────┘
+
+    Parameters
+    ----------
+    summary_obj:
+        A configured ``AnalysisSummary`` object with ``paths``,
+        ``rt_alignment_number``, and ``analysis_number`` already set
+        (call ``summary_obj.setup(…)`` first).  Data tables are loaded
+        automatically on first call via ``summary_obj.load_data()`` if
+        they have not already been cached on the object.
+    output_loc:
+        Override output directory.  Defaults to
+        ``<project_directory>/identification_figures/rt<N>_analysis<M>/``.
+    overwrite:
+        When *False*, skip compounds whose PDF already exists on disk.
+    """
+    project_db_path  = summary_obj.paths["project_db_path"]
+    rt_alignment_num = summary_obj.rt_alignment_number
+    analysis_num     = summary_obj.analysis_number
+
+    # ── Resolve output directory ─────────────────────────────────────────────
+    if output_loc is None:
+        output_loc = (
+            Path(summary_obj.paths["project_directory"])
+            / "identification_figures"
+            / f"rt{rt_alignment_num}_analysis{analysis_num}"
+        )
+    else:
+        output_loc = Path(output_loc)
+    output_loc.mkdir(parents=True, exist_ok=True)
+    logger.info("Exporting identification figures to %s", output_loc)
+
+    # ── Ensure analysis data is available on the summary object ─────────────
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
+    manual_curation_df = summary_obj.manual_curation_df
+    ms1_all_df         = summary_obj.ms1_all_df
+    ms2_raw_all_df     = summary_obj.ms2_raw_all_df
+    ms2_hits_all_df    = summary_obj.ms2_hits_all_df
+
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.error("No manual curation entries found – nothing to plot.")
+        return
+
+    total_files = ms1_all_df["file_path"].nunique() if (ms1_all_df is not None and not ms1_all_df.empty) else 0
+    logger.info(
+        "Plotting %d compounds across %d files.",
+        len(manual_curation_df), total_files,
+    )
+
+    _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
+
+    # ── Per-compound figure loop ─────────────────────────────────────────────
+    for _, mc_row in manual_curation_df.reset_index(drop=True).iterrows():
+        compound_name = mc_row.get("compound_name") or f"compound_{_}"
+        inchi_key     = mc_row.get("inchi_key", "")
+        adduct        = mc_row.get("adduct", "")
+
+        # Build safe filename: replace characters that are awkward in file paths
+        safe_name = f"{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+        fig_path  = output_loc / f"{safe_name}.pdf"
+
+        if not overwrite and fig_path.exists():
+            logger.debug("Skipping %s (already exists).", fig_path)
+            continue
+
+        # ── Filter pre-loaded DataFrames to this compound ──────────────────
+        def _filter(df: pd.DataFrame) -> pd.DataFrame:
+            if df.empty:
+                return df
+            return df[
+                (df["inchi_key"] == inchi_key) & (df["adduct"] == adduct)
+            ].reset_index(drop=True)
+
+        ms1_df      = _filter(ms1_all_df)
+        ms2_raw_df  = _filter(ms2_raw_all_df)
+        ms2_hits_df = _filter(ms2_hits_all_df)
+
+        # Top-3 hits: best score per file, then descending overall
+        if not ms2_hits_df.empty:
+            top3 = (ms2_hits_df
+                    .sort_values("score", ascending=False)
+                    .drop_duplicates("file_path")
+                    .head(3)
+                    .reset_index(drop=True))
+        else:
+            top3 = pd.DataFrame()
+
+        smiles = _get_compound_smiles(project_db_path, inchi_key)
+
+        # ── Build figure ───────────────────────────────────────────────────
+        fig = plt.figure(figsize=(25, 15))
+        gs  = fig.add_gridspec(
+            3, 4,
+            hspace=0.38, wspace=0.30,
+            height_ratios=[1.45, 1.2, 1.35],
+        )
+
+        # Row 1, Cols 0-2: MS2 mirror / raw / empty panels
+        for i in range(3):
+            ax_ms2 = fig.add_subplot(gs[0, i])
+            if i < len(top3):
+                hit = top3.iloc[i]
+                qry_mz,  qry_int  = _parse_spectrum(hit.get("qry_spectrum"))
+                ref_mz,  ref_int  = _parse_spectrum(hit.get("ref_spectrum"))
+
+                raw_colors = hit.get("aligned_fragment_colors")
+                frag_colors = None
+                try:
+                    if raw_colors and pd.notnull(raw_colors):
+                        parsed = json.loads(raw_colors)
+                        if len(parsed) == len(qry_mz):
+                            frag_colors = parsed
+                except Exception:
+                    pass
+
+                if qry_mz and ref_mz:
+                    _plot_mirror(
+                        ax_ms2, qry_mz, qry_int, ref_mz, ref_int,
+                        frag_colors=frag_colors,
+                        score=float(hit.get("score", np.nan)),
+                        rt=float(hit.get("rt", np.nan)),
+                        title=_MIRROR_TITLES[i],
+                    )
+                elif qry_mz:
+                    # Hit row exists but ref_spectrum missing – show raw query
+                    _plot_raw_ms2(
+                        ax_ms2, qry_mz, qry_int,
+                        rt=float(hit.get("rt", np.nan)),
+                        title=_MIRROR_TITLES[i],
+                    )
+                else:
+                    _plot_empty_ms2(ax_ms2, title=_MIRROR_TITLES[i])
+            elif i == 0 and not ms2_raw_df.empty:
+                # No hits at all – show best raw MS2 scan in first panel
+                raw_row = ms2_raw_df.iloc[0]
+                mz_arr, int_arr = _parse_spectrum(raw_row.get("raw_spectrum"))
+                _plot_raw_ms2(
+                    ax_ms2, mz_arr, int_arr,
+                    rt=float(raw_row.get("rt", np.nan)),
+                    title=_MIRROR_TITLES[i],
+                )
+            else:
+                _plot_empty_ms2(ax_ms2, title=_MIRROR_TITLES[i])
+
+        # Row 1, Col 3: molecular structure
+        ax_struct = fig.add_subplot(gs[0, 3])
+        _plot_structure(ax_struct, smiles, inchi_key, size=500)
+
+        # Row 2, Col 0: linear EIC
+        ax_eic_lin = fig.add_subplot(gs[1, 0])
+        _plot_eic(ax_eic_lin, ms1_df, mc_row, log_scale=False)
+        ax_eic_lin.set_title("EIC (linear scale)", fontsize=12)
+
+        # Row 2, Col 1: log-scale EIC
+        ax_eic_log = fig.add_subplot(gs[1, 1])
+        _plot_eic(ax_eic_log, ms1_df, mc_row, log_scale=True)
+        ax_eic_log.set_title("EIC (log₁₀ scale)", fontsize=12)
+
+        # Row 2, Cols 2-3: compound metadata table
+        ax_info = fig.add_subplot(gs[1, 2:4])
+        _plot_compound_info_table(ax_info, mc_row)
+
+        # Row 3, all cols: MS2 hit summary
+        ax_hits = fig.add_subplot(gs[2, 0:4])
+        _plot_hit_info_table(ax_hits, ms2_hits_df, mc_row, total_files)
+
+        # Figure-level title and section dividers
+        plt.suptitle(f"{compound_name}  |  {adduct}\n", fontsize=20, weight="bold", y=0.97)
+        for y_line in [0.60, 0.345]:
+            fig.add_artist(plt.Line2D(
+                [0.08, 0.92], [y_line, y_line],
+                transform=fig.transFigure,
+                color="black", linewidth=1, clip_on=False,
+            ))
+
+        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.debug("Exported identification figure for %s → %s", compound_name, fig_path)
+
+    logger.info("Identification figure export complete → %s", output_loc)
+
+
+# =============================================================================
+# STATS TABLE (SUMMARY EXCEL)
+# =============================================================================
+
+def _mz_quality(ppm_error: float, mz_delta: float) -> float:
+    """Return 0/0.5/1 mz quality score from ppm and absolute mass error."""
+    if np.isnan(ppm_error) or np.isnan(mz_delta):
+        return np.nan
+    if ppm_error <= 5 or mz_delta <= 0.0015:
+        return 1.0
+    if ppm_error <= 10:
+        return 0.5
+    return 0.0
+
+
+def _rt_quality(rt_error: float, chromatography: str) -> float:
+    """Return 0/0.5/1 RT quality score, with thresholds that depend on method."""
+    if np.isnan(rt_error):
+        return np.nan
+    is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
+    if is_c18:
+        if rt_error <= 0.25:
+            return 1.0
+        if rt_error <= 0.5:
+            return 0.5
+        return 0.0
+    else:  # HILIC and others use looser thresholds
+        if rt_error <= 0.5:
+            return 1.0
+        if rt_error <= 2.0:
+            return 0.5
+        return 0.0
+
+
+def _total_score_and_msi(
+    msms_q: float, mz_q: float, rt_q: float
+) -> Tuple[float, str]:
+    """Compute total ID score (0–3) and MSI level string."""
+    scores = [v for v in [msms_q, mz_q, rt_q] if isinstance(v, float) and not np.isnan(v)]
+    total = float(np.nansum([msms_q, mz_q, rt_q]))
+
+    # MSI Level 1 requires MSMS match + at least one other orthogonal property
+    msms_is_one = (isinstance(msms_q, float) and not np.isnan(msms_q) and msms_q == 1.0)
+    other_ones  = sum(
+        1 for v in [mz_q, rt_q]
+        if isinstance(v, float) and not np.isnan(v) and v == 1.0
+    )
+    if msms_is_one and other_ones >= 1:
+        msi = "Level 1"
+    elif total >= 1.5:
+        msi = "Level 2 (putative)"
+    elif len(scores) > 0:
+        msi = "Level 3+ (putative)"
+    else:
+        msi = ""
+    return total, msi
+
+
+def _find_overlapping_compounds(
+    manual_curation_df: pd.DataFrame,
+    compound_idx: int,
+) -> Tuple[str, str]:
+    """
+    Return two ``//``-separated strings: overlapping compound labels and their InChIKeys.
+
+    A compound overlaps if its atlas m/z is within ±0.005 Da (or monoisotopic mass
+    within ±0.005 Da) **and** its RT range intersects the target compound's RT range.
+    """
+    mc = manual_curation_df.reset_index(drop=True)
+    row = mc.iloc[compound_idx]
+
+    mz_target     = row["atlas_mz"]
+    rt_min_target = row["atlas_rt_min"]
+    rt_max_target = row["atlas_rt_max"]
+    label_target  = row["compound_name"]
+    adduct_target = row["adduct"]
+    ik_target     = row["inchi_key"]
+
+    # Count duplicate labels to decide if we need to disambiguate with adduct
+    label_counts = mc["compound_name"].value_counts()
+
+    overlapping_labels: List[str] = []
+    inchi_key_map:      Dict[str, str] = {}
+
+    for idx, other in mc.iterrows():
+        if idx == compound_idx:
+            continue
+        mz_other     = other["atlas_mz"]
+        rt_min_other = other["atlas_rt_min"]
+        rt_max_other = other["atlas_rt_max"]
+
+        mz_overlap = abs(mz_other - mz_target) <= 0.005
+
+        rt_overlap = (
+            (rt_min_other <= rt_min_target <= rt_max_other) or
+            (rt_min_other <= rt_max_target <= rt_max_other) or
+            (rt_min_target <= rt_min_other <= rt_max_target) or
+            (rt_min_target <= rt_max_other <= rt_max_target)
+        )
+
+        if mz_overlap and rt_overlap:
+            name = other["compound_name"] or f"compound_{idx}"
+            key  = (f"{name} {other['adduct']}"
+                    if label_counts.get(name, 0) > 1 else name)
+            overlapping_labels.append(key)
+            inchi_key_map[key] = other.get("inchi_key", "")
+
+    if not overlapping_labels:
+        return "", ""
+
+    # Include the compound itself in its own overlapping set (original behaviour)
+    self_key = (f"{label_target} {adduct_target}"
+                if label_counts.get(label_target, 0) > 1 else label_target)
+    overlapping_labels.append(self_key)
+    inchi_key_map[self_key] = ik_target
+
+    sorted_labels = sorted(overlapping_labels, key=str)
+    return (
+        "//".join(sorted_labels),
+        "//".join(inchi_key_map.get(k, "") for k in sorted_labels),
+    )
+
+
+def make_stats_table(
+    summary_obj: AnalysisSummary,
+    output_loc: Optional[Path] = None,
+    output_filename: str = "Draft_Final_Identifications.xlsx",
+    overwrite: bool = True,
+) -> pd.DataFrame:
+    """Build the per-compound summary Excel workbook for one analysis.
+
+    Reads ``manual_curation`` and ``ms2_hits`` from the project database and
+    produces a single Excel file with two sheets:
+
+    * **Final_Identifications** – one row per compound with quality scores,
+      MS1/MS2 summary values, mz/RT metrics, and formatted section headers.
+
+    The function is the refactored equivalent of ``make_stats_table`` v1
+    but uses the new database-backed ``AnalysisSummary`` architecture instead
+    of the metatlas in-memory dataset objects.
+
+    Parameters
+    ----------
+    summary_obj:
+        A configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+    output_loc:
+        Override the output directory.  Defaults to
+        ``<project_directory>/analysis_tables/rt<N>_analysis<M>/``.
+    output_filename:
+        Name of the Excel file to write.
+    overwrite:
+        When *False*, raises if the output file already exists.
+    """
+    project_db_path  = summary_obj.paths["project_db_path"]
+    rt_alignment_num = summary_obj.rt_alignment_number
+    analysis_num     = summary_obj.analysis_number
+    chromatography   = summary_obj.chromatography or ""
+
+    # ── Resolve output directory ─────────────────────────────────────────────
+    if output_loc is None:
+        output_loc = (
+            Path(summary_obj.paths["project_directory"])
+            / "analysis_tables"
+            / f"rt{rt_alignment_num}_analysis{analysis_num}"
+        )
+    else:
+        output_loc = Path(output_loc)
+    output_loc.mkdir(parents=True, exist_ok=True)
+
+    if not output_filename.endswith(".xlsx"):
+        output_filename += ".xlsx"
+    excel_path = output_loc / output_filename
+
+    # ── Ensure analysis data is available on the summary object ─────────────
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
+    manual_curation_df = summary_obj.manual_curation_df
+    ms2_hits_all_df    = summary_obj.ms2_hits_all_df
+
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.error("No manual curation entries found – nothing to export.")
+        return pd.DataFrame()
+
+    manual_curation_df = manual_curation_df.reset_index(drop=True)
+    logger.info("Processing %d compounds…", len(manual_curation_df))
+
+    # ── Build final_df row by row ─────────────────────────────────────────────
+    rows: List[dict] = []
+
+    for compound_idx, mc_row in manual_curation_df.iterrows():
+        compound_name = mc_row.get("compound_name") or f"compound_{compound_idx}"
+        inchi_key     = mc_row.get("inchi_key",   "")
+        adduct        = mc_row.get("adduct",       "")
+
+        # ── Pull scalar MS1 summary values from manual_curation ──────────────
+        mz_theoretical = float(mc_row.get("atlas_mz",            np.nan))
+        mz_measured    = float(mc_row.get("best_ms1_mz",         np.nan))
+        mz_delta       = (abs(mz_theoretical - mz_measured)
+                          if not (np.isnan(mz_theoretical) or np.isnan(mz_measured))
+                          else np.nan)
+        ppm_error      = float(mc_row.get("best_ms1_ppm_error",  np.nan))
+        rt_error       = float(mc_row.get("best_ms1_rt_error",   np.nan))
+        rt_measured    = float(mc_row.get("best_ms1_rt",         np.nan))
+        max_intensity  = float(mc_row.get("best_ms1_intensity",  np.nan))
+        max_int_file   = mc_row.get("best_ms1_file", "")
+
+        # ── Overlapping compounds ─────────────────────────────────────────────
+        overlap_labels, overlap_keys = _find_overlapping_compounds(
+            manual_curation_df, compound_idx
+        )
+
+        # ── Quality scores ────────────────────────────────────────────────────
+        mz_q = _mz_quality(ppm_error, mz_delta if not np.isnan(mz_delta) else np.nan)
+        rt_q = _rt_quality(rt_error, chromatography)
+
+        # msms_quality: parse leading float from ms2_notes set by analyst in GUI
+        ms2_notes = mc_row.get("ms2_notes") or "no selection"
+        try:
+            msms_q = float(str(ms2_notes).split(",")[0])
+        except (ValueError, AttributeError):
+            msms_q = np.nan
+
+        total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
+
+        # ── Best MS2 hit details ──────────────────────────────────────────────
+        msms_file          = ""
+        msms_rt            = np.nan
+        msms_score         = np.nan
+        msms_num_ions      = np.nan
+        msms_matching_ions = ""
+
+        if not ms2_hits_all_df.empty:
+            comp_hits = ms2_hits_all_df[
+                (ms2_hits_all_df["inchi_key"] == inchi_key) &
+                (ms2_hits_all_df["adduct"]    == adduct)
+            ]
+            if not comp_hits.empty:
+                best_hit = comp_hits.sort_values("score", ascending=False).iloc[0]
+                msms_file  = str(best_hit.get("file_path", ""))
+                msms_rt    = float(best_hit.get("rt",    np.nan))
+                msms_score = float(best_hit.get("score", np.nan))
+
+                try:
+                    mf = json.loads(best_hit.get("matched_fragments", "[]"))
+                    msms_num_ions      = len(mf)
+                    msms_matching_ions = ",".join(f"{m:.3f}" for m in mf)
+                except Exception:
+                    msms_num_ions      = int(best_hit.get("num_matches", 0))
+                    msms_matching_ions = ""
+
+                # Single-ion match annotation (mirrors old logic)
+                if msms_num_ions == 1 and not np.isnan(msms_score):
+                    single_ion = mf[0] if mf else np.nan
+                    ppm_tol    = float(mc_row.get("mz_tolerance", 5.0))
+                    precursor_match = (
+                        abs(single_ion - mz_theoretical) / mz_theoretical * 1e6 <= ppm_tol
+                        if (not np.isnan(single_ion) and mz_theoretical > 0) else False
+                    )
+                    note_tag = " (single matching fragment is the precursor)" if precursor_match else ""
+                    if "1.0, single ion match" in ms2_notes or "0.5, single ion match" in ms2_notes:
+                        ms2_notes = ms2_notes + note_tag
+                    else:
+                        ms2_notes = (
+                            "Unannotated single ion match, needs review. "
+                            "Setting MSMS quality to 0.5. "
+                            f"Original annotation: {ms2_notes}"
+                        )
+                        msms_q     = 0.5
+                        total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
+
+        # ── Isomers ───────────────────────────────────────────────────────────
+        raw_isomers = mc_row.get("isomers")
+        try:
+            isomer_list = json.loads(raw_isomers) if raw_isomers else []
+            isomer_str  = ", ".join(str(x) for x in isomer_list) if isomer_list else ""
+        except Exception:
+            isomer_str = str(raw_isomers) if raw_isomers else ""
+
+        # ── Assemble row dict ─────────────────────────────────────────────────
+        rows.append({
+            "compound_number":         compound_idx + 1,
+            "identified_metabolite":   overlap_labels or compound_name,
+            "label":                   compound_name,
+            "overlapping_compound":    overlap_labels,
+            "overlapping_inchi_keys":  overlap_keys,
+            "formula":                 mc_row.get("formula",   ""),
+            "polarity":                mc_row.get("polarity",  ""),
+            "inchi_key":               inchi_key,
+            "msms_quality":            msms_q,
+            "mz_quality":              mz_q,
+            "rt_quality":              rt_q,
+            "total_score":             total_score,
+            "msi_level":               msi_level,
+            "isomer_details":          isomer_str,
+            "identification_notes":    mc_row.get("identification_notes", ""),
+            "ms1_notes":               mc_row.get("ms1_notes",            ""),
+            "ms2_notes":               ms2_notes,
+            "max_intensity":           max_intensity,
+            "max_intensity_file":      max_int_file,
+            "ms1_rt_peak":             rt_measured,
+            "msms_file":               msms_file,
+            "msms_rt":                 round(msms_rt, 2)    if not np.isnan(msms_rt)    else np.nan,
+            "msms_numberofions":       msms_num_ions,
+            "msms_matchingions":       msms_matching_ions,
+            "msms_score":              round(msms_score, 4) if not np.isnan(msms_score) else np.nan,
+            "mz_adduct":               adduct,
+            "mz_theoretical":          round(mz_theoretical, 4) if not np.isnan(mz_theoretical) else np.nan,
+            "mz_measured":             round(mz_measured,    4) if not np.isnan(mz_measured)    else np.nan,
+            "mz_error":                round(mz_delta,       4) if not np.isnan(mz_delta)       else np.nan,
+            "mz_ppmerror":             round(ppm_error,      4) if not np.isnan(ppm_error)      else np.nan,
+            "rt_min":                  round(float(mc_row.get("atlas_rt_min", np.nan)), 2),
+            "rt_max":                  round(float(mc_row.get("atlas_rt_max", np.nan)), 2),
+            "rt_theoretical":          round(float(mc_row.get("atlas_rt_peak", np.nan)), 2),
+            "rt_measured":             round(rt_measured, 2) if not np.isnan(rt_measured) else np.nan,
+            "rt_error":                round(rt_error,    2) if not np.isnan(rt_error)    else np.nan,
+        })
+
+    final_df = pd.DataFrame(rows)
+    logger.info("Assembled stats table with %d rows.", len(final_df))
+
+    # ── Excel output ─────────────────────────────────────────────────────────
+    if not overwrite and excel_path.exists():
+        raise FileExistsError(
+            f"Output file already exists and overwrite=False: {excel_path}"
+        )
+
+    is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
+
+    HEADER2 = [
+        "Compound #", "Identified Metabolite", "Name of metabolite searched for",
+        "Labels of Overlapping Compounds", "Inchi Keys of Overlapping Compounds",
+        "Molecular Formula", "Polarity", "Inchi Key",
+        "MSMS Score (0 to 1)", "m/z score (0 to 1)", "RT score (0 to 1)",
+        "Total ID Score (0 to 3)", "Mass Spec Initiative ID Level", "Isomer details",
+        "Identification notes", "MS1 notes", "MS2 notes",
+        "Maximum MS1 intensity across all files", "Filename w/ maximum MS1",
+        "Retention time of max intensity MS1 peak",
+        "File with highest MSMS match score", "RT of highest matched MSMS scan",
+        "Number of ion matches in MSMS spectra to reference",
+        "List of ion matches in MSMS spectra to reference",
+        "MSMS score (highest across all samples)",
+        "Adduct", "Theoretical m/z", "Measured m/z",
+        "Mass error (delta Da)", "Mass error (delta ppm)",
+        "Min retention time (min)", "Max retention time (min)",
+        "Theoretical retention time (peak)",
+        "Detected RT (peak)", "RT error (absolute delta)",
+    ]
+
+    rt_q_desc = (
+        "1 (delta RT ≤0.25), 0.5 (delta RT >0.25 & ≤0.5), 0 (delta RT >0.5 min)"
+        if is_c18 else
+        "1 (delta RT ≤0.5), 0.5 (delta RT >0.5 & ≤2), 0 (delta RT >2 min)"
+    )
+    HEADER3 = [
+        "Unique for study",
+        "Isomers may not be chromatographically or spectrally resolvable.",
+        "Name of standard reference compound in library match.",
+        "Compound with similar m/z (±0.005) and overlapping RT window.",
+        "InChI Keys for the overlapping compounds listed in previous column.",
+        "", "",
+        "Neutralised InChI Key",
+        "1 (MSMS matches ref. std.), 0.5 (possible match), 0 (no MSMS or no ref.), -1 (bad match)",
+        "1 (delta ppm ≤5 or delta Da ≤0.0015), 0.5 (delta ppm 5–10), 0 (>10 ppm)",
+        rt_q_desc,
+        "Sum of m/z, RT and MSMS scores",
+        "Level 1 = Two orthogonal properties match authentic standard; else = putative",
+        "Isomers share formula and similar RT; MSMS may differentiate",
+        "", "", "",
+        "Highest MS1 peak height across all files in the analysis",
+        "File containing the highest MS1 peak height",
+        "Retention time of the highest MS1 peak",
+        "File with the top-scoring MS2 database hit",
+        "Retention time of the top-scoring MS2 scan",
+        "Number of fragment ions matching the reference spectrum",
+        "m/z values of matching fragment ions",
+        "Highest MS2 hit score across all files (0–1)",
+        "Ion adduct used for m/z calculation",
+        "Theoretical m/z for compound / adduct pair",
+        "Measured m/z (best MS1 scan)",
+        "Absolute difference between theoretical and measured m/z",
+        "PPM difference between theoretical and measured m/z",
+        "Atlas RT window minimum",
+        "Atlas RT window maximum",
+        "Theoretical (atlas) retention time at peak",
+        "Measured retention time at peak (best MS1 scan)",
+        "Absolute difference between theoretical and measured RT",
+    ]
+
+    # ── Column section spans (0-based column indices in Excel, data starts at col 0) ──
+    # Columns: A=0 … AJ=35  (35 data columns total)
+    _SECTION_SPANS = [
+        ("A1:G1",  "COMPOUND ANNOTATION"),
+        ("H1:H1",  "INCHI KEY"),
+        ("I1:M1",  "COMPOUND IDENTIFICATION SCORES"),
+        ("N1:P1",  "ANNOTATION NOTES"),
+        ("Q1:Q1",  "MS2 NOTES"),
+        ("R1:T1",  "MS1 INTENSITY INFORMATION"),
+        ("U1:Y1",  "MSMS INFORMATION"),
+        ("Z1:Z1",  "ADDUCT"),
+        ("AA1:AE1","ION / M/Z INFORMATION"),
+        ("AF1:AI1","CHROMATOGRAPHIC PEAK INFORMATION"),
+        ("AJ1:AJ1","RT EVALUATION"),
+    ]
+
+    with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
+        final_df.to_excel(
+            writer, sheet_name="Final_Identifications", index=False, startrow=3
+        )
+        workbook  = writer.book
+        worksheet = writer.sheets["Final_Identifications"]
+
+        # Cell formats
+        f_blue       = workbook.add_format({"bg_color": "#DCFFFF"})
+        f_yellow     = workbook.add_format({"bg_color": "#FFFFDC"})
+        f_rose       = workbook.add_format({"bg_color": "#FFDCFF"})
+        f_header     = workbook.add_format({
+            "bold": True, "align": "center", "valign": "vcenter",
+            "text_wrap": True, "border": 1,
+        })
+        f_scientific = workbook.add_format({"num_format": "0.00E+00"})
+
+        worksheet.set_row(1, 60)
+        worksheet.set_row(2, 60)
+        worksheet.set_column("R:R", None, f_scientific)
+
+        # Row 1: section header merges
+        for span, title in _SECTION_SPANS:
+            start_col, end_col = span.split(":")[0], span.split(":")[1]
+            if start_col[:-1] == end_col[:-1] and start_col[-1] == end_col[-1]:
+                # single cell
+                worksheet.write(span.split(":")[0], title, f_header)
+            else:
+                worksheet.merge_range(span, title, f_header)
+
+        # Rows 2 and 3: column headers and descriptions
+        for i, h in enumerate(HEADER2):
+            worksheet.write(1, i, h, f_header)
+        for i, h in enumerate(HEADER3):
+            worksheet.write(2, i, h, f_header)
+
+        # Conditional background colours per section
+        nrows = len(final_df) + 4
+        worksheet.conditional_format(f"I1:M{nrows}", {"type": "no_errors", "format": f_blue})
+        worksheet.conditional_format(f"N1:Q{nrows}", {"type": "no_errors", "format": f_rose})
+        worksheet.conditional_format(f"R1:T{nrows}", {"type": "no_errors", "format": f_yellow})
+        worksheet.conditional_format(f"U1:Y{nrows}", {"type": "no_errors", "format": f_rose})
+        worksheet.conditional_format(f"AA1:AE{nrows}", {"type": "no_errors", "format": f_yellow})
+        worksheet.conditional_format(f"AF1:AI{nrows}", {"type": "no_errors", "format": f_yellow})
+        worksheet.conditional_format(f"AJ1:AJ{nrows}", {"type": "no_errors", "format": f_rose})
+
+    logger.info("Exported stats table to %s", excel_path)
+    return final_df
+
+
+# =============================================================================
+# EIC THUMBNAIL PDF
+# =============================================================================
+
+_GRID_COLS = 5
+_GRID_ROWS = 5
+_PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
+
+
+def _short_fname(file_path: str) -> str:
+    """Return an abbreviated filename label (stem after the 11th ``_``)."""
+    if not file_path:
+        return "no data"
+    stem  = os.path.basename(file_path).split(".")[0]
+    parts = stem.split("_")
+    return "_".join(parts[11:]) if len(parts) > 11 else stem
+
+
+def _render_eic_thumbnail(
+    ax,
+    rt_arr: List,
+    i_arr:  List,
+    rt_min:  float,
+    rt_peak: float,
+    rt_max:  float,
+    fname_short: str,
+    y_max: Optional[float],
+) -> None:
+    """Draw one EIC thumbnail onto *ax*.
+
+    Parameters
+    ----------
+    y_max:
+        When given, fixes the y-axis upper limit (shared-scale mode).
+        When *None*, the axis auto-scales to the data (independent mode).
+    """
+    from matplotlib.ticker import ScalarFormatter
+
+    if rt_arr and i_arr:
+        ax.plot(rt_arr, i_arr, color="steelblue", linewidth=0.8)
+    else:
+        ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=7, color="gray")
+
+    # RT vlines: rt_min = red dashed, rt_peak = black dotted, rt_max = black dashed
+    _vline = lambda val, color, ls: (
+        ax.axvline(val, color=color, linewidth=0.8, linestyle=ls)
+        if val is not None and not (isinstance(val, float) and np.isnan(val))
+        else None
+    )
+    _vline(rt_min,  "red",   "--")
+    _vline(rt_peak, "black", ":" )
+    _vline(rt_max,  "black", "--")
+
+    # Fixed or auto y-limit
+    if y_max is not None and y_max > 0:
+        ax.set_ylim(bottom=0, top=y_max * 1.05)
+
+    # Y-axis: scientific notation with floating ×10ⁿ offset above axis
+    fmt = ScalarFormatter(useMathText=True)
+    fmt.set_scientific(True)
+    fmt.set_powerlimits((0, 0))
+    ax.yaxis.set_major_formatter(fmt)
+    ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
+
+    # Compact ticks, no axis labels
+    ax.tick_params(axis="both", labelsize=5, length=2, pad=1)
+    ax.xaxis.label.set_visible(False)
+    ax.yaxis.label.set_visible(False)
+
+    # Title = short filename
+    ax.set_title(fname_short, fontsize=5, pad=2, loc="center")
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.5)
+
+
+def _write_compound_eic_pdf(
+    pdf_path: Path,
+    compound_name: str,
+    adduct: str,
+    rt_alignment_num: int,
+    analysis_num: int,
+    mc_row: pd.Series,
+    file_items: List[dict],
+    shared_y: bool,
+) -> None:
+    """Write a single-compound EIC thumbnail PDF.
+
+    *file_items* is a list of dicts with keys ``file_path``, ``rt_arr``, ``i_arr``.
+    """
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    rt_min  = mc_row.get("rt_min",        np.nan)
+    rt_max  = mc_row.get("rt_max",        np.nan)
+    rt_peak = mc_row.get("atlas_rt_peak", np.nan)
+
+    # Global y-max across all files for this compound (used in shared mode)
+    if shared_y:
+        all_intensities = [v for item in file_items for v in item["i_arr"] if v is not None]
+        y_max_global = float(max(all_intensities)) if all_intensities else None
+    else:
+        y_max_global = None
+
+    total_files = len(file_items)
+    total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
+    title_base  = f"{compound_name} | {adduct}   (RT alignment {rt_alignment_num}, analysis {analysis_num})"
+
+    with PdfPages(pdf_path) as pdf:
+        for page_idx in range(total_pages):
+            start      = page_idx * _PLOTS_PER_PAGE
+            end        = min(start + _PLOTS_PER_PAGE, total_files)
+            page_items = file_items[start:end]
+            n_on_page  = len(page_items)
+
+            fig, axes = plt.subplots(
+                _GRID_ROWS, _GRID_COLS,
+                figsize=(20, 16),
+                constrained_layout=True,
+            )
+            axes_flat = axes.flatten()
+
+            for slot_idx, item in enumerate(page_items):
+                ax       = axes_flat[slot_idx]
+                rt_arr   = item["rt_arr"]
+                i_arr    = item["i_arr"]
+                fname_s  = _short_fname(item["file_path"])
+
+                # In independent mode, y_max = per-file maximum
+                if shared_y:
+                    y_max = y_max_global
+                else:
+                    y_max = float(max(i_arr)) if i_arr else None
+
+                _render_eic_thumbnail(
+                    ax, rt_arr, i_arr,
+                    rt_min, rt_peak, rt_max,
+                    fname_s, y_max,
+                )
+
+            # Hide unused slots on the last page
+            for slot_idx in range(n_on_page, _PLOTS_PER_PAGE):
+                axes_flat[slot_idx].set_visible(False)
+
+            page_label = f"({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
+            fig.suptitle(f"{title_base}  {page_label}", fontsize=8, y=1.005)
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+
+def make_eic_thumbnails(
+    summary_obj: AnalysisSummary,
+    output_loc: Optional[Path] = None,
+    overwrite: bool = True,
+) -> None:
+    """Generate per-compound EIC thumbnail PDFs in two output folders.
+
+    Produces **one PDF per compound** in each of two sub-directories:
+
+    * ``eic_thumbnails_shared_y/``   — all files for a compound share the same
+      y-axis upper limit (global maximum across that compound's files), making
+      it easy to compare relative intensities across files.
+    * ``eic_thumbnails_independent_y/`` — each file is auto-scaled to its own
+      maximum intensity, showing peak shape detail even for low-intensity files.
+
+    Each page within a PDF holds a **5 × 5 grid** of thumbnails (25 per page),
+    so a compound with 50 files produces a 2-page PDF.
+
+    Each thumbnail shows:
+
+    * The EIC trace (blue line)
+    * ``rt_min``  → red dashed vertical line
+    * ``rt_peak`` → black dotted vertical line
+    * ``rt_max``  → black dashed vertical line
+    * Tick values on both axes, no axis labels
+    * Y-axis in scientific notation with the ×10ⁿ scale factor above the axis
+    * Short filename as the subplot title
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+    output_loc:
+        Override base output directory.  Defaults to
+        ``<project_directory>/analysis_tables/rt<N>_analysis<M>/``.
+    overwrite:
+        When *False*, skips compound PDFs that already exist in both folders.
+    """
+    project_db_path  = summary_obj.paths["project_db_path"]
+    rt_alignment_num = summary_obj.rt_alignment_number
+    analysis_num     = summary_obj.analysis_number
+
+    # ── Resolve base output directory ────────────────────────────────────────
+    if output_loc is None:
+        base_dir = (
+            Path(summary_obj.paths["project_directory"])
+            / "analysis_tables"
+            / f"rt{rt_alignment_num}_analysis{analysis_num}"
+        )
+    else:
+        base_dir = Path(output_loc)
+
+    dir_shared = base_dir / "eic_thumbnails_shared_y"
+    dir_indep  = base_dir / "eic_thumbnails_independent_y"
+    dir_shared.mkdir(parents=True, exist_ok=True)
+    dir_indep.mkdir(parents=True, exist_ok=True)
+
+    # ── Ensure analysis data is available on the summary object ─────────────
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
+    manual_curation_df = summary_obj.manual_curation_df
+    ms1_all_df         = summary_obj.ms1_all_df
+
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.error("No manual curation entries found – nothing to plot.")
+        return
+
+    manual_curation_df = manual_curation_df.reset_index(drop=True)
+    n_compounds = len(manual_curation_df)
+    logger.info("Generating EIC thumbnail PDFs for %d compounds…", n_compounds)
+
+    for _, mc_row in manual_curation_df.iterrows():
+        compound_name = mc_row.get("compound_name") or f"compound_{_}"
+        inchi_key     = mc_row.get("inchi_key", "")
+        adduct        = mc_row.get("adduct",    "")
+
+        # Safe filename stem: replace path-unfriendly characters
+        safe_stem = f"{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+
+        path_shared = dir_shared / f"{safe_stem}.pdf"
+        path_indep  = dir_indep  / f"{safe_stem}.pdf"
+
+        if not overwrite and path_shared.exists() and path_indep.exists():
+            logger.debug("Skipping %s (both PDFs exist).", safe_stem)
+            continue
+
+        # Collect file items for this compound
+        if ms1_all_df.empty:
+            ms1_cmp = pd.DataFrame()
+        else:
+            ms1_cmp = ms1_all_df[
+                (ms1_all_df["inchi_key"] == inchi_key) &
+                (ms1_all_df["adduct"]    == adduct)
+            ].reset_index(drop=True)
+
+        if ms1_cmp.empty:
+            file_items = [{"file_path": "", "rt_arr": [], "i_arr": []}]
+        else:
+            file_items = []
+            for _, file_row in ms1_cmp.iterrows():
+                rt_arr, i_arr = _parse_spectrum(file_row.get("raw_spectrum"))
+                file_items.append({
+                    "file_path": str(file_row.get("file_path", "")),
+                    "rt_arr":    rt_arr,
+                    "i_arr":     i_arr,
+                })
+
+        # Write shared-y PDF
+        if overwrite or not path_shared.exists():
+            _write_compound_eic_pdf(
+                path_shared, compound_name, adduct,
+                rt_alignment_num, analysis_num,
+                mc_row, file_items, shared_y=True,
+            )
+
+        # Write independent-y PDF
+        if overwrite or not path_indep.exists():
+            _write_compound_eic_pdf(
+                path_indep, compound_name, adduct,
+                rt_alignment_num, analysis_num,
+                mc_row, file_items, shared_y=False,
+            )
+
+        logger.debug("Wrote EIC PDFs for %s", compound_name)
+
+    logger.info(
+        "EIC thumbnail PDFs complete.\n  Shared y:      %s\n  Independent y: %s",
+        dir_shared, dir_indep,
+    )
+
+
+# =============================================================================
+# BOXPLOT SUMMARIES
+# =============================================================================
+
+_BOXPLOT_COLS     = 4
+_BOXPLOT_ROWS     = 4
+_BOXPLOTS_PER_PAGE = _BOXPLOT_COLS * _BOXPLOT_ROWS
+
+
+def _file_group(file_path: str) -> str:
+    """Return the file group label: the segment at underscore-separated index 11 of the stem.
+
+    Example: ``…_groupA_…mzML`` → ``"groupA"`` (assuming groupA is at position 11).
+    Falls back to the full stem when the filename has fewer than 12 ``_`` segments.
+    """
+    if not file_path:
+        return "unknown"
+    stem  = os.path.basename(file_path).split(".")[0]
+    parts = stem.split("_")
+    return parts[11] if len(parts) > 11 else stem
+
+
+def _extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
+    """Derive per-file summary metrics from the stored ms1_data rows.
+
+    Iterates once over all ms1_data rows and computes three scalar metrics per
+    (compound × file) directly from the JSON spectra stored in the database —
+    no re-extraction from parquet files is needed.
+
+    Metrics computed
+    ----------------
+    peak_height
+        Maximum intensity value in the EIC (``max(i_array)``).
+    rt_peak
+        Retention time at the intensity maximum (``rt_array[argmax(i_array)]``).
+    mz_centroid
+        Intensity-weighted mean m/z across all scans in the EIC window:
+        ``sum(mz_i × i_i) / sum(i_i)``, using the per-scan m/z list stored in
+        the ``mz`` column alongside the intensity list from ``raw_spectrum``.
+
+    Parameters
+    ----------
+    ms1_all_df:
+        Full ``ms1_data`` table for the analysis (all compounds, all files).
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        ``inchi_key``, ``adduct``, ``file_path``, ``file_group``,
+        ``peak_height``, ``rt_peak``, ``mz_centroid``
+    """
+    if ms1_all_df.empty:
+        return pd.DataFrame(columns=[
+            "inchi_key", "adduct", "file_path", "file_group",
+            "peak_height", "rt_peak", "mz_centroid",
+        ])
+
+    records = []
+    for _, row in ms1_all_df.iterrows():
+        rt_arr, i_arr = _parse_spectrum(row.get("raw_spectrum"))
+        fp    = str(row.get("file_path", ""))
+        group = _file_group(fp)
+        base  = {
+            "inchi_key":  row["inchi_key"],
+            "adduct":     row["adduct"],
+            "file_path":  fp,
+            "file_group": group,
+        }
+
+        if not i_arr or max(i_arr) <= 0:
+            records.append({**base, "peak_height": np.nan, "rt_peak": np.nan, "mz_centroid": np.nan})
+            continue
+
+        i_np  = np.array(i_arr,  dtype=float)
+        rt_np = np.array(rt_arr, dtype=float)
+        idx_max     = int(np.argmax(i_np))
+        peak_height = float(i_np[idx_max])
+        rt_peak_val = float(rt_np[idx_max])
+
+        # Intensity-weighted mz centroid from the stored per-scan mz list
+        mz_centroid = np.nan
+        mz_json = row.get("mz")
+        if mz_json is not None and not (isinstance(mz_json, float) and np.isnan(mz_json)):
+            try:
+                mz_np   = np.array(json.loads(mz_json), dtype=float)
+                total_i = i_np.sum()
+                if len(mz_np) == len(i_np) and total_i > 0:
+                    mz_centroid = float((mz_np * i_np).sum() / total_i)
+            except Exception:
+                pass
+
+        records.append({**base,
+                        "peak_height": peak_height,
+                        "rt_peak":     rt_peak_val,
+                        "mz_centroid": mz_centroid})
+
+    return pd.DataFrame(records)
+
+
+def _plot_compound_boxplot(
+    ax,
+    compound_metrics: pd.DataFrame,
+    metric: str,
+    log_scale: bool,
+    atlas_ref: Optional[float],
+    compound_name: str,
+    adduct: str,
+    ylabel: str,
+) -> None:
+    """Draw a grouped boxplot for one compound onto *ax*.
+
+    Parameters
+    ----------
+    compound_metrics:
+        Rows from ``per_file_df`` already filtered to one (inchi_key, adduct).
+    metric:
+        Column name to plot: ``"peak_height"``, ``"rt_peak"``, or ``"mz_centroid"``.
+    log_scale:
+        When *True* the y-values are log₁₀-transformed before plotting.
+    atlas_ref:
+        Atlas reference value to draw as a red dashed horizontal line
+        (pass *None* to omit the line).
+    compound_name, adduct:
+        Used as the subplot title.
+    ylabel:
+        Y-axis label string.
+    """
+    rng    = np.random.default_rng(seed=42)
+    groups = sorted(compound_metrics["file_group"].dropna().unique()) if not compound_metrics.empty else []
+
+    data_per_group: List[List[float]] = []
+    valid_groups:   List[str]         = []
+    for g in groups:
+        vals = compound_metrics.loc[compound_metrics["file_group"] == g, metric].dropna().tolist()
+        if log_scale:
+            vals = [np.log10(v) for v in vals if isinstance(v, (int, float)) and v > 0]
+        if vals:
+            data_per_group.append(vals)
+            valid_groups.append(g)
+
+    if not data_per_group:
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=8, color="gray")
+        ax.set_title(f"{compound_name}\n{adduct}", fontsize=7, pad=2)
+        return
+
+    positions = list(range(len(valid_groups)))
+
+    ax.boxplot(
+        data_per_group,
+        positions=positions,
+        widths=0.5,
+        patch_artist=True,
+        boxprops=dict(facecolor="#AED6F1", alpha=0.7),
+        medianprops=dict(color="navy", linewidth=1.5),
+        whiskerprops=dict(linewidth=0.8),
+        capprops=dict(linewidth=0.8),
+        showfliers=False,
+    )
+
+    # Individual data points with jitter
+    for pos, vals in zip(positions, data_per_group):
+        jitter = rng.uniform(-0.15, 0.15, size=len(vals))
+        ax.scatter(
+            np.array([pos] * len(vals), dtype=float) + jitter,
+            vals,
+            s=8, color="steelblue", alpha=0.65, zorder=3,
+        )
+
+    # Atlas reference line
+    if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)):
+        ref_val = np.log10(atlas_ref) if (log_scale and atlas_ref > 0) else atlas_ref
+        ax.axhline(ref_val, color="red", linestyle="--", linewidth=0.8, alpha=0.8,
+                   label=f"Atlas {atlas_ref:.5g}")
+        ax.legend(fontsize=5, loc="upper right", framealpha=0.5)
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(valid_groups, rotation=45, ha="right", fontsize=5)
+    ax.tick_params(axis="y", labelsize=6)
+    ax.set_ylabel(ylabel, fontsize=6)
+    ax.set_title(f"{compound_name}\n{adduct}", fontsize=7, pad=2)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.5)
+
+
+def make_boxplots(
+    summary_obj: "AnalysisSummary",
+    output_loc: Optional[Path] = None,
+    overwrite: bool = True,
+) -> None:
+    """Generate six boxplot PDFs showing per-file MS1 metrics grouped by file group.
+
+    For each of three metrics a linear-scale and a log₁₀-scale PDF are written,
+    giving six output files:
+
+    * ``boxplot_peak_height_linear.pdf``
+    * ``boxplot_peak_height_log.pdf``
+    * ``boxplot_rt_peak_linear.pdf``
+    * ``boxplot_rt_peak_log.pdf``
+    * ``boxplot_mz_centroid_linear.pdf``
+    * ``boxplot_mz_centroid_log.pdf``
+
+    Each PDF contains all compounds arranged in a **4 × 4 grid** (16 per page).
+    Each subplot shows file groups on the x-axis (the segment at
+    underscore-separated index 11 of the filename stem) with box-and-whisker
+    plots and individual data points overlaid.  A red dashed atlas reference
+    line is drawn for ``mz_centroid`` (atlas m/z) and ``rt_peak`` (atlas RT peak).
+
+    All three metrics are derived directly from the ``ms1_data`` table rows
+    stored in the database — no re-extraction from raw parquet is needed.
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        Data tables and per-file metrics are loaded automatically via
+        ``summary_obj.load_data()`` on first call if not already cached.
+    output_loc:
+        Override output directory.  Defaults to
+        ``<project_directory>/analysis_tables/rt<N>_analysis<M>/boxplots/``.
+    overwrite:
+        When *False*, skips PDF files that already exist on disk.
+    """
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    project_db_path  = summary_obj.paths["project_db_path"]
+    rt_alignment_num = summary_obj.rt_alignment_number
+    analysis_num     = summary_obj.analysis_number
+
+    if output_loc is None:
+        output_loc = (
+            Path(summary_obj.paths["project_directory"])
+            / "analysis_tables"
+            / f"rt{rt_alignment_num}_analysis{analysis_num}"
+            / "boxplots"
+        )
+    else:
+        output_loc = Path(output_loc)
+    output_loc.mkdir(parents=True, exist_ok=True)
+
+    # ── Ensure analysis data is available on the summary object ─────────────
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
+    manual_curation_df = summary_obj.manual_curation_df
+    per_file_df        = summary_obj.per_file_metrics_df
+
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.error("No manual curation entries found – nothing to plot.")
+        return
+
+    manual_curation_df = manual_curation_df.reset_index(drop=True)
+
+    # per_file_metrics_df is pre-computed by load_data(); compute now as fallback
+    if per_file_df is None:
+        per_file_df = _extract_per_file_metrics(summary_obj.ms1_all_df or pd.DataFrame())
+
+    # Build atlas reference lookup: (inchi_key, adduct) → {atlas_mz, atlas_rt_peak}
+    atlas_lookup: Dict[Tuple[str, str], Dict[str, float]] = {}
+    for _, mc in manual_curation_df.iterrows():
+        key = (mc.get("inchi_key", ""), mc.get("adduct", ""))
+        atlas_lookup[key] = {
+            "atlas_mz":      float(mc.get("atlas_mz",      np.nan)),
+            "atlas_rt_peak": float(mc.get("atlas_rt_peak", np.nan)),
+        }
+
+    # ── Six (metric, log_scale, y-label, atlas_attr) configurations ─────────
+    _METRIC_CONFIGS = [
+        ("peak_height",  False, "Peak Height (intensity)",   None),
+        ("peak_height",  True,  "Peak Height (log₁₀)",       None),
+        ("rt_peak",      False, "RT Peak (min)",              "atlas_rt_peak"),
+        ("rt_peak",      True,  "RT Peak log₁₀(min)",        "atlas_rt_peak"),
+        ("mz_centroid",  False, "m/z Centroid",              "atlas_mz"),
+        ("mz_centroid",  True,  "m/z Centroid (log₁₀)",     "atlas_mz"),
+    ]
+
+    n_compounds = len(manual_curation_df)
+
+    for metric, log_scale, ylabel, atlas_attr in _METRIC_CONFIGS:
+        scale_tag = "log" if log_scale else "linear"
+        pdf_path  = output_loc / f"boxplot_{metric}_{scale_tag}.pdf"
+
+        if not overwrite and pdf_path.exists():
+            logger.debug("Skipping %s (already exists).", pdf_path.name)
+            continue
+
+        logger.info("Writing %s…", pdf_path.name)
+        total_pages = max(1, (n_compounds + _BOXPLOTS_PER_PAGE - 1) // _BOXPLOTS_PER_PAGE)
+
+        with PdfPages(pdf_path) as pdf:
+            for page_idx in range(total_pages):
+                start     = page_idx * _BOXPLOTS_PER_PAGE
+                end       = min(start + _BOXPLOTS_PER_PAGE, n_compounds)
+                page_rows = manual_curation_df.iloc[start:end]
+                n_on_page = len(page_rows)
+
+                fig, axes = plt.subplots(
+                    _BOXPLOT_ROWS, _BOXPLOT_COLS,
+                    figsize=(22, 18),
+                    constrained_layout=True,
+                )
+                axes_flat = axes.flatten()
+
+                for slot_idx, (_, mc_row) in enumerate(page_rows.iterrows()):
+                    ax            = axes_flat[slot_idx]
+                    compound_name = mc_row.get("compound_name") or "unknown"
+                    adduct        = mc_row.get("adduct", "")
+                    inchi_key     = mc_row.get("inchi_key", "")
+
+                    atlas_ref = atlas_lookup.get((inchi_key, adduct), {}).get(atlas_attr) if atlas_attr else None
+
+                    cmp_metrics = (
+                        per_file_df[
+                            (per_file_df["inchi_key"] == inchi_key) &
+                            (per_file_df["adduct"]    == adduct)
+                        ]
+                        if not per_file_df.empty
+                        else pd.DataFrame()
+                    )
+
+                    _plot_compound_boxplot(
+                        ax, cmp_metrics, metric, log_scale,
+                        atlas_ref, compound_name, adduct, ylabel,
+                    )
+
+                # Hide unused grid slots on the last page
+                for slot_idx in range(n_on_page, _BOXPLOTS_PER_PAGE):
+                    axes_flat[slot_idx].set_visible(False)
+
+                page_label = f"  ({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
+                fig.suptitle(
+                    f"{ylabel}  |  RT alignment {rt_alignment_num}, analysis {analysis_num}{page_label}",
+                    fontsize=10,
+                )
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+
+    logger.info("Boxplot PDFs complete → %s", output_loc)
+
+
+# =============================================================================
+# MANUAL CURATION CSV EXPORT
+# =============================================================================
+
+def make_manual_curation_csv(
+    summary_obj: "AnalysisSummary",
+    output_loc: Optional[Path] = None,
+    output_filename: str = "manual_curation.csv",
+    overwrite: bool = True,
+) -> pd.DataFrame:
+    """Write the ``manual_curation`` table to a CSV file (one row per compound).
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        ``manual_curation_df`` is loaded automatically if not already cached.
+    output_loc:
+        Override output directory.  Defaults to
+        ``<project_directory>/analysis_tables/rt<N>_analysis<M>/``.
+    output_filename:
+        CSV filename (the ``.csv`` extension is appended automatically if absent).
+    overwrite:
+        When *False*, raises :exc:`FileExistsError` if the output file already
+        exists.
+
+    Returns
+    -------
+    pd.DataFrame
+        The exported DataFrame (empty on error).
+    """
+    project_db_path  = summary_obj.paths["project_db_path"]
+    rt_alignment_num = summary_obj.rt_alignment_number
+    analysis_num     = summary_obj.analysis_number
+
+    if output_loc is None:
+        output_loc = (
+            Path(summary_obj.paths["project_directory"])
+            / "analysis_tables"
+            / f"rt{rt_alignment_num}_analysis{analysis_num}"
+        )
+    else:
+        output_loc = Path(output_loc)
+    output_loc.mkdir(parents=True, exist_ok=True)
+
+    if not output_filename.endswith(".csv"):
+        output_filename += ".csv"
+    csv_path = output_loc / output_filename
+
+    if not overwrite and csv_path.exists():
+        raise FileExistsError(
+            f"Output file already exists and overwrite=False: {csv_path}"
+        )
+
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
+    manual_curation_df = summary_obj.manual_curation_df
+
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.error("No manual curation entries found – CSV not written.")
+        return pd.DataFrame()
+
+    manual_curation_df.to_csv(csv_path, index=False)
+    logger.info("Exported manual curation CSV to %s", csv_path)
+    return manual_curation_df
+
+
+# =============================================================================
+# MASTER DRIVER
+# =============================================================================
+
+def run_all_summaries(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = False,
+) -> None:
+    """Run all summary outputs for one analysis.
+
+    Calls ``summary_obj.load_data()`` (a no-op if data are already cached)
+    then runs all five output functions in order:
+
+    1. Per-compound identification figures  (PDF, one per compound)
+    2. EIC thumbnail PDFs (shared-y and independent-y variants)
+    3. Summary Excel table (``Draft_Final_Identifications.xlsx``)
+    4. Six boxplot PDFs (3 metrics × linear / log₁₀)
+    5. Manual curation CSV (``manual_curation.csv``)
+
+    Because data tables are stored on ``summary_obj`` after the first call
+    to ``load_data()``, all five sub-functions share the same in-memory
+    DataFrames with no redundant database queries.
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+    overwrite:
+        Passed through to all sub-functions.
+    """
+    # ── Single shared data load ───────────────────────────────────────────────
+    summary_obj.load_data()
+    output_loc = summary_obj.paths.get("analysis_output_dir", None)
+    if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
+        logger.error("No manual curation entries found – aborting run_all_summaries.")
+        return
+
+    # ── Step 1: Identification figures ───────────────────────────────────────
+    logger.info("Step 1/5: Identification figures…")
+    make_identification_figure(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    # ── Step 2: EIC thumbnails ────────────────────────────────────────────────
+    logger.info("Step 2/5: EIC thumbnails…")
+    make_eic_thumbnails(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    # ── Step 3: Stats table (Excel) ───────────────────────────────────────────
+    logger.info("Step 3/5: Stats table…")
+    make_stats_table(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    # ── Step 4: Boxplots ──────────────────────────────────────────────────────
+    logger.info("Step 4/5: Boxplots…")
+    make_boxplots(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    # ── Step 5: Manual curation CSV ───────────────────────────────────────────
+    logger.info("Step 5/5: Manual curation CSV…")
+    make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    logger.info("run_all_summaries: all outputs complete.")
+
