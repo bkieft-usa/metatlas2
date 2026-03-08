@@ -756,7 +756,7 @@ class AnalysisSummary:
         self.ms2_hits_all_df = dbi.get_ms2_hits_for_compound(
             project_db_path, None, None, rt_alignment_num, analysis_num
         )
-        self.per_file_metrics_df = asm._extract_per_file_metrics(self.ms1_all_df)
+        self.per_file_metrics_df = asm.extract_per_file_metrics(self.ms1_all_df)
 
         logger.info(
             "load_data complete: %d compounds, %d MS1 rows, %d MS2 raw rows, %d MS2 hit rows.",

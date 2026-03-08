@@ -660,7 +660,7 @@ def _find_overlapping_compounds(
 def make_stats_table(
     summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
-    output_filename: str = "Draft_Final_Identifications.xlsx",
+    output_filename: str = "Final_Identifications.xlsx",
     overwrite: bool = True,
 ) -> pd.DataFrame:
     """Build the per-compound summary Excel workbook for one analysis.
@@ -687,22 +687,16 @@ def make_stats_table(
     overwrite:
         When *False*, raises if the output file already exists.
     """
-    project_db_path  = summary_obj.paths["project_db_path"]
-    rt_alignment_num = summary_obj.rt_alignment_number
-    analysis_num     = summary_obj.analysis_number
-    chromatography   = summary_obj.chromatography or ""
+    chromatography = summary_obj.chromatography
 
     # ── Resolve output directory ─────────────────────────────────────────────
     if output_loc is None:
-        output_loc = (
-            Path(summary_obj.paths["project_directory"])
-            / "analysis_tables"
-            / f"rt{rt_alignment_num}_analysis{analysis_num}"
-        )
+        raise ValueError("output_loc must be provided as a Path or string")
     else:
         output_loc = Path(output_loc)
     output_loc.mkdir(parents=True, exist_ok=True)
 
+    output_filename = f"{summary_obj.project_name}_RTA{summary_obj.rt_alignment_number}_TGA{summary_obj.analysis_number}_{output_filename}"
     if not output_filename.endswith(".xlsx"):
         output_filename += ".xlsx"
     excel_path = output_loc / output_filename
@@ -1180,11 +1174,7 @@ def make_eic_thumbnails(
 
     # ── Resolve base output directory ────────────────────────────────────────
     if output_loc is None:
-        base_dir = (
-            Path(summary_obj.paths["project_directory"])
-            / "analysis_tables"
-            / f"rt{rt_alignment_num}_analysis{analysis_num}"
-        )
+        raise ValueError("output_loc must be provided as a Path or string")
     else:
         base_dir = Path(output_loc)
 
@@ -1271,11 +1261,6 @@ def make_eic_thumbnails(
 # BOXPLOT SUMMARIES
 # =============================================================================
 
-_BOXPLOT_COLS     = 4
-_BOXPLOT_ROWS     = 4
-_BOXPLOTS_PER_PAGE = _BOXPLOT_COLS * _BOXPLOT_ROWS
-
-
 def _file_group(file_path: str) -> str:
     """Return the file group label: the segment at underscore-separated index 11 of the stem.
 
@@ -1286,10 +1271,10 @@ def _file_group(file_path: str) -> str:
         return "unknown"
     stem  = os.path.basename(file_path).split(".")[0]
     parts = stem.split("_")
-    return parts[11] if len(parts) > 11 else stem
+    return parts[12] if len(parts) > 12 else stem
 
 
-def _extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
+def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
     """Derive per-file summary metrics from the stored ms1_data rows.
 
     Iterates once over all ms1_data rows and computes three scalar metrics per
@@ -1457,23 +1442,23 @@ def make_boxplots(
     output_loc: Optional[Path] = None,
     overwrite: bool = True,
 ) -> None:
-    """Generate six boxplot PDFs showing per-file MS1 metrics grouped by file group.
+    """Generate per-compound boxplot PDFs organised into six metric-type folders.
 
-    For each of three metrics a linear-scale and a log₁₀-scale PDF are written,
-    giving six output files:
+    Six sub-directories are created under ``<output_loc>/boxplots/``, one for
+    each metric × scale combination:
 
-    * ``boxplot_peak_height_linear.pdf``
-    * ``boxplot_peak_height_log.pdf``
-    * ``boxplot_rt_peak_linear.pdf``
-    * ``boxplot_rt_peak_log.pdf``
-    * ``boxplot_mz_centroid_linear.pdf``
-    * ``boxplot_mz_centroid_log.pdf``
+    * ``peak_height_linear/``
+    * ``peak_height_log/``
+    * ``rt_peak_linear/``
+    * ``rt_peak_log/``
+    * ``mz_centroid_linear/``
+    * ``mz_centroid_log/``
 
-    Each PDF contains all compounds arranged in a **4 × 4 grid** (16 per page).
-    Each subplot shows file groups on the x-axis (the segment at
-    underscore-separated index 11 of the filename stem) with box-and-whisker
-    plots and individual data points overlaid.  A red dashed atlas reference
-    line is drawn for ``mz_centroid`` (atlas m/z) and ``rt_peak`` (atlas RT peak).
+    Inside each folder one single-plot PDF is written per compound, named
+    ``<compound_name>_<adduct>.pdf``.  Each PDF contains a single boxplot
+    showing file groups on the x-axis with box-and-whisker plots and
+    individual data points overlaid.  A red dashed atlas reference line is
+    drawn for ``mz_centroid`` (atlas m/z) and ``rt_peak`` (atlas RT peak).
 
     All three metrics are derived directly from the ``ms1_data`` table rows
     stored in the database — no re-extraction from raw parquet is needed.
@@ -1491,19 +1476,13 @@ def make_boxplots(
         When *False*, skips PDF files that already exist on disk.
     """
 
-    project_db_path  = summary_obj.paths["project_db_path"]
     rt_alignment_num = summary_obj.rt_alignment_number
     analysis_num     = summary_obj.analysis_number
 
     if output_loc is None:
-        output_loc = (
-            Path(summary_obj.paths["project_directory"])
-            / "analysis_tables"
-            / f"rt{rt_alignment_num}_analysis{analysis_num}"
-            / "boxplots"
-        )
+        raise ValueError("output_loc must be provided for boxplot output.")
     else:
-        output_loc = Path(output_loc)
+        output_loc = Path(output_loc, "boxplots")
     output_loc.mkdir(parents=True, exist_ok=True)
 
     # ── Ensure analysis data is available on the summary object ─────────────
@@ -1517,10 +1496,6 @@ def make_boxplots(
         return
 
     manual_curation_df = manual_curation_df.reset_index(drop=True)
-
-    # per_file_metrics_df is pre-computed by load_data(); compute now as fallback
-    if per_file_df is None:
-        per_file_df = _extract_per_file_metrics(summary_obj.ms1_all_df or pd.DataFrame())
 
     # Build atlas reference lookup: (inchi_key, adduct) → {atlas_mz, atlas_rt_peak}
     atlas_lookup: Dict[Tuple[str, str], Dict[str, float]] = {}
@@ -1542,64 +1517,54 @@ def make_boxplots(
     ]
 
     n_compounds = len(manual_curation_df)
+    total_tasks = len(_METRIC_CONFIGS) * n_compounds
 
-    for metric, log_scale, ylabel, atlas_attr in _METRIC_CONFIGS:
-        scale_tag = "log" if log_scale else "linear"
-        pdf_path  = output_loc / f"boxplot_{metric}_{scale_tag}.pdf"
+    with tqdm(total=total_tasks, desc=f"Generating boxplots ({len(_METRIC_CONFIGS)} types × {n_compounds} compounds)") as pbar:
+        for metric, log_scale, ylabel, atlas_attr in _METRIC_CONFIGS:
+            scale_tag   = "log" if log_scale else "linear"
+            folder_name = f"{metric}_{scale_tag}"
+            metric_dir  = output_loc / folder_name
+            metric_dir.mkdir(parents=True, exist_ok=True)
 
-        if not overwrite and pdf_path.exists():
-            logger.debug("Skipping %s (already exists).", pdf_path.name)
-            continue
+            for _, mc_row in manual_curation_df.iterrows():
+                compound_name = mc_row.get("compound_name") or "unknown"
+                adduct        = mc_row.get("adduct", "")
+                inchi_key     = mc_row.get("inchi_key", "")
 
-        logger.info("Writing %s…", pdf_path.name)
-        total_pages = max(1, (n_compounds + _BOXPLOTS_PER_PAGE - 1) // _BOXPLOTS_PER_PAGE)
+                safe_stem = f"{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+                pdf_path  = metric_dir / f"{safe_stem}.pdf"
 
-        with PdfPages(pdf_path) as pdf:
-            for page_idx in range(total_pages):
-                start     = page_idx * _BOXPLOTS_PER_PAGE
-                end       = min(start + _BOXPLOTS_PER_PAGE, n_compounds)
-                page_rows = manual_curation_df.iloc[start:end]
-                n_on_page = len(page_rows)
+                pbar.update(1)
 
-                fig, axes = plt.subplots(
-                    _BOXPLOT_ROWS, _BOXPLOT_COLS,
-                    figsize=(22, 18),
-                    constrained_layout=True,
+                if not overwrite and pdf_path.exists():
+                    logger.debug("Skipping %s (already exists).", pdf_path)
+                    continue
+
+                atlas_ref = atlas_lookup.get((inchi_key, adduct), {}).get(atlas_attr) if atlas_attr else None
+
+                cmp_metrics = (
+                    per_file_df[
+                        (per_file_df["inchi_key"] == inchi_key) &
+                        (per_file_df["adduct"]    == adduct)
+                    ]
+                    if not per_file_df.empty
+                    else pd.DataFrame()
                 )
-                axes_flat = axes.flatten()
 
-                for slot_idx, (_, mc_row) in enumerate(page_rows.iterrows()):
-                    ax            = axes_flat[slot_idx]
-                    compound_name = mc_row.get("compound_name") or "unknown"
-                    adduct        = mc_row.get("adduct", "")
-                    inchi_key     = mc_row.get("inchi_key", "")
+                fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
 
-                    atlas_ref = atlas_lookup.get((inchi_key, adduct), {}).get(atlas_attr) if atlas_attr else None
+                _plot_compound_boxplot(
+                    ax, cmp_metrics, metric, log_scale,
+                    atlas_ref, compound_name, adduct, ylabel,
+                )
 
-                    cmp_metrics = (
-                        per_file_df[
-                            (per_file_df["inchi_key"] == inchi_key) &
-                            (per_file_df["adduct"]    == adduct)
-                        ]
-                        if not per_file_df.empty
-                        else pd.DataFrame()
-                    )
-
-                    _plot_compound_boxplot(
-                        ax, cmp_metrics, metric, log_scale,
-                        atlas_ref, compound_name, adduct, ylabel,
-                    )
-
-                # Hide unused grid slots on the last page
-                for slot_idx in range(n_on_page, _BOXPLOTS_PER_PAGE):
-                    axes_flat[slot_idx].set_visible(False)
-
-                page_label = f"  ({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
                 fig.suptitle(
-                    f"{ylabel}  |  RT alignment {rt_alignment_num}, analysis {analysis_num}{page_label}",
-                    fontsize=10,
+                    f"{ylabel}  |  RT alignment {rt_alignment_num}, analysis {analysis_num}",
+                    fontsize=9,
                 )
-                pdf.savefig(fig, bbox_inches="tight")
+
+                with PdfPages(pdf_path) as pdf:
+                    pdf.savefig(fig, bbox_inches="tight")
                 plt.close(fig)
 
     logger.info("Boxplot PDFs complete → %s", output_loc)
@@ -1612,7 +1577,7 @@ def make_boxplots(
 def make_manual_curation_csv(
     summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
-    output_filename: str = "manual_curation.csv",
+    output_filename: str = "manually_curated_compound_data.csv",
     overwrite: bool = True,
 ) -> pd.DataFrame:
     """Write the ``manual_curation`` table to a CSV file (one row per compound).
@@ -1641,11 +1606,7 @@ def make_manual_curation_csv(
     analysis_num     = summary_obj.analysis_number
 
     if output_loc is None:
-        output_loc = (
-            Path(summary_obj.paths["project_directory"])
-            / "analysis_tables"
-            / f"rt{rt_alignment_num}_analysis{analysis_num}"
-        )
+        raise ValueError("output_loc must be provided for manual curation CSV output.")
     else:
         output_loc = Path(output_loc)
     output_loc.mkdir(parents=True, exist_ok=True)
@@ -1723,11 +1684,6 @@ def run_all_summaries(
 
     logger.info("Making Manual curation CSV…")
     make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
-
-    logger.info("Exporting post-curation atlas data CSV...")
-    summary_obj.post_curation_atlas_obj.to_dataframe().to_csv(
-        f"{Path(output_loc) / f'{summary_obj.post_curation_atlas_obj.atlas_uid}.csv'}", index=False
-    )
 
     logger.info("run_all_summaries: all outputs complete.")
 

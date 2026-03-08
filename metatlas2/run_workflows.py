@@ -1,5 +1,6 @@
 from typing import Dict, Any
 import sys
+import yaml
 
 import threading, time, os
 from IPython.display import display, HTML
@@ -291,6 +292,7 @@ def run_analysis_summary(
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
+    chromatography: str,
     analysis_atlas: str = None,
     overwrite: bool = False,
 ) -> None:
@@ -308,7 +310,8 @@ def run_analysis_summary(
         config=config,
         project_name=project_name,
         rt_alignment_number=rt_alignment_number,
-        analysis_number=analysis_number
+        analysis_number=analysis_number,
+        chromatography=chromatography
     )
 
     summary_obj.pre_curation_atlas_obj = Atlas.from_database(
@@ -326,3 +329,12 @@ def run_analysis_summary(
         summary_obj=summary_obj,
         overwrite=overwrite,
     )
+
+    logger.info("Exporting post-curation atlas data CSV...")
+    summary_obj.post_curation_atlas_obj.to_dataframe().to_csv(
+        f"{summary_obj.paths['analysis_output_dir']}/{summary_obj.post_curation_atlas_obj.atlas_uid}.csv", index=False
+    )
+
+    logger.info("Saving input yaml config to analysis output directory...")
+    with open(f"{summary_obj.paths['analysis_output_dir']}/analysis_config.yaml", "w") as f:
+        yaml.dump(config, f)
