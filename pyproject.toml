@@ -50,6 +50,7 @@ dependencies = [
     "sqlalchemy==2.0.39",
     "tables==3.10.2",
     "tqdm==4.67.1",
+    "xlsxwriter>=3.2.9",
 ]
 
 [tool.uv.extra-build-dependencies]
