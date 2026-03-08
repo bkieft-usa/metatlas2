@@ -83,16 +83,18 @@ EIC_COLOR_MAP = {
 # -------------------------------------------------
 #   Main factory
 # -------------------------------------------------
-def build_dash_app(analysis_gui_obj,
-                   ms2_score_cutoff=0.5,
-                   top_n_hits=20,
-                   port=8050):
+def build_dash_app(
+    analysis_gui_obj,
+    remove_unidentified_compounds=True,
+    top_n_hits=20,
+    port=8050
+):
 
     project_path = analysis_gui_obj.paths["project_db_path"]
     rt_alignment = analysis_gui_obj.rt_alignment_number
     analysis_num = analysis_gui_obj.analysis_number
 
-    manual_curation_df = dbi.get_manual_curation_entries(project_path, rt_alignment, analysis_num)
+    manual_curation_df = dbi.get_manual_curation_entries(project_path, rt_alignment, analysis_num, remove_unidentified_compounds)
     ms1_df  = dbi.get_ms1_data_for_compound(project_path, None, None, rt_alignment, analysis_num)
     ms2_df  = dbi.get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num)
     ms2_hits_df = dbi.get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num)
@@ -354,7 +356,7 @@ def build_dash_app(analysis_gui_obj,
         Results are cached by (inchi_key, adduct, score_cutoff, top_n_hits, rt_min, rt_max)
         so both _count_ms2_scans and _make_ms2_figure share the same computation.
         """
-        key = (inchi_key, adduct, float(ms2_score_cutoff), int(top_n_hits),
+        key = (inchi_key, adduct, int(top_n_hits),
                round(rt_min, 4) if rt_min is not None else None,
                round(rt_max, 4) if rt_max is not None else None)
         if key in ms2_scans_cache:
@@ -366,7 +368,6 @@ def build_dash_app(analysis_gui_obj,
         hits_sub = ms2_hits_df[
             (ms2_hits_df["inchi_key"] == inchi_key)
             & (ms2_hits_df["adduct"] == adduct)
-            & (ms2_hits_df["score"] >= ms2_score_cutoff)
         ]
         if rt_min is not None and rt_max is not None:
             hits_sub = hits_sub[(hits_sub["rt"] >= rt_min) & (hits_sub["rt"] <= rt_max)]

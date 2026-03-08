@@ -60,15 +60,13 @@ def apply_rt_alignment_to_target_atlases(
 
                     # Create a new CompoundMZRT with updated RTs
                     mz_rt_uid = dbi._generate_uid("mz_rt", decorator="exp")
-                    comp_dict = {k: v for k, v in comp_ref.__dict__.items() if k not in ['mz_rt_uid', 'rt_peak', 'rt_min', 'rt_max', 'rt_alignment_applied', 'manual_curation_applied']}
+                    comp_dict = {k: v for k, v in comp_ref.__dict__.items() if k not in ['mz_rt_uid', 'rt_peak', 'rt_min', 'rt_max']}
                     aligned_comp_mzrt = CompoundMZRT(
                         **comp_dict,
                         mz_rt_uid=mz_rt_uid,
                         rt_peak=aligned_rt_peak,
                         rt_min=aligned_rt_min,
                         rt_max=aligned_rt_max,
-                        rt_alignment_applied=True,
-                        manual_curation_applied=False
                     )
                     aligned_compound_mzrts[inchi_key] = aligned_comp_mzrt
 
@@ -243,10 +241,10 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     # Table: Compound number to name mapping (ordered by RT), now with residuals
     ax_table = fig.add_subplot(gs[1, :])
     ax_table.axis('off')
-    table_data = modeling_results_df[['compound_num', 'compound_name', 'inchi_key', 'atlas_rt_peak', 'residual']].copy()
+    table_data = modeling_results_df[['compound_num', 'inchi_key', 'adduct', 'atlas_rt_peak', 'residual']].copy()
     table_data['atlas_rt_peak'] = table_data['atlas_rt_peak'].round(3)
     table_data['residual'] = table_data['residual'].round(4)
-    table_data.columns = ['#', 'Compound Name', 'InChi Key', 'Atlas RT (min)', 'Residual (min)']
+    table_data.columns = ['#', 'InChi Key', 'Adduct', 'Atlas RT (min)', 'Residual (min)']
     table = ax_table.table(cellText=table_data.values,
                         colLabels=table_data.columns,
                         loc='center',
@@ -309,7 +307,6 @@ def build_rt_alignment_model(
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
         compound_uid = compound_mzrt.compound_uid
-        compound_name = compound_mzrt.compound_name
         atlas_rt_peak = compound_mzrt.rt_peak
         atlas_rt_min = compound_mzrt.rt_min
         atlas_rt_max = compound_mzrt.rt_max
@@ -351,8 +348,8 @@ def build_rt_alignment_model(
 
         compound_stats.append({
             'compound_uid': compound_uid,
-            'compound_name': compound_name,
             'inchi_key': inchi_key,
+            'adduct': adduct,
             'atlas_rt_peak': atlas_rt_peak,
             'atlas_rt_min': atlas_rt_min,
             'atlas_rt_max': atlas_rt_max,
@@ -418,7 +415,7 @@ def build_rt_alignment_model(
     best_model['compounds_used_for_modeling'] = reliable_compounds['compound_uid'].tolist()
 
     logger.info(f"Compound RT Statistics:")
-    display(compound_rt_stats[['compound_name', 'inchi_key', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 
+    display(compound_rt_stats[['inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 
                                'observation_count', 'exp_rt_std']])
 
     rt_align.rt_alignment_model = best_model

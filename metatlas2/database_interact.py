@@ -37,7 +37,7 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
     elif entity_type == "rt_atlas":
         return f"atl-rta-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-rta-{uuid.uuid4().hex[:32]}"
     elif entity_type == "autoid_atlas":
-        return f"atl-aida-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-aida-{uuid.uuid4().hex[:32]}"
+        return f"atl-aid-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-aid-{uuid.uuid4().hex[:32]}"
     elif entity_type == "mz_rt":
         return f"mzrt-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"mzrt-{uuid.uuid4().hex[:32]}"
     elif entity_type == "compound":
@@ -81,21 +81,30 @@ def create_new_atlas_from_dataframe(
 
     compound_mzrts = {}
     for _, row in atlas_df.iterrows():
+        # main key
         inchi_key = row.get('inchi_key', '')
+        adduct = str(row.get('adduct', None))
         if not inchi_key or inchi_key not in compound_lookup:
             logger.warning(f"Compound with inchi_key {inchi_key} missing from metatlas database, skipping.")
             continue
+        # required fields
         compound_uid = compound_lookup[inchi_key]
+        compound_name = str(row.get('compound_name', 'Unknown Compound'))
         rt_peak = row.get('rt_peak', None)
         rt_min = row.get('rt_min', rt_peak - 0.5)
         rt_max = row.get('rt_max', rt_peak + 0.5)
         mz = row.get('mz', None)
         mz_tolerance = row.get('mz_tolerance', 5.0)
-        adduct = str(row.get('adduct', None))
         if rt_peak is None or mz is None or adduct is None:
             raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference.")
+        # extra fields
         confidence_level = row.get('confidence_level', None)
+        ms1_notes = row.get('ms1_notes', '')
+        ms2_notes = row.get('ms2_notes', '')
+        other_notes = row.get('other_notes', '')
+        analyst_notes = row.get('analyst_notes', '')
         identification_notes = row.get('identification_notes', '')
+
         mz_rt_uid, _ = get_or_create_compound_mz_rt_uid(
             main_db_path,
             compound_uid,
@@ -110,18 +119,23 @@ def create_new_atlas_from_dataframe(
         compound_mzrt = CompoundMZRT(
             mz_rt_uid=mz_rt_uid,
             compound_uid=compound_uid,
+            compound_name=compound_name,
             inchi_key=inchi_key,
+            adduct=adduct,
             rt_peak=rt_peak,
             rt_min=rt_min,
             rt_max=rt_max,
             mz=mz,
             mz_tolerance=mz_tolerance,
-            adduct=adduct,
             chromatography=chromatography,
             polarity=polarity,
             confidence=confidence_level,
+            source=atlas_file_path,
+            ms1_notes=ms1_notes,
+            ms2_notes=ms2_notes,
+            other_notes=other_notes,
+            analyst_notes=analyst_notes,
             identification_notes=identification_notes,
-            source=atlas_file_path
         )
         compound_mzrts[inchi_key] = compound_mzrt
 
@@ -470,7 +484,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
         if compound_records:
             logger.info(f"Batch inserting {len(compound_records)} compounds...")
             conn.executemany("""
-                INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, compound_records)
 
         # Check for existing references and batch insert if necessary
@@ -506,7 +520,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
             # Batch insert filtered references
             if filtered_reference_records:
                 conn.executemany("""
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, filtered_reference_records)
         
         # Get final counts
@@ -653,19 +667,23 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
         return (
             _generate_uid("mz_rt", decorator="ref"),
             reference_data.get('compound_uid'),
+            reference_data.get('compound_name'),
+            reference_data.get('inchi_key'),
+            reference_data.get('adduct', ''),
             float(reference_data.get('rt_peak')),
             float(reference_data.get('rt_min')),
             float(reference_data.get('rt_max')),
             float(reference_data.get('mz')),
             float(reference_data.get('mz_tolerance', 5.0)),
-            reference_data.get('adduct', ''),
             reference_data.get('chromatography'),
             reference_data.get('polarity'),
             reference_data.get('confidence', 'Unknown'),
-            reference_data.get('identification_notes', ''),
             reference_data.get('source', 'Unknown'),
             reference_data.get('ms1_notes', ''),
             reference_data.get('ms2_notes', ''),
+            reference_data.get('other_notes', ''),
+            reference_data.get('analyst_notes', ''),
+            reference_data.get('identification_notes', ''),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -897,7 +915,7 @@ def batch_save_compounds_and_mzrts(
             if reference_records:
                 logger.info(f"Creating {len(reference_records)} new references...")
                 conn.executemany("""
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, reference_records)
     
     # Log summary
@@ -940,11 +958,11 @@ def _check_identical_reference_exists(conn, reference_data: Dict) -> bool:
             AND chromatography = ? 
             AND polarity = ? 
             AND adduct = ?
-            AND ABS(rt_peak - ?) < 0.0001
-            AND ABS(rt_min - ?) < 0.0001  
-            AND ABS(rt_max - ?) < 0.0001
-            AND ABS(mz - ?) < 0.0001
-            AND ABS(mz_tolerance - ?) < 0.0001
+            AND rt_peak = ?
+            AND rt_min = ?
+            AND rt_max = ?
+            AND mz = ?
+            AND mz_tolerance = ?
         """, [
             compound_uid, chromatography, polarity, adduct,
             rt_peak, rt_min, rt_max, mz, mz_tolerance
@@ -990,12 +1008,14 @@ def _create_database_tables(conn, db_type: str = "main"):
             CREATE TABLE IF NOT EXISTS compound_mzrt (
                 mz_rt_uid TEXT PRIMARY KEY,
                 compound_uid TEXT,
+                compound_name TEXT,
+                inchi_key TEXT,
+                adduct TEXT,
                 rt_peak REAL,
                 rt_min REAL,
                 rt_max REAL,
                 mz REAL,
                 mz_tolerance REAL,
-                adduct TEXT,
                 chromatography TEXT,
                 polarity TEXT,
                 confidence TEXT,
@@ -1098,12 +1118,14 @@ def _create_database_tables(conn, db_type: str = "main"):
             CREATE TABLE IF NOT EXISTS compound_mzrt (
                 mz_rt_uid TEXT PRIMARY KEY,
                 compound_uid TEXT,
+                compound_name TEXT,
+                inchi_key TEXT,
+                adduct TEXT,
                 rt_peak REAL,
                 rt_min REAL,
                 rt_max REAL,
                 mz REAL,
                 mz_tolerance REAL,
-                adduct TEXT,
                 chromatography TEXT,
                 polarity TEXT,
                 confidence TEXT,
@@ -1310,25 +1332,27 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
+                        compound_mzrt.compound_name,
+                        compound_mzrt.inchi_key,
+                        compound_mzrt.adduct,
                         compound_mzrt.rt_peak,
                         compound_mzrt.rt_min,
                         compound_mzrt.rt_max,
                         compound_mzrt.mz,
                         compound_mzrt.mz_tolerance,
-                        compound_mzrt.adduct,
                         compound_mzrt.chromatography,
                         compound_mzrt.polarity,
-                        compound_mzrt.get("confidence", 'Unknown'),
-                        compound_mzrt.get("source", 'Unknown'),
-                        compound_mzrt.get("ms1_notes", ''),
-                        compound_mzrt.get("ms2_notes", ''),
-                        compound_mzrt.get("other_notes", ''),
-                        compound_mzrt.get("analyst_notes", ''),
-                        compound_mzrt.get("identification_notes", ''),
+                        compound_mzrt.confidence,
+                        compound_mzrt.source,
+                        compound_mzrt.ms1_notes,
+                        compound_mzrt.ms2_notes,
+                        compound_mzrt.other_notes,
+                        compound_mzrt.analyst_notes,
+                        compound_mzrt.identification_notes,
                         prov["analyst"],
                         prov["timestamp"]
                     ))
@@ -1396,25 +1420,27 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
+                        compound_mzrt.compound_name,
+                        compound_mzrt.inchi_key,
+                        compound_mzrt.adduct,
                         compound_mzrt.rt_peak,
                         compound_mzrt.rt_min,
                         compound_mzrt.rt_max,
                         compound_mzrt.mz,
                         compound_mzrt.mz_tolerance,
-                        compound_mzrt.adduct,
                         compound_mzrt.chromatography,
                         compound_mzrt.polarity,
-                        compound_mzrt.get("confidence", 'Unknown'),
-                        compound_mzrt.get("source", 'Unknown'),
-                        compound_mzrt.get("ms1_notes", ''),
-                        compound_mzrt.get("ms2_notes", ''),
-                        compound_mzrt.get("other_notes", ''),
-                        compound_mzrt.get("analyst_notes", ''),
-                        compound_mzrt.get("identification_notes", ''),
+                        compound_mzrt.confidence,
+                        compound_mzrt.source,
+                        compound_mzrt.ms1_notes,
+                        compound_mzrt.ms2_notes,
+                        compound_mzrt.other_notes,
+                        compound_mzrt.analyst_notes,
+                        compound_mzrt.identification_notes,
                         prov["analyst"],
                         prov["timestamp"]
                     ))
@@ -1498,8 +1524,8 @@ def get_or_create_compound_mz_rt_uid(
             SELECT mz_rt_uid FROM compound_mzrt
             WHERE compound_uid = ?
             AND chromatography = ? AND polarity = ? AND adduct = ?
-            AND ABS(rt_peak - ?) < 0.0001 AND ABS(mz - ?) < 0.0001
-            AND ABS(mz_tolerance - ?) < 0.0001
+            AND rt_peak = ? AND mz = ?
+            AND mz_tolerance = ?
         """, [
             compound_uid, chromatography, polarity, adduct,
             rt_peak, mz, mz_tolerance
@@ -1550,7 +1576,8 @@ def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> Non
 def get_manual_curation_entries(
     project_db_path: str,
     rt_alignment_number: int,
-    analysis_number: int
+    analysis_number: int,
+    remove_unidentified_compounds: bool = True
 ) -> pd.DataFrame:
     """
     Get all manual_curation entries for the given RT alignment and analysis number,
@@ -1559,11 +1586,15 @@ def get_manual_curation_entries(
     """
     try:
         with get_db_connection(project_db_path) as conn:
-            df = conn.execute("""
+            query = """
                 SELECT *
                 FROM manual_curation
                 WHERE rt_alignment_number = ? AND analysis_number = ?
-            """, [rt_alignment_number, analysis_number]).df()
+            """
+            params = [rt_alignment_number, analysis_number]
+            if remove_unidentified_compounds:
+                query += " AND auto_ided = TRUE"
+            df = conn.execute(query, params).df()
     except Exception as e:
         logger.error(f"Error retrieving manual curation entries: {e}")
         df = pd.DataFrame()
@@ -1573,7 +1604,7 @@ def get_manual_curation_entries(
 
     df['compound_name'] = df['compound_name'].fillna('')
     df['has_unlabeled'] = df['compound_name'].str.contains('unlabeled', case=False, na=False).astype(int)
-    df = df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, False])
+    df = df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, True])
     df = df.drop('has_unlabeled', axis=1)
 
     return df
@@ -1705,6 +1736,7 @@ def get_ms2_data_for_compound(
 
 def create_new_atlas_after_manual_curation(
     summary_obj: "AnalysisSummary",
+    remove_flagged_compounds: bool = True
 ) -> "Atlas":
     """
     """
@@ -1727,7 +1759,7 @@ def create_new_atlas_after_manual_curation(
                 "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
             )
         # Remove compounds from original atlas if the ms1 note has 'remove' in it
-        if curation_row is not None and 'remove' in str(curation_row.get('ms1_notes', '')).lower():
+        if remove_flagged_compounds and curation_row is not None and 'remove' in str(curation_row.get('ms1_notes', '')).lower():
             logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove'.")
             continue
         if curation_row is not None:
@@ -1763,9 +1795,9 @@ def create_new_atlas_after_manual_curation(
     new_atlas.source_atlas_uid = source_atlas.atlas_uid
     new_atlas.atlas_name = source_atlas.atlas_name + " (post-manual-curation)"
     new_atlas.atlas_description = source_atlas.atlas_description + " (post-manual-curation)"
-    save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
+    save_atlas_to_database(new_atlas, summary_obj.paths['project_db_path'], summary_obj.paths['main_db_path'])
 
-    auto_id_obj.post_autoid_atlas_obj = new_atlas
+    summary_obj.post_curation_atlas_obj = new_atlas
 
     logger.info(
         f"Created and saved post-curation atlas {new_atlas_uid} (from source atlas {source_atlas.atlas_uid}) "
@@ -2033,7 +2065,7 @@ def _prepare_manual_curation_record(
             rt_alignment_number,
             analysis_number,
             row.get('compound_name', ''),
-            row.get('auto_ided', False),
+            bool(row.get('auto_ided', False)),
             row.get('polarity', ''),
             row.get('chromatography', ''),
             float(row.get('mz_tolerance', 5.0)),
