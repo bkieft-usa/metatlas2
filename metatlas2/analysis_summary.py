@@ -1,18 +1,16 @@
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict
 from pathlib import Path
 import sys
 import json
 import os
-
-if TYPE_CHECKING:
-    from workflow_objects import AnalysisSummary
+from tqdm.notebook import tqdm
 
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.ticker import ScalarFormatter
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.patches import Rectangle
@@ -343,7 +341,7 @@ def _plot_hit_info_table(
 # =============================================================================
 
 def make_identification_figure(
-    summary_obj: AnalysisSummary,
+    summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     overwrite: bool = True,
 ) -> None:
@@ -379,13 +377,9 @@ def make_identification_figure(
 
     # ── Resolve output directory ─────────────────────────────────────────────
     if output_loc is None:
-        output_loc = (
-            Path(summary_obj.paths["project_directory"])
-            / "identification_figures"
-            / f"rt{rt_alignment_num}_analysis{analysis_num}"
-        )
+        raise ValueError("output_loc must be provided as a Path or string")
     else:
-        output_loc = Path(output_loc)
+        output_loc = Path(output_loc, "identification_figures")
     output_loc.mkdir(parents=True, exist_ok=True)
     logger.info("Exporting identification figures to %s", output_loc)
 
@@ -410,7 +404,7 @@ def make_identification_figure(
     _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
 
     # ── Per-compound figure loop ─────────────────────────────────────────────
-    for _, mc_row in manual_curation_df.reset_index(drop=True).iterrows():
+    for _, mc_row in tqdm(manual_curation_df.reset_index(drop=True).iterrows(), total=len(manual_curation_df), desc="Generating ID figures"):
         compound_name = mc_row.get("compound_name") or f"compound_{_}"
         inchi_key     = mc_row.get("inchi_key", "")
         adduct        = mc_row.get("adduct", "")
@@ -664,7 +658,7 @@ def _find_overlapping_compounds(
 
 
 def make_stats_table(
-    summary_obj: AnalysisSummary,
+    summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     output_filename: str = "Draft_Final_Identifications.xlsx",
     overwrite: bool = True,
@@ -729,7 +723,7 @@ def make_stats_table(
     # ── Build final_df row by row ─────────────────────────────────────────────
     rows: List[dict] = []
 
-    for compound_idx, mc_row in manual_curation_df.iterrows():
+    for compound_idx, mc_row in tqdm(manual_curation_df.iterrows(), total=len(manual_curation_df), desc="Making stats table"):
         compound_name = mc_row.get("compound_name") or f"compound_{compound_idx}"
         inchi_key     = mc_row.get("inchi_key",   "")
         adduct        = mc_row.get("adduct",       "")
@@ -1030,7 +1024,6 @@ def _render_eic_thumbnail(
         When given, fixes the y-axis upper limit (shared-scale mode).
         When *None*, the axis auto-scales to the data (independent mode).
     """
-    from matplotlib.ticker import ScalarFormatter
 
     if rt_arr and i_arr:
         ax.plot(rt_arr, i_arr, color="steelblue", linewidth=0.8)
@@ -1085,7 +1078,6 @@ def _write_compound_eic_pdf(
 
     *file_items* is a list of dicts with keys ``file_path``, ``rt_arr``, ``i_arr``.
     """
-    from matplotlib.backends.backend_pdf import PdfPages
 
     rt_min  = mc_row.get("rt_min",        np.nan)
     rt_max  = mc_row.get("rt_max",        np.nan)
@@ -1145,7 +1137,7 @@ def _write_compound_eic_pdf(
 
 
 def make_eic_thumbnails(
-    summary_obj: AnalysisSummary,
+    summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     overwrite: bool = True,
 ) -> None:
@@ -1215,7 +1207,7 @@ def make_eic_thumbnails(
     n_compounds = len(manual_curation_df)
     logger.info("Generating EIC thumbnail PDFs for %d compounds…", n_compounds)
 
-    for _, mc_row in manual_curation_df.iterrows():
+    for _, mc_row in tqdm(manual_curation_df.iterrows(), total=len(manual_curation_df), desc="Generating EIC thumbnails"):
         compound_name = mc_row.get("compound_name") or f"compound_{_}"
         inchi_key     = mc_row.get("inchi_key", "")
         adduct        = mc_row.get("adduct",    "")
@@ -1498,7 +1490,6 @@ def make_boxplots(
     overwrite:
         When *False*, skips PDF files that already exist on disk.
     """
-    from matplotlib.backends.backend_pdf import PdfPages
 
     project_db_path  = summary_obj.paths["project_db_path"]
     rt_alignment_num = summary_obj.rt_alignment_number
@@ -1718,25 +1709,25 @@ def run_all_summaries(
         logger.error("No manual curation entries found – aborting run_all_summaries.")
         return
 
-    # ── Step 1: Identification figures ───────────────────────────────────────
-    logger.info("Step 1/5: Identification figures…")
+    logger.info("Making Identification figures…")
     make_identification_figure(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    # ── Step 2: EIC thumbnails ────────────────────────────────────────────────
-    logger.info("Step 2/5: EIC thumbnails…")
+    logger.info("Making EIC thumbnails…")
     make_eic_thumbnails(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    # ── Step 3: Stats table (Excel) ───────────────────────────────────────────
-    logger.info("Step 3/5: Stats table…")
+    logger.info("Making Stats table…")
     make_stats_table(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    # ── Step 4: Boxplots ──────────────────────────────────────────────────────
-    logger.info("Step 4/5: Boxplots…")
+    logger.info("Making Boxplots…")
     make_boxplots(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    # ── Step 5: Manual curation CSV ───────────────────────────────────────────
-    logger.info("Step 5/5: Manual curation CSV…")
+    logger.info("Making Manual curation CSV…")
     make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    logger.info("Exporting post-curation atlas data CSV...")
+    summary_obj.post_curation_atlas_obj.to_dataframe().to_csv(
+        f"{Path(output_loc) / f'{summary_obj.post_curation_atlas_obj.atlas_uid}.csv'}", index=False
+    )
 
     logger.info("run_all_summaries: all outputs complete.")
 

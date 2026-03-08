@@ -291,7 +291,7 @@ def run_analysis_summary(
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
-    analysis_atlas_uid: str = None,
+    analysis_atlas: str = None,
     overwrite: bool = False,
 ) -> None:
     """
@@ -313,7 +313,7 @@ def run_analysis_summary(
 
     summary_obj.pre_curation_atlas_obj = Atlas.from_database(
         database_path=summary_obj.paths['project_db_path'],
-        atlas_uid=analysis_atlas_uid,
+        atlas_uid=analysis_atlas,
         main_db_path=summary_obj.paths['main_db_path']
     )
     
@@ -323,6 +323,6 @@ def run_analysis_summary(
     )
 
     asm.run_all_summaries(
-        summary_obj,
+        summary_obj=summary_obj,
         overwrite=overwrite,
     )

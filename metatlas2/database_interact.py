@@ -38,6 +38,8 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"atl-rta-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-rta-{uuid.uuid4().hex[:32]}"
     elif entity_type == "autoid_atlas":
         return f"atl-aid-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-aid-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "curated_atlas":
+        return f"atl-mcr-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-mcr-{uuid.uuid4().hex[:32]}"
     elif entity_type == "mz_rt":
         return f"mzrt-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"mzrt-{uuid.uuid4().hex[:32]}"
     elif entity_type == "compound":
@@ -55,7 +57,7 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
     elif entity_type == "ms2_hits":
         return f"ms2-hits-{uuid.uuid4().hex[:32]}"
     elif entity_type == "manual_curation":
-        return f"cmp-info-{uuid.uuid4().hex[:32]}"
+        return f"mcr-{uuid.uuid4().hex[:32]}"
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
@@ -1739,38 +1741,34 @@ def create_new_atlas_after_manual_curation(
     remove_flagged_compounds: bool = True
 ) -> "Atlas":
     """
+    Create a new Atlas object after manual curation
     """
     source_atlas = summary_obj.pre_curation_atlas_obj
-
-    # Build (inchi_key, adduct) -> first row of curated DataFrame
-    curation_lookup = {}
-    for mc in summary_obj.experimental_data.manual_curation:
-        curation_lookup[(mc.inchi_key, mc.adduct)] = mc.data.iloc[0]
 
     # Deep-copy every CompoundMZRT and apply curation updates
     new_compound_mzrts = {}
     for dict_key, cmzrt in source_atlas.compound_mzrts.items():
         new_cmzrt = copy.deepcopy(cmzrt)
-        curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
+        curation_row = summary_obj.manual_curation_df[(summary_obj.manual_curation_df['inchi_key'] == cmzrt.inchi_key) & (summary_obj.manual_curation_df['adduct'] == cmzrt.adduct)]
         # Check if curation_row has ms2_notes still as 'no selection' and error out and print message to address it
-        if curation_row is not None and str(curation_row.get('ms2_notes', '')).lower() == 'no selection':
-            raise ValueError(
-                f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) has ms2_notes as 'no selection' in manual curation. "
-                "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
-            )
+        # if not curation_row.empty and str(curation_row.iloc[0].get('ms2_notes', '')).lower() == 'no selection':
+        #     raise ValueError(
+        #         f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) has ms2_notes as 'no selection' in manual curation. "
+        #         "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
+        #     )
         # Remove compounds from original atlas if the ms1 note has 'remove' in it
-        if remove_flagged_compounds and curation_row is not None and 'remove' in str(curation_row.get('ms1_notes', '')).lower():
+        if remove_flagged_compounds and not curation_row.empty and 'remove' in str(curation_row.iloc[0].get('ms1_notes', '')).lower():
             logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove'.")
             continue
-        if curation_row is not None:
-            new_cmzrt.rt_peak = float(curation_row.get('rt_peak', cmzrt.rt_peak))
-            new_cmzrt.rt_min  = float(curation_row.get('rt_min',  cmzrt.rt_min))
-            new_cmzrt.rt_max  = float(curation_row.get('rt_max',  cmzrt.rt_max))
-            new_cmzrt.ms1_notes = str(curation_row.get('ms1_notes', cmzrt.ms1_notes))
-            new_cmzrt.ms2_notes = str(curation_row.get('ms2_notes', cmzrt.ms2_notes))
-            new_cmzrt.other_notes = str(curation_row.get('other_notes', 'no selection'))
-            new_cmzrt.analyst_notes = str(curation_row.get('analyst_notes', cmzrt.analyst_notes))
-            new_cmzrt.identification_notes = str(curation_row.get('identification_notes', cmzrt.identification_notes))
+        if not curation_row.empty:
+            new_cmzrt.rt_peak = float(curation_row.iloc[0].get('rt_peak', cmzrt.rt_peak))
+            new_cmzrt.rt_min  = float(curation_row.iloc[0].get('rt_min',  cmzrt.rt_min))
+            new_cmzrt.rt_max  = float(curation_row.iloc[0].get('rt_max',  cmzrt.rt_max))
+            new_cmzrt.ms1_notes = str(curation_row.iloc[0].get('ms1_notes', cmzrt.ms1_notes))
+            new_cmzrt.ms2_notes = str(curation_row.iloc[0].get('ms2_notes', cmzrt.ms2_notes))
+            new_cmzrt.other_notes = str(curation_row.iloc[0].get('other_notes', 'no selection'))
+            new_cmzrt.analyst_notes = str(curation_row.iloc[0].get('analyst_notes', cmzrt.analyst_notes))
+            new_cmzrt.identification_notes = str(curation_row.iloc[0].get('identification_notes', cmzrt.identification_notes))
         else:
             logger.warning(
                 f"No manual curation entry found for {cmzrt.inchi_key} / {cmzrt.adduct}, "
@@ -1780,7 +1778,7 @@ def create_new_atlas_after_manual_curation(
 
     # Generate a new atlas UID
     new_atlas_uid = _generate_uid(
-        "autoid_atlas",
+        "curated_atlas",
         decorator=(
             f"{source_atlas.analysis_type.lower()}-"
             f"{source_atlas.chromatography.lower()}-"
@@ -1795,6 +1793,7 @@ def create_new_atlas_after_manual_curation(
     new_atlas.source_atlas_uid = source_atlas.atlas_uid
     new_atlas.atlas_name = source_atlas.atlas_name + " (post-manual-curation)"
     new_atlas.atlas_description = source_atlas.atlas_description + " (post-manual-curation)"
+    new_atlas.atlas_type = "MANUALLY_CURATED"
     save_atlas_to_database(new_atlas, summary_obj.paths['project_db_path'], summary_obj.paths['main_db_path'])
 
     summary_obj.post_curation_atlas_obj = new_atlas
@@ -1811,6 +1810,7 @@ def create_new_atlas_after_auto_id(
     remove_unidentified_compounds: bool = True
 ) -> "Atlas":
     """
+    Create a new atlas after auto-identification
     """
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
 
@@ -1847,6 +1847,7 @@ def create_new_atlas_after_auto_id(
     new_atlas.source_atlas_uid = source_atlas.atlas_uid
     new_atlas.atlas_name = source_atlas.atlas_name + " (post-auto-identification)"
     new_atlas.atlas_description = source_atlas.atlas_description + " (post-auto-identification)"
+    new_atlas.atlas_type = "AUTO_IDED"
     save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
 
     auto_id_obj.post_autoid_atlas_obj = new_atlas

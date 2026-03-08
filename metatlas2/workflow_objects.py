@@ -722,6 +722,8 @@ class AnalysisSummary:
             analysis_number=self.analysis_number
         )
 
+        self.load_data()
+
     def load_data(self) -> None:
         """Load all analysis data tables from the project database and cache them as attributes.
         """
