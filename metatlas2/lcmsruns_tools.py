@@ -11,7 +11,8 @@ logger = lcf.get_logger('lcmsruns_tools')
 
 def filter_lcmsruns_list(
     lcmsruns: List["LCMSRun"], 
-    file_type: List[str] = None,
+    include_file_type: List[str] = None,
+    exclude_file_type: List[str] = None,
     file_format: str = "parquet",
     chromatography: str = None,
     polarity: str = None
@@ -29,14 +30,18 @@ def filter_lcmsruns_list(
         elif polarity.lower() in ["neg", "negative"]:
             polarity = "negative"
 
-    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: file_type={file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}...")
+    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: include_file_type={include_file_type}, exclude_file_type={exclude_file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}...")
     filtered_runs = lcmsruns.copy()
 
     # Fix: ensure file_type is always a list
-    if file_type:
-        if isinstance(file_type, str):
+    if include_file_type is not [None] or include_file_type is not None:
+        if isinstance(include_file_type, str):
             file_type = [file_type]
         filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() in [ft.lower() for ft in file_type]]
+    if exclude_file_type is not [None] or exclude_file_type is not None:
+        if isinstance(exclude_file_type, str):
+            file_type = [file_type]
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() not in [ft.lower() for ft in file_type]]
     if file_format:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'file_format', '').lower() == file_format.lower()]
     if chromatography:

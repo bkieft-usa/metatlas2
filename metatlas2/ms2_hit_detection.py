@@ -20,10 +20,10 @@ import database_interact as dbi
 # Initialize logger properly at module level
 logger = lcf.get_logger('ms2_hit_detection')
 
-def process_job(job, reference_df):
+def process_job(job, reference_df, workflow_params):
     inchi_key, adduct, file_path, ms2_df = job
     try:
-        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df)
+        ms2_hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, reference_df, workflow_params)
         return (inchi_key, adduct, file_path, ms2_hits_df)
     except Exception as e:
         logger.error(f"Error in hit detection for {inchi_key} {adduct} {file_path}: {e}")
@@ -31,7 +31,6 @@ def process_job(job, reference_df):
 
 def find_ms2_hits(
     auto_id_obj: "AutoID",
-    msms_refs_path: str
 ) -> "ExperimentalData":
     """
     Find MS2 hits for all compounds with MS2 data in the experimental dataset using a reference spectra database.
@@ -40,7 +39,7 @@ def find_ms2_hits(
     """
     from workflow_objects import MS2Hit
 
-    reference_df = ldt.load_msms_refs_file(Path(msms_refs_path))
+    reference_df = ldt.load_msms_refs_file(Path(auto_id_obj.paths['msms_refs_path']))
     if reference_df.empty:
         raise FileNotFoundError("No reference database found - skipping hit detection")
 
@@ -64,12 +63,12 @@ def find_ms2_hits(
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(process_job, job, reference_df) for job in jobs]
+            futures = [executor.submit(process_job, job, reference_df, auto_id_obj.workflow_params) for job in jobs]
             for future in tqdm(as_completed(futures), total=len(futures), desc="Finding MS2 hits"):
                 results.append(future.result())
     else:
         logger.info("Using sequential processing for hit detection...")
-        results = [process_job(job, reference_df) for job in tqdm(jobs, desc="Finding MS2 hits")]
+        results = [process_job(job, reference_df, auto_id_obj.workflow_params) for job in tqdm(jobs, desc="Finding MS2 hits")]
 
     # Assign results to ExperimentalData.ms2_hits as MS2Hit objects
     for inchi_key, adduct, filename, ms2_hits_df in results:
@@ -92,7 +91,12 @@ def find_ms2_hits(
 
     return
 
-def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: pd.DataFrame) -> pd.DataFrame:
+def _find_hits_from_ms2_df(
+    ms2_df: pd.DataFrame, 
+    inchi_key: str, 
+    reference_df: pd.DataFrame,
+    workflow_params: Dict[str, Any]
+) -> pd.DataFrame:
     """
     Find reference hits for all MS2 scans in a DataFrame.
     
@@ -100,6 +104,7 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
         ms2_df: MS2 data DataFrame with columns: rt, mz, i, precursor_MZ, precursor_intensity
         inchi_key: InChI key for compound
         reference_df: Reference spectra database
+        workflow_params: Dictionary of workflow parameters from config for hit detection thresholds, etc.
         
     Returns:
         DataFrame with one row per hit, columns include all hit metadata
@@ -110,7 +115,7 @@ def _find_hits_from_ms2_df(ms2_df: pd.DataFrame, inchi_key: str, reference_df: p
     all_hits = []
     
     # Set up MatchMS scoring
-    frag_mz_tolerance = 0.05
+    frag_mz_tolerance = workflow_params.get('ms2_frag_mz_tolerance', 0.05)
     cos = CosineHungarian(tolerance=frag_mz_tolerance)
     
     # Find matching reference spectra by inchi_key

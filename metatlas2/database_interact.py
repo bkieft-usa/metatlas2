@@ -61,6 +61,89 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
+def get_all_atlases_for_autoid(
+    auto_id_obj: "AutoIdentification",
+) -> List[str]:
+    """
+    Given a project database and an RT alignment number, return all atlases that match the RT alignment number, 
+    and return a list of Atlas uids
+    """
+
+    project_db_path = auto_id_obj.paths['project_db_path']
+    rt_alignment_number = auto_id_obj.rt_alignment_number
+    analysis_subset = auto_id_obj.analysis_subset
+    atlases = []
+
+    # Try to get RT-aligned atlases from database first
+    chromatography = getattr(auto_id_obj, 'chromatography', None)
+    with get_db_connection(project_db_path) as conn:
+        if analysis_subset:
+            # Build query with polarity and analysis_type filters
+            where_clauses = ["rt_alignment_number = ?", "atlas_type = 'RT-ALIGNED'"]
+            params = [rt_alignment_number]
+            if chromatography:
+                where_clauses.append("chromatography = ?")
+                params.append(chromatography)
+            pol_analysis_pairs = [tuple(subset.split('-')) for subset in analysis_subset]
+            pair_clauses = []
+            for pol, analysis_type in pol_analysis_pairs:
+                pair_clauses.append("(polarity = ? AND analysis_type = ?)")
+                params.extend([pol, analysis_type])
+            where_clauses.append("(" + " OR ".join(pair_clauses) + ")")
+            query = f"""
+                SELECT atlas_uid, chromatography, polarity, analysis_type
+                FROM atlases
+                WHERE {' AND '.join(where_clauses)}
+            """
+            results = conn.execute(query, params).fetchall()
+            atlases = [row[0] for row in results]
+        else: # get all atlases that can be found for that rt align number
+            where_clauses = ["rt_alignment_number = ?", "atlas_type = 'RT-ALIGNED'"]
+            params = [rt_alignment_number]
+            if chromatography:
+                where_clauses.append("chromatography = ?")
+                params.append(chromatography)
+            query = f"""
+                SELECT atlas_uid, chromatography, polarity, analysis_type
+                FROM atlases
+                WHERE {' AND '.join(where_clauses)}
+            """
+            results = conn.execute(query, params).fetchall()
+            atlases = [row[0] for row in results]
+
+    if atlases:
+        logger.info(f"Retrieved {len(atlases)} RT-aligned atlases for RT alignment number {rt_alignment_number} from database at {project_db_path}")
+        return atlases
+
+    # Fallback: Use atlas UIDs from config file attribute (e.g., analysis.yaml)
+    logger.warning(f"No RT-aligned atlases found for RT alignment number {rt_alignment_number} in database at {project_db_path}. Falling back to Atlas UIDs in config.")
+    config = auto_id_obj.config
+    atlas_entries = []
+    # Traverse config to collect all atlas UIDs
+    workflows = config.get('WORKFLOWS', {})
+    targeted = workflows.get('TARGETED_ANALYSES', {})
+    for chrom, chrom_dict in targeted.items():
+        for pol, pol_dict in chrom_dict.items():
+            for analysis_type, analysis_dict in pol_dict.items():
+                atlas_uid = analysis_dict.get('ATLAS', {}).get('uid', None)
+                if atlas_uid:
+                    atlas_entries.append({
+                        'uid': atlas_uid,
+                        'chrom': chrom,
+                        'pol': pol,
+                        'analysis_type': analysis_type
+                    })
+    # Filter if analysis_subset is provided
+    if analysis_subset:
+        analysis_filters = [tuple(subset.split('-')) for subset in analysis_subset]
+        for entry in atlas_entries:
+            if (entry['pol'], entry['analysis_type']) in analysis_filters:
+                atlases.append(entry['uid'])
+    else:
+        atlases = [entry['uid'] for entry in atlas_entries]
+    logger.info(f"Retrieved {len(atlases)} atlas UIDs from config file.")
+    return atlases
+
 def create_new_atlas_from_dataframe(
     atlas_df: pd.DataFrame, 
     atlas_name: str, 
@@ -1738,7 +1821,6 @@ def get_ms2_data_for_compound(
 
 def create_new_atlas_after_manual_curation(
     summary_obj: "AnalysisSummary",
-    remove_flagged_compounds: bool = True
 ) -> "Atlas":
     """
     Create a new Atlas object after manual curation
@@ -1751,14 +1833,14 @@ def create_new_atlas_after_manual_curation(
         new_cmzrt = copy.deepcopy(cmzrt)
         curation_row = summary_obj.manual_curation_df[(summary_obj.manual_curation_df['inchi_key'] == cmzrt.inchi_key) & (summary_obj.manual_curation_df['adduct'] == cmzrt.adduct)]
         # Check if curation_row has ms2_notes still as 'no selection' and error out and print message to address it
-        # if not curation_row.empty and str(curation_row.iloc[0].get('ms2_notes', '')).lower() == 'no selection':
-        #     raise ValueError(
-        #         f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) has ms2_notes as 'no selection' in manual curation. "
-        #         "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
-        #     )
+        if summary_obj.workflow_params.get('gui_require_all_evaluated', True) and not curation_row.empty and str(curation_row.iloc[0].get('ms2_notes', '')).lower() == 'no selection':
+            raise ValueError(
+                f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) has ms2_notes as 'no selection' in manual curation. "
+                "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
+            )
         # Remove compounds from original atlas if the ms1 note has 'remove' in it
-        if remove_flagged_compounds and not curation_row.empty and 'remove' in str(curation_row.iloc[0].get('ms1_notes', '')).lower():
-            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove'.")
+        if summary_obj.workflow_params.get('remove_flagged_compounds', True) and not curation_row.empty and 'remove' in str(curation_row.iloc[0].get('ms1_notes', '')).lower():
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove' and 'remove_flagged_compounds' is set to True in config.")
             continue
         if not curation_row.empty:
             new_cmzrt.rt_peak = float(curation_row.iloc[0].get('rt_peak', cmzrt.rt_peak))
@@ -1796,18 +1878,15 @@ def create_new_atlas_after_manual_curation(
     new_atlas.atlas_type = "MANUALLY_CURATED"
     save_atlas_to_database(new_atlas, summary_obj.paths['project_db_path'], summary_obj.paths['main_db_path'])
 
-    summary_obj.post_curation_atlas_obj = new_atlas
-
     logger.info(
         f"Created and saved post-curation atlas {new_atlas_uid} (from source atlas {source_atlas.atlas_uid}) "
         f"with ({len(new_compound_mzrts)} compounds)."
     )
 
-    return
+    return new_atlas
 
 def create_new_atlas_after_auto_id(
-    auto_id_obj: "AutoIdentification",
-    remove_unidentified_compounds: bool = True
+    auto_id_obj: "AutoIdentification"
 ) -> "Atlas":
     """
     Create a new atlas after auto-identification
@@ -1825,8 +1904,8 @@ def create_new_atlas_after_auto_id(
         new_cmzrt = copy.deepcopy(cmzrt)
         curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
         # Remove compounds from original atlas that were not auto-identified (curation_row has auto_ided=False)
-        if remove_unidentified_compounds and curation_row is not None and not curation_row.get('auto_ided', False):
-            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it was not auto-identified and remove_unidentified_compounds is True.")
+        if auto_id_obj.workflow_params.get('remove_unided_compounds', True) and curation_row is not None and not curation_row.get('auto_ided', False):
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it was not auto-identified and remove_unided_compounds is set to True in config.")
             continue
         new_compound_mzrts[dict_key] = new_cmzrt
 
@@ -1850,14 +1929,12 @@ def create_new_atlas_after_auto_id(
     new_atlas.atlas_type = "AUTO_IDED"
     save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
 
-    auto_id_obj.post_autoid_atlas_obj = new_atlas
-
     logger.info(
         f"Created and saved post-auto-identification atlas {new_atlas_uid} (from source atlas {source_atlas.atlas_uid}) "
         f"with ({len(new_compound_mzrts)} compounds)."
     )
 
-    return
+    return new_atlas
 
 def save_auto_identification_results_to_db(
     auto_id_obj: "AutoIdentification"

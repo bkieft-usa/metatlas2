@@ -332,10 +332,11 @@ class Atlas:
 
 @dataclass
 class NewCompound:
-    config: Dict[str, Any]
+    config_path: str
     overwrite_db: bool = False
 
     def run(self) -> Tuple[List[Compound], List[CompoundMZRT]]:
+        self.config = ldt.load_metatlas2_config(self.config_path)
         main_db_path = self.config["ENV"]["PATHS"]["main_database"]
 
         compounds = []
@@ -372,9 +373,10 @@ class NewCompound:
 
 @dataclass
 class NewAtlas:
-    config: Dict[str, Any]
+    config_path: str
 
     def run(self) -> List[Atlas]:
+        self.config = ldt.load_metatlas2_config(self.config_path)
         summary = []
         for chrom, pol_dict in self.config['ATLASES'].items():
             for pol, pol_config in pol_dict.items():
@@ -413,14 +415,15 @@ class NewAtlas:
 @dataclass
 class Project:
     project_name: str = field(default_factory=str)
-    config: Dict = field(default_factory=dict)
+    config_path: str = field(default_factory=str)
     paths: Dict[str, str] = field(default_factory=dict)
     lcmsruns: List['LCMSRun'] = field(default_factory=list)
 
-    def setup(self, project_name: str, config: dict, overwrite_existing: bool = False):
+    def setup(self, project_name: str, config_path: str, overwrite_existing: bool = False):
 
         self.project_name = project_name
-        self.config = config
+        self.config_path = config_path
+        self.config = ldt.load_metatlas2_config(self.config_path)
 
         logger.info(f"Setting up workflow paths for project {self.project_name}...")
         self.paths = _set_up_paths(
@@ -489,6 +492,8 @@ class RTAlign:
     project_name: str = None
 
     # Attributes added during analysis
+    pre_align_atlas_uid: Optional[str] = None
+    pre_align_atlas_obj: Optional[Atlas] = None
     rt_alignment_params: Dict[str, Any] = field(default_factory=dict)
     aligner_lcmsruns: List[LCMSRun] = field(default_factory=list)
     modeling_data: Optional[pd.DataFrame] = field(default_factory=pd.DataFrame)
@@ -499,13 +504,14 @@ class RTAlign:
     rt_alignment_model: Optional[Dict[str, Any]] = None
 
     # Paths and config
+    config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, config: dict, project_name: str, chromatography: str, rt_alignment_number: int):
+    def setup(self, config_path: str, project_name: str, chromatography: str, rt_alignment_number: int):
         """
         Set up RTAlign object using a Project object and RT alignment parameters.
         Populates paths, config, and relevant atlas UID.
@@ -513,10 +519,11 @@ class RTAlign:
 
         logger.info(f"Setting up RTAlign object for {chromatography} chromatography and RT alignment number {rt_alignment_number}...")
         self.rt_alignment_number = rt_alignment_number
-        self.chromatography = chromatography
         self.project_name = project_name
-        self.config = config
-        self.qc_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
+        self.config_path = config_path
+        self.config = ldt.load_metatlas2_config(self.config_path)
+        self.chromatography = self.config["WORKFLOWS"].get("RT_ALIGNMENT", {}).keys()[0]
+        self.pre_align_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
         self.rt_alignment_params = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('PARAMS', {})
 
         logger.info(f"Setting up workflow paths...")
@@ -597,6 +604,7 @@ class AutoIdentification:
     created_date: str = None
 
     # Attributes added during analysis
+    analysis_subset: Optional[List[str]] = None
     workflow_params: Dict[str, Any] = field(default_factory=dict)
     autoid_lcmsruns: List[LCMSRun] = field(default_factory=list)
     experimental_data: Optional[ExperimentalData] = None
@@ -604,13 +612,14 @@ class AutoIdentification:
     post_autoid_atlas_obj: Optional[Atlas] = None
 
     # Paths and config
+    config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int, analysis_atlas_uid: str):
+    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int, analysis_subset: Optional[List[str]] = None):
         """
         Set up AutoIdentification object.
         Populates paths, config, and relevant atlas UID.
@@ -618,9 +627,11 @@ class AutoIdentification:
         logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.analysis_atlas_uid = analysis_atlas_uid
-        self.config = config
+        self.config_path = config_path
+        self.config = ldt.load_metatlas2_config(self.config_path)
         self.project_name = project_name
+        self.analysis_subset = analysis_subset
+        self.chromatography = self.config["WORKFLOWS"].get("TARGETED_ANALYSES", {}).keys()[0]
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
@@ -630,6 +641,7 @@ class AutoIdentification:
             rt_alignment_number=self.rt_alignment_number,
             analysis_number=self.analysis_number
         )
+
 
 class AnalysisGUI:
     # Core metadata
@@ -642,13 +654,17 @@ class AnalysisGUI:
     created_date: str = None
 
     # Paths and config
+    config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
+
+    # Attributes added during analysis
+    workflow_params: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, config: dict, project_name: str, rt_alignment_number: int, analysis_number: int):
+    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
@@ -656,7 +672,8 @@ class AnalysisGUI:
         logger.info(f"Setting up AnalysisGUI object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.config = config
+        self.config_path = config_path
+        self.config = ldt.load_metatlas2_config(self.config_path)
         self.project_name = project_name
 
         logger.info(f"Setting up workflow paths...")
@@ -676,6 +693,7 @@ class AnalysisSummary:
     polarity: str = None
 
     # Attributes added during analysis
+    workflow_params: Dict[str, Any] = field(default_factory=dict)
     pre_curation_atlas_obj: Optional[Atlas] = None
     post_curation_atlas_obj: Optional[Atlas] = None
     summary_data: Optional[pd.DataFrame] = None
@@ -688,6 +706,7 @@ class AnalysisSummary:
     per_file_metrics_df: Optional[pd.DataFrame] = None
 
     # Paths and config
+    config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
@@ -696,11 +715,10 @@ class AnalysisSummary:
 
     def setup(
         self,
-        config: dict,
+        config_path: str,
         project_name: str,
         rt_alignment_number: int,
         analysis_number: int,
-        chromatography: str = None,
     ):
         """
         Set up AnalysisSummary object.
@@ -709,8 +727,9 @@ class AnalysisSummary:
         logger.info(f"Setting up AnalysisSummary object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.chromatography = chromatography
-        self.config = config
+        self.chromatography = self.config["WORKFLOWS"].get("RT_ALIGNMENT", {}).keys()[0]
+        self.config_path = config_path
+        self.config = ldt.load_metatlas2_config(self.config_path)
         self.project_name = project_name
 
         logger.info(f"Setting up workflow paths...")

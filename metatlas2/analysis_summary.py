@@ -1685,5 +1685,13 @@ def run_all_summaries(
     logger.info("Making Manual curation CSV…")
     make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("run_all_summaries: all outputs complete.")
+    logger.info("Exporting post-curation atlas data CSV...")
+    summary_obj.post_curation_atlas_obj.to_dataframe().to_csv(
+        f"{summary_obj.paths['analysis_output_dir']}/{summary_obj.post_curation_atlas_obj.atlas_uid}.csv", index=False
+    )
+
+    logger.info("Saving input yaml config to analysis output directory...")
+    with open(f"{summary_obj.paths['analysis_output_dir']}/analysis_config.yaml", "w") as f:
+        with open(summary_obj.config_path, "r") as original:
+            f.write(original.read())
 

@@ -18,12 +18,9 @@ import logging_config as lcf
 logger = lcf.get_logger('extract_data_from_parquet')
 
 def extract_eic_and_ms2_from_parquet(
-    atlas: "Atlas",
+    obj: "RTAlignment" or "AutoIdentification",
     stage: str,
-    lcmsruns: List["LCMSRun"],
-    workflow_params: dict,
     use_parallel: bool = True,
-    only_ms_level: int = None,
     max_workers: int = None
 ) -> "ExperimentalData":
     """
@@ -31,10 +28,9 @@ def extract_eic_and_ms2_from_parquet(
     Extract EIC and MS2 data directly from parquet files with optional parallel processing.
     
     Args:
-        atlas: Atlas object with attributes [atlas_uid, atlas_name, ...]
+        obj: RTAlignment or AutoIdentification object
         lcmsruns: List of LCMSRun objects
-        ppm_tolerance: m/z tolerance in ppm
-        extra_time: Extra RT time to extract beyond feature bounds
+        workflow_params: Dictionary containing workflow parameters
         use_parallel: Whether to use parallel processing (default: True)
         only_ms_level: If specified, only extract data for this MS level (1 or 2)
         max_workers: Maximum number of parallel workers (default: min(cpu_count, len(files), 8))
@@ -45,6 +41,11 @@ def extract_eic_and_ms2_from_parquet(
     """
     from workflow_objects import ExperimentalData, MS1Data, MS2Data
 
+    atlas = obj.pre_align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
+    lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns
+    workflow_params = obj.rt_alignment_params if stage == "rt_alignment" else obj.workflow_params
+    only_ms_level = 1 if stage == "rt_alignment" else None
+
     logger.info(f"Starting data extraction based on {atlas.atlas_uid} ({atlas.atlas_name}) for stage '{stage}' from {len(lcmsruns)} LCMS runs...")
 
     logger.info("Initiating an experimental data object to hold results during analysis...")
@@ -53,21 +54,16 @@ def extract_eic_and_ms2_from_parquet(
     project_files_list = [run.file_path for run in lcmsruns]
     logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_list)} project files...")
 
-    ppm_tolerance = workflow_params.get("ppm_error", 20.0)
-    extra_time = workflow_params.get("extra_time", 1)
-    logger.info(f"Using ppm_tolerance={ppm_tolerance} and extra_time={extra_time} for data extraction.")
-
     if max_workers is None:
         max_workers = min(mp.cpu_count(), len(project_files_list), 8)
     use_parallel = use_parallel and max_workers > 1 and len(project_files_list) > 1
 
     compound_mzrts = list(atlas.compound_mzrts.values())
-
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers...")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_file = {
-                executor.submit(_process_single_parquet_file, parquet_file, compound_mzrts, ppm_tolerance, extra_time, only_ms_level): parquet_file
+                executor.submit(_process_single_parquet_file, parquet_file, compound_mzrts, workflow_params, only_ms_level): parquet_file
                 for parquet_file in project_files_list
             }
 
@@ -101,7 +97,7 @@ def extract_eic_and_ms2_from_parquet(
         for parquet_file in tqdm(project_files_list, desc="Processing parquet files"):
             try:
                 file_results = _process_single_parquet_file(
-                    parquet_file, compound_mzrts, ppm_tolerance, extra_time, only_ms_level
+                    parquet_file, compound_mzrts, workflow_params, only_ms_level
                 )
                 for inchi_key, adduct_data in file_results.items():
                     for adduct, file_data in adduct_data.items():
@@ -129,8 +125,7 @@ def extract_eic_and_ms2_from_parquet(
 def _process_single_parquet_file(
     parquet_file: str, 
     compound_mzrts: list, 
-    ppm_tolerance: float, 
-    extra_time: float, 
+    workflow_params: Dict[str, Any], 
     only_ms_level: int = None
 ) -> Dict[str, Dict]:
     """Process a single parquet file - worker function for parallel processing."""    
@@ -157,8 +152,7 @@ def _process_single_parquet_file(
                 mz=compound_mzrt.mz,
                 rt_min=compound_mzrt.rt_min,
                 rt_max=compound_mzrt.rt_max,
-                ppm_tolerance=ppm_tolerance,
-                extra_time=extra_time
+                workflow_params=workflow_params
             )
             ms1_data = ms1_data.sort_values(by=['rt', 'i'], ascending=[True, False]).reset_index(drop=True)
             compound_data['ms1_data'] = ms1_data
@@ -168,8 +162,7 @@ def _process_single_parquet_file(
                 mz=compound_mzrt.mz,
                 rt_min=compound_mzrt.rt_min,
                 rt_max=compound_mzrt.rt_max,
-                ppm_tolerance=ppm_tolerance,
-                extra_time=extra_time
+                workflow_params=workflow_params
             )
             ms2_data = ms2_data.sort_values(by=['rt', 'mz'], ascending=[True, True]).reset_index(drop=True)
             compound_data['ms2_data'] = ms2_data
@@ -193,8 +186,7 @@ def _extract_ms1_from_parquet(
     mz: float,
     rt_min: float,
     rt_max: float,
-    ppm_tolerance: float = 5,
-    extra_time: float = 1
+    workflow_params: Dict[str, Any]
 ) -> pd.DataFrame:
     """
     Extract a single feature from a parquet file.
@@ -205,14 +197,15 @@ def _extract_ms1_from_parquet(
         mz: Target m/z value
         rt_min: Minimum retention time
         rt_max: Maximum retention time
-        ppm_tolerance: m/z tolerance in ppm
-        extra_time: Extra time to extract beyond rt_min/rt_max
+        workflow_params: Dictionary containing workflow parameters (e.g., ppm_tolerance, extra_time)
     
     Returns:
         DataFrame with columns: [compound_name, rt, mz, i]
     """
-    mz_min, mz_max = calculate_mz_bounds(mz, ppm_tolerance)
-    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, extra_time)
+    mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 20.0))
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 1.0))
+    minimum_intensity = workflow_params.get("ms1_min_peak_intensity", 0)
+    min_points = workflow_params.get("ms1_min_num_points", 1)
     
     # Read parquet with m/z filter (uses sorted index efficiently)
     df = pq.read_table(
@@ -221,10 +214,14 @@ def _extract_ms1_from_parquet(
             ('mz', '>=', mz_min),
             ('mz', '<=', mz_max),
             ('rt', '>=', rt_min),
-            ('rt', '<=', rt_max)
+            ('rt', '<=', rt_max),
+            ('i', '>=', minimum_intensity)
         ]
     ).to_pandas()
     
+    if len(df) < min_points:
+        return pd.DataFrame(columns=['rt', 'mz', 'i'])
+
     if not df.empty:
         return df[['rt', 'mz', 'i']]
     else:
@@ -235,8 +232,7 @@ def _extract_ms2_from_parquet(
     mz: float,
     rt_min: float,
     rt_max: float,
-    ppm_tolerance: float = 5,
-    extra_time: float = 0.75
+    workflow_params: Dict[str, Any]
 ) -> pd.DataFrame:
     """
     Extract MS2 feature from parquet file.
@@ -245,9 +241,9 @@ def _extract_ms2_from_parquet(
         DataFrame with columns: [compound_name, rt, mz, i, precursor_MZ,
                                  precursor_intensity, collision_energy]
     """
-    mz_min, mz_max = calculate_mz_bounds(mz, ppm_tolerance)
-    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, extra_time)
-    
+    mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 5.0))
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 1.0))
+
     # For MS2, filter by precursor m/z
     df = pq.read_table(
         parquet_file,

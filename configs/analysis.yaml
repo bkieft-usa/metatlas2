@@ -11,20 +11,10 @@ WORKFLOWS:
       ATLAS:
         uid: atl-ref-qc-hilicz-pos-b40e4175852c475189c5446f5667127e
       PARAMS:
-          use_existing_rt_alignment: true
-          ppm_error: 20.0
-          extra_time: 1.0
-          apply_model_to_min_max: true
-          polynomial_degree: 2
-          min_observations_per_compound: 1
-          min_compounds_for_modeling: 2
-          r2_threshold: 0.7
-          exclude_inchikeys:
-            - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
-    C18:
-      ATLAS:
-        uid:
-      PARAMS:
+          include_lcmsruns:
+            - QC
+          exclude_lcmsruns:
+            - NEG
           use_existing_rt_alignment: true
           ppm_error: 20.0
           extra_time: 1.0
@@ -34,7 +24,7 @@ WORKFLOWS:
           min_compounds_for_modeling: 2
           r2_threshold: 0.5
           exclude_inchikeys:
-            -
+            - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
   TARGETED_ANALYSES:
     HILICZ:
       POS:
@@ -44,11 +34,51 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+              - EXCTRL
+              - REFSTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 1e5
+            ms1_min_num_points: 5
             ppm_error: 5.0
-            min_peak_intensity: 100000.0
             extra_time: 1.0
             ms2_min_score: 0.1
             ms2_min_matches: 1
+            ms2_frag_mz_tolerance: 0.05
+            gui_require_all_evaluated: true
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXCTRL: red
+              TXCTRL: red
+              REFSTD: black
         ISTD:
           ATLAS:
             uid: atl-ref-istd-hilicz-pos-9f54594c18c5408889f76e16cbbcbd3e
@@ -69,76 +99,6 @@ WORKFLOWS:
             ppm_error: 5.0
             min_peak_intensity: 100000.0
             extra_time: 1.0
-            ms2_min_score: 0.1
-            ms2_min_matches: 2
-      NEG:
-        QC:
-          ATLAS:
-            uid:
-          PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
-            ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
-            ms2_min_score: 0.1
-            ms2_min_matches: 2
-        ISTD:
-          ATLAS:
-            uid:
-          PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
-            ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
-            ms2_min_score: 0.1
-            ms2_min_matches: 2
-        EMA:
-          ATLAS:
-            uid:
-          PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
-            ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
-            ms2_min_score: 0.1
-            ms2_min_matches: 2
-
-    C18:
-      POS:
-        QC:
-          ATLAS:
-            uid:
-          PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
-            ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
-            ms2_min_score: 0.1
-            ms2_min_matches: 1
-        ISTD:
-          ATLAS:
-            uid:
-          PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
-            ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
-            ms2_min_score: 0.1
-            ms2_min_matches: 2
-        EMA:
-          ATLAS:
-            uid:
-          PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
-            ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
             ms2_min_score: 0.1
             ms2_min_matches: 2
       NEG:
