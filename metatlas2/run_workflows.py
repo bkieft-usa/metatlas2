@@ -17,35 +17,9 @@ import analysis_gui as agu
 import analysis_summary as asm
 import notebook_generator as nbg
 
-from workflow_objects import NewCompound, NewAtlas, Atlas, Project, RTAlign, AutoIdentification, AnalysisGUI, AnalysisSummary
+from workflow_objects import Compound, Atlas, Project, RTAlign, AutoIdentification, AnalysisGUI, AnalysisSummary
 
-logger = lcf.get_logger('workflow_objects')
-
-def add_compounds_to_db(
-    config_path: str,
-    overwrite_db: bool = False,
-) -> None:
-    """
-    Creates main database (if needed) and loads compounds from config file paths.
-    """
-    new_compound_obj = NewCompound(
-        config_path=config_path,
-        overwrite_db=overwrite_db
-    )
-    
-    new_compound_obj.run()
-
-def add_atlases_to_db(
-    config_path: str
-) -> None:
-    """
-    Creates atlases from config file paths and saves them to the database.
-    """
-    new_atlas_obj = NewAtlas(
-        config_path=config_path
-    )
-    
-    new_atlas_obj.run()
+logger = lcf.get_logger('run_workflows')
 
 def run_project_setup(
     project_name: str,

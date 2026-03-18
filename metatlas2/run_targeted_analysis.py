@@ -101,6 +101,8 @@ def generate_slurm_script(args) -> str:
     if args.skip_setup:    extra_flags.append("--skip-setup")
     if args.skip_rt_align: extra_flags.append("--skip-rt-align")
     if args.skip_auto_id:   extra_flags.append("--skip-auto-id")
+    if args.analysis_subset:
+        extra_flags.append("--analysis-subset " + " ".join(args.analysis_subset))
     extra_flags_str = " \\\n    ".join(extra_flags)
 
     project_short = args.project[:30].replace(" ", "_")
@@ -118,7 +120,6 @@ def generate_slurm_script(args) -> str:
         project             = args.project,
         rt_align_num        = args.rt_align_num,
         analysis_num        = args.analysis_num,
-        analysis_subset     = args.analysis_subset if args.analysis_subset else None,
         extra_flags         = extra_flags_str,
     )
 

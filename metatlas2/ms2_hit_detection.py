@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm.notebook import tqdm
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 from matchms.similarity import CosineHungarian
 from matchms import Spectrum
@@ -166,6 +166,8 @@ def _find_hits_from_ms2_df(
                 query_spectrum_array = np.array([fragment_mz, fragment_intensity])
                 ref_spectrum_array = np.array([ref_mz, ref_intensity])
                 alignment_data = _align_spectra_for_plotting(query_spectrum_array, ref_spectrum_array, frag_mz_tolerance)
+                if len(alignment_data.get('matched_fragments', [])) < workflow_params.get('ms2_min_matching_frags', 1):
+                    continue
                 
                 # Create hit data row
                 hit_data = {

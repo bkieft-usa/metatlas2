@@ -1,8 +1,3 @@
-ENV:
-  PATHS:
-    main_database: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb
-    pubchem_cache: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/pubchem_cache/pubchem_global_cache.parquet
-
 PARAMS:
   use_pubchem_cache: true
   update_pubchem_cache: false

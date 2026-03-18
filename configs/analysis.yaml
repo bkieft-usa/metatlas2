@@ -1,15 +1,8 @@
-ENV:
-  PATHS:
-    raw_data_dir: /pscratch/sd/b/bkieft/metatlas_lite_data/raw_data/jgi
-    projects_dir: /pscratch/sd/b/bkieft/metatlas_lite_data/projects
-    main_database: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb
-    msms_refs: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/msms_refs/msms_refs_no_inosine15n.tab
-
 WORKFLOWS:
   RT_ALIGNMENT:
     HILICZ:
       ATLAS:
-        uid: atl-ref-qc-hilicz-pos-b40e4175852c475189c5446f5667127e
+        uid: atl-ref-qc-hilicz-pos-84d0c7806bc24a82a4c10558f0426ccc
       PARAMS:
           include_lcmsruns:
             - QC
@@ -30,7 +23,7 @@ WORKFLOWS:
       POS:
         QC:
           ATLAS:
-            uid: atl-ref-qc-hilicz-pos-b40e4175852c475189c5446f5667127e
+            uid: atl-ref-qc-hilicz-pos-84d0c7806bc24a82a4c10558f0426ccc
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
@@ -69,7 +62,7 @@ WORKFLOWS:
             ppm_error: 5.0
             extra_time: 1.0
             ms2_min_score: 0.1
-            ms2_min_matches: 1
+            ms2_min_matching_frags: 1
             ms2_frag_mz_tolerance: 0.05
             gui_require_all_evaluated: true
             gui_top_n_hits: 20
@@ -81,26 +74,106 @@ WORKFLOWS:
               REFSTD: black
         ISTD:
           ATLAS:
-            uid: atl-ref-istd-hilicz-pos-9f54594c18c5408889f76e16cbbcbd3e
+            uid: atl-ref-istd-hilicz-pos-10ba3c561afe46ab9931ff622acaac73
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+              - EXCTRL
+              - REFSTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 1e5
+            ms1_min_num_points: 5
             ppm_error: 5.0
-            min_peak_intensity: 100000.0
             extra_time: 1.0
             ms2_min_score: 0.1
-            ms2_min_matches: 2
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.05
+            gui_require_all_evaluated: true
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXCTRL: red
+              TXCTRL: red
+              REFSTD: black
         EMA:
           ATLAS:
             uid:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+              - EXCTRL
+              - REFSTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 1e5
+            ms1_min_num_points: 5
             ppm_error: 5.0
-            min_peak_intensity: 100000.0
             extra_time: 1.0
             ms2_min_score: 0.1
-            ms2_min_matches: 2
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.05
+            gui_require_all_evaluated: true
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXCTRL: red
+              TXCTRL: red
+              REFSTD: black
       NEG:
         QC:
           ATLAS:
@@ -108,30 +181,150 @@ WORKFLOWS:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+              - EXCTRL
+              - REFSTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 1e5
+            ms1_min_num_points: 5
             ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
+            extra_time: 1.0
             ms2_min_score: 0.1
-            ms2_min_matches: 2
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.05
+            gui_require_all_evaluated: true
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXCTRL: red
+              TXCTRL: red
+              REFSTD: black
         ISTD:
           ATLAS:
             uid:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+              - EXCTRL
+              - REFSTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 1e5
+            ms1_min_num_points: 5
             ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
+            extra_time: 1.0
             ms2_min_score: 0.1
-            ms2_min_matches: 2
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.05
+            gui_require_all_evaluated: true
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXCTRL: red
+              TXCTRL: red
+              REFSTD: black
         EMA:
           ATLAS:
             uid:
           PARAMS:
             use_existing_hits: false
             use_existing_analysis: false
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+              - EXCTRL
+              - REFSTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 1e5
+            ms1_min_num_points: 5
             ppm_error: 5.0
-            min_peak_intensity: 100000.0
-            extra_time: 0.0
+            extra_time: 1.0
             ms2_min_score: 0.1
-            ms2_min_matches: 2
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.05
+            gui_require_all_evaluated: true
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXCTRL: red
+              TXCTRL: red
+              REFSTD: black

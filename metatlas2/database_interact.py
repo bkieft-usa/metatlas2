@@ -7,6 +7,8 @@ import os
 import json
 import sys
 import copy
+import getpass
+from datetime import datetime
 from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -29,6 +31,13 @@ def get_db_connection(db_path: str):
         yield conn
     finally:
         conn.close()
+
+def get_provenance():
+    """Get provenance information for database records."""
+    return {
+        "analyst": getpass.getuser(),
+        "timestamp": datetime.now().isoformat()
+    }
 
 def _generate_uid(entity_type: str, decorator: str = None) -> str:
     """Generate a unique identifier for database entities."""
@@ -395,7 +404,7 @@ def save_rt_alignment_model_to_db(
     qc_files = [run.file_path for run in rt_align_obj.aligner_lcmsruns]
     project_db_path = Path(rt_align_obj.paths['project_db_path'])
     project_name = project_db_path.stem.replace('.duckdb', '')
-    prov = ldt.get_provenance()
+    prov = get_provenance()
 
     rt_alignment_model = rt_align_obj.rt_alignment_model
     modeling_data = (
@@ -513,7 +522,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
     logger.info(f"Adding {len(unique_inchi_keys)} compounds to database: {db_path}")
     
     pubchem_cache = pcr.load_or_create_pubchem_cache(pubchem_cache_path)
-    prov = ldt.get_provenance()
+    prov = get_provenance()
 
     with get_db_connection(db_path) as conn:
         # Get existing compounds in one query
@@ -671,7 +680,7 @@ def _prepare_compound_record(row: pd.Series, compound_uid: str, pubchem_cache: D
 def _prepare_compound_record_from_dict(compound_data: Dict) -> Optional[Tuple]:
     """Prepare compound record from dictionary data."""
     try:
-        prov = ldt.get_provenance()
+        prov = get_provenance()
         
         # Use provided compound_uid (should be set by calling function)
         compound_uid = compound_data.get('compound_uid')
@@ -747,7 +756,7 @@ def _prepare_reference_record(row: pd.Series, compound_uid: str, chromatography:
 def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]:
     """Prepare reference record from dictionary data."""
     try:
-        prov = ldt.get_provenance()
+        prov = get_provenance()
         
         return (
             _generate_uid("mz_rt", decorator="ref"),
@@ -788,7 +797,7 @@ def save_lcmsruns_to_db(
     Returns the number of files saved.
     """
     with get_db_connection(project_db_path) as conn:
-        prov = ldt.get_provenance()
+        prov = get_provenance()
 
         # Check if lcmsruns table exists and has rows
         table_exists = conn.execute(
@@ -1377,7 +1386,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
     """
 
     logger.info(f"Saving atlas {atlas_obj.atlas_name} to database at {db_path}...")
-    prov = ldt.get_provenance()
+    prov = get_provenance()
     with get_db_connection(db_path) as conn:
         if not main_db_path: # This will be a main database save, since db_path will be main
             
@@ -1953,7 +1962,7 @@ def save_auto_identification_results_to_db(
     exp_data_obj = auto_id_obj.experimental_data
 
     # Get time and analyst for provenance
-    prov = ldt.get_provenance()
+    prov = get_provenance()
 
     # Get compound_uid mappings
     inchi_keys = [ci.inchi_key for ci in exp_data_obj.manual_curation]

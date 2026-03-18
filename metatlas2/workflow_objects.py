@@ -16,6 +16,74 @@ import analysis_summary as asm
 
 logger = lcf.get_logger('workflow_objects')
 
+# Paths
+_BASE_DATA_DIR = Path("/pscratch/sd/b/bkieft/metatlas_lite_data")
+_RAW_DATA_DIR  = _BASE_DATA_DIR / "raw_data" / "jgi"
+_PROJECTS_DIR  = _BASE_DATA_DIR / "projects"
+_MAIN_DB_PATH  = _BASE_DATA_DIR / "databases" / "metatlas.duckdb"
+_MSMS_REFS_PATH = _BASE_DATA_DIR / "databases" / "msms_refs" / "msms_refs_no_inosine15n.tab"
+
+def _set_up_paths(
+    config: Dict,
+    project_name: str,
+    stage: str,
+    rt_alignment_number: int = None,
+    analysis_number: int = None,
+) -> Dict[str, str]:
+    """Set up and validate paths for project directory, raw data, and project database."""
+
+    project_dir = _PROJECTS_DIR / project_name
+
+    paths = {
+        "raw_data_directory": str(_RAW_DATA_DIR / project_name),
+        "project_directory":  str(project_dir),
+        "project_db_path":    str(project_dir / f"{project_name}.duckdb"),
+        "main_db_path":       str(_MAIN_DB_PATH),
+        "msms_refs_path":     str(_MSMS_REFS_PATH),
+    }
+
+    if not Path(paths["raw_data_directory"]).exists():
+        raise ValueError(f"Raw data directory not found: {paths['raw_data_directory']}")
+    if not _MAIN_DB_PATH.exists():
+        raise ValueError(f"Main database not found: {paths['main_db_path']}")
+
+    if stage == "project_setup":
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+    if stage in ["rt_alignment", "auto_identification", "analysis_gui"]:
+        if not project_dir.exists():
+            raise FileNotFoundError(
+                f"Project directory not found: {paths['project_directory']}. "
+                "Please run project setup first."
+            )
+        if not Path(paths["project_db_path"]).exists():
+            raise FileNotFoundError(
+                f"Project database not found: {paths['project_db_path']}. "
+                "Please run project setup first."
+            )
+
+    if stage == "auto_identification" and not _MSMS_REFS_PATH.exists():
+        raise FileNotFoundError(
+            f"MS/MS reference file not found: {paths['msms_refs_path']}. "
+            "Please ensure the path is correct in the config file."
+        )
+
+    if stage in ["rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
+        if rt_alignment_number is None:
+            raise ValueError("RT alignment number must be provided for this stage.")
+        rta_dir = project_dir / f"{project_name}_RTA{rt_alignment_number}"
+        rta_dir.mkdir(parents=True, exist_ok=True)
+        paths["rt_alignment_output_dir"] = str(rta_dir)
+
+    if stage in ["auto_identification", "analysis_gui", "analysis_summary"]:
+        if analysis_number is None:
+            raise ValueError("Both RT alignment number and analysis number must be provided for this stage.")
+        analysis_dir = project_dir / f"{project_name}_RTA{rt_alignment_number}_TGA{analysis_number}"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        paths["analysis_output_dir"] = str(analysis_dir)
+
+    return paths
+
 @dataclass
 class Compound:
     """
@@ -93,6 +161,43 @@ class Compound:
             'created_by': self.created_by,
             'created_date': self.created_date
         }
+
+    @classmethod
+    def create_from_config(cls, config_path: str, overwrite_db: bool = False) -> Tuple[List['Compound'], List['CompoundMZRT']]:
+        """Create and save Compounds and CompoundMZRTs from a config file."""
+        config = ldt.load_compound_config(config_path)
+        main_db_path = str(Path("/pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb"))
+
+        compounds = []
+        compound_mzrts = []
+        dbi.create_metatlas_database(main_db_path, overwrite=overwrite_db)
+
+        for chrom, pol_dict in config['COMPOUNDS'].items():
+            for pol, pol_config in pol_dict.items():
+                for file_path in pol_config.get('PATHS', []):
+                    if not file_path:
+                        logger.debug(f"Skipping empty file path for {chrom}/{pol}")
+                        continue
+                    logger.info(f"Processing compound file: {file_path}")
+                    compounds_df = ldt.load_compound_input(file_path)
+                    pcr.retrieve_pubchem_info(
+                        compounds=compounds_df,
+                        pubchem_cache_path=str(Path("/pscratch/sd/b/bkieft/metatlas_lite_data/databases/pubchem_cache/pubchem_global_cache.parquet")),
+                        use_pubchem_cache=config["PARAMS"].get("use_pubchem_cache", True),
+                        update_pubchem_cache=config["PARAMS"].get("update_pubchem_cache", False)
+                    )
+                    for _, row in compounds_df.iterrows():
+                        try:
+                            compound = cls.from_atlas_row(row)
+                            compounds.append(compound)
+                            compound_mzrt = CompoundMZRT.from_atlas_row(row)
+                            compound_mzrt.source = file_path
+                            compound_mzrts.append(compound_mzrt)
+                        except Exception as e:
+                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('compound_name', 'Unknown')}: {e}")
+
+        dbi.batch_save_compounds_and_mzrts(main_db_path, compounds, compound_mzrts)
+        return
 
 @dataclass
 class CompoundMZRT:
@@ -329,56 +434,15 @@ class Atlas:
         logger.info(f"Loading atlas with UID {atlas_uid} from database...")
         return cls.from_dataframe(dbi.get_atlas_compounds_table(database_path, atlas_uid, main_db_path))
 
-
-@dataclass
-class NewCompound:
-    config_path: str
-    overwrite_db: bool = False
-
-    def run(self) -> Tuple[List[Compound], List[CompoundMZRT]]:
-        self.config = ldt.load_metatlas2_config(self.config_path)
-        main_db_path = self.config["ENV"]["PATHS"]["main_database"]
-
-        compounds = []
-        compound_mzrts = []
-        dbi.create_metatlas_database(main_db_path, overwrite=self.overwrite_db)
-
-        for chrom, pol_dict in self.config['COMPOUNDS'].items():
-            for pol, pol_config in pol_dict.items():
-                for file_path in pol_config.get('PATHS', []):
-                    if not file_path:
-                        logger.debug(f"Skipping empty file path for {chrom}/{pol}")
-                        continue
-                    logger.info(f"Processing compound file: {file_path}")
-                    compounds_df = ldt.load_compound_input(file_path)
-                    pcr.retrieve_pubchem_info(
-                        compounds=compounds_df, 
-                        pubchem_cache_path=self.config["ENV"]["PATHS"]["pubchem_cache"], 
-                        use_pubchem_cache=self.config["PARAMS"].get("use_pubchem_cache", True), 
-                        update_pubchem_cache=self.config["PARAMS"].get("update_pubchem_cache", False)
-                        )
-                    for _, row in compounds_df.iterrows():
-                        try:
-                            compound = Compound.from_atlas_row(row)
-                            compounds.append(compound)
-                            compound_mzrt = CompoundMZRT.from_atlas_row(row)
-                            compound_mzrt.source = file_path
-                            compound_mzrts.append(compound_mzrt)
-                        except Exception as e:
-                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('compound_name', 'Unknown')}: {e}")
-
-        dbi.batch_save_compounds_and_mzrts(main_db_path, compounds, compound_mzrts)
-
-        return
-
-@dataclass
-class NewAtlas:
-    config_path: str
-
-    def run(self) -> List[Atlas]:
-        self.config = ldt.load_metatlas2_config(self.config_path)
+    @classmethod
+    def create_from_config(cls, config_path: str) -> List['Atlas']:
+        """Create and save Atlas objects from a config file."""
+        config = ldt.load_atlas_config(config_path)
+        main_db_path = str(Path("/pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb"))
+        
+        atlases = []
         summary = []
-        for chrom, pol_dict in self.config['ATLASES'].items():
+        for chrom, pol_dict in config['ATLASES'].items():
             for pol, pol_config in pol_dict.items():
                 for analysis_type, atlas_info in pol_config.items():
                     if not atlas_info.get('path'):
@@ -394,11 +458,12 @@ class NewAtlas:
                             chromatography=chrom,
                             polarity=pol,
                             atlas_file_path=atlas_info['path'],
-                            main_db_path=self.config["ENV"]["PATHS"]["main_database"]
+                            main_db_path=main_db_path
                         )
-                        dbi.save_atlas_to_database(atlas_obj, self.config["ENV"]["PATHS"]["main_database"])
+                        dbi.save_atlas_to_database(atlas_obj, main_db_path)
                         logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
                         atlas_obj.validate()
+                        atlases.append(atlas_obj)
                         summary.append({
                             'atlas_uid': atlas_obj.atlas_uid,
                             'atlas_name': atlas_obj.atlas_name,
@@ -406,10 +471,10 @@ class NewAtlas:
                         })
                     except Exception as e:
                         logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
+
         logger.info("Atlas creation summary:")
         for info in summary:
             logger.info(f"Atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
-
         return
 
 @dataclass
@@ -642,7 +707,6 @@ class AutoIdentification:
             analysis_number=self.analysis_number
         )
 
-
 class AnalysisGUI:
     # Core metadata
     analysis_uid: str = None
@@ -784,62 +848,3 @@ class AnalysisSummary:
             len(self.ms2_raw_all_df),
             len(self.ms2_hits_all_df),
         )
-
-def _set_up_paths(
-    config: Dict, 
-    project_name: str, 
-    stage: str, 
-    rt_alignment_number: int = None, 
-    analysis_number: int = None
-) -> Tuple[str, str, str]:
-    """Set up and validate paths for project directory, raw data, and project database"""
-    
-    workflow_paths = {}
-
-    workflow_paths['raw_data_directory'] = str(Path(config['ENV']['PATHS']['raw_data_dir']) / project_name)
-    workflow_paths['project_directory'] = str(Path(config['ENV']['PATHS']['projects_dir']) / project_name)
-    workflow_paths['project_db_path'] = str(Path(workflow_paths['project_directory']) / f"{project_name}.duckdb")
-    workflow_paths['main_db_path'] = config["ENV"]["PATHS"]["main_database"]
-    workflow_paths['msms_refs_path'] = config["ENV"]["PATHS"]["msms_refs"]
-
-    if not Path(workflow_paths['raw_data_directory']).exists():
-        raise ValueError(f"Raw data directory not found: {workflow_paths['raw_data_directory']}")
-    
-    if not Path(workflow_paths['main_db_path']).exists():
-        raise ValueError(f"Main database not found: {workflow_paths['main_db_path']}.")
-
-    if stage == "project_setup":
-        Path(workflow_paths['project_directory']).mkdir(parents=True, exist_ok=True)
-
-    if stage in ["rt_alignment", "auto_identification", "analysis_gui"]:
-        if not Path(workflow_paths['project_db_path']).exists():
-            raise FileNotFoundError(
-                f"Project database not found: {workflow_paths['project_db_path']}. "
-                "Please run project setup first."
-            )
-        if not Path(workflow_paths['project_directory']).exists():
-            raise FileNotFoundError(
-                f"Project directory not found: {workflow_paths['project_directory']}. "
-                "Please run project setup first."
-            )
-
-    if stage == "auto_identification":
-        if not Path(workflow_paths['msms_refs_path']).exists():
-            raise FileNotFoundError(
-                f"MS/MS reference file not found: {workflow_paths['msms_refs_path']}. "
-                "Please ensure the path is correct in the config file."
-            )
-
-    if stage in ["rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
-        if rt_alignment_number is None:
-            raise ValueError("RT alignment number must be provided for this stage.")
-        workflow_paths['rt_alignment_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}")
-        Path(workflow_paths['rt_alignment_output_dir']).mkdir(parents=True, exist_ok=True)
-    
-    if stage in ["auto_identification", "analysis_gui", "analysis_summary"]:
-        if rt_alignment_number is None or analysis_number is None:
-            raise ValueError("Both RT alignment number and analysis number must be provided for this stage.")
-        workflow_paths['analysis_output_dir'] = str(Path(workflow_paths['project_directory']) / f"{project_name}_RTA{rt_alignment_number}_TGA{analysis_number}")
-        Path(workflow_paths['analysis_output_dir']).mkdir(parents=True, exist_ok=True)
-
-    return workflow_paths

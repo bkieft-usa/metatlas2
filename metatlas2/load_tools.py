@@ -2,10 +2,8 @@ import pandas as pd
 import numpy as np
 import yaml
 import ast
-import getpass
 import sys
 from pathlib import Path
-from datetime import datetime
 from typing import Dict, Any, List
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
@@ -73,27 +71,22 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
         config = yaml.safe_load(f)
     
     # Define expected top-level structure
-    required_sections = ['ENV', 'WORKFLOWS']
+    required_sections = ['WORKFLOWS']
+    required_subsections = ["RT_ALIGNMENT", "TARGETED_ANALYSES"]
     
     # Validate required sections exist
     for section in required_sections:
         if section not in config:
             raise ValueError(f"Missing required configuration section: {section}")
     
-    # Validate ENV section
-    if 'PATHS' not in config['ENV']:
-        raise ValueError("Missing 'PATHS' section in ENV configuration")
-    required_paths = ['projects_dir', 'main_database', 'msms_refs']
-    for path_key in required_paths:
-        if path_key not in config['ENV']['PATHS']:
-            raise ValueError(f"Missing required path: {path_key}")
-    
-    # Validate WORKFLOWS section structure
-    workflows = config['WORKFLOWS']
+    # Validate required subsections in WORKFLOWS
+    for subsection in required_subsections:
+        if subsection not in config['WORKFLOWS']:
+            raise ValueError(f"Missing required WORKFLOWS subsection: {subsection}")
     
     # Validate RT_ALIGNMENT section if present
-    if 'RT_ALIGNMENT' in workflows:
-        rt_alignment = workflows['RT_ALIGNMENT']
+    if 'RT_ALIGNMENT' in config['WORKFLOWS']:
+        rt_alignment = config['WORKFLOWS']['RT_ALIGNMENT']
         for chromatography, chrom_config in rt_alignment.items():
             if 'ATLAS' not in chrom_config:
                 raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS section")
@@ -117,10 +110,17 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                 params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
                 params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
                 params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
-    
+
+                # include/exclude lcmsruns: list or None
+                params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
+                params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
+
+                # exclude_inchikeys: list or empty
+                params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
+
     # Validate TARGETED_ANALYSES section if present
-    if 'TARGETED_ANALYSES' in workflows:
-        targeted = workflows['TARGETED_ANALYSES']
+    if 'TARGETED_ANALYSES' in config['WORKFLOWS']:
+        targeted = config['WORKFLOWS']['TARGETED_ANALYSES']
         for chromatography, chrom_config in targeted.items():
             for polarity, pol_config in chrom_config.items():
                 for analysis_name, analysis_config in pol_config.items():
@@ -138,17 +138,58 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                     # Validate and convert analysis parameters if present
                     if 'PARAMS' in analysis_config:
                         params = analysis_config['PARAMS']
+
+                        # Boolean workflow flags
                         params['use_existing_hits'] = bool(params.get('use_existing_hits', False))
                         params['use_existing_analysis'] = bool(params.get('use_existing_analysis', False))
-                        params['default_ppm_error'] = float(params.get('default_ppm_error', 5.0))
-                        params['min_peak_intensity'] = float(params.get('min_peak_intensity', 100000.0))
+                        params['do_alignment'] = bool(params.get('do_alignment', True))
+                        params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
+                        params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
+                        params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
+
+                        # MS1 parameters
+                        params['ppm_error'] = float(params.get('ppm_error', 5.0))
                         params['extra_time'] = float(params.get('extra_time', 0.0))
+                        params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
+                        params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
+
+                        # MS2 parameters
                         params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
-                        params['ms2_min_matches'] = int(params.get('ms2_min_matches', 1))
-    
-    # Add config path for reference
-    config['ENV']['PATHS']['config_path'] = str(Path(config_path).resolve())
-    
+                        params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
+                        params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
+
+                        # include_lcmsruns: flat list
+                        params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
+
+                        # exclude_lcmsruns: nested dict of lists (keyed by workflow step)
+                        # e.g. {data_extraction: [...], gui: [...], ...}
+                        excl = params.get('exclude_lcmsruns')
+                        if excl is None:
+                            params['exclude_lcmsruns'] = {}
+                        elif isinstance(excl, dict):
+                            params['exclude_lcmsruns'] = {
+                                step: list(runs) if runs else []
+                                for step, runs in excl.items()
+                            }
+                        elif isinstance(excl, list):
+                            # Backwards compatibility: flat list -> wrap under 'data_extraction'
+                            logger.warning(
+                                f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name}: "
+                                f"exclude_lcmsruns is a flat list; wrapping under 'data_extraction'"
+                            )
+                            params['exclude_lcmsruns'] = {'data_extraction': list(excl)}
+                        else:
+                            raise ValueError(
+                                f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name}: "
+                                f"exclude_lcmsruns must be a dict or list"
+                            )
+
+                        # GUI parameters
+                        params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
+                        params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 20))
+                        gui_colors = params.get('gui_lcmsruns_colors')
+                        params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
+
     logger.info(f"Loaded metatlas2 configuration from {config_path}")
     
     return config
@@ -159,23 +200,13 @@ def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
         atlas_config = yaml.safe_load(f)
     
     # Validate required fields
-    required_fields = ['ENV', 'ATLASES']
+    required_fields = ['ATLASES']
     for field in required_fields:
         if field not in atlas_config:
             raise ValueError(f"Missing required atlas configuration field: {field}")
 
-    # Validate ENV section
-    if 'PATHS' not in atlas_config['ENV']:
-        raise ValueError("Missing 'PATHS' section in ENV configuration")
-    required_paths = ['main_database']
-    for path_key in required_paths:
-        if path_key not in atlas_config['ENV']['PATHS']:
-            raise ValueError(f"Missing required path: {path_key}")
-
-    # Validate ATLASES section structure
-    atlases = atlas_config['ATLASES']
-    
-    for chromatography, chrom_config in atlases.items():
+    # Validate ATLASES section structure    
+    for chromatography, chrom_config in atlas_config['ATLASES'].items():
         if not isinstance(chrom_config, dict):
             raise ValueError(f"Invalid chromatography configuration for {chromatography}")
         
@@ -212,27 +243,49 @@ def load_compound_config(compound_config_path: str) -> Dict[str, Any]:
         compound_config = yaml.safe_load(f)
 
     # Validate required fields
-    required_fields = ['ENV', 'COMPOUNDS']
+    required_fields = ['PARAMS', 'COMPOUNDS']
     for field in required_fields:
         if field not in compound_config:
             raise ValueError(f"Missing required compound configuration field: {field}")
 
-    # Validate ENV section
-    if 'PATHS' not in compound_config['ENV']:
-        raise ValueError("Missing 'PATHS' section in ENV configuration")
-    required_paths = ['main_database', 'pubchem_cache']
-    for path_key in required_paths:
-        if path_key not in compound_config['ENV']['PATHS']:
-            raise ValueError(f"Missing required path: {path_key}")
+    # Validate PARAMS section
+    params = compound_config['PARAMS']
+    params['use_pubchem_cache'] = bool(params.get('use_pubchem_cache', True))
+    params['update_pubchem_cache'] = bool(params.get('update_pubchem_cache', False))
+
+    # Validate COMPOUNDS section
+    for chromatography, chrom_config in compound_config['COMPOUNDS'].items():
+        if not isinstance(chrom_config, dict):
+            raise ValueError(f"Invalid chromatography configuration for {chromatography}")
+
+        for polarity, pol_config in chrom_config.items():
+            if not isinstance(pol_config, dict):
+                raise ValueError(f"Invalid polarity configuration for {chromatography}/{polarity}")
+
+            if 'PATHS' not in pol_config:
+                raise ValueError(f"Missing PATHS in {chromatography}/{polarity}")
+
+            if not isinstance(pol_config['PATHS'], list):
+                raise ValueError(f"PATHS must be a list in {chromatography}/{polarity}")
+
+            # Normalize paths: filter None/empty, convert to strings, warn if missing
+            validated_paths = []
+            for path in pol_config['PATHS']:
+                if not path:
+                    continue
+                path_str = str(path)
+                if not Path(path_str).exists():
+                    logger.warning(
+                        f"Compound input file not found: {path_str} "
+                        f"for {chromatography}/{polarity}"
+                    )
+                validated_paths.append(path_str)
+
+            pol_config['PATHS'] = validated_paths
+
+    logger.info(f"Loaded compound configuration from {compound_config_path}")
 
     return compound_config
-
-def get_provenance():
-    """Get provenance information for database records."""
-    return {
-        "analyst": getpass.getuser(),
-        "timestamp": datetime.now().isoformat()
-    }
 
 def load_compound_input(file_path: str) -> pd.DataFrame:
     """Load compound input file (TSV/CSV) and validate required columns."""

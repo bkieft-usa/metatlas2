@@ -57,19 +57,15 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
     param_keys = [
         "ms1_min_peak_intensity",
         "ms1_min_num_points",
-        "ppm_error",
-        "extra_time",
         "ms2_min_score",
-        "ms2_min_matches",
-        "ms2_frag_mz_tolerance",
-        "gui_require_all_evaluated",
+        "ms2_min_matching_frags",
         "gui_lcmsruns_colors",
     ]
     src = "# Parameters to override for GUI analysis\n"
     src += "override_parameters = {\n"
     for key in param_keys:
-        value = params.get(key, None)
-        src += f"    '{key}': {repr(value)},\n"
+        current_value = params.get(key, None)
+        src += f"    '{key}': None # current value: {repr(current_value)}\n"
     src += "}\n"
     src += "# Edit override_parameters as needed before running the GUI cell."
     return nbformat.v4.new_code_cell(src)

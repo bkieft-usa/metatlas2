@@ -1,7 +1,3 @@
-ENV:
-  PATHS:
-    main_database: /pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb
-
 ATLASES:
   HILICZ:
     POS:

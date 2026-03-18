@@ -2,6 +2,8 @@ import pandas as pd
 import time
 import re
 import sys
+import getpass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
 from tqdm.notebook import tqdm
@@ -14,6 +16,13 @@ import logging_config as lcf
 
 # Initialize logger properly at module level
 logger = lcf.get_logger('pubchem_retrieval')
+
+def get_provenance():
+    """Get provenance information for database records."""
+    return {
+        "analyst": getpass.getuser(),
+        "timestamp": datetime.now().isoformat()
+    }
 
 def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
     """Get comprehensive compound data from PubChem using InChI key."""
@@ -73,7 +82,7 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
         return compound_data
         
     except Exception as e:
-        logger.error(f"Error retrieving PubChem data for {inchi_key}: {e}")
+        logger.warning(f"Error retrieving PubChem data for {inchi_key}: {e}")
         return None
 
 def _filter_synonym_list(synonyms: List[str]) -> str:
@@ -181,7 +190,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
     # Load existing global cache
     pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path, use_cache=use_pubchem_cache)
 
-    prov = ldt.get_provenance()
+    prov = get_provenance()
     unique_inchi_keys = compounds['inchi_key'].dropna().unique()
 
     # Determine which compounds need API lookup
@@ -223,11 +232,9 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
                     updated_entries += 1
                 else:
                     new_entries += 1
-            else:
-                logger.warning(f"No PubChem data found for {inchi_key}")
 
             # Be respectful to PubChem API
-            time.sleep(0.25)
+            time.sleep(0.5)
         
         # Save cache IMMEDIATELY after fetching to persist for next file
         if use_pubchem_cache or update_pubchem_cache:

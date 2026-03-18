@@ -2,6 +2,7 @@ import json, os, time, sys, uuid, threading
 import numpy as np, pandas as pd
 import plotly.graph_objects as go
 import dash
+from typing import Dict, Any
 from dash import dcc, html, ctx, Input, Output, State, Patch
 import dash_bootstrap_components as dbc
 from dash_extensions import EventListener
@@ -84,14 +85,80 @@ def build_dash_app(
     project_path = analysis_gui_obj.paths["project_db_path"]
     rt_alignment = analysis_gui_obj.rt_alignment_number
     analysis_num = analysis_gui_obj.analysis_number
-    lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
     remove_unidentified_compounds = analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
+    config_parameters_overridden = _parse_override_parameters(override_parameters)
 
     manual_curation_df = dbi.get_manual_curation_entries(project_path, rt_alignment, analysis_num, remove_unidentified_compounds)
     ms1_df  = dbi.get_ms1_data_for_compound(project_path, None, None, rt_alignment, analysis_num)
     ms2_df  = dbi.get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num)
     ms2_hits_df = dbi.get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num)
+
+    # ── upfront compound filtering based on override_parameters ───────────
+    def _compound_passes_filters(row):
+        inchi, adduct = row["inchi_key"], row["adduct"]
+        rt_min, rt_max = float(row["rt_min"]), float(row["rt_max"])
+
+        ms1_min_pts   = config_parameters_overridden.get("ms1_min_num_points")     if config_parameters_overridden else None
+        ms1_min_int   = config_parameters_overridden.get("ms1_min_peak_intensity") if config_parameters_overridden else None
+        if ms1_min_pts is not None or ms1_min_int is not None:
+            ms1_sub = ms1_df[(ms1_df["inchi_key"] == inchi) & (ms1_df["adduct"] == adduct)]
+            passing_traces = 0
+            for _, r in ms1_sub.iterrows():
+                try:
+                    rt_arr, int_arr = json.loads(r["raw_spectrum"])
+                    if ms1_min_pts is not None and len(rt_arr) < ms1_min_pts:
+                        continue
+                    if ms1_min_int is not None and max(int_arr) < ms1_min_int:
+                        continue
+                    passing_traces += 1
+                except Exception:
+                    continue
+            if passing_traces == 0:
+                return False
+
+        ms2_min_score = config_parameters_overridden.get("ms2_min_score")          if config_parameters_overridden else None
+        ms2_min_frags = config_parameters_overridden.get("ms2_min_matching_frags") if config_parameters_overridden else None
+        if ms2_min_score is not None or ms2_min_frags is not None:
+            ms2_sub = ms2_df[
+                (ms2_df["inchi_key"] == inchi) & (ms2_df["adduct"] == adduct) &
+                (ms2_df["rt"] >= rt_min) & (ms2_df["rt"] <= rt_max)
+            ]
+            if ms2_sub.empty:
+                return False
+            hits_sub = ms2_hits_df[
+                (ms2_hits_df["inchi_key"] == inchi) & (ms2_hits_df["adduct"] == adduct) &
+                (ms2_hits_df["rt"] >= rt_min) & (ms2_hits_df["rt"] <= rt_max)
+            ]
+            if hits_sub.empty:
+                return False
+            merged = pd.merge(ms2_sub, hits_sub, on=["inchi_key", "adduct", "file_path", "rt"], how="left")
+            merged["score"] = merged["score"].fillna(0)
+            if ms2_min_score is not None:
+                merged = merged[merged["score"] >= ms2_min_score]
+            if ms2_min_frags is not None:
+                merged = merged[merged["num_matches"] >= ms2_min_frags]
+            if merged.empty:
+                return False
+
+        return True
+
+    if config_parameters_overridden:
+        n_before = len(manual_curation_df)
+        mask = manual_curation_df.apply(_compound_passes_filters, axis=1)
+        manual_curation_df = manual_curation_df[mask].reset_index(drop=True)
+        n_after = len(manual_curation_df)
+        if n_before != n_after:
+            logger.info(
+                "Override parameter filtering removed %d/%d compounds "
+                "(ms2_min_score=%s, ms2_min_matching_frags=%s, "
+                "ms1_min_peak_intensity=%s, ms1_min_num_points=%s)",
+                n_before - n_after, n_before,
+                config_parameters_overridden.get("ms2_min_score"),
+                config_parameters_overridden.get("ms2_min_matching_frags"),
+                config_parameters_overridden.get("ms1_min_peak_intensity"),
+                config_parameters_overridden.get("ms1_min_num_points"),
+            )
 
     compound_options = [
         {"label": f"{i+1}: {row['compound_name']}", "value": i}
@@ -132,6 +199,15 @@ def build_dash_app(
 
     def _rt_bounds_from_row(row):
         return float(row["rt_min"]), float(row["rt_max"])
+    
+    def _parse_override_parameters(override_parameters: Dict[str, Any] = None) -> Dict[str, Any]:
+        if override_parameters is None:
+            return None
+        parsed = {}
+        for key, val in override_parameters.items():
+            if val is not None:
+                parsed[key] = val
+        return parsed
 
     def _load_state(compound_idx, ms2_idx=0, session_id=None, edit_seq=0):
         row = _compound_row(compound_idx)
@@ -373,6 +449,10 @@ def build_dash_app(
         else:
             merged = pd.merge(ms2_sub, hits_sub, on=["inchi_key", "adduct", "file_path", "rt"], how="left")
             merged["score"] = merged["score"].fillna(0)
+            if config_parameters_overridden.get("ms2_min_score", None) is not None:
+                merged = merged[merged["score"] >= config_parameters_overridden["ms2_min_score"]]
+            if config_parameters_overridden.get("ms2_min_matching_frags", None) is not None:
+                merged = merged[merged["num_matches"] >= config_parameters_overridden["ms2_min_matching_frags"]]
             scans = merged.sort_values(["score", "rt"], ascending=[False, True]).head(top_n_hits)
 
         ms2_scans_cache[key] = scans
@@ -447,6 +527,11 @@ def build_dash_app(
 
     # ── figure builders ────────────────────────────────────────────────────
     def _make_ms1_figure(state):
+        if config_parameters_overridden['get_lcmsruns_colors'] is not None:
+            lcmsruns_color_map = config_parameters_overridden['get_lcmsruns_colors']
+        else:
+            lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
+    
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min, rt_max = state["rt_min"], state["rt_max"]
@@ -460,6 +545,12 @@ def build_dash_app(
             for _, r in sub[sub["file_path"] == fp].iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
+                    if config_parameters_overridden.get("ms1_min_num_points", None) is not None:
+                        if len(rt) < config_parameters_overridden["ms1_min_num_points"]:
+                            continue
+                    if config_parameters_overridden.get("ms1_min_peak_intensity", None) is not None:
+                        if max(intensity) < config_parameters_overridden["ms1_min_peak_intensity"]:
+                            continue
                     fig.add_trace(go.Scatter(
                         x=rt, y=intensity, mode="lines", name=short_name,
                         line=dict(color=color, width=1.5),
