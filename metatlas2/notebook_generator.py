@@ -22,26 +22,33 @@ def generate_gui_notebooks(
         logger.info("create_curation_notebooks is not True, skipping notebook generation.")
         return
 
-    pre_curation_atlas = auto_id_obj.post_autoid_atlas_obj
-    logger.info(f"Generating analysis GUI notebook for atlas {pre_curation_atlas.atlas_uid}")
+    logger.info(f"Generating analysis GUI notebook for atlas {auto_id_obj.post_autoid_atlas_obj.atlas_uid}")
 
     logger.info("Building notebook cells...")
     nb = nbformat.v4.new_notebook()
+
+    kernel_name = "metatlas2"
+    nb.metadata["kernelspec"] = {
+        "display_name": kernel_name,
+        "language": "python",
+        "name": kernel_name,
+    }
+    logger.info(f"Notebook kernel set to '{kernel_name}'")
+
     nb.cells = [
         _make_header_cell(auto_id_obj),
         _make_imports_cell(),
         _make_variables_cell(auto_id_obj),
         _make_parameters_cell(auto_id_obj),
         _make_gui_cell(),
-        _make_summary_divider_cell(),
         _make_summary_cell(),
     ]
 
     logger.info("Generating notebook file...")
     fname = (
-        f"_{pre_curation_atlas.chromatography}"
-        f"_{pre_curation_atlas.analysis_type}"
-        f"_{pre_curation_atlas.polarity}"
+        f"{auto_id_obj.post_autoid_atlas_obj.chromatography}"
+        f"_{auto_id_obj.post_autoid_atlas_obj.analysis_type}"
+        f"_{auto_id_obj.post_autoid_atlas_obj.polarity}"
         f"_RTA{auto_id_obj.rt_alignment_number}"
         f"_TGA{auto_id_obj.analysis_number}"
         f".ipynb"
@@ -65,19 +72,17 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
     src += "override_parameters = {\n"
     for key in param_keys:
         current_value = params.get(key, None)
-        src += f"    '{key}': None # current value: {repr(current_value)}\n"
+        src += f"    '{key}': None, # current value: {repr(current_value)}\n"
     src += "}\n"
-    src += "# Edit override_parameters as needed before running the GUI cell."
     return nbformat.v4.new_code_cell(src)
 
 def _make_header_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
-    pre_curation_atlas = auto_id_obj.post_autoid_atlas_obj
     text = (
         f"# Analysis GUI & Summary\n"
         f"**Project:** `{auto_id_obj.project_name}`  \n"
-        f"**Chromatography:** {pre_curation_atlas.chromatography}  \n"
-        f"**Polarity:** {pre_curation_atlas.polarity}  \n"
-        f"**Analysis type:** {pre_curation_atlas.analysis_type}  \n"
+        f"**Chromatography:** {auto_id_obj.post_autoid_atlas_obj.chromatography}  \n"
+        f"**Polarity:** {auto_id_obj.post_autoid_atlas_obj.polarity}  \n"
+        f"**Analysis type:** {auto_id_obj.post_autoid_atlas_obj.analysis_type}  \n"
         f"**Analysis number:** {auto_id_obj.analysis_number}  \n\n"
         f"Run the **GUI cell**, curate, then run the **Summary cell**."
     )
@@ -92,7 +97,6 @@ def _make_imports_cell() -> nbformat.NotebookNode:
         "pd.options.display.max_colwidth = 600\n\n"
         "sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')\n"
         "import logging_config as lcf\n"
-        "import load_tools as ldt\n"
         "import run_workflows as rwf\n\n"
         "lcf.setup_logging(log_level=logging.INFO)\n"
         "logger = lcf.get_logger('analysis_gui')\n"
@@ -101,14 +105,13 @@ def _make_imports_cell() -> nbformat.NotebookNode:
 
 
 def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
-    pre_curation_atlas = auto_id_obj.post_autoid_atlas_obj
     src = (
-        f"ANALYSIS_CONFIG  = ldt.load_metatlas2_config({auto_id_obj.config_path!r})\n"
+        f"ANALYSIS_CONFIG  = {auto_id_obj.config_path!r}\n"
         f"PROJECT_NAME     = {auto_id_obj.project_name!r}\n"
         f"RT_ALIGN_NUM     = {auto_id_obj.rt_alignment_number!r}\n"
         f"ANALYSIS_NUM     = {auto_id_obj.analysis_number!r}\n"
-        f"ANALYSIS_ATLAS   = {pre_curation_atlas.atlas_uid!r}\n"
-        f"CHROMATOGRAPHY   = {pre_curation_atlas.chromatography!r}\n"
+        f"ANALYSIS_ATLAS   = {auto_id_obj.post_autoid_atlas_obj.atlas_uid!r}\n"
+        f"CHROMATOGRAPHY   = {auto_id_obj.post_autoid_atlas_obj.chromatography!r}"
     )
     return nbformat.v4.new_code_cell(src)
 
@@ -116,23 +119,16 @@ def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.Notebook
 def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
         "# ── Manual Curation ──────────────────────────────────────────\n"
-        "# Run this cell, curate in the GUI, then run the summary cell below.\n"
         "rwf.run_analysis_gui(\n"
         "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    analysis_atlas=ANALYSIS_ATLAS,\n"
+        "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
         "    override_parameters=override_parameters,\n"
         ")\n"
     )
     return nbformat.v4.new_code_cell(src)
-
-
-def _make_summary_divider_cell() -> nbformat.NotebookNode:
-    return nbformat.v4.new_markdown_cell(
-        "---\n## Analysis Summary\nRun after curation is complete."
-    )
 
 
 def _make_summary_cell() -> nbformat.NotebookNode:
@@ -143,7 +139,7 @@ def _make_summary_cell() -> nbformat.NotebookNode:
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    analysis_atlas=ANALYSIS_ATLAS,\n"
+        "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
         "    overwrite=False,\n"
         ")\n"
     )

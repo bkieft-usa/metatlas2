@@ -71,16 +71,19 @@ def _set_up_paths(
     if stage in ["rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
         if rt_alignment_number is None:
             raise ValueError("RT alignment number must be provided for this stage.")
-        rta_dir = project_dir / f"{project_name}_RTA{rt_alignment_number}"
+        rta_dir = project_dir / f"RTA{rt_alignment_number}"
         rta_dir.mkdir(parents=True, exist_ok=True)
         paths["rt_alignment_output_dir"] = str(rta_dir)
+        paths["aligned_atlases_store_file"] = str(rta_dir / "rt_aligned_atlases.csv")
 
     if stage in ["auto_identification", "analysis_gui", "analysis_summary"]:
         if analysis_number is None:
             raise ValueError("Both RT alignment number and analysis number must be provided for this stage.")
-        analysis_dir = project_dir / f"{project_name}_RTA{rt_alignment_number}_TGA{analysis_number}"
+        analysis_dir = project_dir / f"RTA{rt_alignment_number}" / f"TGA{analysis_number}"
         analysis_dir.mkdir(parents=True, exist_ok=True)
         paths["analysis_output_dir"] = str(analysis_dir)
+        paths["auto_ided_atlases_store_file"] = str(analysis_dir / "auto_ided_atlases.csv")
+        paths["curated_atlases_store_file"] = str(analysis_dir / "curated_atlases.csv")
 
     return paths
 
@@ -457,7 +460,7 @@ class Atlas:
                             analysis_type=analysis_type,
                             chromatography=chrom,
                             polarity=pol,
-                            atlas_file_path=atlas_info['path'],
+                            atlas_file_path=atlas_info.get('path', 'No File Origin Provided'),
                             main_db_path=main_db_path
                         )
                         dbi.save_atlas_to_database(atlas_obj, main_db_path)
@@ -476,6 +479,22 @@ class Atlas:
         for info in summary:
             logger.info(f"Atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
         return
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for database serialization."""
+        return {
+            'atlas_uid': self.atlas_uid,
+            'atlas_name': self.atlas_name,
+            'atlas_description': self.atlas_description,
+            'chromatography': self.chromatography,
+            'polarity': self.polarity,
+            'analysis_type': self.analysis_type,
+            'atlas_type': self.atlas_type,
+            'created_by': self.created_by,
+            'created_date': self.created_date,
+            'source': self.source,
+            'source_atlas_uid': self.source_atlas_uid
+        }
 
 @dataclass
 class Project:
@@ -498,10 +517,12 @@ class Project:
         )
 
         logger.info(f"Creating project database at {self.paths['project_db_path']}...")
-        dbi.create_project_database(
+        exists = dbi.create_project_database(
             project_db_path=self.paths['project_db_path'],
             overwrite=overwrite_existing
         )
+        if exists:
+            return
         
         logger.info(f"Loading LCMS runs...")
         lcmsruns_list = lrt.get_project_lcmsruns_from_disk(
@@ -557,8 +578,8 @@ class RTAlign:
     project_name: str = None
 
     # Attributes added during analysis
-    pre_align_atlas_uid: Optional[str] = None
-    pre_align_atlas_obj: Optional[Atlas] = None
+    align_atlas_uid: Optional[str] = None
+    align_atlas_obj: Optional[Atlas] = None
     rt_alignment_params: Dict[str, Any] = field(default_factory=dict)
     aligner_lcmsruns: List[LCMSRun] = field(default_factory=list)
     modeling_data: Optional[pd.DataFrame] = field(default_factory=pd.DataFrame)
@@ -576,19 +597,19 @@ class RTAlign:
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
 
-    def setup(self, config_path: str, project_name: str, chromatography: str, rt_alignment_number: int):
+    def setup(self, config_path: str, project_name: str, rt_alignment_number: int):
         """
         Set up RTAlign object using a Project object and RT alignment parameters.
         Populates paths, config, and relevant atlas UID.
         """
 
-        logger.info(f"Setting up RTAlign object for {chromatography} chromatography and RT alignment number {rt_alignment_number}...")
+        logger.info(f"Setting up RTAlign object with RT alignment number {rt_alignment_number}...")
         self.rt_alignment_number = rt_alignment_number
         self.project_name = project_name
         self.config_path = config_path
         self.config = ldt.load_metatlas2_config(self.config_path)
-        self.chromatography = self.config["WORKFLOWS"].get("RT_ALIGNMENT", {}).keys()[0]
-        self.pre_align_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
+        self.chromatography = next(iter(self.config["WORKFLOWS"]["RT_ALIGNMENT"].keys()))
+        self.align_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
         self.rt_alignment_params = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('PARAMS', {})
 
         logger.info(f"Setting up workflow paths...")
@@ -620,7 +641,7 @@ class RTAlign:
         elif not use_existing_rt_alignment and existing_rt_aln_model is None:
             logger.info(f"Variable 'use_existing_rt_alignment' is False and no existing RT alignment model found in database for atlas {self.qc_atlas_uid}. Creating new RT Alignment model.")
 
-        self.rt_alignment_model = rta_model
+        return rta_model
 
 class ManualCuration:
     def __init__(self, inchi_key: str, adduct: str, data: pd.DataFrame):
@@ -696,7 +717,7 @@ class AutoIdentification:
         self.config = ldt.load_metatlas2_config(self.config_path)
         self.project_name = project_name
         self.analysis_subset = analysis_subset
-        self.chromatography = self.config["WORKFLOWS"].get("TARGETED_ANALYSES", {}).keys()[0]
+        self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
@@ -724,6 +745,15 @@ class AnalysisGUI:
 
     # Attributes added during analysis
     workflow_params: Dict[str, Any] = field(default_factory=dict)
+    pre_curation_atlas_obj: Optional[Atlas] = None
+    post_curation_atlas_obj: Optional[Atlas] = None
+
+    # Dfs for in-memory GUI analysis
+    manual_curation_df:  Optional[pd.DataFrame] = None
+    ms1_df: Optional[pd.DataFrame] = None
+    ms2_df: Optional[pd.DataFrame] = None
+    ms2_hits_df: Optional[pd.DataFrame] = None
+    override_parameters: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__

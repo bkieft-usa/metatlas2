@@ -9,13 +9,13 @@ import database_interact as dbi
 import logging_config as lcf
 import rt_align_tools as rat
 import ms2_hit_detection as mhd
-import extract_data_from_parquet as pdx
 import manual_curation_summarizer as mcs
 import extract_data_from_parquet as edp
 import lcmsruns_tools as lrt
 import analysis_gui as agu
 import analysis_summary as asm
 import notebook_generator as nbg
+import load_tools as ldt
 
 from workflow_objects import Compound, Atlas, Project, RTAlign, AutoIdentification, AnalysisGUI, AnalysisSummary
 
@@ -41,7 +41,7 @@ def run_project_setup(
 def run_rt_alignment(
     config_path: str,
     project_name: str,
-    rt_alignment_number: int,
+    rt_alignment_number: int
 ) -> None:
     """Run fresh RT alignment using an RT alignment atlas"""
     
@@ -50,15 +50,29 @@ def run_rt_alignment(
     rt_align_obj.setup(
         config_path=config_path,
         project_name=project_name,
-        rt_alignment_number=rt_alignment_number
+        rt_alignment_number=rt_alignment_number,
     )
 
-    if self.rt_alignment_params.get('do_alignment', True) is False:
-        logger.warning(f"RT alignment is disabled in config. Exiting.")
+    if rt_align_obj.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases
+        logger.warning(f"RT alignment is disabled in config. Writing atlases from config to {rt_align_obj.paths['aligned_atlases_store_file']} and exiting...")
+        for chrom, pol_dict in rt_align_obj.config['WORKFLOWS']['TARGETED_ANALYSES'].items():
+            for pol, analysis_dict in pol_dict.items():
+                for analysis_type, atlas_config in analysis_dict.items():
+                    atlas_uid = atlas_config['ATLAS']['uid']
+                    atlas_obj = Atlas.from_database(
+                        database_path=rt_align_obj.paths['main_db_path'],
+                        atlas_uid=atlas_uid
+                    )
+                    ldt.save_atlas_data_to_csv(
+                        atlas_obj=atlas_obj,
+                        output_path=rt_align_obj.paths['aligned_atlases_store_file'],
+                    )
         return
-    
-    logger.info(f"Checking for existing RT model in database with UID {rt_align_obj.pre_align_atlas_uid} ({rt_align_obj.chromatography}) and RT Alignment number {rt_align_obj.rt_alignment_number}")
-    rt_align_obj.check_existing_rt_alignment()
+
+    logger.info(f"Checking for existing RT aligned atlases table file at {rt_align_obj.paths['aligned_atlases_store_file']}...")
+    if os.path.exists(rt_align_obj.paths['aligned_atlases_store_file']):
+        logger.warning(f"Exiting! Aligned atlases have already been generated for RT alignment number {rt_align_obj.rt_alignment_number} at {rt_align_obj.paths['aligned_atlases_store_file']}.")
+        return
 
     logger.info(f"Retrieving all LCMS runs for project...")
     project_lcmsruns = dbi.get_lcmsruns_from_db(
@@ -73,11 +87,14 @@ def run_rt_alignment(
         chromatography=rt_align_obj.chromatography
     )
 
-    if rt_align_obj.rt_alignment_model is None:
+    logger.info(f"Checking for existing RT alignment model in database with UID {rt_align_obj.align_atlas_uid} ({rt_align_obj.chromatography}) and RT Alignment number {rt_align_obj.rt_alignment_number}")
+    rt_align_obj.rt_alignment_model = rt_align_obj.check_existing_rt_alignment()
+
+    if rt_align_obj.rt_alignment_model is None: # create model from scratch
         
-        rt_align_obj.pre_align_atlas_obj = Atlas.from_database(
+        rt_align_obj.align_atlas_obj = Atlas.from_database(
             database_path=rt_align_obj.paths['main_db_path'],
-            atlas_uid=rt_align_obj.pre_align_atlas_uid
+            atlas_uid=rt_align_obj.align_atlas_uid
         )
 
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
@@ -89,13 +106,13 @@ def run_rt_alignment(
         logger.info("Passing ExperimentalData and Atlas to summarizer...")
         rat.create_file_matching_summary(
             experimental_data=experimental_data_obj,
-            atlas=template_atlas_obj
+            atlas=rt_align_obj.align_atlas_obj
         )
 
         logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
         rat.build_rt_alignment_model(
             experimental_data=experimental_data_obj,
-            atlas=template_atlas_obj, 
+            atlas=rt_align_obj.align_atlas_obj, 
             rt_align=rt_align_obj
         )
 
@@ -114,12 +131,16 @@ def run_rt_alignment(
         rt_align_obj=rt_align_obj
     )
 
-    logger.info("Passing aligned Atlases to database saver...")
-    for _, aligned_atlas_obj in rt_align_obj.rt_aligned_atlases.items():
+    logger.info("Passing aligned Atlases to database saver...")    
+    for uid, aligned_atlas_obj in rt_align_obj.rt_aligned_atlases.items():
         dbi.save_atlas_to_database(
-            atlas_obj=aligned_atlas_obj, 
+            atlas_obj=aligned_atlas_obj,
             db_path=rt_align_obj.paths['project_db_path'],
             main_db_path=rt_align_obj.paths['main_db_path']
+        )
+        ldt.save_atlas_data_to_csv(
+            atlas_obj=aligned_atlas_obj,
+            output_path=rt_align_obj.paths['aligned_atlases_store_file']
         )
 
     logger.info("Passing RTAlign object to RT alignment summary generator...")
@@ -134,7 +155,7 @@ def run_auto_identification(
     project_name: str,
     rt_alignment_number: int = None,
     analysis_number: int = None,
-    analysis_subset: list = None
+    analysis_subset: list = None,
 ) -> Dict[str, int]:
     """
     Runs targeted analysis using RT-aligned atlases from database.
@@ -162,17 +183,21 @@ def run_auto_identification(
         project_db_path=auto_id_obj.paths['project_db_path'],
     )
 
-    logger.info(f"Retrieving all atlases from database for auto identification...")
-    pre_autoid_atlas_uids = dbi.get_all_atlases_for_autoid(
-        auto_id_obj=auto_id_obj,
-        use_config_atlases=False
+    logger.info(f"Retrieving atlases from CSV file {auto_id_obj.paths['aligned_atlases_store_file']} for auto identification...")
+    pre_autoid_atlases = ldt.load_atlas_data_from_csv(
+        file_path=auto_id_obj.paths['aligned_atlases_store_file']
     )
 
-    for pre_autoid_atlas_uid in pre_autoid_atlas_uids:
+    for _, atlas_to_autoid in pre_autoid_atlases.iterrows():
+        if auto_id_obj.analysis_subset:
+            analysis_filters = [tuple(subset.split('-')) for subset in auto_id_obj.analysis_subset]
+            if (atlas_to_autoid['polarity'], atlas_to_autoid['analysis_type']) not in analysis_filters:
+                logger.warning(f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} with polarity {atlas_to_autoid['polarity']} and analysis type {atlas_to_autoid['analysis_type']} since it's not in the specified analysis subset: {auto_id_obj.analysis_subset}")
+                continue
 
         auto_id_obj.pre_autoid_atlas_obj = Atlas.from_database(
             database_path=auto_id_obj.paths['project_db_path'],
-            atlas_uid=pre_autoid_atlas_uid,
+            atlas_uid=atlas_to_autoid['atlas_uid'],
             main_db_path=auto_id_obj.paths['main_db_path']
         )
 
@@ -189,7 +214,7 @@ def run_auto_identification(
         )
 
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
-        auto_id_obj.experimental_data = pdx.extract_eic_and_ms2_from_parquet(
+        auto_id_obj.experimental_data = edp.extract_eic_and_ms2_from_parquet(
             obj=auto_id_obj,
             stage="auto_identification",
         )
@@ -219,17 +244,25 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
+        logger.info("Saving post-autoid Atlas data to CSV...")
+        ldt.save_atlas_data_to_csv(
+            atlas_obj=auto_id_obj.post_autoid_atlas_obj,
+            output_path=auto_id_obj.paths['auto_ided_atlases_store_file']
+        )
+
         logger.info("Passing Atlas object to curation notebook generator...")
         nbg.generate_gui_notebooks(
             auto_id_obj=auto_id_obj
         )
+
+    logger.info(f"Auto identification procedure complete for RT alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}!")
 
 def run_analysis_gui(
     config_path: str,
     project_name: str,
     rt_alignment_number: int = None,
     analysis_number: int = None,
-    analysis_atlas: str = None,
+    pre_curation_atlas: str = None,
     override_parameters: Dict[str, Any] = None,
     dash_app_port: int = 8050
 ) -> "CurationApp":
@@ -249,17 +282,27 @@ def run_analysis_gui(
 
     analysis_gui_obj.pre_curation_atlas_obj = Atlas.from_database(
         database_path=analysis_gui_obj.paths['project_db_path'],
-        atlas_uid=analysis_atlas,
+        atlas_uid=pre_curation_atlas,
         main_db_path=analysis_gui_obj.paths['main_db_path']
     )
 
     logger.info("Loading workflow parameters for analysis GUI from config...")
     analysis_gui_obj.workflow_params = analysis_gui_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][analysis_gui_obj.pre_curation_atlas_obj.chromatography][analysis_gui_obj.pre_curation_atlas_obj.polarity][analysis_gui_obj.pre_curation_atlas_obj.analysis_type]['PARAMS']
 
+    logger.info("Loading and filtering GUI inputs...")
+    dbi.load_and_filter_gui_inputs(
+        analysis_gui_obj=analysis_gui_obj,
+        override_parameters=override_parameters
+    )
+
+    display(analysis_gui_obj.manual_curation_df.head())
+    display(analysis_gui_obj.ms1_df.head())
+    display(analysis_gui_obj.ms2_df.head())
+    display(analysis_gui_obj.ms2_hits_df.head())
+
     logger.info("Launching Analysis GUI...")
     dash_app = agu.build_dash_app(
         analysis_gui_obj=analysis_gui_obj,
-        override_parameters=override_parameters,
         port=dash_app_port,
     )
 
@@ -286,7 +329,7 @@ def run_analysis_summary(
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
-    analysis_atlas: str = None,
+    pre_curation_atlas: str = None,
     overwrite: bool = False,
 ) -> None:
     """
@@ -308,7 +351,7 @@ def run_analysis_summary(
 
     summary_obj.pre_curation_atlas_obj = Atlas.from_database(
         database_path=summary_obj.paths['project_db_path'],
-        atlas_uid=analysis_atlas,
+        atlas_uid=pre_curation_atlas,
         main_db_path=summary_obj.paths['main_db_path']
     )
 
@@ -318,6 +361,12 @@ def run_analysis_summary(
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
     summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(
         summary_obj=summary_obj
+    )
+
+    logger.info("Saving post-manual-curation Atlas data to CSV...")
+    ldt.save_atlas_data_to_csv(
+        atlas_obj=summary_obj.post_curation_atlas_obj,
+        output_path=summary_obj.paths['curated_atlases_store_file']
     )
 
     logger.info("Creating and saving summary files and figures to output directory...")

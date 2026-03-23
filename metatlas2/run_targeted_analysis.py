@@ -32,11 +32,12 @@ python {script_path} run \\
     {extra_flags}
 """
 
-def _get_analysis_output_dir(config: dict, project_name: str, rt_align_num: int, analysis_num: int) -> str:
+def _get_analysis_output_dir(config_path: str, project_name: str, rt_align_num: int, analysis_num: int) -> str:
     """
     Derive the analysis output directory from config, mirroring _set_up_paths logic.
     Creates the directory if it does not exist.
     """
+    config = ldt.load_metatlas2_config(config_path)
     projects_dir = config["ENV"]["PATHS"]["projects_dir"]
     analysis_output_dir = os.path.join(
         projects_dir,
@@ -59,8 +60,8 @@ def parse_args():
         p.add_argument("--config",         required=True, help="Path to analysis.yaml")
         p.add_argument("--project",        required=True, help="Project name")
         p.add_argument("--rt-align-num",   type=int, default=0)
-        p.add_argument("--analysis-num",   type=int, default=1)
-        p.add_argument("--analysis-subset", nargs="+", default=None, help="Optional list of polarity-analysis_type to restrict to instead of all in config (e.g. ['POS-ISTD', 'POS-EMA'])")
+        p.add_argument("--analysis-num",   type=int, default=0)
+        p.add_argument("--analysis-subset",  type=lambda s: s.split(","), default=None, help="Comma-separated polarity-analysis_type list to filter config for RT alignment and Auto ID (e.g. 'POS-ISTD,POS-EMA')")
         p.add_argument("--overwrite",      action="store_true", default=False)
         p.add_argument("--skip-setup",     action="store_true", default=False)
         p.add_argument("--skip-rt-align",  action="store_true", default=False)
@@ -87,10 +88,8 @@ def generate_slurm_script(args) -> str:
     Script and logs are written to the analysis output directory.
     Returns the path of the written file.
     """
-    config = ldt.load_metatlas2_config(args.config)
-
     analysis_output_dir = _get_analysis_output_dir(
-        config=config,
+        config_path=args.config,
         project_name=args.project,
         rt_align_num=args.rt_align_num,
         analysis_num=args.analysis_num,
@@ -101,8 +100,7 @@ def generate_slurm_script(args) -> str:
     if args.skip_setup:    extra_flags.append("--skip-setup")
     if args.skip_rt_align: extra_flags.append("--skip-rt-align")
     if args.skip_auto_id:   extra_flags.append("--skip-auto-id")
-    if args.analysis_subset:
-        extra_flags.append("--analysis-subset " + " ".join(args.analysis_subset))
+    if args.analysis_subset: extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
     extra_flags_str = " \\\n    ".join(extra_flags)
 
     project_short = args.project[:30].replace(" ", "_")
@@ -154,16 +152,12 @@ def main():
             sys.exit(result.returncode)
         return
 
-    # ── run: execute workflow ──────────────────────────────────────────────────
-    logger.info("Loading config from %s", args.config)
-    config = ldt.load_metatlas2_config(args.config)
-
     # ── Project Setup ─────────────────────────────────────────────────
     if not args.skip_setup:
         logger.info("Running Project Setup")
         rwf.run_project_setup(
             project_name=args.project,
-            config=config,
+            config_path=args.config,
             overwrite_existing=args.overwrite,
         )
 
@@ -171,16 +165,16 @@ def main():
     if not args.skip_rt_align:
         logger.info("Running RT alignment ...")
         rwf.run_rt_alignment(
-            config=config,
+            config_path=args.config,
             project_name=args.project,
-            rt_alignment_number=args.rt_align_num,
+            rt_alignment_number=args.rt_align_num
         )
 
     # ── Auto Identification (one per atlas) ────────────────────────────
     logger.info("Running Auto Identification")
     if not args.skip_auto_id:
         rwf.run_auto_identification(
-            config=config,
+            config_path=args.config,
             project_name=args.project,
             rt_alignment_number=args.rt_align_num,
             analysis_number=args.analysis_num,

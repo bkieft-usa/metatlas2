@@ -8,7 +8,6 @@ import logging_config as lcf
 # Initialize logger properly at module level
 logger = lcf.get_logger('lcmsruns_tools')
 
-
 def filter_lcmsruns_list(
     lcmsruns: List["LCMSRun"], 
     include_file_type: List[str] = None,
@@ -34,14 +33,10 @@ def filter_lcmsruns_list(
     filtered_runs = lcmsruns.copy()
 
     # Fix: ensure file_type is always a list
-    if include_file_type is not [None] or include_file_type is not None:
-        if isinstance(include_file_type, str):
-            file_type = [file_type]
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() in [ft.lower() for ft in file_type]]
-    if exclude_file_type is not [None] or exclude_file_type is not None:
-        if isinstance(exclude_file_type, str):
-            file_type = [file_type]
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() not in [ft.lower() for ft in file_type]]
+    if include_file_type:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() in [ft.lower() for ft in include_file_type]]
+    if exclude_file_type:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() not in [ft.lower() for ft in exclude_file_type]]
     if file_format:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'file_format', '').lower() == file_format.lower()]
     if chromatography:

@@ -20,75 +20,9 @@ logger = lcf.get_logger('rt_align_tools')
 def apply_rt_alignment_to_target_atlases(
         rt_align_obj: "RTAlign"
 ) -> Tuple[Dict[str, "Atlas"], Dict[str, float]]:
-    from workflow_objects import Atlas, CompoundMZRT
 
     logger.info("Applying RT alignment model to target atlases and generating RT-aligned Atlas objects...")
-
-    main_db_path = rt_align_obj.paths['main_db_path']
-    targeted_analyses = rt_align_obj.config['WORKFLOWS']['TARGETED_ANALYSES']
-    rt_alignment_model = rt_align_obj.rt_alignment_model
-    rt_align_settings = rt_align_obj.rt_alignment_params
-    rt_alignment_number = rt_align_obj.rt_alignment_number
-
-    aligned_atlases = {}
-    all_rt_shifts = []
-    for chrom, pol_dict in targeted_analyses.items():
-        for pol, analysis_dict in pol_dict.items():
-            for analysis_type, atlas_params_dict in analysis_dict.items():
-                target_atlas_uid = atlas_params_dict.get('ATLAS', {}).get('uid', None)
-                if target_atlas_uid is None:
-                    logger.debug(f"Skipping {chrom} {pol} {analysis_type} - no target atlas UID found in parameters")
-                    continue
-
-                logger.info(f"Loading {chrom} {pol} {analysis_type} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
-                atlas_obj = Atlas.from_database(main_db_path, target_atlas_uid)
-
-                # Create a new Atlas object for the RT-aligned version
-                aligned_compound_mzrts = {}
-                for inchi_key, comp_ref in atlas_obj.compound_mzrts.items():
-                    # Apply RT alignment model
-                    aligned_rt_peak = float(_apply_rt_model([comp_ref.rt_peak], rt_alignment_model)[0])
-                    if rt_align_settings['apply_model_to_min_max']:
-                        aligned_rt_min = float(_apply_rt_model([comp_ref.rt_min], rt_alignment_model)[0])
-                        aligned_rt_max = float(_apply_rt_model([comp_ref.rt_max], rt_alignment_model)[0])
-                    else:
-                        window = comp_ref.rt_max - comp_ref.rt_min
-                        aligned_rt_min = aligned_rt_peak - window / 2
-                        aligned_rt_max = aligned_rt_peak + window / 2
-                    rt_shift = aligned_rt_peak - comp_ref.rt_peak
-                    all_rt_shifts.append(rt_shift)
-
-                    # Create a new CompoundMZRT with updated RTs
-                    mz_rt_uid = dbi._generate_uid("mz_rt", decorator="exp")
-                    comp_dict = {k: v for k, v in comp_ref.__dict__.items() if k not in ['mz_rt_uid', 'rt_peak', 'rt_min', 'rt_max']}
-                    aligned_comp_mzrt = CompoundMZRT(
-                        **comp_dict,
-                        mz_rt_uid=mz_rt_uid,
-                        rt_peak=aligned_rt_peak,
-                        rt_min=aligned_rt_min,
-                        rt_max=aligned_rt_max,
-                    )
-                    aligned_compound_mzrts[inchi_key] = aligned_comp_mzrt
-
-                # Generate new UID and name for the aligned atlas
-                aligned_atlas_uid = dbi._generate_uid("rt_atlas", decorator=f"{analysis_type.lower()}-{chrom.lower()}-{pol.lower()}")
-                aligned_atlas = Atlas(
-                    atlas_uid=aligned_atlas_uid,
-                    atlas_name=f"{atlas_obj.atlas_name} (post-rt-alignment)",
-                    atlas_description=f"{atlas_obj.atlas_description} (post-rt-alignment)",
-                    chromatography=chrom,
-                    polarity=pol,
-                    analysis_type=analysis_type,
-                    atlas_type="RT-ALIGNED",
-                    source_atlas_uid=atlas_obj.atlas_uid,
-                    rt_alignment_number=rt_alignment_number,
-                    analysis_number=None,
-                    created_by=atlas_obj.created_by,
-                    created_date=atlas_obj.created_date,
-                    source=atlas_obj.source,
-                    compound_mzrts=aligned_compound_mzrts
-                )
-                aligned_atlases[aligned_atlas_uid] = aligned_atlas
+    aligned_atlases, all_rt_shifts = dbi.update_atlas_with_rt_alignment(rt_align_obj)
 
     # Calculate RT shift stats
     rt_shift_stats = {}
@@ -158,7 +92,7 @@ def build_polynomial_model(X, y, degree):
         'intercept': model.intercept_
     }
 
-def _apply_rt_model(atlas_rt_values, model_info):
+def apply_rt_model(atlas_rt_values, model_info):
     """Apply RT alignment model to Atlas RT values."""
     X_new = np.array(atlas_rt_values).reshape(-1, 1)
     X_new_poly = model_info['poly_features'].transform(X_new)
@@ -500,6 +434,7 @@ def create_file_matching_summary(
     logger.info(f"  Compounds without matches: {compounds_without_matches}")
     logger.info(f"  Total files analyzed: {total_files_analyzed}")
     logger.info(f"  Files with matches: {total_files_with_matches}")
+    logger.info(f"  Files without matches: {total_files_without_matches}")
     logger.info(f"  Total peaks extracted: {total_peaks_extracted}")
     logger.info(f"  Average peaks per matched compound: {avg_peaks_per_compound:.1f}")
     logger.info(f"  Average compounds matched per file: {avg_compounds_per_file:.1f}")

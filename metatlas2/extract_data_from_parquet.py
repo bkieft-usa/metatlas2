@@ -6,7 +6,7 @@ import pandas as pd
 import sys
 import pyarrow.parquet as pq
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -41,7 +41,7 @@ def extract_eic_and_ms2_from_parquet(
     """
     from workflow_objects import ExperimentalData, MS1Data, MS2Data
 
-    atlas = obj.pre_align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
+    atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
     lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns
     workflow_params = obj.rt_alignment_params if stage == "rt_alignment" else obj.workflow_params
     only_ms_level = 1 if stage == "rt_alignment" else None

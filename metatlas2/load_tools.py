@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import os
+import csv
 import yaml
 import ast
 import sys
@@ -367,3 +369,19 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
     logger.info(f"Loaded {len(df)} atlas entries from {file_path}")
     
     return df
+
+def save_atlas_data_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
+    """Save Atlas data to CSV file."""
+    atlas_info = atlas_obj.to_dict()
+    file_exists = os.path.isfile(output_path)
+    with open(output_path, "a", newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=atlas_info.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(atlas_info)
+
+def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
+    """Load Atlas data from CSV file."""
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Atlas data file not found: {file_path}")
+    return pd.read_csv(file_path)

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from IPython.display import display
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import lcmsruns_tools as lrt
+import rt_align_tools as rat
 import pubchem_retrieval as pcr
 import load_tools as ldt
 import logging_config as lcf
@@ -70,88 +70,88 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
-def get_all_atlases_for_autoid(
-    auto_id_obj: "AutoIdentification",
-) -> List[str]:
-    """
-    Given a project database and an RT alignment number, return all atlases that match the RT alignment number, 
-    and return a list of Atlas uids
-    """
+# def get_all_atlases_for_autoid(
+#     auto_id_obj: "AutoIdentification",
+# ) -> List[str]:
+#     """
+#     Given a project database and an RT alignment number, return all atlases that match the RT alignment number, 
+#     and return a list of Atlas uids
+#     """
 
-    project_db_path = auto_id_obj.paths['project_db_path']
-    rt_alignment_number = auto_id_obj.rt_alignment_number
-    analysis_subset = auto_id_obj.analysis_subset
-    atlases = []
+#     project_db_path = auto_id_obj.paths['project_db_path']
+#     rt_alignment_number = auto_id_obj.rt_alignment_number
+#     analysis_subset = auto_id_obj.analysis_subset
+#     atlases = []
 
-    # Try to get RT-aligned atlases from database first
-    chromatography = getattr(auto_id_obj, 'chromatography', None)
-    with get_db_connection(project_db_path) as conn:
-        if analysis_subset:
-            # Build query with polarity and analysis_type filters
-            where_clauses = ["rt_alignment_number = ?", "atlas_type = 'RT-ALIGNED'"]
-            params = [rt_alignment_number]
-            if chromatography:
-                where_clauses.append("chromatography = ?")
-                params.append(chromatography)
-            pol_analysis_pairs = [tuple(subset.split('-')) for subset in analysis_subset]
-            pair_clauses = []
-            for pol, analysis_type in pol_analysis_pairs:
-                pair_clauses.append("(polarity = ? AND analysis_type = ?)")
-                params.extend([pol, analysis_type])
-            where_clauses.append("(" + " OR ".join(pair_clauses) + ")")
-            query = f"""
-                SELECT atlas_uid, chromatography, polarity, analysis_type
-                FROM atlases
-                WHERE {' AND '.join(where_clauses)}
-            """
-            results = conn.execute(query, params).fetchall()
-            atlases = [row[0] for row in results]
-        else: # get all atlases that can be found for that rt align number
-            where_clauses = ["rt_alignment_number = ?", "atlas_type = 'RT-ALIGNED'"]
-            params = [rt_alignment_number]
-            if chromatography:
-                where_clauses.append("chromatography = ?")
-                params.append(chromatography)
-            query = f"""
-                SELECT atlas_uid, chromatography, polarity, analysis_type
-                FROM atlases
-                WHERE {' AND '.join(where_clauses)}
-            """
-            results = conn.execute(query, params).fetchall()
-            atlases = [row[0] for row in results]
+#     # Try to get RT-aligned atlases from database first
+#     chromatography = getattr(auto_id_obj, 'chromatography', None)
+#     with get_db_connection(project_db_path) as conn:
+#         if analysis_subset:
+#             # Build query with polarity and analysis_type filters
+#             where_clauses = ["rt_alignment_number = ?", "atlas_type = 'RT-ALIGNED'"]
+#             params = [rt_alignment_number]
+#             if chromatography:
+#                 where_clauses.append("chromatography = ?")
+#                 params.append(chromatography)
+#             pol_analysis_pairs = [tuple(subset.split('-')) for subset in analysis_subset]
+#             pair_clauses = []
+#             for pol, analysis_type in pol_analysis_pairs:
+#                 pair_clauses.append("(polarity = ? AND analysis_type = ?)")
+#                 params.extend([pol, analysis_type])
+#             where_clauses.append("(" + " OR ".join(pair_clauses) + ")")
+#             query = f"""
+#                 SELECT atlas_uid, chromatography, polarity, analysis_type
+#                 FROM atlases
+#                 WHERE {' AND '.join(where_clauses)}
+#             """
+#             results = conn.execute(query, params).fetchall()
+#             atlases = [row[0] for row in results]
+#         else: # get all atlases that can be found for that rt align number
+#             where_clauses = ["rt_alignment_number = ?", "atlas_type = 'RT-ALIGNED'"]
+#             params = [rt_alignment_number]
+#             if chromatography:
+#                 where_clauses.append("chromatography = ?")
+#                 params.append(chromatography)
+#             query = f"""
+#                 SELECT atlas_uid, chromatography, polarity, analysis_type
+#                 FROM atlases
+#                 WHERE {' AND '.join(where_clauses)}
+#             """
+#             results = conn.execute(query, params).fetchall()
+#             atlases = [row[0] for row in results]
 
-    if atlases:
-        logger.info(f"Retrieved {len(atlases)} RT-aligned atlases for RT alignment number {rt_alignment_number} from database at {project_db_path}")
-        return atlases
+#     if atlases:
+#         logger.info(f"Retrieved {len(atlases)} RT-aligned atlases for RT alignment number {rt_alignment_number} from database at {project_db_path}")
+#         return atlases
 
-    # Fallback: Use atlas UIDs from config file attribute (e.g., analysis.yaml)
-    logger.warning(f"No RT-aligned atlases found for RT alignment number {rt_alignment_number} in database at {project_db_path}. Falling back to Atlas UIDs in config.")
-    config = auto_id_obj.config
-    atlas_entries = []
-    # Traverse config to collect all atlas UIDs
-    workflows = config.get('WORKFLOWS', {})
-    targeted = workflows.get('TARGETED_ANALYSES', {})
-    for chrom, chrom_dict in targeted.items():
-        for pol, pol_dict in chrom_dict.items():
-            for analysis_type, analysis_dict in pol_dict.items():
-                atlas_uid = analysis_dict.get('ATLAS', {}).get('uid', None)
-                if atlas_uid:
-                    atlas_entries.append({
-                        'uid': atlas_uid,
-                        'chrom': chrom,
-                        'pol': pol,
-                        'analysis_type': analysis_type
-                    })
-    # Filter if analysis_subset is provided
-    if analysis_subset:
-        analysis_filters = [tuple(subset.split('-')) for subset in analysis_subset]
-        for entry in atlas_entries:
-            if (entry['pol'], entry['analysis_type']) in analysis_filters:
-                atlases.append(entry['uid'])
-    else:
-        atlases = [entry['uid'] for entry in atlas_entries]
-    logger.info(f"Retrieved {len(atlases)} atlas UIDs from config file.")
-    return atlases
+#     # Fallback: Use atlas UIDs from config file attribute (e.g., analysis.yaml)
+#     logger.warning(f"No RT-aligned atlases found for RT alignment number {rt_alignment_number} in database at {project_db_path}. Falling back to Atlas UIDs in config.")
+#     config = auto_id_obj.config
+#     atlas_entries = []
+#     # Traverse config to collect all atlas UIDs
+#     workflows = config.get('WORKFLOWS', {})
+#     targeted = workflows.get('TARGETED_ANALYSES', {})
+#     for chrom, chrom_dict in targeted.items():
+#         for pol, pol_dict in chrom_dict.items():
+#             for analysis_type, analysis_dict in pol_dict.items():
+#                 atlas_uid = analysis_dict.get('ATLAS', {}).get('uid', None)
+#                 if atlas_uid:
+#                     atlas_entries.append({
+#                         'uid': atlas_uid,
+#                         'chrom': chrom,
+#                         'pol': pol,
+#                         'analysis_type': analysis_type
+#                     })
+#     # Filter if analysis_subset is provided
+#     if analysis_subset:
+#         analysis_filters = [tuple(subset.split('-')) for subset in analysis_subset]
+#         for entry in atlas_entries:
+#             if (entry['pol'], entry['analysis_type']) in analysis_filters:
+#                 atlases.append(entry['uid'])
+#     else:
+#         atlases = [entry['uid'] for entry in atlas_entries]
+#     logger.info(f"Retrieved {len(atlases)} atlas UIDs from config file.")
+#     return atlases
 
 def create_new_atlas_from_dataframe(
     atlas_df: pd.DataFrame, 
@@ -345,10 +345,9 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
         df['compound_name'] = df['compound_name'] if 'compound_name' in df.columns else ''
         logger.info(f"Retrieved {len(df)} compounds for atlas {atlas_uid} ({df['atlas_name'].iloc[0]})")
 
-    display(df.head())
     return df
 
-def create_project_database(project_db_path: str, overwrite: bool = False) -> None:
+def create_project_database(project_db_path: str, overwrite: bool = False) -> bool:
     """
     Create project-specific database with required tables.
     Never overwrites existing databases - requires analyst to increment analysis number.
@@ -357,7 +356,7 @@ def create_project_database(project_db_path: str, overwrite: bool = False) -> No
 
     if project_db_path.exists() and not overwrite:
         logger.info(f"Project database already exists at {project_db_path}. Not overwriting.")
-        return
+        return True
     elif project_db_path.exists() and overwrite:
         logger.warning(f"Overwriting existing project database at {project_db_path} (overwrite=True)")
         project_db_path.unlink()
@@ -368,7 +367,8 @@ def create_project_database(project_db_path: str, overwrite: bool = False) -> No
     with get_db_connection(project_db_path) as conn:
         _create_database_tables(conn, db_type="project")
     logger.info(f"Project database created at {project_db_path}")
-    return
+
+    return False
 
 def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
     """
@@ -1667,16 +1667,105 @@ def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> Non
     else:
         logger.info(f"No existing AutoIdentification results found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}. Proceeding.")
 
+def load_and_filter_gui_inputs(
+        analysis_gui_obj,
+        override_parameters: dict = None
+):
+
+    # Implement the filters if override parameters are set
+    ms1_min_pts   = override_parameters.get("ms1_min_num_points")
+    ms1_min_int   = override_parameters.get("ms1_min_peak_intensity")
+    ms2_min_score = override_parameters.get("ms2_min_score")
+    ms2_min_frags = override_parameters.get("ms2_min_matching_frags")
+    if ms1_min_pts is not None or ms1_min_int is not None or ms2_min_score is not None or ms2_min_frags is not None:
+        logger.info("Applying filters to ms1_df, ms2_df, and ms2_hits_df based on override_parameters...")
+    else:
+        logger.info("No filters applied to ms1_df, ms2_df, or ms2_hits_df since no relevant override_parameters were set.")
+        return
+
+    project_path = analysis_gui_obj.paths["project_db_path"]
+    main_path = analysis_gui_obj.paths["main_db_path"]
+    rt_alignment = analysis_gui_obj.rt_alignment_number
+    analysis_num = analysis_gui_obj.analysis_number
+    remove_unidentified_compounds = analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)
+
+    # Load atlas to act as reference for GUI curation
+    manual_curation_atlas = analysis_gui_obj.pre_curation_atlas_obj
+    manual_curation_atlas_df = get_atlas_compounds_table(project_path, manual_curation_atlas.atlas_uid, main_path)
+    atlas_compounds = manual_curation_atlas_df[["inchi_key", "adduct"]]
+
+    # Load manual curation entries and MS1/MS2 data for compounds in this analysis (based on input atlas)
+    manual_curation_df = get_manual_curation_entries(project_path, rt_alignment, analysis_num, remove_unidentified_compounds, atlas_compounds=atlas_compounds)
+    ms1_df  = get_ms1_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
+    ms2_df  = get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
+    ms2_hits_df = get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
+
+    # Filter ms1_df rows that fail the spectrum-level criteria
+    if ms1_min_pts is not None or ms1_min_int is not None:
+        def _ms1_row_passes(r):
+            try:
+                rt_arr, int_arr = json.loads(r["raw_spectrum"])
+                int_arr = [0 if isinstance(v, float) and np.isnan(v) else v for v in int_arr]
+                if ms1_min_pts is not None and len(rt_arr) < ms1_min_pts:
+                    return False
+                if ms1_min_int is not None and (not int_arr or max(int_arr) < ms1_min_int):
+                    return False
+                return True
+            except Exception:
+                return False
+        ms1_df = ms1_df[ms1_df.apply(_ms1_row_passes, axis=1)].reset_index(drop=True)
+
+    # Filter ms2_hits_df rows that fail the score/fragment criteria
+    if ms2_min_score is not None:
+        ms2_hits_df = ms2_hits_df[ms2_hits_df["score"] >= ms2_min_score]
+    if ms2_min_frags is not None:
+        ms2_hits_df = ms2_hits_df[ms2_hits_df["num_matches"] >= ms2_min_frags]
+    ms2_hits_df = ms2_hits_df.reset_index(drop=True)
+
+    # Filter ms2_df to only retain scans that have a passing hit
+    if ms2_min_score is not None or ms2_min_frags is not None:
+        hit_keys = ms2_hits_df[["inchi_key", "adduct", "file_path", "rt"]].drop_duplicates()
+        ms2_df = ms2_df.merge(hit_keys, on=["inchi_key", "adduct", "file_path", "rt"], how="inner").reset_index(drop=True)
+
+    # Filter manual_curation_df to only keep compounds with passing data in the filtered dataframes
+    passing_pairs_ms1 = set(zip(ms1_df["inchi_key"], ms1_df["adduct"])) if (ms1_min_pts is not None or ms1_min_int is not None) else None
+    passing_pairs_ms2 = set(zip(ms2_hits_df["inchi_key"], ms2_hits_df["adduct"])) if (ms2_min_score is not None or ms2_min_frags is not None) else None
+
+    def _compound_passes(row):
+        pair = (row["inchi_key"], row["adduct"])
+        if passing_pairs_ms1 is not None and pair not in passing_pairs_ms1:
+            return False
+        if passing_pairs_ms2 is not None and pair not in passing_pairs_ms2:
+            return False
+        return True
+
+    keep_mask = manual_curation_df.apply(_compound_passes, axis=1)
+    n_removed = (~keep_mask).sum()
+    if n_removed > 0:
+        logger.info("Pre-filter removed %d compound(s) based on override_parameters filters", n_removed)
+    manual_curation_df = manual_curation_df[keep_mask].reset_index(drop=True)
+
+    analysis_gui_obj.manual_curation_df = manual_curation_df
+    analysis_gui_obj.ms1_df = ms1_df
+    analysis_gui_obj.ms2_df = ms2_df
+    analysis_gui_obj.ms2_hits_df = ms2_hits_df
+    analysis_gui_obj.override_parameters = override_parameters
+    return
+
 def get_manual_curation_entries(
     project_db_path: str,
     rt_alignment_number: int,
     analysis_number: int,
-    remove_unidentified_compounds: bool = True
+    remove_unidentified_compounds: bool = True,
+    atlas_compounds: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
-    Get all manual_curation entries for the given RT alignment and analysis number,
-    ordered by ascending RT peak. Within each RT peak group, compounds without 'unlabeled'
-    in the name come before those with 'unlabeled'.
+    Get all manual_curation entries for the given RT alignment and analysis number.
+
+    If ``atlas_compounds`` (a DataFrame with 'inchi_key' and 'adduct' columns) is
+    provided the query is restricted to those pairs and the result is returned in
+    atlas order.  Otherwise rows are ordered by ascending RT peak with unlabeled
+    compounds placed after their non-unlabeled counterparts.
     """
     try:
         with get_db_connection(project_db_path) as conn:
@@ -1688,6 +1777,16 @@ def get_manual_curation_entries(
             params = [rt_alignment_number, analysis_number]
             if remove_unidentified_compounds:
                 query += " AND auto_ided = TRUE"
+            if atlas_compounds is not None and not atlas_compounds.empty:
+                pairs = list(
+                    atlas_compounds[["inchi_key", "adduct"]]
+                    .drop_duplicates()
+                    .itertuples(index=False, name=None)
+                )
+                placeholders = ", ".join(["(?, ?)"] * len(pairs))
+                query += f" AND (inchi_key, adduct) IN (VALUES {placeholders})"
+                for ik, ad in pairs:
+                    params.extend([ik, ad])
             df = conn.execute(query, params).df()
     except Exception as e:
         logger.error(f"Error retrieving manual curation entries: {e}")
@@ -1697,9 +1796,24 @@ def get_manual_curation_entries(
         raise ValueError(f"No manual curation entries found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}.")
 
     df['compound_name'] = df['compound_name'].fillna('')
-    df['has_unlabeled'] = df['compound_name'].str.contains('unlabeled', case=False, na=False).astype(int)
-    df = df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, True])
-    df = df.drop('has_unlabeled', axis=1)
+
+    if atlas_compounds is not None and not atlas_compounds.empty:
+        _order = (
+            atlas_compounds[["inchi_key", "adduct"]]
+            .drop_duplicates()
+            .reset_index(drop=True)
+            .assign(_atlas_order=lambda d: d.index)
+        )
+        df = (
+            df.merge(_order, on=["inchi_key", "adduct"], how="left")
+            .sort_values("_atlas_order")
+            .drop(columns=["_atlas_order"])
+            .reset_index(drop=True)
+        )
+    else:
+        df['has_unlabeled'] = df['compound_name'].str.contains('unlabeled', case=False, na=False).astype(int)
+        df = df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, True])
+        df = df.drop('has_unlabeled', axis=1)
 
     return df
 
@@ -1708,11 +1822,14 @@ def get_ms1_data_for_compound(
     inchi_key: str = None,
     adduct: str = None,
     rt_alignment_number: int = None,
-    analysis_number: int = None
+    analysis_number: int = None,
+    atlas_compounds: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Get all MS1 data for a compound (inchi_key+adduct) for plotting EIC.
     If inchi_key or adduct is None, do not filter on that field.
+    If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
+    only rows matching those pairs are returned.
     """
     query = """
         SELECT *
@@ -1733,6 +1850,16 @@ def get_ms1_data_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
+        if atlas_compounds is not None and not atlas_compounds.empty:
+            pairs = list(
+                atlas_compounds[["inchi_key", "adduct"]]
+                .drop_duplicates()
+                .itertuples(index=False, name=None)
+            )
+            placeholders = ", ".join(["(?, ?)"] * len(pairs))
+            query += f" AND (inchi_key, adduct) IN (VALUES {placeholders})"
+            for ik, ad in pairs:
+                params.extend([ik, ad])
         with get_db_connection(project_db_path) as conn:
             df = conn.execute(query, params).df()
     except Exception as e:
@@ -1750,10 +1877,13 @@ def get_ms2_hits_for_compound(
     adduct: str = None,
     rt_alignment_number: int = None,
     analysis_number: int = None,
+    atlas_compounds: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Get MS2 hits for a compound (inchi_key+adduct), ordered by score descending.
     If inchi_key or adduct is None, do not filter on that field.
+    If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
+    only rows matching those pairs are returned.
     """
     query = """
         SELECT *
@@ -1774,6 +1904,16 @@ def get_ms2_hits_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
+        if atlas_compounds is not None and not atlas_compounds.empty:
+            pairs = list(
+                atlas_compounds[["inchi_key", "adduct"]]
+                .drop_duplicates()
+                .itertuples(index=False, name=None)
+            )
+            placeholders = ", ".join(["(?, ?)"] * len(pairs))
+            query += f" AND (inchi_key, adduct) IN (VALUES {placeholders})"
+            for ik, ad in pairs:
+                params.extend([ik, ad])
         query += " ORDER BY score DESC"
         with get_db_connection(project_db_path) as conn:
             df = conn.execute(query, params).df()
@@ -1791,11 +1931,14 @@ def get_ms2_data_for_compound(
     inchi_key: str = None,
     adduct: str = None,
     rt_alignment_number: int = None,
-    analysis_number: int = None
+    analysis_number: int = None,
+    atlas_compounds: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Get all MS2 data for a compound (inchi_key+adduct) for plotting query spectrum if no hits.
     If inchi_key or adduct is None, do not filter on that field.
+    If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
+    only rows matching those pairs are returned.
     """
     query = """
         SELECT *
@@ -1816,6 +1959,16 @@ def get_ms2_data_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
+        if atlas_compounds is not None and not atlas_compounds.empty:
+            pairs = list(
+                atlas_compounds[["inchi_key", "adduct"]]
+                .drop_duplicates()
+                .itertuples(index=False, name=None)
+            )
+            placeholders = ", ".join(["(?, ?)"] * len(pairs))
+            query += f" AND (inchi_key, adduct) IN (VALUES {placeholders})"
+            for ik, ad in pairs:
+                params.extend([ik, ad])
         query += " ORDER BY file_path, rt"
         with get_db_connection(project_db_path) as conn:
             df = conn.execute(query, params).df()
@@ -1834,6 +1987,7 @@ def create_new_atlas_after_manual_curation(
     """
     Create a new Atlas object after manual curation
     """
+    prov = get_provenance()
     source_atlas = summary_obj.pre_curation_atlas_obj
 
     # Deep-copy every CompoundMZRT and apply curation updates
@@ -1849,7 +2003,7 @@ def create_new_atlas_after_manual_curation(
             )
         # Remove compounds from original atlas if the ms1 note has 'remove' in it
         if summary_obj.workflow_params.get('remove_flagged_compounds', True) and not curation_row.empty and 'remove' in str(curation_row.iloc[0].get('ms1_notes', '')).lower():
-            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove' and 'remove_flagged_compounds' is set to True in config.")
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove' and 'remove_flagged_compounds' is set to True in config.")
             continue
         if not curation_row.empty:
             new_cmzrt.rt_peak = float(curation_row.iloc[0].get('rt_peak', cmzrt.rt_peak))
@@ -1885,6 +2039,8 @@ def create_new_atlas_after_manual_curation(
     new_atlas.atlas_name = source_atlas.atlas_name + " (post-manual-curation)"
     new_atlas.atlas_description = source_atlas.atlas_description + " (post-manual-curation)"
     new_atlas.atlas_type = "MANUALLY_CURATED"
+    new_atlas.created_by = prov["analyst"]
+    new_atlas.created_date = prov["timestamp"]
     save_atlas_to_database(new_atlas, summary_obj.paths['project_db_path'], summary_obj.paths['main_db_path'])
 
     logger.info(
@@ -1900,6 +2056,7 @@ def create_new_atlas_after_auto_id(
     """
     Create a new atlas after auto-identification
     """
+    prov = get_provenance()
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
 
     # Build (inchi_key, adduct) -> first row of curated DataFrame
@@ -1914,7 +2071,7 @@ def create_new_atlas_after_auto_id(
         curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
         # Remove compounds from original atlas that were not auto-identified (curation_row has auto_ided=False)
         if auto_id_obj.workflow_params.get('remove_unided_compounds', True) and curation_row is not None and not curation_row.get('auto_ided', False):
-            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it was not auto-identified and remove_unided_compounds is set to True in config.")
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it was not auto-identified and remove_unided_compounds is set to True in config.")
             continue
         new_compound_mzrts[dict_key] = new_cmzrt
 
@@ -1936,6 +2093,8 @@ def create_new_atlas_after_auto_id(
     new_atlas.atlas_name = source_atlas.atlas_name + " (post-auto-identification)"
     new_atlas.atlas_description = source_atlas.atlas_description + " (post-auto-identification)"
     new_atlas.atlas_type = "AUTO_IDED"
+    new_atlas.created_by = prov["analyst"]
+    new_atlas.created_date = prov["timestamp"]
     save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
 
     logger.info(
@@ -1944,6 +2103,79 @@ def create_new_atlas_after_auto_id(
     )
 
     return new_atlas
+
+def update_atlas_with_rt_alignment(
+    rt_align_obj: "RTAlignment"
+) -> tuple[dict[str, "Atlas"], list[float]]:
+    """Apply RT alignment model to target atlases and return new Atlas objects with updated RTs, along with a list of all RT shifts applied."""
+    
+    from workflow_objects import Atlas, CompoundMZRT
+
+    prov = get_provenance()
+    main_db_path = rt_align_obj.paths['main_db_path']
+    targeted_analyses = rt_align_obj.config['WORKFLOWS']['TARGETED_ANALYSES']
+
+    aligned_atlases = {}
+    all_rt_shifts = []
+    for chrom, pol_dict in targeted_analyses.items():
+        for pol, analysis_dict in pol_dict.items():
+            for analysis_type, atlas_params_dict in analysis_dict.items():
+                target_atlas_uid = atlas_params_dict.get('ATLAS', {}).get('uid', None)
+                if target_atlas_uid is None:
+                    logger.info(f"Skipping {chrom} {pol} {analysis_type} - no target atlas UID found in parameters")
+                    continue
+
+                logger.info(f"Loading {chrom} {pol} {analysis_type} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
+                atlas_obj = Atlas.from_database(main_db_path, target_atlas_uid)
+
+                # Create a new Atlas object for the RT-aligned version
+                aligned_compound_mzrts = {}
+                for inchi_key, comp_ref in atlas_obj.compound_mzrts.items():
+                    # Apply RT alignment model
+                    aligned_rt_peak = float(rat.apply_rt_model([comp_ref.rt_peak], rt_align_obj.rt_alignment_model)[0])
+                    if rt_align_obj.rt_alignment_params['apply_model_to_min_max']:
+                        aligned_rt_min = float(rat.apply_rt_model([comp_ref.rt_min], rt_align_obj.rt_alignment_model)[0])
+                        aligned_rt_max = float(rat.apply_rt_model([comp_ref.rt_max], rt_align_obj.rt_alignment_model)[0])
+                    else:
+                        window = comp_ref.rt_max - comp_ref.rt_min
+                        aligned_rt_min = aligned_rt_peak - window / 2
+                        aligned_rt_max = aligned_rt_peak + window / 2
+                    rt_shift = aligned_rt_peak - comp_ref.rt_peak
+                    all_rt_shifts.append(rt_shift)
+
+                    # Create a new CompoundMZRT with updated RTs
+                    mz_rt_uid = _generate_uid("mz_rt", decorator="exp")
+                    comp_dict = {k: v for k, v in comp_ref.__dict__.items() if k not in ['mz_rt_uid', 'rt_peak', 'rt_min', 'rt_max']}
+                    aligned_comp_mzrt = CompoundMZRT(
+                        **comp_dict,
+                        mz_rt_uid=mz_rt_uid,
+                        rt_peak=aligned_rt_peak,
+                        rt_min=aligned_rt_min,
+                        rt_max=aligned_rt_max,
+                    )
+                    aligned_compound_mzrts[inchi_key] = aligned_comp_mzrt
+
+                # Generate new UID and name for the aligned atlas
+                aligned_atlas_uid = _generate_uid("rt_atlas", decorator=f"{analysis_type.lower()}-{chrom.lower()}-{pol.lower()}")
+                aligned_atlas = Atlas(
+                    atlas_uid=aligned_atlas_uid,
+                    atlas_name=f"{atlas_obj.atlas_name} (post-rt-alignment)",
+                    atlas_description=f"{atlas_obj.atlas_description} (post-rt-alignment)",
+                    chromatography=chrom,
+                    polarity=pol,
+                    analysis_type=analysis_type,
+                    atlas_type="RT-ALIGNED",
+                    source_atlas_uid=atlas_obj.atlas_uid,
+                    rt_alignment_number=rt_align_obj.rt_alignment_number,
+                    analysis_number=None,
+                    created_by=prov["analyst"],
+                    created_date=prov["timestamp"],
+                    source=atlas_obj.source,
+                    compound_mzrts=aligned_compound_mzrts
+                )
+                aligned_atlases[aligned_atlas_uid] = aligned_atlas
+
+    return aligned_atlases, all_rt_shifts
 
 def save_auto_identification_results_to_db(
     auto_id_obj: "AutoIdentification"
