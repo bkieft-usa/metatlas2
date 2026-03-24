@@ -295,11 +295,6 @@ def run_analysis_gui(
         override_parameters=override_parameters
     )
 
-    display(analysis_gui_obj.manual_curation_df.head())
-    display(analysis_gui_obj.ms1_df.head())
-    display(analysis_gui_obj.ms2_df.head())
-    display(analysis_gui_obj.ms2_hits_df.head())
-
     logger.info("Launching Analysis GUI...")
     dash_app = agu.build_dash_app(
         analysis_gui_obj=analysis_gui_obj,

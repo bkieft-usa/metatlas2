@@ -64,7 +64,7 @@ WORKFLOWS:
             ms2_min_score: 0.1
             ms2_min_matching_frags: 1
             ms2_frag_mz_tolerance: 0.05
-            gui_require_all_evaluated: true
+            gui_require_all_evaluated: false
             gui_top_n_hits: 20
             gui_lcmsruns_colors:
               ISTD: blue
@@ -115,7 +115,7 @@ WORKFLOWS:
             ms2_min_score: 0.1
             ms2_min_matching_frags: 1
             ms2_frag_mz_tolerance: 0.05
-            gui_require_all_evaluated: true
+            gui_require_all_evaluated: false
             gui_top_n_hits: 20
             gui_lcmsruns_colors:
               ISTD: blue
@@ -166,7 +166,7 @@ WORKFLOWS:
             ms2_min_score: 0.1
             ms2_min_matching_frags: 1
             ms2_frag_mz_tolerance: 0.05
-            gui_require_all_evaluated: true
+            gui_require_all_evaluated: false
             gui_top_n_hits: 20
             gui_lcmsruns_colors:
               ISTD: blue

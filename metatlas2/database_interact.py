@@ -1672,17 +1672,7 @@ def load_and_filter_gui_inputs(
         override_parameters: dict = None
 ):
 
-    # Implement the filters if override parameters are set
-    ms1_min_pts   = override_parameters.get("ms1_min_num_points")
-    ms1_min_int   = override_parameters.get("ms1_min_peak_intensity")
-    ms2_min_score = override_parameters.get("ms2_min_score")
-    ms2_min_frags = override_parameters.get("ms2_min_matching_frags")
-    if ms1_min_pts is not None or ms1_min_int is not None or ms2_min_score is not None or ms2_min_frags is not None:
-        logger.info("Applying filters to ms1_df, ms2_df, and ms2_hits_df based on override_parameters...")
-    else:
-        logger.info("No filters applied to ms1_df, ms2_df, or ms2_hits_df since no relevant override_parameters were set.")
-        return
-
+    # Set shorthands for object attributes
     project_path = analysis_gui_obj.paths["project_db_path"]
     main_path = analysis_gui_obj.paths["main_db_path"]
     rt_alignment = analysis_gui_obj.rt_alignment_number
@@ -1700,6 +1690,22 @@ def load_and_filter_gui_inputs(
     ms2_df  = get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
     ms2_hits_df = get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
 
+    # Check if filtering is necessary
+    ms1_min_pts   = override_parameters.get("ms1_min_num_points")
+    ms1_min_int   = override_parameters.get("ms1_min_peak_intensity")
+    ms2_min_score = override_parameters.get("ms2_min_score")
+    ms2_min_frags = override_parameters.get("ms2_min_matching_frags")
+    if ms1_min_pts is not None or ms1_min_int is not None or ms2_min_score is not None or ms2_min_frags is not None:
+        logger.info("Applying filters to ms1_df, ms2_df, and ms2_hits_df based on override_parameters...")
+    else:
+        logger.info("No filters applied to ms1_df, ms2_df, or ms2_hits_df since no default analysis parameters were overridden.")
+        analysis_gui_obj.manual_curation_df = manual_curation_df
+        analysis_gui_obj.ms1_df = ms1_df
+        analysis_gui_obj.ms2_df = ms2_df
+        analysis_gui_obj.ms2_hits_df = ms2_hits_df
+        analysis_gui_obj.override_parameters = override_parameters
+        return
+    
     # Filter ms1_df rows that fail the spectrum-level criteria
     if ms1_min_pts is not None or ms1_min_int is not None:
         def _ms1_row_passes(r):

@@ -69,7 +69,7 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
         "gui_lcmsruns_colors",
     ]
     src = "# Parameters to override for GUI analysis\n"
-    src += "override_parameters = {\n"
+    src += "OVERRIDE_PARAMS = {\n"
     for key in param_keys:
         current_value = params.get(key, None)
         src += f"    '{key}': None, # current value: {repr(current_value)}\n"
@@ -125,7 +125,7 @@ def _make_gui_cell() -> nbformat.NotebookNode:
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
         "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
-        "    override_parameters=override_parameters,\n"
+        "    override_parameters=OVERRIDE_PARAMS,\n"
         ")\n"
     )
     return nbformat.v4.new_code_cell(src)

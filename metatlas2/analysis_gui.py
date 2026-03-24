@@ -1,20 +1,19 @@
 import json, os, time, sys, uuid, threading
 import numpy as np, pandas as pd
+from panel import state
 import plotly.graph_objects as go
 import dash
 from typing import Dict, Any
 from dash import dcc, html, ctx, Input, Output, State, Patch
 import dash_bootstrap_components as dbc
 from dash_extensions import EventListener
-import logging
 import traceback
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
 import logging_config as lcf
 
-# Initialize logger properly at module level
-logger = lcf.get_logger('analysis_gui')
+logger = lcf.get_logger("analysis_gui")
 
 # -------------------------------------------------
 #   Constants
@@ -40,7 +39,7 @@ OTHER_OPTIONS = [
     "no selection",
     "potential rt shifting",
     "high ppm diff",
-    "noisy, high background",
+    "noisy or high background",
     "needs review"
 ]
 
@@ -65,7 +64,7 @@ OTHER_HOTKEYS = {
     "no selection":           "5",
     "potential rt shifting":  "6",
     "high ppm diff":          "7",
-    "noisy, high background": "8",
+    "noisy or high background": "8",
     "needs review":           "9",
 }
 
@@ -80,10 +79,13 @@ def build_dash_app(
     analysis_gui_obj,
     port=8050
 ):
+    logger.info("Starting the app factory for the Analysis GUI...")
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.manual_curation_df
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
+
+    logger.info(f"manual_curation_df has {len(manual_curation_df)} rows")
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
@@ -92,25 +94,18 @@ def build_dash_app(
     ]
 
     # Create the app
-    app = dash.Dash(
-        __name__,
-        external_stylesheets=[dbc.themes.BOOTSTRAP],
-        requests_pathname_prefix=f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/",
-        suppress_callback_exceptions=True,
-    )
-    app.config.prevent_initial_callbacks = "initial_duplicate"
-
-    # Create loger that can print to GUI and console, and set levels
-    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
-        stdout_handler = logging.StreamHandler(sys.stdout)
-        stdout_handler.setLevel(logging.DEBUG)
-        logger.addHandler(stdout_handler)
-    logger.setLevel(logging.DEBUG)
-    for log_name in ("dash", "flask", "werkzeug"):
-        log = logging.getLogger(log_name)
-        log.setLevel(logging.DEBUG)
-        if not any(isinstance(h, logging.StreamHandler) for h in log.handlers):
-            log.addHandler(logging.StreamHandler(sys.stdout))
+    try:
+        app = dash.Dash(
+            __name__,
+            external_stylesheets=[dbc.themes.BOOTSTRAP],
+            requests_pathname_prefix=f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/",
+            suppress_callback_exceptions=True,
+        )
+        logger.info("App built successfully")
+        app.config.prevent_initial_callbacks = "initial_duplicate"
+    except Exception as e:
+        traceback.print_exc()
+        logger.error(f"FAILED: {e}")
 
     # Set up some caching to help with race conditions
     flush_lock = threading.RLock()
@@ -172,7 +167,7 @@ def build_dash_app(
 
     app.layout = dbc.Container(
         [
-            dcc.Store(id="session-store", storage_type="session", data=_load_state(0)),
+            dcc.Store(id="session-store", storage_type="memory", data=_load_state(0)),
             keyboard_listener,
             dbc.Row(
                 [
@@ -287,17 +282,9 @@ def build_dash_app(
         fluid=True,
     )
 
-    # ── helpers ────────────────────────────────────────────────────────────
+    logger.info("Layout constructed successfully")
 
-    def _apply_rt_change(state, new_min, new_max):
-        # full-state variant used where full dict return is required
-        out = dict(state)
-        rt_min = max(0.0, min(new_min, new_max))
-        rt_max = max(rt_min, new_max)
-        out["rt_min"] = round(rt_min, 4)
-        out["rt_max"] = round(rt_max, 4)
-        out["edit_seq"] = int(out.get("edit_seq", 0)) + 1
-        return out
+    # ── helpers ────────────────────────────────────────────────────────────
 
     def _parse_isomers(isomers_val):
         if isomers_val is None or (isinstance(isomers_val, float) and np.isnan(isomers_val)):
@@ -373,17 +360,17 @@ def build_dash_app(
     def _count_ms2_scans(row, rt_min=None, rt_max=None):
         return len(_get_ms2_scans(row["inchi_key"], row["adduct"], rt_min, rt_max))
 
-    def _clean_spectrum(mz_arr, int_arr):
+    def _clean_spectrum(val_arr, int_arr):
         out_i = [0 if (isinstance(i, float) and np.isnan(i)) else i for i in int_arr]
-        return mz_arr, out_i
+        return val_arr, out_i
 
     def _parse_spectrum_cached(raw_spectrum):
         if raw_spectrum in spectrum_cache:
             return spectrum_cache[raw_spectrum]
-        mz, ints = json.loads(raw_spectrum)
-        mz, ints = _clean_spectrum(mz, ints)
-        spectrum_cache[raw_spectrum] = (mz, ints)
-        return mz, ints
+        val, ints = json.loads(raw_spectrum)
+        val, ints = _clean_spectrum(val, ints)
+        spectrum_cache[raw_spectrum] = (val, ints)
+        return val, ints
 
     def _flush_to_db(state):
         row = _compound_row(state["compound_idx"])
@@ -405,7 +392,7 @@ def build_dash_app(
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(sid, -1)
         if seq < latest_seq:
-            logger.warning("Skipping stale flush sid=%s seq=%s latest=%s", sid, seq, latest_seq)
+            logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
             return state
 
         # DB write without holding Python lock
@@ -439,10 +426,22 @@ def build_dash_app(
 
     # ── figure builders ────────────────────────────────────────────────────
     def _make_ms1_figure(state):
-        if analysis_gui_obj.override_parameters['get_lcmsruns_colors'] is not None:
-            lcmsruns_color_map = analysis_gui_obj.override_parameters['get_lcmsruns_colors']
+        logger.info(f"Making MS1 figure, state={state}")
+
+        if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
+            lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
+            if not isinstance(lcmsruns_color_map, dict):
+                raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings")
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in lcmsruns_color_map.items()):
+                raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping strings to strings (LCMS run identifiers to color strings)")
         else:
-            lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
+            lcmsruns_color_map = {
+                'ISTD': 'blue', 
+                'QC': 'blue', 
+                'EXCTRL': 'red', 
+                'TXCTRL': 'red', 
+                'REFSTD': 'black'
+            }
     
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
@@ -451,9 +450,10 @@ def build_dash_app(
         sub = analysis_gui_obj.ms1_df[(analysis_gui_obj.ms1_df["inchi_key"] == inchi) & (analysis_gui_obj.ms1_df["adduct"] == adduct)]
 
         fig = go.Figure()
+        logger.info(f"empty ms1 figure made, state={state}")
         for fp in sub["file_path"].unique():
             short_name = "_".join(os.path.basename(fp).split(".")[0].split("_")[11:])
-            color = next((c for k, c in lcmsruns_color_map.items() if k in short_name.lower()), "gray")
+            color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in short_name.lower()), "gray")
             for _, r in sub[sub["file_path"] == fp].iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
@@ -463,7 +463,8 @@ def build_dash_app(
                         hovertemplate="%{x:.3f} min<br>%{y:.2e}",
                     ))
                 except Exception as e:
-                    logger.error("MS1 parse error %s: %s", fp, e)
+                    traceback.print_exc()
+                    logger.error(f"MS1 parse error {fp}: {e}")
 
         fig.add_vline(x=row["atlas_rt_peak"], line=dict(color="black", dash="dash", width=1.5),
                       annotation_text=f"Atlas {row['atlas_rt_peak']:.3f}", annotation_position="top left")
@@ -570,7 +571,8 @@ def build_dash_app(
             else:
                 isomer_str = "No Isomers Found"
         except Exception as exc:
-            logger.exception(f"Isomer detection failed with {exc}")
+            traceback.print_exc()
+            logger.error(f"Isomer detection failed with {exc}")
 
         compound_display_idx = state["compound_idx"] + 1
 
@@ -590,9 +592,12 @@ def build_dash_app(
             xaxis=dict(showgrid=False, zeroline=False),
             yaxis=dict(showgrid=False, zeroline=False),
         )
+
+        logger.info(f"Full MS1 figure made, state={state}")
         return fig
 
     def _make_ms2_figure(state):
+        logger.info(f"Making MS2 figure, state={state}")
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min, rt_max = state["rt_min"], state["rt_max"]
@@ -663,7 +668,10 @@ def build_dash_app(
             xaxis=dict(showgrid=False, zeroline=False),
             yaxis=dict(showgrid=False, zeroline=False),
         )
+        logger.info(f"Full MS2 figure made, state={state}")
         return fig
+
+    logger.info("App helpers defined successfully")
 
     # ── callbacks ──────────────────────────────────────────────────────────
     @app.callback(
@@ -698,7 +706,8 @@ def build_dash_app(
             try:
                 old_state = _flush_to_db(old_state)
             except Exception as exc:
-                logger.exception("init_store: _flush_to_db failed: %s", exc)
+                traceback.print_exc()
+                logger.error(f"init_store: _flush_to_db failed: {exc}")
                 flush_error = f"Save failed: {type(exc).__name__}: {exc}"
 
         new_state = _load_state(
@@ -736,12 +745,12 @@ def build_dash_app(
         if new_idx == int(state["compound_idx"]):
             raise dash.exceptions.PreventUpdate
 
-        logger.debug("navigate_compound: %s -> compound %s", trigger, new_idx)
         flush_error = None
         try:
             state = _flush_to_db(state)
         except Exception as exc:
-            logger.exception("navigate_compound: _flush_to_db failed: %s", exc)
+            traceback.print_exc()
+            logger.error(f"navigate_compound: _flush_to_db failed: {exc}")
             flush_error = f"Save failed: {type(exc).__name__}: {exc}"
 
         new_state = _load_state(
@@ -924,8 +933,8 @@ def build_dash_app(
         except dash.exceptions.PreventUpdate:
             raise
         except Exception as exc:
-            logger.exception("handle_keyboard error (key=%r, compound=%s): %s",
-                             key, state.get("compound_idx"), exc)
+            traceback.print_exc()
+            logger.error(f"handle_keyboard error (key={key}, compound={state.get('compound_idx')}, tag={tag}): {exc}")
             raise dash.exceptions.PreventUpdate
 
     def _handle_keyboard_inner(event, state, key):  # noqa: ARG001
@@ -996,9 +1005,9 @@ def build_dash_app(
             try:
                 state = _flush_to_db(state)
             except Exception as exc:
-                logger.exception("handle_keyboard j/k: _flush_to_db failed: %s", exc)
+                traceback.print_exc()
+                logger.error(f"handle_keyboard navigation _flush_to_db failed: {exc}")
                 flush_error = f"Save failed: {type(exc).__name__}: {exc}"
-            logger.debug("keyboard %s -> compound %s", key, new_idx)
             new_state = _load_state(
                 new_idx,
                 session_id=state.get("session_id"),
@@ -1017,14 +1026,6 @@ def build_dash_app(
 
         raise dash.exceptions.PreventUpdate
 
-    # ─────────────────────────────────────────────────────────────────────
-    # navigate_compound_keyboard has been removed.  j/k navigation is now
-    # handled inside handle_keyboard / _handle_keyboard_inner so that the
-    # DB flush and state load happen atomically in a single callback, which
-    # eliminates the race where an in-flight Patch from a UI-change callback
-    # could be flushed with stale data via the old two-hop chain
-    # (keyboard → compound-dd → init_store).
-
     @app.callback(
         Output("ms1-graph", "figure"),
         Output("ms2-graph", "figure"),
@@ -1033,6 +1034,7 @@ def build_dash_app(
         prevent_initial_call=False,
     )
     def update_figures(state):
+        logger.info(f"update_figures called, state={state}")
         if state is None:
             raise dash.exceptions.PreventUpdate
         flush_err = state.get("flush_error")
@@ -1047,9 +1049,8 @@ def build_dash_app(
                 banner = ""
             return ms1_fig, ms2_fig, banner
         except Exception as exc:
-            tb = traceback.format_exc()
-            print(f"[update_figures ERROR] compound={state.get('compound_idx')}\n{tb}", flush=True)
-            logger.exception("update_figures error (compound %s): %s", state.get("compound_idx"), exc)
+            traceback.print_exc()
+            logger.error(f"update_figures error: {exc}")
             err_html = html.Span(
                 f"⚠ Figure error: {type(exc).__name__}: {exc}",
                 style={"color": "red", "fontSize": "11px", "fontWeight": "bold"},
@@ -1124,12 +1125,17 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         try:
             _flush_to_db(state)
-            logger.info("Save: flush succeeded for compound %s", state.get("compound_idx"))
+            logger.info(f"save_and_exit: flush succeeded for compound {state.get('compound_idx')}")
             msg = "Saved. You may return to the notebook to run the curation summary."
         except Exception as exc:
-            logger.exception("Save: _flush_to_db failed: %s", exc)
+            traceback.print_exc()
+            logger.error(f"save_and_exit: flush failed for compound {state.get('compound_idx')}: {exc}")
             msg = f"Save failed: {type(exc).__name__}: {exc}."
 
         return msg, True
+
+    logger.info("Callbacks registered")
+
+    logger.info("App setup complete")
 
     return app
