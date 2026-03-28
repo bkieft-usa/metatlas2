@@ -1,10 +1,10 @@
-import json, os, time, sys, uuid, threading
+import functools, json, os, time, sys, uuid, threading
 import numpy as np, pandas as pd
 from panel import state
 import plotly.graph_objects as go
 import dash
 from typing import Dict, Any
-from dash import dcc, html, ctx, Input, Output, State, Patch
+from dash import dcc, html, ctx, Input, Output, State
 import dash_bootstrap_components as dbc
 from dash_extensions import EventListener
 import traceback
@@ -109,9 +109,9 @@ def build_dash_app(
 
     # Set up some caching to help with race conditions
     flush_lock = threading.RLock()
+    cache_lock = threading.Lock()
     latest_flushed_seq_by_session = {}
     ms2_scans_cache = {}
-    spectrum_cache = {}
 
     # ── early helpers needed for layout construction ───────────────────────
     def _compound_row(idx):
@@ -149,11 +149,10 @@ def build_dash_app(
         }
 
     def _patch_with_seq(state, **changes):
-        p = Patch()
-        for k, v in changes.items():
-            p[k] = v
-        p["edit_seq"] = int(state.get("edit_seq", 0)) + 1
-        return p
+        new_state = dict(state)
+        new_state.update(changes)
+        new_state["edit_seq"] = int(state.get("edit_seq", 0)) + 1
+        return new_state
 
     def _patch_rt_change(state, new_min, new_max):
         rt_min = max(0.0, min(new_min, new_max))
@@ -168,6 +167,7 @@ def build_dash_app(
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(0)),
+            dcc.Store(id="controls-compound-idx", storage_type="memory", data=0),
             keyboard_listener,
             dbc.Row(
                 [
@@ -332,8 +332,9 @@ def build_dash_app(
         key = (inchi_key, adduct, int(top_n_hits),
                round(rt_min, 4) if rt_min is not None else None,
                round(rt_max, 4) if rt_max is not None else None)
-        if key in ms2_scans_cache:
-            return ms2_scans_cache[key]
+        with cache_lock:
+            if key in ms2_scans_cache:
+                return ms2_scans_cache[key]
 
         ms2_sub = analysis_gui_obj.ms2_df[(analysis_gui_obj.ms2_df["inchi_key"] == inchi_key) & (analysis_gui_obj.ms2_df["adduct"] == adduct)]
         if rt_min is not None and rt_max is not None:
@@ -354,8 +355,10 @@ def build_dash_app(
             merged["score"] = merged["score"].fillna(0)
             scans = merged.sort_values(["score", "rt"], ascending=[False, True]).head(top_n_hits)
 
-        ms2_scans_cache[key] = scans
-        return scans
+        with cache_lock:
+            if key not in ms2_scans_cache:
+                ms2_scans_cache[key] = scans
+        return ms2_scans_cache[key]
 
     def _count_ms2_scans(row, rt_min=None, rt_max=None):
         return len(_get_ms2_scans(row["inchi_key"], row["adduct"], rt_min, rt_max))
@@ -364,15 +367,26 @@ def build_dash_app(
         out_i = [0 if (isinstance(i, float) and np.isnan(i)) else i for i in int_arr]
         return val_arr, out_i
 
+    @functools.lru_cache(maxsize=None)
     def _parse_spectrum_cached(raw_spectrum):
-        if raw_spectrum in spectrum_cache:
-            return spectrum_cache[raw_spectrum]
         val, ints = json.loads(raw_spectrum)
         val, ints = _clean_spectrum(val, ints)
-        spectrum_cache[raw_spectrum] = (val, ints)
         return val, ints
 
     def _flush_to_db(state):
+        sid = state.get("session_id", "unknown")
+        seq = int(state.get("edit_seq", 0))
+
+        # Stale/duplicate check and reservation are atomic under the lock so two
+        # concurrent calls with the same seq can never both proceed to the DB write.
+        with flush_lock:
+            latest_seq = latest_flushed_seq_by_session.get(sid, -1)
+            if seq <= latest_seq:
+                logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
+                return state
+            # Reserve this seq before releasing the lock so no other call races through.
+            latest_flushed_seq_by_session[sid] = seq
+
         row = _compound_row(state["compound_idx"])
         updates = {
             "rt_min":               state["rt_min"],
@@ -385,30 +399,15 @@ def build_dash_app(
             "identification_notes": state["id_notes"],
         }
 
-        sid = state.get("session_id", "unknown")
-        seq = int(state.get("edit_seq", 0))
-
-        # Fast stale check under lock (no DB I/O while locked)
-        with flush_lock:
-            latest_seq = latest_flushed_seq_by_session.get(sid, -1)
-        if seq < latest_seq:
-            logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
-            return state
-
-        # DB write without holding Python lock
+        # DB write outside lock
         dbi.write_gui_updates_to_db(analysis_gui_obj.paths["project_db_path"], row["curation_uid"], updates)
-
-        # Commit flushed seq
-        with flush_lock:
-            latest_seq = latest_flushed_seq_by_session.get(sid, -1)
-            if seq > latest_seq:
-                latest_flushed_seq_by_session[sid] = seq
 
         idx = state["compound_idx"]
         df_idx = manual_curation_df.index[idx]
-        for col, val in updates.items():
-            if col in manual_curation_df.columns:
-                manual_curation_df.at[df_idx, col] = val
+        with flush_lock:
+            for col, val in updates.items():
+                if col in manual_curation_df.columns:
+                    manual_curation_df.at[df_idx, col] = val
 
         state["last_saved"] = {
             "name":          row["compound_name"],
@@ -701,6 +700,11 @@ def build_dash_app(
         if old_state is not None and int(old_state.get("compound_idx", -1)) == compound_idx:
             raise dash.exceptions.PreventUpdate
 
+        # Skip flush if this dd change was triggered by programmatic navigation
+        # (navigate_compound / handle_keyboard already flushed atomically).
+        if old_state is not None and old_state.get("_nav_programmatic"):
+            raise dash.exceptions.PreventUpdate
+
         flush_error = None
         if old_state is not None:
             try:
@@ -753,6 +757,7 @@ def build_dash_app(
             logger.error(f"navigate_compound: _flush_to_db failed: {exc}")
             flush_error = f"Save failed: {type(exc).__name__}: {exc}"
 
+        ms2_scans_cache.clear()
         new_state = _load_state(
             new_idx,
             session_id=state.get("session_id"),
@@ -760,6 +765,7 @@ def build_dash_app(
         )
         new_state["last_saved"] = state.get("last_saved")
         new_state["flush_error"] = flush_error
+        new_state["_nav_programmatic"] = True
         return new_state, new_idx
 
     @app.callback(
@@ -779,9 +785,7 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         delta = -1 if trigger == "ms2-prev" else 1
         new_idx = max(0, min(state["ms2_idx"] + delta, n_scans - 1))
-        p = Patch()
-        p["ms2_idx"] = new_idx
-        return p
+        return _patch_with_seq(state, ms2_idx=new_idx)
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -810,9 +814,9 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         isomer_idx = state.get("isomer_snap_idx", 0) % len(bounds)
         rt_min, rt_max = bounds[isomer_idx]
-        p = _patch_rt_change(state, rt_min, rt_max)
-        p["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
-        return p
+        new_state = _patch_rt_change(state, rt_min, rt_max)
+        new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
+        return new_state
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -851,10 +855,14 @@ def build_dash_app(
         Output("session-store", "data", allow_duplicate=True),
         Input("analyst-notes", "value"),
         State("session-store", "data"),
+        State("controls-compound-idx", "data"),
         prevent_initial_call=True,
     )
-    def set_analyst_notes(txt, state):
+    def set_analyst_notes(txt, state, controls_idx):
         if state is None or txt is None or txt == state.get("analyst_notes"):
+            raise dash.exceptions.PreventUpdate
+        # Reject debounce fires that arrived after j/k navigation changed the compound.
+        if controls_idx is not None and int(controls_idx) != int(state.get("compound_idx", -1)):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, analyst_notes=txt)
 
@@ -862,10 +870,14 @@ def build_dash_app(
         Output("session-store", "data", allow_duplicate=True),
         Input("id-notes", "value"),
         State("session-store", "data"),
+        State("controls-compound-idx", "data"),
         prevent_initial_call=True,
     )
-    def set_id_notes(txt, state):
+    def set_id_notes(txt, state, controls_idx):
         if state is None or txt is None or txt == state.get("id_notes"):
+            raise dash.exceptions.PreventUpdate
+        # Reject debounce fires that arrived after j/k navigation changed the compound.
+        if controls_idx is not None and int(controls_idx) != int(state.get("compound_idx", -1)):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, id_notes=txt)
 
@@ -878,25 +890,21 @@ def build_dash_app(
     def rt_drag(relayout, state):
         if not relayout or state is None:
             raise dash.exceptions.PreventUpdate
-        shape_updates = {}
+        new_min, new_max = state["rt_min"], state["rt_max"]
+        updated = False
         for k, v in relayout.items():
-            if k.startswith("shapes[") and k.endswith("].x0"):
-                try:
-                    idx = int(k.split("[")[1].split("]")[0])
-                    shape_updates[idx] = float(v)
-                except (ValueError, IndexError):
-                    pass
-        if not shape_updates:
-            raise dash.exceptions.PreventUpdate
-        sorted_indices = sorted(shape_updates.keys())
-        if len(sorted_indices) >= 2:
-            new_min = shape_updates[sorted_indices[0]]
-            new_max = shape_updates[sorted_indices[1]]
-        else:
-            dragged_x = list(shape_updates.values())[0]
+            if not (k.startswith("shapes[") and k.endswith("].x0")):
+                continue
+            dragged_x = float(v)
             dist_min = abs(dragged_x - state["rt_min"])
             dist_max = abs(dragged_x - state["rt_max"])
-            new_min, new_max = (dragged_x, state["rt_max"]) if dist_min <= dist_max else (state["rt_min"], dragged_x)
+            if dist_min <= dist_max:
+                new_min = dragged_x
+            else:
+                new_max = dragged_x
+            updated = True
+        if not updated:
+            raise dash.exceptions.PreventUpdate
         return _patch_rt_change(state, new_min, new_max)
 
     @app.callback(
@@ -957,18 +965,14 @@ def build_dash_app(
             n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
             if n_scans == 0:
                 raise dash.exceptions.PreventUpdate
-            p = Patch()
-            p["ms2_idx"] = max(state["ms2_idx"] - 1, 0)
-            return p, dash.no_update
+            return _patch_with_seq(state, ms2_idx=max(state["ms2_idx"] - 1, 0)), dash.no_update
 
         if key == ";":
             row = _compound_row(state["compound_idx"])
             n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
             if n_scans == 0:
                 raise dash.exceptions.PreventUpdate
-            p = Patch()
-            p["ms2_idx"] = min(state["ms2_idx"] + 1, n_scans - 1)
-            return p, dash.no_update
+            return _patch_with_seq(state, ms2_idx=min(state["ms2_idx"] + 1, n_scans - 1)), dash.no_update
 
         if key == "n":
             row = _compound_row(state["compound_idx"])
@@ -987,9 +991,9 @@ def build_dash_app(
                 raise dash.exceptions.PreventUpdate
             isomer_idx = state.get("isomer_snap_idx", 0) % len(bounds)
             rt_min, rt_max = bounds[isomer_idx]
-            p = _patch_rt_change(state, rt_min, rt_max)
-            p["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
-            return p, dash.no_update
+            new_state = _patch_rt_change(state, rt_min, rt_max)
+            new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
+            return new_state, dash.no_update
 
         if key in ("j", "k"):
             # Atomic navigation: flush current compound to DB, then load the next.
@@ -1008,6 +1012,7 @@ def build_dash_app(
                 traceback.print_exc()
                 logger.error(f"handle_keyboard navigation _flush_to_db failed: {exc}")
                 flush_error = f"Save failed: {type(exc).__name__}: {exc}"
+            ms2_scans_cache.clear()
             new_state = _load_state(
                 new_idx,
                 session_id=state.get("session_id"),
@@ -1015,6 +1020,7 @@ def build_dash_app(
             )
             new_state["last_saved"] = state.get("last_saved")
             new_state["flush_error"] = flush_error
+            new_state["_nav_programmatic"] = True
             return new_state, new_idx
 
         if key in MS2_KEY_TO_LABEL:
@@ -1101,6 +1107,7 @@ def build_dash_app(
         Output("ms1-radio", "value"),
         Output("ms2-radio", "value"),
         Output("other-radio", "value"),
+        Output("controls-compound-idx", "data"),
         Input("session-store", "data"),
         prevent_initial_call=True,
     )
@@ -1110,7 +1117,7 @@ def build_dash_app(
         ms2_val   = state["ms2_note"]   if state["ms2_note"]   in MS2_OPTIONS   else "no selection"
         ms1_val   = state["ms1_note"]   if state["ms1_note"]   in MS1_OPTIONS   else "keep"
         other_val = state["other_note"] if state["other_note"] in OTHER_OPTIONS else "no selection"
-        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val
+        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"]
 
     @app.callback(
         Output("save-exit-status", "children"),
