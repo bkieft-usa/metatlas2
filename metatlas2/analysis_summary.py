@@ -53,18 +53,43 @@ def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
 # COMPOUND STRUCTURE HELPER
 # =============================================================================
 
-def _get_compound_smiles(project_db_path: str, inchi_key: str) -> Optional[str]:
-    """Return the SMILES string for *inchi_key* from the project compounds table."""
-    try:
-        with dbi.get_db_connection(project_db_path) as conn:
-            row = conn.execute(
-                "SELECT smiles FROM compounds WHERE inchi_key = ? LIMIT 1",
-                [inchi_key],
-            ).fetchone()
-        return row[0] if row else None
-    except Exception as exc:
-        logger.warning("Could not retrieve SMILES for %s: %s", inchi_key, exc)
-        return None
+def _get_compound_formula(
+    project_db_path: str,
+    inchi_key: str,
+    main_db_path: Optional[str] = None,
+) -> Optional[str]:
+    """Return the compound formula for *inchi_key*, checking main_db first then project_db."""
+    for db_path in filter(None, [main_db_path, project_db_path]):
+        try:
+            with dbi.get_db_connection(db_path) as conn:
+                row = conn.execute(
+                    "SELECT formula FROM compounds WHERE inchi_key = ? LIMIT 1",
+                    [inchi_key],
+                ).fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception as exc:
+            logger.warning("Could not retrieve formula from %s for %s: %s", db_path, inchi_key, exc)
+    return None
+
+def _get_compound_smiles(
+    project_db_path: str,
+    inchi_key: str,
+    main_db_path: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return (smiles, inchi) for *inchi_key*, checking main_db first then project_db."""
+    for db_path in filter(None, [main_db_path, project_db_path]):
+        try:
+            with dbi.get_db_connection(db_path) as conn:
+                row = conn.execute(
+                    "SELECT smiles, inchi FROM compounds WHERE inchi_key = ? LIMIT 1",
+                    [inchi_key],
+                ).fetchone()
+            if row and (row[0] or row[1]):
+                return row[0] or None, row[1] or None
+        except Exception as exc:
+            logger.warning("Could not retrieve structure from %s for %s: %s", db_path, inchi_key, exc)
+    return None, None
 
 
 # =============================================================================
@@ -154,32 +179,31 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
         spine.set_linewidth(1.2)
 
 
-def _plot_structure(ax, smiles: Optional[str], inchi_key: str, size: int = 500) -> None:
-    """Draw the molecular structure from *smiles* using RDKit; fall back to InChIKey text."""
+def _plot_structure(
+    ax,
+    smiles: Optional[str],
+    inchi: Optional[str],
+    inchi_key: str,
+    size: int = 500,
+) -> None:
+    """Draw the molecular structure using RDKit (SMILES first, InChI fallback)."""
     ax.axis("off")
-    if not smiles:
-        ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
-                ha="center", va="center", fontsize=10)
-        return
+    mol = None
     try:
-        import io
-        from PIL import Image
         from rdkit import Chem
-        from rdkit.Chem.Draw import rdMolDraw2D
-
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            raise ValueError("Invalid SMILES")
-        drawer = rdMolDraw2D.MolDraw2DCairo(size, size)
-        drawer.drawOptions().addStereoAnnotation = True
-        drawer.DrawMolecule(mol)
-        drawer.FinishDrawing()
-        img = Image.open(io.BytesIO(drawer.GetDrawingText()))
-        ax.imshow(img, aspect="equal")
+        from rdkit.Chem import Draw
+        if smiles:
+            mol = Chem.MolFromSmiles(smiles)
+        if mol is None and inchi:
+            mol = Chem.MolFromInchi(inchi)
+        if mol is not None:
+            image = Draw.MolToImage(mol, size=(size, size))
+            ax.imshow(image, aspect="equal")
+            return
     except Exception as exc:
         logger.warning("Could not draw structure for %s: %s", inchi_key, exc)
-        ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
-                ha="center", va="center", fontsize=10)
+    ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
+            ha="center", va="center", fontsize=10)
 
 
 def _plot_eic(
@@ -306,8 +330,8 @@ def _plot_hit_info_table(
         y = header_y - row_h * (row_idx + 1)
         bg = "#f0f0f0" if row_idx % 2 == 0 else "white"
         ax.add_patch(Rectangle(
-            (0, y - row_h * 0.3), 1.0, row_h,
-            transform=ax.transAxes, color=bg, zorder=0, clip_on=False,
+            (0, y - row_h), 1.0, row_h * 1.05,
+            transform=ax.transAxes, color=bg, zorder=0,
         ))
 
         raw_name   = os.path.basename(str(hit["file_path"]))
@@ -372,6 +396,7 @@ def make_identification_figure(
         When *False*, skip compounds whose PDF already exists on disk.
     """
     project_db_path  = summary_obj.paths["project_db_path"]
+    main_db_path     = summary_obj.paths.get("main_db_path")
     rt_alignment_num = summary_obj.rt_alignment_number
     analysis_num     = summary_obj.analysis_number
 
@@ -408,6 +433,11 @@ def make_identification_figure(
         compound_name = mc_row.get("compound_name") or f"compound_{_}"
         inchi_key     = mc_row.get("inchi_key", "")
         adduct        = mc_row.get("adduct", "")
+        formula = _get_compound_formula(project_db_path, inchi_key, main_db_path) or "N/A"
+        smiles, inchi = _get_compound_smiles(project_db_path, inchi_key, main_db_path)
+        mc_row['formula'] = formula
+        mc_row['smiles']  = smiles
+        mc_row['inchi']   = inchi
 
         # Build safe filename: replace characters that are awkward in file paths
         safe_name = f"{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
@@ -438,8 +468,6 @@ def make_identification_figure(
                     .reset_index(drop=True))
         else:
             top3 = pd.DataFrame()
-
-        smiles = _get_compound_smiles(project_db_path, inchi_key)
 
         # ── Build figure ───────────────────────────────────────────────────
         fig = plt.figure(figsize=(25, 15))
@@ -498,7 +526,7 @@ def make_identification_figure(
 
         # Row 1, Col 3: molecular structure
         ax_struct = fig.add_subplot(gs[0, 3])
-        _plot_structure(ax_struct, smiles, inchi_key, size=500)
+        _plot_structure(ax_struct, mc_row.get('smiles', None), mc_row.get('inchi', None), inchi_key, size=500)
 
         # Row 2, Col 0: linear EIC
         ax_eic_lin = fig.add_subplot(gs[1, 0])
@@ -721,6 +749,7 @@ def make_stats_table(
         compound_name = mc_row.get("compound_name") or f"compound_{compound_idx}"
         inchi_key     = mc_row.get("inchi_key",   "")
         adduct        = mc_row.get("adduct",       "")
+        mc_row['formula'] = _get_compound_formula(summary_obj.paths["project_db_path"], inchi_key, summary_obj.paths.get("main_db_path"))
 
         # ── Pull scalar MS1 summary values from manual_curation ──────────────
         mz_theoretical = float(mc_row.get("atlas_mz",            np.nan))

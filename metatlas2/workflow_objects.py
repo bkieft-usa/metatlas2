@@ -821,9 +821,9 @@ class AnalysisSummary:
         logger.info(f"Setting up AnalysisSummary object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.config_path = config_path
         self.config = ldt.load_metatlas2_config(self.config_path)
+        self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.project_name = project_name
 
         logger.info(f"Setting up workflow paths...")

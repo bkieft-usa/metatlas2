@@ -426,8 +426,6 @@ def build_dash_app(
 
     # ── figure builders ────────────────────────────────────────────────────
     def _make_ms1_figure(state):
-        logger.info(f"Making MS1 figure, state={state}")
-
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
             if not isinstance(lcmsruns_color_map, dict):
@@ -450,7 +448,6 @@ def build_dash_app(
         sub = analysis_gui_obj.ms1_df[(analysis_gui_obj.ms1_df["inchi_key"] == inchi) & (analysis_gui_obj.ms1_df["adduct"] == adduct)]
 
         fig = go.Figure()
-        logger.info(f"empty ms1 figure made, state={state}")
         for fp in sub["file_path"].unique():
             short_name = "_".join(os.path.basename(fp).split(".")[0].split("_")[11:])
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in short_name.lower()), "gray")
@@ -466,8 +463,7 @@ def build_dash_app(
                     traceback.print_exc()
                     logger.error(f"MS1 parse error {fp}: {e}")
 
-        fig.add_vline(x=row["atlas_rt_peak"], line=dict(color="black", dash="dash", width=1.5),
-                      annotation_text=f"Atlas {row['atlas_rt_peak']:.3f}", annotation_position="top left")
+        fig.add_vline(x=row["atlas_rt_peak"], line=dict(color="black", width=1.5))
         if pd.notnull(row.get("suggested_rt_min")):
             fig.add_vline(x=row["suggested_rt_min"], line=dict(color="orange", dash="dot", width=1.5))
         if pd.notnull(row.get("suggested_rt_max")):
@@ -593,11 +589,9 @@ def build_dash_app(
             yaxis=dict(showgrid=False, zeroline=False),
         )
 
-        logger.info(f"Full MS1 figure made, state={state}")
         return fig
 
     def _make_ms2_figure(state):
-        logger.info(f"Making MS2 figure, state={state}")
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min, rt_max = state["rt_min"], state["rt_max"]
@@ -668,7 +662,7 @@ def build_dash_app(
             xaxis=dict(showgrid=False, zeroline=False),
             yaxis=dict(showgrid=False, zeroline=False),
         )
-        logger.info(f"Full MS2 figure made, state={state}")
+
         return fig
 
     logger.info("App helpers defined successfully")
@@ -1034,7 +1028,6 @@ def build_dash_app(
         prevent_initial_call=False,
     )
     def update_figures(state):
-        logger.info(f"update_figures called, state={state}")
         if state is None:
             raise dash.exceptions.PreventUpdate
         flush_err = state.get("flush_error")

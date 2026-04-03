@@ -83,6 +83,7 @@ def _make_header_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNod
         f"**Chromatography:** {auto_id_obj.post_autoid_atlas_obj.chromatography}  \n"
         f"**Polarity:** {auto_id_obj.post_autoid_atlas_obj.polarity}  \n"
         f"**Analysis type:** {auto_id_obj.post_autoid_atlas_obj.analysis_type}  \n"
+        f"**RT alignment number:** {auto_id_obj.rt_alignment_number}  \n"
         f"**Analysis number:** {auto_id_obj.analysis_number}  \n\n"
         f"Run the **GUI cell**, curate, then run the **Summary cell**."
     )
