@@ -4,6 +4,8 @@ import sys
 import threading, time, os
 from IPython.display import display, HTML
 
+from werkzeug.serving import make_server
+
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
 import logging_config as lcf
@@ -24,7 +26,8 @@ logger = lcf.get_logger('run_workflows')
 def run_project_setup(
     project_name: str,
     config_path: str,
-    overwrite_existing: bool = False
+    overwrite_existing: bool = False,
+    rt_alignment_number: int = None
 ) -> None:
     """
     Creates project database and loads LCMS run files.
@@ -35,7 +38,8 @@ def run_project_setup(
     project_obj.setup(
         project_name=project_name,
         config_path=config_path,
-        overwrite_existing=overwrite_existing
+        overwrite_existing=overwrite_existing,
+        rt_alignment_number=rt_alignment_number
     )
 
 def run_rt_alignment(
@@ -53,25 +57,8 @@ def run_rt_alignment(
         rt_alignment_number=rt_alignment_number,
     )
 
-    if rt_align_obj.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases
-        logger.warning(f"RT alignment is disabled in config. Writing atlases from config to {rt_align_obj.paths['aligned_atlases_store_file']} and exiting...")
-        for chrom, pol_dict in rt_align_obj.config['WORKFLOWS']['TARGETED_ANALYSES'].items():
-            for pol, analysis_dict in pol_dict.items():
-                for analysis_type, atlas_config in analysis_dict.items():
-                    atlas_uid = atlas_config['ATLAS']['uid']
-                    atlas_obj = Atlas.from_database(
-                        database_path=rt_align_obj.paths['main_db_path'],
-                        atlas_uid=atlas_uid
-                    )
-                    ldt.save_atlas_data_to_csv(
-                        atlas_obj=atlas_obj,
-                        output_path=rt_align_obj.paths['aligned_atlases_store_file'],
-                    )
-        return
-
-    logger.info(f"Checking for existing RT aligned atlases table file at {rt_align_obj.paths['aligned_atlases_store_file']}...")
-    if os.path.exists(rt_align_obj.paths['aligned_atlases_store_file']):
-        logger.warning(f"Exiting! Aligned atlases have already been generated for RT alignment number {rt_align_obj.rt_alignment_number} at {rt_align_obj.paths['aligned_atlases_store_file']}.")
+    if rt_align_obj.run_alignment is False:
+        logger.info(f"RT alignment is disabled or aligned atlases already exist for RT alignment number {rt_align_obj.rt_alignment_number}. Skipping RT alignment procedure and exiting.")
         return
 
     logger.info(f"Retrieving all LCMS runs for project...")
@@ -86,45 +73,41 @@ def run_rt_alignment(
         exclude_file_type=rt_align_obj.rt_alignment_params.get('exclude_lcmsruns', ["NEG"]),
         chromatography=rt_align_obj.chromatography
     )
+    
+    logger.info("Retrieving template Atlas from database...")
+    rt_align_obj.align_atlas_obj = Atlas.from_database(
+        database_path=rt_align_obj.paths['main_db_path'],
+        atlas_uid=rt_align_obj.align_atlas_uid
+    )
 
-    logger.info(f"Checking for existing RT alignment model in database with UID {rt_align_obj.align_atlas_uid} ({rt_align_obj.chromatography}) and RT Alignment number {rt_align_obj.rt_alignment_number}")
-    rt_align_obj.rt_alignment_model = rt_align_obj.check_existing_rt_alignment()
+    logger.info("Passing Atlas and LCMSRuns to data extractor...")
+    experimental_data_obj = edp.extract_eic_and_ms2_from_parquet(
+        obj=rt_align_obj,
+        stage="rt_alignment"
+    )
 
-    if rt_align_obj.rt_alignment_model is None: # create model from scratch
-        
-        rt_align_obj.align_atlas_obj = Atlas.from_database(
-            database_path=rt_align_obj.paths['main_db_path'],
-            atlas_uid=rt_align_obj.align_atlas_uid
-        )
+    logger.info("Passing ExperimentalData and Atlas to summarizer...")
+    rat.create_file_matching_summary(
+        experimental_data=experimental_data_obj,
+        atlas=rt_align_obj.align_atlas_obj
+    )
 
-        logger.info("Passing Atlas and LCMSRuns to data extractor...")
-        experimental_data_obj = edp.extract_eic_and_ms2_from_parquet(
-            obj=rt_align_obj,
-            stage="rt_alignment"
-        )
+    logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
+    rat.build_rt_alignment_model(
+        experimental_data=experimental_data_obj,
+        atlas=rt_align_obj.align_atlas_obj, 
+        rt_align=rt_align_obj
+    )
 
-        logger.info("Passing ExperimentalData and Atlas to summarizer...")
-        rat.create_file_matching_summary(
-            experimental_data=experimental_data_obj,
-            atlas=rt_align_obj.align_atlas_obj
-        )
-
-        logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
-        rat.build_rt_alignment_model(
-            experimental_data=experimental_data_obj,
-            atlas=rt_align_obj.align_atlas_obj, 
-            rt_align=rt_align_obj
-        )
-
-        logger.info("Passing RTAlign object to model database table saver...")
-        dbi.save_rt_alignment_model_to_db(
-            rt_align_obj=rt_align_obj
-        )
-        
-        logger.info("Passing RTAlign object to model visualizer...")
-        rat.visualize_rt_alignment_model(
-            rt_align_obj=rt_align_obj
-        )
+    logger.info("Passing RTAlign object to model database table saver...")
+    dbi.save_rt_alignment_model_to_db(
+        rt_align_obj=rt_align_obj
+    )
+    
+    logger.info("Passing RTAlign object to model visualizer...")
+    rat.visualize_rt_alignment_model(
+        rt_align_obj=rt_align_obj
+    )
     
     logger.info("Passing RTAlign object to alignment applicator...")
     rat.apply_rt_alignment_to_target_atlases(
@@ -296,21 +279,18 @@ def run_analysis_gui(
     )
 
     logger.info("Launching Analysis GUI...")
+    shutdown_holder = [None]
+
     dash_app = agu.build_dash_app(
         analysis_gui_obj=analysis_gui_obj,
         port=dash_app_port,
+        shutdown_holder=shutdown_holder,
     )
 
-    def _run():
-        dash_app.run(
-            host="0.0.0.0",
-            port=dash_app_port,
-            debug=False,
-            use_reloader=False,
-            dev_tools_hot_reload=False,
-        )
+    server = make_server("0.0.0.0", dash_app_port, dash_app.server)
+    shutdown_holder[0] = server.shutdown
 
-    t = threading.Thread(target=_run, daemon=True)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     time.sleep(3)
 

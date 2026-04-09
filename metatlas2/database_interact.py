@@ -8,6 +8,7 @@ import json
 import sys
 import copy
 import getpass
+import shutil
 from datetime import datetime
 from tqdm.notebook import tqdm
 from pathlib import Path
@@ -347,12 +348,14 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
 
     return df
 
-def create_project_database(project_db_path: str, overwrite: bool = False) -> bool:
+def create_project_database(project_db_path: str, rt_align_path: str, overwrite: bool = False) -> bool:
     """
     Create project-specific database with required tables.
     Never overwrites existing databases - requires analyst to increment analysis number.
     """
+
     project_db_path = Path(project_db_path)
+    rt_alignment_path = Path(rt_align_path)
 
     if project_db_path.exists() and not overwrite:
         logger.info(f"Project database already exists at {project_db_path}. Not overwriting.")
@@ -360,7 +363,9 @@ def create_project_database(project_db_path: str, overwrite: bool = False) -> bo
     elif project_db_path.exists() and overwrite:
         logger.warning(f"Overwriting existing project database at {project_db_path} (overwrite=True)")
         project_db_path.unlink()
+        shutil.rmtree(rt_align_path)
         logger.info(f"Deleted existing database at {project_db_path}")
+        logger.info(f"Deleted existing RT alignment output at {rt_alignment_path}")
     elif not project_db_path.exists():
         logger.info(f"No existing project database found at {project_db_path}. Creating new database.")
 
@@ -1680,8 +1685,11 @@ def load_and_filter_gui_inputs(
     remove_unidentified_compounds = analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)
 
     # Load atlas to act as reference for GUI curation
-    manual_curation_atlas = analysis_gui_obj.pre_curation_atlas_obj
-    manual_curation_atlas_df = get_atlas_compounds_table(project_path, manual_curation_atlas.atlas_uid, main_path)
+    manual_curation_atlas_df = get_atlas_compounds_table(
+        project_path, 
+        analysis_gui_obj.pre_curation_atlas_obj.atlas_uid, 
+        main_path
+    )
     atlas_compounds = manual_curation_atlas_df[["inchi_key", "adduct"]]
 
     # Load manual curation entries and MS1/MS2 data for compounds in this analysis (based on input atlas)

@@ -142,8 +142,6 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                         params = analysis_config['PARAMS']
 
                         # Boolean workflow flags
-                        params['use_existing_hits'] = bool(params.get('use_existing_hits', False))
-                        params['use_existing_analysis'] = bool(params.get('use_existing_analysis', False))
                         params['do_alignment'] = bool(params.get('do_alignment', True))
                         params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
                         params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))

@@ -80,14 +80,36 @@ def find_ms2_hits(
         )
         auto_id_obj.experimental_data.ms2_hits.append(ms2_hit_obj)
 
-    # Print summary
-    compounds_with_hits = sum(
-        1 for ms2_hit in auto_id_obj.experimental_data.ms2_hits if not ms2_hit.data.empty
-    )
-    total_hits = sum(
-        len(ms2_hit.data) for ms2_hit in auto_id_obj.experimental_data.ms2_hits if not ms2_hit.data.empty
-    )
-    logger.info(f"Hit detection complete: {compounds_with_hits} compounds with reference hits and {total_hits} total hits")
+    # Limit to top N hits per compound (inchi_key) by score, across all files and references
+    max_hits = 100
+    hits_by_compound: Dict[Tuple[str, str], List] = {}
+    logger.info(f"Limiting to top {max_hits} hits per compound (InChI key + adduct) across all files...")
+    for hit_obj in auto_id_obj.experimental_data.ms2_hits:
+        hits_by_compound.setdefault((hit_obj.inchi_key, hit_obj.adduct), []).append(hit_obj)
+
+    for (inchi_key, adduct), hit_objs in hits_by_compound.items():
+        hit_objs_with_data = [h for h in hit_objs if not h.data.empty and 'score' in h.data.columns]
+        if not hit_objs_with_data:
+            continue
+        combined = pd.concat(
+            [h.data.assign(_hit_obj_id=id(h)) for h in hit_objs_with_data],
+            ignore_index=True
+        )
+        total_for_compound = len(combined)
+        if total_for_compound > max_hits:
+            combined = combined.nlargest(max_hits, 'score')
+            for hit_obj in hit_objs_with_data:
+                mask = combined['_hit_obj_id'] == id(hit_obj)
+                hit_obj.data = combined.loc[mask].drop(columns='_hit_obj_id').reset_index(drop=True)
+            logger.info(f"Compound {inchi_key} {adduct}: trimmed {total_for_compound} hits to top {max_hits} by score.")
+
+    # Print summary broken down by compound and file
+    hits_list = [(h.inchi_key, h.adduct, h.filename, len(h.data))
+                 for h in auto_id_obj.experimental_data.ms2_hits if not h.data.empty]
+    total_hits = sum(n for _, _, _, n in hits_list)
+    unique_compounds = len({(ik, ad) for ik, ad, _, _ in hits_list})
+    unique_files = len({fn for _, _, fn, _ in hits_list})
+    logger.info(f"Hit detection complete: {total_hits} total hits across {unique_compounds} compounds and {unique_files} files.")
 
     return
 
@@ -161,7 +183,9 @@ def _find_hits_from_ms2_df(
                 # Calculate MatchMS score
                 mms_comparison = cos.pair(mms_query, mms_ref)
                 score = mms_comparison['score'] if mms_comparison['score'] is not None else 0.0
-                
+                if score < workflow_params.get('ms2_min_score', 0.01):
+                    continue
+
                 # Perform custom alignment for plotting
                 query_spectrum_array = np.array([fragment_mz, fragment_intensity])
                 ref_spectrum_array = np.array([ref_mz, ref_intensity])

@@ -98,7 +98,7 @@ def _make_imports_cell() -> nbformat.NotebookNode:
         "pd.options.display.max_colwidth = 600\n\n"
         "sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')\n"
         "import logging_config as lcf\n"
-        "import run_workflows as rwf\n\n"
+        "import workflows as wfs\n\n"
         "lcf.setup_logging(log_level=logging.INFO)\n"
         "logger = lcf.get_logger('analysis_gui')\n"
     )
@@ -120,7 +120,7 @@ def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.Notebook
 def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
         "# ── Manual Curation ──────────────────────────────────────────\n"
-        "rwf.run_analysis_gui(\n"
+        "wfs.run_analysis_gui(\n"
         "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
@@ -135,7 +135,7 @@ def _make_gui_cell() -> nbformat.NotebookNode:
 def _make_summary_cell() -> nbformat.NotebookNode:
     src = (
         "# ── Analysis Summary ─────────────────────────────────────────\n"
-        "rwf.run_analysis_summary(\n"
+        "wfs.run_analysis_summary(\n"
         "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"

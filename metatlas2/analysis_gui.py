@@ -15,9 +15,6 @@ import logging_config as lcf
 
 logger = lcf.get_logger("analysis_gui")
 
-# -------------------------------------------------
-#   Constants
-# -------------------------------------------------
 MS2_OPTIONS = [
     "no selection",
     "-1.0, poor match, should remove",
@@ -72,12 +69,10 @@ MS2_KEY_TO_LABEL = {v: k for k, v in MS2_HOTKEYS.items()}
 MS1_KEY_TO_LABEL = {v: k for k, v in MS1_HOTKEYS.items()}
 OTHER_KEY_TO_LABEL = {v: k for k, v in OTHER_HOTKEYS.items()}
 
-# -------------------------------------------------
-#   Main factory
-# -------------------------------------------------
 def build_dash_app(
     analysis_gui_obj,
-    port=8050
+    port=8050,
+    shutdown_holder=None
 ):
     logger.info("Starting the app factory for the Analysis GUI...")
 
@@ -113,7 +108,6 @@ def build_dash_app(
     latest_flushed_seq_by_session = {}
     ms2_scans_cache = {}
 
-    # ── early helpers needed for layout construction ───────────────────────
     def _compound_row(idx):
         return manual_curation_df.iloc[idx]
 
@@ -164,6 +158,7 @@ def build_dash_app(
         events=[{"event": "keydown", "props": ["key", "timeStamp", "target.tagName"]}],
     )
 
+    # format of the app itself
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(0)),
@@ -284,8 +279,6 @@ def build_dash_app(
 
     logger.info("Layout constructed successfully")
 
-    # ── helpers ────────────────────────────────────────────────────────────
-
     def _parse_isomers(isomers_val):
         if isomers_val is None or (isinstance(isomers_val, float) and np.isnan(isomers_val)):
             return []
@@ -377,14 +370,11 @@ def build_dash_app(
         sid = state.get("session_id", "unknown")
         seq = int(state.get("edit_seq", 0))
 
-        # Stale/duplicate check and reservation are atomic under the lock so two
-        # concurrent calls with the same seq can never both proceed to the DB write.
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(sid, -1)
             if seq <= latest_seq:
                 logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
                 return state
-            # Reserve this seq before releasing the lock so no other call races through.
             latest_flushed_seq_by_session[sid] = seq
 
         row = _compound_row(state["compound_idx"])
@@ -423,7 +413,7 @@ def build_dash_app(
         state["flush_error"] = None
         return state
 
-    # ── figure builders ────────────────────────────────────────────────────
+    # main figures for ms data display
     def _make_ms1_figure(state):
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
@@ -666,7 +656,7 @@ def build_dash_app(
 
     logger.info("App helpers defined successfully")
 
-    # ── callbacks ──────────────────────────────────────────────────────────
+    # all app callbacks that fire when GUI is interacted with
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
         Input("compound-dd", "value"),
@@ -690,13 +680,7 @@ def build_dash_app(
 
         compound_idx = int(compound_idx)
 
-        # No-op if already on this compound.
         if old_state is not None and int(old_state.get("compound_idx", -1)) == compound_idx:
-            raise dash.exceptions.PreventUpdate
-
-        # Skip flush if this dd change was triggered by programmatic navigation
-        # (navigate_compound / handle_keyboard already flushed atomically).
-        if old_state is not None and old_state.get("_nav_programmatic"):
             raise dash.exceptions.PreventUpdate
 
         flush_error = None
@@ -708,6 +692,7 @@ def build_dash_app(
                 logger.error(f"init_store: _flush_to_db failed: {exc}")
                 flush_error = f"Save failed: {type(exc).__name__}: {exc}"
 
+        ms2_scans_cache.clear()
         new_state = _load_state(
             compound_idx,
             session_id=(old_state or {}).get("session_id"),
@@ -855,7 +840,6 @@ def build_dash_app(
     def set_analyst_notes(txt, state, controls_idx):
         if state is None or txt is None or txt == state.get("analyst_notes"):
             raise dash.exceptions.PreventUpdate
-        # Reject debounce fires that arrived after j/k navigation changed the compound.
         if controls_idx is not None and int(controls_idx) != int(state.get("compound_idx", -1)):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, analyst_notes=txt)
@@ -870,7 +854,6 @@ def build_dash_app(
     def set_id_notes(txt, state, controls_idx):
         if state is None or txt is None or txt == state.get("id_notes"):
             raise dash.exceptions.PreventUpdate
-        # Reject debounce fires that arrived after j/k navigation changed the compound.
         if controls_idx is not None and int(controls_idx) != int(state.get("compound_idx", -1)):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, id_notes=txt)
@@ -990,11 +973,6 @@ def build_dash_app(
             return new_state, dash.no_update
 
         if key in ("j", "k"):
-            # Atomic navigation: flush current compound to DB, then load the next.
-            # Handled here (not in a separate callback) so the flush reads the
-            # session-store State that was current when the keypress fired, with no
-            # intermediate hop through compound-dd that could race with in-flight
-            # Patch callbacks.
             delta = -1 if key == "j" else 1
             new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
             if new_idx == int(state["compound_idx"]):
@@ -1131,6 +1109,9 @@ def build_dash_app(
             traceback.print_exc()
             logger.error(f"save_and_exit: flush failed for compound {state.get('compound_idx')}: {exc}")
             msg = f"Save failed: {type(exc).__name__}: {exc}."
+
+        if shutdown_holder is not None and shutdown_holder[0] is not None:
+            threading.Timer(1.5, shutdown_holder[0]).start()
 
         return msg, True
 

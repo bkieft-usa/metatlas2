@@ -2,7 +2,7 @@ WORKFLOWS:
   RT_ALIGNMENT:
     HILICZ:
       ATLAS:
-        uid: atl-ref-qc-hilicz-pos-cdf8c6709c6e4953b75917e72e851130
+        uid: atl-ref-qc-hilicz-pos-f19a9c071d094cf9909f511f2900b60f
       PARAMS:
           include_lcmsruns:
             - QC
@@ -23,10 +23,8 @@ WORKFLOWS:
       POS:
         QC:
           ATLAS:
-            uid: atl-ref-qc-hilicz-pos-cdf8c6709c6e4953b75917e72e851130
+            uid: atl-ref-qc-hilicz-pos-f19a9c071d094cf9909f511f2900b60f
           PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
             include_lcmsruns:
               - EXPERIMENTAL
               - ISTD
@@ -74,10 +72,8 @@ WORKFLOWS:
               REFSTD: black
         ISTD:
           ATLAS:
-            uid: atl-ref-istd-hilicz-pos-8b5ff31b79704f728c046a40623ace2b
+            uid: atl-ref-istd-hilicz-pos-edeee877539142329d10bfdf3291627c
           PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
             include_lcmsruns:
               - EXPERIMENTAL
               - ISTD
@@ -125,10 +121,8 @@ WORKFLOWS:
               REFSTD: black
         EMA:
           ATLAS:
-            uid: atl-ref-ema-hilicz-pos-984447634249453b80c0445746285c45
+            uid: atl-ref-ema-hilicz-pos-f9cd71d306644aafa88c0324677fca79
           PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
             include_lcmsruns:
               - EXPERIMENTAL
               - ISTD
@@ -179,8 +173,6 @@ WORKFLOWS:
           ATLAS:
             uid:
           PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
             include_lcmsruns:
               - EXPERIMENTAL
               - ISTD
@@ -230,8 +222,6 @@ WORKFLOWS:
           ATLAS:
             uid:
           PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
             include_lcmsruns:
               - EXPERIMENTAL
               - ISTD
@@ -281,8 +271,6 @@ WORKFLOWS:
           ATLAS:
             uid:
           PARAMS:
-            use_existing_hits: false
-            use_existing_analysis: false
             include_lcmsruns:
               - EXPERIMENTAL
               - ISTD

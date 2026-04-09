@@ -7,7 +7,7 @@ import os
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
 import load_tools as ldt
-import run_workflows as rwf
+import workflows as wfs
 
 SLURM_TEMPLATE = """\
 #!/bin/bash
@@ -155,16 +155,17 @@ def main():
     # ── Project Setup ─────────────────────────────────────────────────
     if not args.skip_setup:
         logger.info("Running Project Setup")
-        rwf.run_project_setup(
+        wfs.run_project_setup(
             project_name=args.project,
             config_path=args.config,
             overwrite_existing=args.overwrite,
+            rt_alignment_number=args.rt_align_num
         )
 
     # ── RT Alignment (one per chromatography in config) ───────────────
     if not args.skip_rt_align:
         logger.info("Running RT alignment ...")
-        rwf.run_rt_alignment(
+        wfs.run_rt_alignment(
             config_path=args.config,
             project_name=args.project,
             rt_alignment_number=args.rt_align_num
@@ -173,7 +174,7 @@ def main():
     # ── Auto Identification (one per atlas) ────────────────────────────
     logger.info("Running Auto Identification")
     if not args.skip_auto_id:
-        rwf.run_auto_identification(
+        wfs.run_auto_identification(
             config_path=args.config,
             project_name=args.project,
             rt_alignment_number=args.rt_align_num,

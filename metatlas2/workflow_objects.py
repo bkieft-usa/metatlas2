@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import numpy as np
 import pandas as pd
+import os
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import database_interact as dbi
@@ -24,7 +25,6 @@ _MAIN_DB_PATH  = _BASE_DATA_DIR / "databases" / "metatlas.duckdb"
 _MSMS_REFS_PATH = _BASE_DATA_DIR / "databases" / "msms_refs" / "msms_refs_no_inosine15n.tab"
 
 def _set_up_paths(
-    config: Dict,
     project_name: str,
     stage: str,
     rt_alignment_number: int = None,
@@ -68,7 +68,7 @@ def _set_up_paths(
             "Please ensure the path is correct in the config file."
         )
 
-    if stage in ["rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
+    if stage in ["project_setup", "rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
         if rt_alignment_number is None:
             raise ValueError("RT alignment number must be provided for this stage.")
         rta_dir = project_dir / f"RTA{rt_alignment_number}"
@@ -503,7 +503,7 @@ class Project:
     paths: Dict[str, str] = field(default_factory=dict)
     lcmsruns: List['LCMSRun'] = field(default_factory=list)
 
-    def setup(self, project_name: str, config_path: str, overwrite_existing: bool = False):
+    def setup(self, project_name: str, config_path: str, overwrite_existing: bool = False, rt_alignment_number: int = None):
 
         self.project_name = project_name
         self.config_path = config_path
@@ -513,12 +513,14 @@ class Project:
         self.paths = _set_up_paths(
             self.config, 
             self.project_name, 
-            "project_setup"
+            "project_setup",
+            rt_alignment_number=rt_alignment_number
         )
 
         logger.info(f"Creating project database at {self.paths['project_db_path']}...")
         exists = dbi.create_project_database(
             project_db_path=self.paths['project_db_path'],
+            rt_align_path=self.paths['rt_alignment_output_dir'],
             overwrite=overwrite_existing
         )
         if exists:
@@ -604,6 +606,7 @@ class RTAlign:
         """
 
         logger.info(f"Setting up RTAlign object with RT alignment number {rt_alignment_number}...")
+        self.run_alignment = True
         self.rt_alignment_number = rt_alignment_number
         self.project_name = project_name
         self.config_path = config_path
@@ -620,28 +623,31 @@ class RTAlign:
             rt_alignment_number=self.rt_alignment_number
         )
 
-    def check_existing_rt_alignment(self) -> Optional[Dict]:
-        """
-        Check for an existing RT alignment model in the database and handle logic for reuse or creation.
-        """
+        if self.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases in text file
+            self.run_alignment = False
+            logger.info(f"RT alignment is disabled in config. Writing atlases from config to {self.paths['aligned_atlases_store_file']} and exiting...")
+            for chrom, pol_dict in self.config['WORKFLOWS']['TARGETED_ANALYSES'].items():
+                for pol, analysis_dict in pol_dict.items():
+                    for analysis_type, atlas_config in analysis_dict.items():
+                        atlas_uid = atlas_config['ATLAS']['uid']
+                        atlas_obj = Atlas.from_database(
+                            database_path=self.paths['main_db_path'],
+                            atlas_uid=atlas_uid
+                        )
+                        ldt.save_atlas_data_to_csv(
+                            atlas_obj=atlas_obj,
+                            output_path=self.paths['aligned_atlases_store_file'],
+                        )
 
-        rta_model = None
-        use_existing_rt_alignment = self.rt_alignment_params.get('use_existing_rt_alignment', False)
-        existing_rt_aln_model = dbi.get_rt_alignment_model_from_db(self)
-
-        if use_existing_rt_alignment and existing_rt_aln_model is not None:
-            logger.info(f"Using the existing RT alignment model from database for atlas {self.qc_atlas_uid} and RT alignment number {self.rt_alignment_number}.")
-            rta_model = rat.calculate_model_values_from_existing(existing_rt_aln_model)
-            if rta_model:
-                logger.info(f"Loaded existing RT alignment model with R² = {rta_model['r2']:.4f}, RMSE = {rta_model['rmse']:.4f}")
-        elif use_existing_rt_alignment and existing_rt_aln_model is None:
-            logger.warning(f"Variable 'use_existing_rt_alignment' is True, but no existing RT alignment model found in database for atlas {self.qc_atlas_uid}. Creating new RT Alignment model.")
-        elif not use_existing_rt_alignment and existing_rt_aln_model is not None:
-            raise ValueError(f"Variable 'use_existing_rt_alignment' is False, but RT alignment model already exists in database for atlas {self.qc_atlas_uid}. To avoid overwriting, either set use_existing_rt_alignment to True or choose a different RT alignment number.")
-        elif not use_existing_rt_alignment and existing_rt_aln_model is None:
-            logger.info(f"Variable 'use_existing_rt_alignment' is False and no existing RT alignment model found in database for atlas {self.qc_atlas_uid}. Creating new RT Alignment model.")
-
-        return rta_model
+        logger.info(f"Checking for existing RT aligned atlases table file at {self.paths['aligned_atlases_store_file']}...")
+        if os.path.exists(self.paths['aligned_atlases_store_file']) and self.rt_alignment_params.get('use_existing_rt_alignment', False) is True:
+            logger.info(f"Aligned atlases have already been generated for RT alignment number {self.rt_alignment_number} at {self.paths['aligned_atlases_store_file']}, not overwriting since use_existing_rt_alignment is set to True in config.")
+            self.run_alignment = False
+        elif os.path.exists(self.paths['aligned_atlases_store_file']) and self.rt_alignment_params.get('use_existing_rt_alignment', False) is False:
+            logger.warning(f"Aligned atlases file already exists at {self.paths['aligned_atlases_store_file']} for RT alignment number {self.rt_alignment_number}, but overwriting existing file since use_existing_rt_alignment is set to False in config.")
+            Path(self.paths['aligned_atlases_store_file']).unlink()
+        elif not os.path.exists(self.paths['aligned_atlases_store_file']):
+            logger.info(f"No existing aligned atlases file found at {self.paths['aligned_atlases_store_file']} for RT alignment number {self.rt_alignment_number}. Aligned atlases will be generated.")
 
 class ManualCuration:
     def __init__(self, inchi_key: str, adduct: str, data: pd.DataFrame):
