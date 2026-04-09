@@ -80,7 +80,7 @@ def build_dash_app(
     manual_curation_df = analysis_gui_obj.manual_curation_df
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
 
-    logger.info(f"manual_curation_df has {len(manual_curation_df)} rows")
+    logger.info(f"Analysis starting with {len(manual_curation_df)} compounds.")
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
@@ -373,7 +373,7 @@ def build_dash_app(
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(sid, -1)
             if seq <= latest_seq:
-                logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
+                #logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
                 return state
             latest_flushed_seq_by_session[sid] = seq
 
@@ -1103,11 +1103,11 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         try:
             _flush_to_db(state)
-            logger.info(f"save_and_exit: flush succeeded for compound {state.get('compound_idx')}")
+            logger.info(f"Save and Exit: flush succeeded for compound {state.get('compound_idx')}")
             msg = "Saved. You may return to the notebook to run the curation summary."
         except Exception as exc:
             traceback.print_exc()
-            logger.error(f"save_and_exit: flush failed for compound {state.get('compound_idx')}: {exc}")
+            logger.error(f"Save and Exit: flush failed for compound {state.get('compound_idx')}: {exc}")
             msg = f"Save failed: {type(exc).__name__}: {exc}."
 
         if shutdown_holder is not None and shutdown_holder[0] is not None:

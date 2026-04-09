@@ -511,9 +511,8 @@ class Project:
 
         logger.info(f"Setting up workflow paths for project {self.project_name}...")
         self.paths = _set_up_paths(
-            self.config, 
-            self.project_name, 
-            "project_setup",
+            project_name=self.project_name, 
+            stage="project_setup",
             rt_alignment_number=rt_alignment_number
         )
 
@@ -617,7 +616,6 @@ class RTAlign:
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
-            config=self.config,
             project_name=self.project_name,
             stage="rt_alignment",
             rt_alignment_number=self.rt_alignment_number
@@ -727,7 +725,6 @@ class AutoIdentification:
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
-            config=self.config,
             project_name=self.project_name,
             stage="auto_identification",
             rt_alignment_number=self.rt_alignment_number,
@@ -778,7 +775,6 @@ class AnalysisGUI:
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
-            config=self.config,
             project_name=self.project_name,
             stage="analysis_gui",
             rt_alignment_number=self.rt_alignment_number,
@@ -834,7 +830,6 @@ class AnalysisSummary:
 
         logger.info(f"Setting up workflow paths...")
         self.paths = _set_up_paths(
-            config=self.config,
             project_name=self.project_name,
             stage="analysis_summary",
             rt_alignment_number=self.rt_alignment_number,

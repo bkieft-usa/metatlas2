@@ -1,6 +1,6 @@
 from typing import Dict, Any
 import sys
-
+import logging
 import threading, time, os
 from IPython.display import display, HTML
 
@@ -290,6 +290,7 @@ def run_analysis_gui(
     server = make_server("0.0.0.0", dash_app_port, dash_app.server)
     shutdown_holder[0] = server.shutdown
 
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     time.sleep(3)

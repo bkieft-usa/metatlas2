@@ -3,6 +3,7 @@ import logging
 import subprocess
 import sys
 import os
+from pathlib import Path
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
@@ -32,6 +33,17 @@ python {script_path} run \\
     {extra_flags}
 """
 
+def _get_project_dir(project_name: str) -> str:
+    """
+    Derive the project directory from config.
+    Creates the directory if it does not exist.
+    """
+    _BASE_DATA_DIR = Path("/pscratch/sd/b/bkieft/metatlas_lite_data")
+    _PROJECTS_DIR  = _BASE_DATA_DIR / "projects"
+    _PROJECT_DIR = _PROJECTS_DIR / project_name
+    os.makedirs(_PROJECT_DIR, exist_ok=True)
+    return str(_PROJECT_DIR)
+
 def _get_analysis_output_dir(config_path: str, project_name: str, rt_align_num: int, analysis_num: int) -> str:
     """
     Derive the analysis output directory from config, mirroring _set_up_paths logic.
@@ -55,7 +67,6 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run metatlas2 pre-curation workflow")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # ── Shared arguments factory ──────────────────────────────────────────────
     def add_shared_args(p):
         p.add_argument("--config",         required=True, help="Path to analysis.yaml")
         p.add_argument("--project",        required=True, help="Project name")
@@ -66,11 +77,11 @@ def parse_args():
         p.add_argument("--skip-setup",     action="store_true", default=False)
         p.add_argument("--skip-rt-align",  action="store_true", default=False)
         p.add_argument("--skip-auto-id",   action="store_true", default=False)
-    # ── 'run' subcommand ──────────────────────────────────────────────────────
+        p.add_argument("--log-to-stdout",   action="store_true", default=False, help="Write log output to stdout instead of a log file in the project directory")
+
     run_parser = subparsers.add_parser("run", help="Execute the pre-curation workflow directly")
     add_shared_args(run_parser)
 
-    # ── 'submit' subcommand ───────────────────────────────────────────────────
     submit_parser = subparsers.add_parser("submit", help="Write and immediately submit a Slurm job")
     add_shared_args(submit_parser)
     submit_parser.add_argument("--qos",       default="regular")
@@ -96,11 +107,12 @@ def generate_slurm_script(args) -> str:
     )
 
     extra_flags = []
-    if args.overwrite:     extra_flags.append("--overwrite")
-    if args.skip_setup:    extra_flags.append("--skip-setup")
-    if args.skip_rt_align: extra_flags.append("--skip-rt-align")
-    if args.skip_auto_id:   extra_flags.append("--skip-auto-id")
-    if args.analysis_subset: extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
+    if args.overwrite:        extra_flags.append("--overwrite")
+    if args.skip_setup:       extra_flags.append("--skip-setup")
+    if args.skip_rt_align:    extra_flags.append("--skip-rt-align")
+    if args.skip_auto_id:     extra_flags.append("--skip-auto-id")
+    if args.log_to_stdout:    extra_flags.append("--log-to-stdout")
+    if args.analysis_subset:  extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
     extra_flags_str = " \\\n    ".join(extra_flags)
 
     project_short = args.project[:30].replace(" ", "_")
@@ -121,7 +133,6 @@ def generate_slurm_script(args) -> str:
         extra_flags         = extra_flags_str,
     )
 
-    # Write the script into the analysis output dir unless user overrides
     if args.output:
         out_path = args.output
     else:
@@ -138,10 +149,19 @@ def generate_slurm_script(args) -> str:
 def main():
     args = parse_args()
 
-    lcf.setup_logging(log_level=logging.INFO)
+    if args.log_to_stdout:
+        log_file = None
+    else:
+        print("Setting up logging...")
+        project_dir = _get_project_dir(args.project)
+        log_file = os.path.join(
+            project_dir,
+            f"RTA{args.rt_align_num}_TGA{args.analysis_num}.log"
+        )
+
+    lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
     logger = lcf.get_logger("run_targeted_analysis")
 
-    # ── submit: write script and queue with sbatch ────────────────────────────
     if args.command == "submit":
         out_path = generate_slurm_script(args)
         print(f"Slurm script written to: {out_path}")
@@ -152,8 +172,8 @@ def main():
             sys.exit(result.returncode)
         return
 
-    # ── Project Setup ─────────────────────────────────────────────────
     if not args.skip_setup:
+        print("Running project setup...")
         logger.info("Running Project Setup")
         wfs.run_project_setup(
             project_name=args.project,
@@ -162,8 +182,8 @@ def main():
             rt_alignment_number=args.rt_align_num
         )
 
-    # ── RT Alignment (one per chromatography in config) ───────────────
     if not args.skip_rt_align:
+        print("Running RT alignment...")
         logger.info("Running RT alignment ...")
         wfs.run_rt_alignment(
             config_path=args.config,
@@ -171,7 +191,7 @@ def main():
             rt_alignment_number=args.rt_align_num
         )
 
-    # ── Auto Identification (one per atlas) ────────────────────────────
+    print("Running Auto Identification...")
     logger.info("Running Auto Identification")
     if not args.skip_auto_id:
         wfs.run_auto_identification(
@@ -182,6 +202,7 @@ def main():
             analysis_subset=args.analysis_subset,
         )
 
+    print("Pre-curation workflow complete. Open the generated notebooks to curate.")
     logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")
 
 

@@ -10,7 +10,6 @@ from typing import Dict, List, Any
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from tqdm.notebook import tqdm
 
 sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
 import logging_config as lcf
@@ -67,7 +66,7 @@ def extract_eic_and_ms2_from_parquet(
                 for parquet_file in project_files_list
             }
 
-            for future in tqdm(as_completed(future_to_file), total=len(future_to_file), desc="Extracting data from parquet files"):
+            for future in as_completed(future_to_file):
                 parquet_file = future_to_file[future]
 
                 try:
@@ -94,7 +93,7 @@ def extract_eic_and_ms2_from_parquet(
                     continue
     else:
         logger.info("Using sequential processing...")
-        for parquet_file in tqdm(project_files_list, desc="Processing parquet files"):
+        for parquet_file in project_files_list:
             try:
                 file_results = _process_single_parquet_file(
                     parquet_file, compound_mzrts, workflow_params, only_ms_level

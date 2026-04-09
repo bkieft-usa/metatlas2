@@ -1,7 +1,6 @@
 import sys
 import pandas as pd
 import numpy as np
-from tqdm.notebook import tqdm
 from typing import Dict, Optional, List, Any
 
 from scipy.interpolate import interp1d
@@ -20,7 +19,7 @@ def create_manual_curation_obj(
     """
     from workflow_objects import ManualCuration
 
-    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Processing atlas compounds", unit="compound"):
+    for atlas_compound_mzrt in auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values():
 
         compound_data = pd.DataFrame([{
             'compound_uid': atlas_compound_mzrt.compound_uid,

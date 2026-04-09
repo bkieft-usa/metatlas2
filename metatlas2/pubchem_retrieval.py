@@ -6,7 +6,6 @@ import getpass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
-from tqdm.notebook import tqdm
 
 import pubchempy as pcp
 
@@ -219,7 +218,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
         new_entries = 0
         updated_entries = 0
         
-        for inchi_key in tqdm(compounds_to_fetch, desc="Fetching PubChem data"):
+        for inchi_key in compounds_to_fetch:
             was_in_cache = inchi_key in pubchem_cache
             
             # Get PubChem data via API

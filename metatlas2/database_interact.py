@@ -10,7 +10,6 @@ import copy
 import getpass
 import shutil
 from datetime import datetime
-from tqdm.notebook import tqdm
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from contextlib import contextmanager
@@ -2222,7 +2221,7 @@ def save_auto_identification_results_to_db(
 
     # CompoundInfo
     logger.info(f"Processing manual curation entries...")
-    for ci in tqdm(exp_data_obj.manual_curation, total=len(exp_data_obj.manual_curation), desc="Compounds"):
+    for ci in exp_data_obj.manual_curation:
         compound_uid = compound_uid_map.get(ci.inchi_key)
         if not compound_uid:
             logger.warning(f"Could not find compound_uid for {ci.inchi_key}, skipping")
@@ -2236,7 +2235,7 @@ def save_auto_identification_results_to_db(
 
     # MS1Data
     logger.info(f"Processing MS1 data entries...")
-    for ms1 in tqdm(exp_data_obj.ms1_data, total=len(exp_data_obj.ms1_data), desc="MS1 data files"):
+    for ms1 in exp_data_obj.ms1_data:
         compound_uid = compound_uid_map.get(ms1.inchi_key)
         if not compound_uid or ms1.data.empty:
             continue
@@ -2261,7 +2260,7 @@ def save_auto_identification_results_to_db(
 
     # MS2Data
     logger.info(f"Processing MS2 data entries...")
-    for ms2 in tqdm(exp_data_obj.ms2_data, total=len(exp_data_obj.ms2_data), desc="MS2 data scans"):
+    for ms2 in exp_data_obj.ms2_data:
         compound_uid = compound_uid_map.get(ms2.inchi_key)
         if not compound_uid or ms2.data.empty:
             continue
@@ -2285,7 +2284,7 @@ def save_auto_identification_results_to_db(
 
     # MS2Hits
     logger.info(f"Processing MS2 hit entries...")
-    for ms2_hit in tqdm(exp_data_obj.ms2_hits, total=len(exp_data_obj.ms2_hits), desc="MS2 hit entries"):
+    for ms2_hit in exp_data_obj.ms2_hits:
         compound_uid = compound_uid_map.get(ms2_hit.inchi_key)
         if not compound_uid or ms2_hit.data.empty:
             continue
@@ -2345,7 +2344,7 @@ def write_gui_updates_to_db(
         with get_db_connection(project_db_path) as conn:
             conn.execute(f"UPDATE manual_curation SET {set_clause} WHERE curation_uid = ?", params)
         
-        logger.info(f"Updated manual curation entry {curation_uid} with fields {list(updated_fields.keys())}")
+        #logger.info(f"Updated manual curation entry {curation_uid} with fields {list(updated_fields.keys())}")
     except Exception as e:
         logger.error(f"Error updating manual curation entry {curation_uid}: {e}")
         raise ValueError(f"Failed to update manual curation entry {curation_uid}. See logs for details.")
@@ -2606,5 +2605,4 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
             "MS2 hits": ms2_hits_count,
         })
 
-    display(pd.DataFrame(summary_rows))
     return

@@ -349,8 +349,7 @@ def build_rt_alignment_model(
     best_model['compounds_used_for_modeling'] = reliable_compounds['compound_uid'].tolist()
 
     logger.info(f"Compound RT Statistics:")
-    display(compound_rt_stats[['inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 
-                               'observation_count', 'exp_rt_std']])
+    logger.info(f"\n{compound_rt_stats[['inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 'observation_count', 'exp_rt_std']].to_string()}")
 
     rt_align.rt_alignment_model = best_model
     rt_align.modeling_data = modeling_results_df

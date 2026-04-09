@@ -58,6 +58,7 @@ def generate_gui_notebooks(
         nbformat.write(nb, f)
 
     logger.info(f"Notebook written to {out_path}")
+    print(f"Manual curation notebook generated: {out_path}")
 
 def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     params = auto_id_obj.workflow_params
@@ -119,7 +120,7 @@ def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.Notebook
 
 def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
-        "# ── Manual Curation ──────────────────────────────────────────\n"
+        "# Manual Curation\n"
         "wfs.run_analysis_gui(\n"
         "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"
@@ -134,7 +135,7 @@ def _make_gui_cell() -> nbformat.NotebookNode:
 
 def _make_summary_cell() -> nbformat.NotebookNode:
     src = (
-        "# ── Analysis Summary ─────────────────────────────────────────\n"
+        "# Analysis Summary\n"
         "wfs.run_analysis_summary(\n"
         "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"

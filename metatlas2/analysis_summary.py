@@ -268,10 +268,10 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
     ]
 
     y_start = 0.96
-    line_h  = 0.069
+    line_h  = 0.086  # Increased from 0.069 to accommodate larger font
     for label, value in rows:
-        ax.text(0.02, y_start, f"{label}:", fontsize=10, weight="bold", va="top", transform=ax.transAxes)
-        ax.text(0.38, y_start, value,        fontsize=10,                va="top", transform=ax.transAxes)
+        ax.text(0.02, y_start, f"{label}:", fontsize=12.5, weight="bold", va="center", transform=ax.transAxes)
+        ax.text(0.38, y_start, value,        fontsize=12.5,                va="center", transform=ax.transAxes)
         y_start -= line_h
 
     ax.set_xlim(0, 1)
@@ -289,7 +289,7 @@ def _plot_hit_info_table(
 
     if ms2_hits_compound_df.empty:
         ax.text(0.5, 0.5, "No MS2 hits found.", transform=ax.transAxes,
-                ha="center", va="center", fontsize=13, color="gray")
+                ha="center", va="center", fontsize=16, color="gray")
         return
 
     # Single best hit overall
@@ -329,16 +329,16 @@ def _plot_hit_info_table(
     col_x = [0.01, 0.28, 0.50, 0.72]
 
     # File name as title
-    ax.text(0.5, 0.97, fname_abbr, fontsize=11, weight="bold",
-            ha="center", va="top", transform=ax.transAxes)
+    ax.text(0.5, 0.97, fname_abbr, fontsize=13.75, weight="bold",
+            ha="center", va="center", transform=ax.transAxes)
 
     header_y = 0.80
-    row_h    = 0.17
+    row_h    = 0.2125  # Increased from 0.17 to accommodate larger font
 
     # Column header row
     for x, label in zip(col_x, ["BEST MATCH", "Theoretical", "Measured", "Error/Score"]):
-        ax.text(x, header_y, label, fontsize=10, weight="bold",
-                va="top", transform=ax.transAxes)
+        ax.text(x, header_y, label, fontsize=12.5, weight="bold",
+                va="center", transform=ax.transAxes)
 
     # Data rows
     table_rows = [
@@ -364,15 +364,16 @@ def _plot_hit_info_table(
             transform=ax.transAxes, color=bg, zorder=0,
         ))
         for col_idx, val in enumerate(row_vals):
-            ax.text(col_x[col_idx], y, val,
-                    fontsize=10,
+            ax.text(col_x[col_idx], y,
+                    val,
+                    fontsize=12.5,
                     weight="bold" if col_idx == 0 else "normal",
-                    va="top", transform=ax.transAxes)
+                    va="center", transform=ax.transAxes)
 
     n_unique = ms2_hits_compound_df["file_path"].nunique()
     ax.text(0.01, 0.04,
             f"Files with ≥1 MS2 hit: {n_unique} / {total_files} total",
-            fontsize=9, style="italic", transform=ax.transAxes)
+            fontsize=11.25, style="italic", transform=ax.transAxes)
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -552,7 +553,7 @@ def make_identification_figure(
         _plot_hit_info_table(ax_hits, ms2_hits_df, mc_row, total_files)
 
         # Figure-level title and section dividers
-        plt.suptitle(f"[{cmp_idx + 1:04d}]  {compound_name}  |  {adduct}\n", fontsize=20, weight="bold", y=0.97)
+        plt.suptitle(f"[{cmp_idx + 1:04d}]  |  {compound_name}  |  {adduct}\n", fontsize=20, weight="bold", y=0.97)
         for y_line in [0.60, 0.345]:
             fig.add_artist(plt.Line2D(
                 [0.08, 0.92], [y_line, y_line],
