@@ -1,9 +1,6 @@
 import argparse
-import sys
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import logging_config as lcf
-from workflow_objects import Compound
-
+from metatlas2.workflow_objects import Compound
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('workflow_objects')
 
 def add_compounds_to_db(

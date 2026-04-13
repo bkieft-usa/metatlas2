@@ -13,15 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from contextlib import contextmanager
-from IPython.display import display
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import rt_align_tools as rat
-import pubchem_retrieval as pcr
-import load_tools as ldt
-import logging_config as lcf
-
-# Initialize logger properly at module level
+import metatlas2.rt_align_tools as rat
+import metatlas2.pubchem_retrieval as pcr
+import metatlas2.load_tools as ldt
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('database_interact')
 
 @contextmanager
@@ -163,7 +159,8 @@ def create_new_atlas_from_dataframe(
     atlas_file_path: str = None,
     main_db_path: str = None
 ) -> "Atlas":
-    from workflow_objects import Atlas, CompoundMZRT
+    
+    from metatlas2.workflow_objects import Atlas, CompoundMZRT
 
     if not chromatography:
         chromatography = ldt.detect_atlas_input_chromatography(atlas_df)
@@ -854,7 +851,7 @@ def get_lcmsruns_from_db(
     Returns a flat list of LCMSRun objects.
     """
 
-    from workflow_objects import LCMSRun
+    from metatlas2.workflow_objects import LCMSRun
 
     where_conditions = ["file_format = ?"]
     params = [file_format]
@@ -2120,9 +2117,11 @@ def create_new_atlas_after_auto_id(
 def update_atlas_with_rt_alignment(
     rt_align_obj: "RTAlignment"
 ) -> tuple[dict[str, "Atlas"], list[float]]:
-    """Apply RT alignment model to target atlases and return new Atlas objects with updated RTs, along with a list of all RT shifts applied."""
+    """Apply RT alignment model to target atlases and return new Atlas objects with updated RTs, 
+    along with a list of all RT shifts applied.
+    """
     
-    from workflow_objects import Atlas, CompoundMZRT
+    from metatlas2.workflow_objects import Atlas, CompoundMZRT
 
     prov = get_provenance()
     main_db_path = rt_align_obj.paths['main_db_path']
@@ -2606,3 +2605,63 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
         })
 
     return
+
+def list_atlases_in_db(
+    project_db_path: str,
+    atlas_uid: str = None,
+    atlas_name: str = None,
+    analysis_type: str = None,
+    chromatography: str = None,
+    polarity: str = None,
+    atlas_type: str = None,
+    created_by: str = None,
+    created_date: str = None,
+    source: str = None
+    ) -> pd.DataFrame:
+    """List all atlases in the project database, optionally filtered by provided parameters."""
+    try:
+        where_conditions = []
+        params = []
+        
+        if atlas_uid is not None:
+            where_conditions.append("atlas_uid = ?")
+            params.append(atlas_uid)
+        if atlas_name is not None:
+            where_conditions.append("atlas_name = ?")
+            params.append(atlas_name)
+        if analysis_type is not None:
+            where_conditions.append("analysis_type = ?")
+            params.append(analysis_type)
+        if chromatography is not None:
+            where_conditions.append("chromatography = ?")
+            params.append(chromatography)
+        if polarity is not None:
+            where_conditions.append("polarity = ?")
+            params.append(polarity)
+        if atlas_type is not None:
+            where_conditions.append("atlas_type = ?")
+            params.append(atlas_type)
+        if created_by is not None:
+            where_conditions.append("created_by = ?")
+            params.append(created_by)
+        if created_date is not None:
+            where_conditions.append("created_date = ?")
+            params.append(created_date)
+        if source is not None:
+            where_conditions.append("source = ?")
+            params.append(source)
+        
+        with get_db_connection(project_db_path) as conn:
+            query = "SELECT atlas_uid, atlas_name, analysis_type, chromatography, polarity, atlas_type, created_by, created_date, source FROM atlases"
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
+                df = conn.execute(query, params).df()
+        
+        if df.empty:
+            logger.warning("No atlases found in the database matching the given filters.")
+
+    except Exception as e:
+        logger.error(f"Error retrieving atlases from database: {e}")
+        df = pd.DataFrame()
+
+    return df

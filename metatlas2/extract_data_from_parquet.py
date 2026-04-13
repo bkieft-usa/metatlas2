@@ -1,9 +1,4 @@
-"""
-Efficient feature extraction from parquet files using sorted m/z indices.
-Direct extraction without intermediate preparation steps.
-"""
 import pandas as pd
-import sys
 import pyarrow.parquet as pq
 from pathlib import Path
 from typing import Dict, List, Any
@@ -11,9 +6,7 @@ from typing import Dict, List, Any
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import logging_config as lcf
-
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('extract_data_from_parquet')
 
 def extract_eic_and_ms2_from_parquet(
@@ -38,7 +31,7 @@ def extract_eic_and_ms2_from_parquet(
         experimental_data_obj: ExperimentalData object with extracted MS1 and MS2 data
 
     """
-    from workflow_objects import ExperimentalData, MS1Data, MS2Data
+    from metatlas2.workflow_objects import ExperimentalData, MS1Data, MS2Data
 
     atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
     lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns

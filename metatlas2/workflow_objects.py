@@ -1,91 +1,18 @@
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 from pathlib import Path
-import sys
-import numpy as np
 import pandas as pd
 import os
+from dataclasses import asdict
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import database_interact as dbi
-import logging_config as lcf
-import rt_align_tools as rat
-import load_tools as ldt
-import pubchem_retrieval as pcr
-import lcmsruns_tools as lrt
-import analysis_summary as asm
-
+import metatlas2.database_interact as dbi
+import metatlas2.load_tools as ldt
+import metatlas2.pubchem_retrieval as pcr
+import metatlas2.lcmsruns_tools as lrt
+import metatlas2.analysis_summary as asm
+import metatlas2.logging_config as lcf
+import metatlas2.run_targeted_analysis as rta
 logger = lcf.get_logger('workflow_objects')
-
-# Paths
-_BASE_DATA_DIR = Path("/pscratch/sd/b/bkieft/metatlas_lite_data")
-_RAW_DATA_DIR  = _BASE_DATA_DIR / "raw_data" / "jgi"
-_PROJECTS_DIR  = _BASE_DATA_DIR / "projects"
-_MAIN_DB_PATH  = _BASE_DATA_DIR / "databases" / "metatlas.duckdb"
-_MSMS_REFS_PATH = _BASE_DATA_DIR / "databases" / "msms_refs" / "msms_refs_no_inosine15n.tab"
-
-def _set_up_paths(
-    project_name: str,
-    stage: str,
-    rt_alignment_number: int = None,
-    analysis_number: int = None,
-) -> Dict[str, str]:
-    """Set up and validate paths for project directory, raw data, and project database."""
-
-    project_dir = _PROJECTS_DIR / project_name
-
-    paths = {
-        "raw_data_directory": str(_RAW_DATA_DIR / project_name),
-        "project_directory":  str(project_dir),
-        "project_db_path":    str(project_dir / f"{project_name}.duckdb"),
-        "main_db_path":       str(_MAIN_DB_PATH),
-        "msms_refs_path":     str(_MSMS_REFS_PATH),
-    }
-
-    if not Path(paths["raw_data_directory"]).exists():
-        raise ValueError(f"Raw data directory not found: {paths['raw_data_directory']}")
-    if not _MAIN_DB_PATH.exists():
-        raise ValueError(f"Main database not found: {paths['main_db_path']}")
-
-    if stage == "project_setup":
-        project_dir.mkdir(parents=True, exist_ok=True)
-
-    if stage in ["rt_alignment", "auto_identification", "analysis_gui"]:
-        if not project_dir.exists():
-            raise FileNotFoundError(
-                f"Project directory not found: {paths['project_directory']}. "
-                "Please run project setup first."
-            )
-        if not Path(paths["project_db_path"]).exists():
-            raise FileNotFoundError(
-                f"Project database not found: {paths['project_db_path']}. "
-                "Please run project setup first."
-            )
-
-    if stage == "auto_identification" and not _MSMS_REFS_PATH.exists():
-        raise FileNotFoundError(
-            f"MS/MS reference file not found: {paths['msms_refs_path']}. "
-            "Please ensure the path is correct in the config file."
-        )
-
-    if stage in ["project_setup", "rt_alignment", "auto_identification", "analysis_gui", "analysis_summary"]:
-        if rt_alignment_number is None:
-            raise ValueError("RT alignment number must be provided for this stage.")
-        rta_dir = project_dir / f"RTA{rt_alignment_number}"
-        rta_dir.mkdir(parents=True, exist_ok=True)
-        paths["rt_alignment_output_dir"] = str(rta_dir)
-        paths["aligned_atlases_store_file"] = str(rta_dir / "rt_aligned_atlases.csv")
-
-    if stage in ["auto_identification", "analysis_gui", "analysis_summary"]:
-        if analysis_number is None:
-            raise ValueError("Both RT alignment number and analysis number must be provided for this stage.")
-        analysis_dir = project_dir / f"RTA{rt_alignment_number}" / f"TGA{analysis_number}"
-        analysis_dir.mkdir(parents=True, exist_ok=True)
-        paths["analysis_output_dir"] = str(analysis_dir)
-        paths["auto_ided_atlases_store_file"] = str(analysis_dir / "auto_ided_atlases.csv")
-        paths["curated_atlases_store_file"] = str(analysis_dir / "curated_atlases.csv")
-
-    return paths
 
 @dataclass
 class Compound:
@@ -166,10 +93,16 @@ class Compound:
         }
 
     @classmethod
-    def create_from_config(cls, config_path: str, overwrite_db: bool = False) -> Tuple[List['Compound'], List['CompoundMZRT']]:
+    def create_from_config(
+        cls, 
+        config_path: str, 
+        overwrite_db: bool = False
+    ) -> None:
         """Create and save Compounds and CompoundMZRTs from a config file."""
         config = ldt.load_compound_config(config_path)
-        main_db_path = str(Path("/pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb"))
+        paths = rta.set_up_paths(config=config)
+        main_db_path = paths.get("main_db_path", None)
+        pubchem_cache_path = paths.get("pubchem_cache_path", None)
 
         compounds = []
         compound_mzrts = []
@@ -185,7 +118,7 @@ class Compound:
                     compounds_df = ldt.load_compound_input(file_path)
                     pcr.retrieve_pubchem_info(
                         compounds=compounds_df,
-                        pubchem_cache_path=str(Path("/pscratch/sd/b/bkieft/metatlas_lite_data/databases/pubchem_cache/pubchem_global_cache.parquet")),
+                        pubchem_cache_path=pubchem_cache_path,
                         use_pubchem_cache=config["PARAMS"].get("use_pubchem_cache", True),
                         update_pubchem_cache=config["PARAMS"].get("update_pubchem_cache", False)
                     )
@@ -328,7 +261,7 @@ class Atlas:
     def __post_init__(self):
         self.validate()
 
-    def validate(self) -> List[str]:
+    def validate(self) -> None:
         """Validate atlas data and return list of issues found."""
 
         logger.info(f"Validating atlas {self.atlas_name} (UID: {self.atlas_uid}) with {len(self.compound_mzrts)} compounds...")
@@ -374,7 +307,7 @@ class Atlas:
         """Convert Atlas to DataFrame format for database operations."""
         rows = []
         for compound_mzrt in self.compound_mzrts.values():
-            compound_dict = compound_mzrt.__dict__.copy()
+            compound_dict = asdict(compound_mzrt)
             # Add Atlas-level metadata
             compound_dict.update({
                 'atlas_uid': self.atlas_uid,
@@ -438,10 +371,14 @@ class Atlas:
         return cls.from_dataframe(dbi.get_atlas_compounds_table(database_path, atlas_uid, main_db_path))
 
     @classmethod
-    def create_from_config(cls, config_path: str) -> List['Atlas']:
+    def create_from_config(
+        cls, 
+        config_path: str
+    ) -> None:
         """Create and save Atlas objects from a config file."""
         config = ldt.load_atlas_config(config_path)
-        main_db_path = str(Path("/pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb"))
+        paths = rta.set_up_paths(config=config)
+        main_db_path = paths.get("main_db_path", None)
         
         atlases = []
         summary = []
@@ -465,7 +402,6 @@ class Atlas:
                         )
                         dbi.save_atlas_to_database(atlas_obj, main_db_path)
                         logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
-                        atlas_obj.validate()
                         atlases.append(atlas_obj)
                         summary.append({
                             'atlas_uid': atlas_obj.atlas_uid,
@@ -498,23 +434,16 @@ class Atlas:
 
 @dataclass
 class Project:
-    project_name: str = field(default_factory=str)
-    config_path: str = field(default_factory=str)
+    config: Dict[str, Any] = field(default_factory=dict)
+    project_name: str = field(default="")
     paths: Dict[str, str] = field(default_factory=dict)
     lcmsruns: List['LCMSRun'] = field(default_factory=list)
 
-    def setup(self, project_name: str, config_path: str, overwrite_existing: bool = False, rt_alignment_number: int = None):
+    def setup(self, project_name: str, config: Dict[str, Any], paths: Dict[str, str], overwrite_existing: bool = False):
 
         self.project_name = project_name
-        self.config_path = config_path
-        self.config = ldt.load_metatlas2_config(self.config_path)
-
-        logger.info(f"Setting up workflow paths for project {self.project_name}...")
-        self.paths = _set_up_paths(
-            project_name=self.project_name, 
-            stage="project_setup",
-            rt_alignment_number=rt_alignment_number
-        )
+        self.config = config
+        self.paths = paths
 
         logger.info(f"Creating project database at {self.paths['project_db_path']}...")
         exists = dbi.create_project_database(
@@ -555,9 +484,6 @@ class LCMSRun:
     created_by: str
     created_date: str
 
-    def to_dict(self) -> Dict[str, Any]:
-        return self.__dict__
-
 @dataclass
 class RTAlign:
     # Core metadata
@@ -577,13 +503,14 @@ class RTAlign:
     use_existing_model: bool = False
     chromatography: str = None
     project_name: str = None
+    run_alignment: bool = True
 
     # Attributes added during analysis
     align_atlas_uid: Optional[str] = None
     align_atlas_obj: Optional[Atlas] = None
     rt_alignment_params: Dict[str, Any] = field(default_factory=dict)
     aligner_lcmsruns: List[LCMSRun] = field(default_factory=list)
-    modeling_data: Optional[pd.DataFrame] = field(default_factory=pd.DataFrame)
+    modeling_data: Optional[pd.DataFrame] = field(default=None)
 
     # Attributes modified by external functions
     rt_shift_stats: Dict[str, Any] = field(default_factory=dict)
@@ -591,35 +518,23 @@ class RTAlign:
     rt_alignment_model: Optional[Dict[str, Any]] = None
 
     # Paths and config
-    config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return self.__dict__
-
-    def setup(self, config_path: str, project_name: str, rt_alignment_number: int):
+    def setup(self, project_name: str, rt_alignment_number: int, config: Dict[str, Any], paths: Dict[str, str]):
         """
         Set up RTAlign object using a Project object and RT alignment parameters.
         Populates paths, config, and relevant atlas UID.
         """
 
         logger.info(f"Setting up RTAlign object with RT alignment number {rt_alignment_number}...")
-        self.run_alignment = True
         self.rt_alignment_number = rt_alignment_number
         self.project_name = project_name
-        self.config_path = config_path
-        self.config = ldt.load_metatlas2_config(self.config_path)
+        self.config = config
+        self.paths = paths
         self.chromatography = next(iter(self.config["WORKFLOWS"]["RT_ALIGNMENT"].keys()))
         self.align_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
         self.rt_alignment_params = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('PARAMS', {})
-
-        logger.info(f"Setting up workflow paths...")
-        self.paths = _set_up_paths(
-            project_name=self.project_name,
-            stage="rt_alignment",
-            rt_alignment_number=self.rt_alignment_number
-        )
 
         if self.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases in text file
             self.run_alignment = False
@@ -636,6 +551,7 @@ class RTAlign:
                             atlas_obj=atlas_obj,
                             output_path=self.paths['aligned_atlases_store_file'],
                         )
+            return
 
         logger.info(f"Checking for existing RT aligned atlases table file at {self.paths['aligned_atlases_store_file']}...")
         if os.path.exists(self.paths['aligned_atlases_store_file']) and self.rt_alignment_params.get('use_existing_rt_alignment', False) is True:
@@ -647,43 +563,52 @@ class RTAlign:
         elif not os.path.exists(self.paths['aligned_atlases_store_file']):
             logger.info(f"No existing aligned atlases file found at {self.paths['aligned_atlases_store_file']} for RT alignment number {self.rt_alignment_number}. Aligned atlases will be generated.")
 
+@dataclass
 class ManualCuration:
-    def __init__(self, inchi_key: str, adduct: str, data: pd.DataFrame):
-        self.inchi_key = inchi_key
-        self.adduct = adduct
-        self.data = data
+    inchi_key: str
+    adduct: str
+    data: pd.DataFrame = field(default=None, compare=False)
+    # data columns: compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number,
+    #   compound_name, auto_ided, polarity, chromatography, mz_tolerance, atlas_mz,
+    #   atlas_rt_peak, atlas_rt_min, atlas_rt_max, original_rt_peak, original_rt_min,
+    #   original_rt_max, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
+    #   identification_notes, analyst_notes, best_ms1_file, best_ms1_rt, best_ms1_mz,
+    #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, isomers,
+    #   suggested_rt_min, suggested_rt_max, suggested_rt_peak, rt_suggestion_confidence
 
-class MS1Data:
-    def __init__(self, inchi_key: str, adduct: str, filename: str, data: pd.DataFrame):
-        self.inchi_key = inchi_key
-        self.adduct = adduct
-        self.filename = filename
-        self.data = data
 
-class MS2Data:
-    def __init__(self, inchi_key: str, adduct: str, filename: str, data: pd.DataFrame):
-        self.inchi_key = inchi_key
-        self.adduct = adduct
-        self.filename = filename
-        self.data = data
+@dataclass
+class _SpecData:
+    inchi_key: str
+    adduct: str
+    filename: str
+    data: pd.DataFrame = field(default=None, compare=False)
 
-class MS2Hit:
-    def __init__(self, inchi_key: str, adduct: str, filename: str, data: pd.DataFrame):
-        self.inchi_key = inchi_key
-        self.adduct = adduct
-        self.filename = filename
-        self.data = data
 
+MS1Data = _SpecData
+# data columns: rt, mz, i
+
+MS2Data = _SpecData
+# data columns: rt, mz, i, precursor_MZ, precursor_intensity, collision_energy
+
+MS2Hit = _SpecData
+# data columns: inchi_key, database, ref_id, ref_name, score, num_matches,
+#   mz_theoretical, mz_measured, ppm_error, rt, qry_intensity_peak,
+#   ref_frags, data_frags, matched_fragments, aligned_fragment_colors,
+#   qry_spectrum, ref_spectrum
+
+
+@dataclass
 class ExperimentalData:
-    def __init__(self):
-        self.manual_curation: List[ManualCuration] = []
-        self.ms1_data: List[MS1Data] = []
-        self.ms2_data: List[MS2Data] = []
-        self.ms2_hits: List[MS2Hit] = []
+    manual_curation: List[ManualCuration] = field(default_factory=list)
+    ms1_data: List[_SpecData] = field(default_factory=list)
+    ms2_data: List[_SpecData] = field(default_factory=list)
+    ms2_hits: List[_SpecData] = field(default_factory=list)
 
 @dataclass
 class AutoIdentification:
     # Core metadata
+    project_name: str = None
     auto_id_uid: str = None
     rt_alignment_number: int = None
     analysis_number: int = None
@@ -702,14 +627,10 @@ class AutoIdentification:
     post_autoid_atlas_obj: Optional[Atlas] = None
 
     # Paths and config
-    config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return self.__dict__
-
-    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int, analysis_subset: Optional[List[str]] = None):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, config: Dict[str, Any], paths: Dict[str, str], analysis_subset: Optional[List[str]] = None):
         """
         Set up AutoIdentification object.
         Populates paths, config, and relevant atlas UID.
@@ -717,22 +638,16 @@ class AutoIdentification:
         logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.config_path = config_path
-        self.config = ldt.load_metatlas2_config(self.config_path)
+        self.config = config
+        self.paths = paths
         self.project_name = project_name
         self.analysis_subset = analysis_subset
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
 
-        logger.info(f"Setting up workflow paths...")
-        self.paths = _set_up_paths(
-            project_name=self.project_name,
-            stage="auto_identification",
-            rt_alignment_number=self.rt_alignment_number,
-            analysis_number=self.analysis_number
-        )
-
+@dataclass
 class AnalysisGUI:
     # Core metadata
+    project_name: str = None
     analysis_uid: str = None
     rt_alignment_number: int = None
     analysis_number: int = None
@@ -758,10 +673,7 @@ class AnalysisGUI:
     ms2_hits_df: Optional[pd.DataFrame] = None
     override_parameters: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return self.__dict__
-
-    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int):
+    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int, config: Dict[str, Any], paths: Dict[str, str]):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
@@ -770,17 +682,11 @@ class AnalysisGUI:
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.config_path = config_path
-        self.config = ldt.load_metatlas2_config(self.config_path)
+        self.config = config
+        self.paths = paths
         self.project_name = project_name
 
-        logger.info(f"Setting up workflow paths...")
-        self.paths = _set_up_paths(
-            project_name=self.project_name,
-            stage="analysis_gui",
-            rt_alignment_number=self.rt_alignment_number,
-            analysis_number=self.analysis_number
-        )
-
+@dataclass
 class AnalysisSummary:
     # Core metadata
     rt_alignment_number: int = None
@@ -806,15 +712,14 @@ class AnalysisSummary:
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return self.__dict__
-
     def setup(
         self,
         config_path: str,
         project_name: str,
         rt_alignment_number: int,
         analysis_number: int,
+        config: Dict[str, Any],
+        paths: Dict[str, str],
     ):
         """
         Set up AnalysisSummary object.
@@ -824,17 +729,10 @@ class AnalysisSummary:
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.config_path = config_path
-        self.config = ldt.load_metatlas2_config(self.config_path)
+        self.config = config
+        self.paths = paths
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.project_name = project_name
-
-        logger.info(f"Setting up workflow paths...")
-        self.paths = _set_up_paths(
-            project_name=self.project_name,
-            stage="analysis_summary",
-            rt_alignment_number=self.rt_alignment_number,
-            analysis_number=self.analysis_number
-        )
 
         self.load_data()
 

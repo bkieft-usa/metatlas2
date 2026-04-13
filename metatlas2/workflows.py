@@ -1,60 +1,67 @@
 from typing import Dict, Any
-import sys
 import logging
 import threading, time, os
 from IPython.display import display, HTML
 
 from werkzeug.serving import make_server
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import database_interact as dbi
-import logging_config as lcf
-import rt_align_tools as rat
-import ms2_hit_detection as mhd
-import manual_curation_summarizer as mcs
-import extract_data_from_parquet as edp
-import lcmsruns_tools as lrt
-import analysis_gui as agu
-import analysis_summary as asm
-import notebook_generator as nbg
-import load_tools as ldt
-
-from workflow_objects import Compound, Atlas, Project, RTAlign, AutoIdentification, AnalysisGUI, AnalysisSummary
-
-logger = lcf.get_logger('run_workflows')
+import metatlas2.database_interact as dbi
+import metatlas2.rt_align_tools as rat
+import metatlas2.ms2_hit_detection as mhd
+import metatlas2.manual_curation_summarizer as mcs
+import metatlas2.extract_data_from_parquet as edp
+import metatlas2.lcmsruns_tools as lrt
+import metatlas2.analysis_gui as agu
+import metatlas2.analysis_summary as asm
+import metatlas2.notebook_generator as nbg
+import metatlas2.load_tools as ldt
+import metatlas2.logging_config as lcf
+logger = lcf.get_logger('workflows')
 
 def run_project_setup(
     project_name: str,
-    config_path: str,
+    config: Dict[str, Any],
+    paths: Dict[str, str],
     overwrite_existing: bool = False,
-    rt_alignment_number: int = None
 ) -> None:
     """
     Creates project database and loads LCMS run files.
     """
 
+    from metatlas2.workflow_objects import Project
+
     project_obj = Project()
 
     project_obj.setup(
         project_name=project_name,
-        config_path=config_path,
+        config=config,
+        paths=paths,
         overwrite_existing=overwrite_existing,
-        rt_alignment_number=rt_alignment_number
     )
 
 def run_rt_alignment(
-    config_path: str,
     project_name: str,
-    rt_alignment_number: int
+    rt_alignment_number: int,
+    config: Dict[str, Any],
+    paths: Dict[str, str],
 ) -> None:
     """Run fresh RT alignment using an RT alignment atlas"""
-    
+
+    from metatlas2.workflow_objects import RTAlign, Atlas
+
+    if not os.path.exists(paths["project_db_path"]):
+        raise FileNotFoundError(
+            f"Project database not found: {paths['project_db_path']}. "
+            "Please run project setup first."
+        )
+
     rt_align_obj = RTAlign()
 
     rt_align_obj.setup(
-        config_path=config_path,
         project_name=project_name,
         rt_alignment_number=rt_alignment_number,
+        config=config,
+        paths=paths,
     )
 
     if rt_align_obj.run_alignment is False:
@@ -71,7 +78,8 @@ def run_rt_alignment(
         lcmsruns=project_lcmsruns,
         include_file_type=rt_align_obj.rt_alignment_params.get('include_lcmsruns', ["QC"]),
         exclude_file_type=rt_align_obj.rt_alignment_params.get('exclude_lcmsruns', ["NEG"]),
-        chromatography=rt_align_obj.chromatography
+        chromatography=rt_align_obj.chromatography,
+        ms_level=1
     )
     
     logger.info("Retrieving template Atlas from database...")
@@ -134,8 +142,9 @@ def run_rt_alignment(
     logger.info(f"RT alignment procedure complete for RT alignment number {rt_align_obj.rt_alignment_number} and chromatography {rt_align_obj.chromatography}!")
 
 def run_auto_identification(
-    config_path: str,
     project_name: str,
+    config: Dict[str, Any],
+    paths: Dict[str, str],
     rt_alignment_number: int = None,
     analysis_number: int = None,
     analysis_subset: list = None,
@@ -148,14 +157,28 @@ def run_auto_identification(
         Dict with analysis statistics: {atlas_uid: num_identifications}
     """
 
+    from metatlas2.workflow_objects import Atlas, AutoIdentification
+
+    if not os.path.exists(paths["project_db_path"]):
+        raise FileNotFoundError(
+            f"Project database not found: {paths['project_db_path']}. "
+            "Please run project setup first."
+        )
+    if not os.path.exists(paths["msms_refs_path"]):
+        raise FileNotFoundError(
+            f"MS/MS reference file not found: {paths['msms_refs_path']}. "
+            "Please ensure the path is correct in the config file."
+        )
+
     auto_id_obj = AutoIdentification()
 
     auto_id_obj.setup(
-        config_path=config_path,
         project_name=project_name,
         rt_alignment_number=rt_alignment_number, 
         analysis_number=analysis_number,
-        analysis_subset=analysis_subset
+        config=config,
+        paths=paths,
+        analysis_subset=analysis_subset,
     )
 
     logger.info(f"Checking for existing Auto Identification results within RT Alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}...")
@@ -173,9 +196,9 @@ def run_auto_identification(
 
     for _, atlas_to_autoid in pre_autoid_atlases.iterrows():
         if auto_id_obj.analysis_subset:
-            analysis_filters = [tuple(subset.split('-')) for subset in auto_id_obj.analysis_subset]
+            analysis_filters = [tuple(subset.split('-', 1)) for subset in auto_id_obj.analysis_subset]
             if (atlas_to_autoid['polarity'], atlas_to_autoid['analysis_type']) not in analysis_filters:
-                logger.warning(f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} with polarity {atlas_to_autoid['polarity']} and analysis type {atlas_to_autoid['analysis_type']} since it's not in the specified analysis subset: {auto_id_obj.analysis_subset}")
+                logger.info(f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} with polarity {atlas_to_autoid['polarity']} and analysis type {atlas_to_autoid['analysis_type']} since it's not in the specified analysis subset: {auto_id_obj.analysis_subset}")
                 continue
 
         auto_id_obj.pre_autoid_atlas_obj = Atlas.from_database(
@@ -241,26 +264,36 @@ def run_auto_identification(
     logger.info(f"Auto identification procedure complete for RT alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}!")
 
 def run_analysis_gui(
-    config_path: str,
     project_name: str,
+    config: Dict[str, Any],
+    paths: Dict[str, str],
     rt_alignment_number: int = None,
     analysis_number: int = None,
     pre_curation_atlas: str = None,
     override_parameters: Dict[str, Any] = None,
-    dash_app_port: int = 8050
+    dash_app_port: int = 8050,
 ) -> "CurationApp":
     """
     Runs the analysis GUI for interactive exploration of results.
     Requires RT alignment and auto identification to have been completed.
     """
 
+    from metatlas2.workflow_objects import Atlas, AnalysisGUI
+
+    if not os.path.exists(paths["project_db_path"]):
+        raise FileNotFoundError(
+            f"Project database not found: {paths['project_db_path']}. "
+            "Please run project setup first."
+        )
+
     analysis_gui_obj = AnalysisGUI()
 
     analysis_gui_obj.setup(
-        config_path=config_path,
         project_name=project_name, 
         rt_alignment_number=rt_alignment_number, 
         analysis_number=analysis_number,
+        config=config,
+        paths=paths,
     )
 
     analysis_gui_obj.pre_curation_atlas_obj = Atlas.from_database(
@@ -301,10 +334,11 @@ def run_analysis_gui(
     return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
 
 def run_analysis_summary(
-    config_path: str,
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
+    config: Dict[str, Any],
+    paths: Dict[str, str],
     pre_curation_atlas: str = None,
     overwrite: bool = False,
 ) -> None:
@@ -316,13 +350,16 @@ def run_analysis_summary(
     produces all summary files in order:
     """
 
+    from metatlas2.workflow_objects import Atlas, AnalysisSummary
+
     summary_obj = AnalysisSummary()
     
     summary_obj.setup(
-        config_path=config_path,
         project_name=project_name,
         rt_alignment_number=rt_alignment_number,
         analysis_number=analysis_number,
+        config=config,
+        paths=paths,
     )
 
     summary_obj.pre_curation_atlas_obj = Atlas.from_database(
@@ -350,3 +387,34 @@ def run_analysis_summary(
         summary_obj=summary_obj,
         overwrite=overwrite,
     )
+
+def run_atlas_finder(
+    project_db_path: str,
+    atlas_uid: str = None,
+    atlas_name: str = None,
+    analysis_type: str = None,
+    chromatography: str = None,
+    polarity: str = None,
+    atlas_type: str = None,
+    created_by: str = None,
+    created_date: str = None,
+    source: str = None
+):
+    """
+    Run the atlas finder utility to query the database for atlases matching user-specified criteria.
+    """
+    
+    df = dbi.find_atlases_in_database(
+        database_path=project_db_path,
+        atlas_uid=atlas_uid,
+        atlas_name=atlas_name,
+        analysis_type=analysis_type,
+        chromatography=chromatography,
+        polarity=polarity,
+        atlas_type=atlas_type,
+        created_by=created_by,
+        created_date=created_date,
+        source=source
+    )
+
+    return df

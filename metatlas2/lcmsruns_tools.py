@@ -1,11 +1,7 @@
-import sys
 from pathlib import Path
 from typing import List
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import logging_config as lcf
-
-# Initialize logger properly at module level
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('lcmsruns_tools')
 
 def filter_lcmsruns_list(
@@ -14,7 +10,8 @@ def filter_lcmsruns_list(
     exclude_file_type: List[str] = None,
     file_format: str = "parquet",
     chromatography: str = None,
-    polarity: str = None
+    polarity: str = None,
+    ms_level: int = None
 ) -> List["LCMSRun"]:
     """
     Filter a list of LCMSRun objects by file type, file format, chromatography, and polarity.
@@ -29,7 +26,10 @@ def filter_lcmsruns_list(
         elif polarity.lower() in ["neg", "negative"]:
             polarity = "negative"
 
-    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: include_file_type={include_file_type}, exclude_file_type={exclude_file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}...")
+    if ms_level is not None:
+        ms_level = int(ms_level)
+
+    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: include_file_type={include_file_type}, exclude_file_type={exclude_file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}, ms_level={ms_level}...")
     filtered_runs = lcmsruns.copy()
 
     # Fix: ensure file_type is always a list
@@ -43,6 +43,8 @@ def filter_lcmsruns_list(
         filtered_runs = [run for run in filtered_runs if getattr(run, 'chromatography', '').lower() == chromatography.lower()]
     if polarity:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'polarity', '').lower() == polarity.lower()]
+    if ms_level is not None:
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'ms_level', None) == ms_level]
 
     logger.info(f"Filtered to {len(filtered_runs)} out of {len(lcmsruns)} total files.")
     return filtered_runs

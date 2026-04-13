@@ -4,14 +4,10 @@ import os
 import csv
 import yaml
 import ast
-import sys
 from pathlib import Path
 from typing import Dict, Any, List
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import logging_config as lcf
-
-# Initialize logger properly at module level
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
 
 def load_msms_refs_file(file_path):

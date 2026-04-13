@@ -1,16 +1,7 @@
 import os
-import sys
 import nbformat
 
-# Type hint workaround: AutoIdentification is imported at runtime
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from workflow_objects import AutoIdentification
-
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import logging_config as lcf
-
-# Initialize logger properly at module level
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
 
 def generate_gui_notebooks(
@@ -74,34 +65,30 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
     for key in param_keys:
         current_value = params.get(key, None)
         src += f"    '{key}': None, # current value: {repr(current_value)}\n"
-    src += "}\n"
+    src += "}"
     return nbformat.v4.new_code_cell(src)
 
 def _make_header_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     text = (
-        f"# Analysis GUI & Summary\n"
-        f"**Project:** `{auto_id_obj.project_name}`  \n"
+        f"# **`{auto_id_obj.project_name}`**  \n"
         f"**Chromatography:** {auto_id_obj.post_autoid_atlas_obj.chromatography}  \n"
         f"**Polarity:** {auto_id_obj.post_autoid_atlas_obj.polarity}  \n"
         f"**Analysis type:** {auto_id_obj.post_autoid_atlas_obj.analysis_type}  \n"
         f"**RT alignment number:** {auto_id_obj.rt_alignment_number}  \n"
-        f"**Analysis number:** {auto_id_obj.analysis_number}  \n\n"
-        f"Run the **GUI cell**, curate, then run the **Summary cell**."
+        f"**Analysis number:** {auto_id_obj.analysis_number}"
     )
     return nbformat.v4.new_markdown_cell(text)
 
 
 def _make_imports_cell() -> nbformat.NotebookNode:
     src = (
-        "import sys\n"
         "import logging\n"
         "import pandas as pd\n"
         "pd.options.display.max_colwidth = 600\n\n"
-        "sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')\n"
-        "import logging_config as lcf\n"
-        "import workflows as wfs\n\n"
+        "import metatlas2.workflows as wfs\n\n"
+        "import metatlas2.logging_config as lcf\n"
         "lcf.setup_logging(log_level=logging.INFO)\n"
-        "logger = lcf.get_logger('analysis_gui')\n"
+        "logger = lcf.get_logger('analysis_gui')"
     )
     return nbformat.v4.new_code_cell(src)
 
@@ -127,8 +114,8 @@ def _make_gui_cell() -> nbformat.NotebookNode:
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
         "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
-        "    override_parameters=OVERRIDE_PARAMS,\n"
-        ")\n"
+        "    override_parameters=OVERRIDE_PARAMS\n" \
+        ")"
     )
     return nbformat.v4.new_code_cell(src)
 
@@ -141,8 +128,7 @@ def _make_summary_cell() -> nbformat.NotebookNode:
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
-        "    overwrite=False,\n"
-        ")\n"
+        "    pre_curation_atlas=ANALYSIS_ATLAS\n",
+        ")"
     )
     return nbformat.v4.new_code_cell(src)

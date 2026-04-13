@@ -1,4 +1,3 @@
-import sys
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List, Any
@@ -6,9 +5,7 @@ from typing import Dict, Optional, List, Any
 from scipy.interpolate import interp1d
 from scipy.signal import find_peaks, peak_widths, peak_prominences
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import logging_config as lcf
-
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('curation_creator')
 
 def create_manual_curation_obj(
@@ -17,7 +14,7 @@ def create_manual_curation_obj(
     """
     Create ManualCuration object from CompoundMZRT.
     """
-    from workflow_objects import ManualCuration
+    from metatlas2.workflow_objects import ManualCuration
 
     for atlas_compound_mzrt in auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values():
 

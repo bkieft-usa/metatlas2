@@ -1,7 +1,6 @@
 import pandas as pd
 import time
 import re
-import sys
 import getpass
 from datetime import datetime
 from pathlib import Path
@@ -9,11 +8,7 @@ from typing import Dict, Any, List
 
 import pubchempy as pcp
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import load_tools as ldt
-import logging_config as lcf
-
-# Initialize logger properly at module level
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('pubchem_retrieval')
 
 def get_provenance():

@@ -1,4 +1,3 @@
-import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -11,12 +10,8 @@ from scipy.optimize import linear_sum_assignment
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import load_tools as ldt
-import logging_config as lcf
-import database_interact as dbi
-
-# Initialize logger properly at module level
+import metatlas2.load_tools as ldt
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('ms2_hit_detection')
 
 def process_job(job, reference_df, workflow_params):
@@ -36,7 +31,8 @@ def find_ms2_hits(
     Uses MatchMS cosine similarity scoring and Hungarian algorithm for peak alignment.
     Parallelized across compounds/files with MS2 data for faster processing.
     """
-    from workflow_objects import MS2Hit
+
+    from metatlas2.workflow_objects import MS2Hit
 
     reference_df = ldt.load_msms_refs_file(Path(auto_id_obj.paths['msms_refs_path']))
     if reference_df.empty:
@@ -233,9 +229,7 @@ def _align_spectra_for_plotting(query_spectrum: np.ndarray, ref_spectrum: np.nda
     """
     try:
         query_mz = query_spectrum[0]
-        query_intensity = query_spectrum[1]
         ref_mz = ref_spectrum[0]
-        ref_intensity = ref_spectrum[1]
         
         matched_peaks = _match_peaks(query_spectrum, ref_spectrum, frag_mz_tolerance)
         matrix_size = max(len(query_mz), len(ref_mz))

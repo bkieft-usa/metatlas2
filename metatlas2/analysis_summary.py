@@ -1,8 +1,8 @@
 from typing import Optional, List, Tuple, Dict
 from pathlib import Path
-import sys
 import json
 import os
+import textwrap
 from tqdm.notebook import tqdm
 
 import numpy as np
@@ -15,10 +15,8 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.patches import Rectangle
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import database_interact as dbi
-import logging_config as lcf
-
+import metatlas2.database_interact as dbi
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('analysis_summary')
 
 # ── colour palette for EIC traces (one colour per file) ──────────────────────
@@ -118,7 +116,7 @@ def _plot_mirror(
 
     ax.text(0.5, 1.10, title,                   fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     ax.text(0.5, 1.04, f"Score: {score_str}",   fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 0.99, f"RT: {rt_str} min",     fontsize=9,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+    ax.text(0.5, 1.01, f"RT: {rt_str} min",     fontsize=9,  weight="normal", ha="center", va="bottom",    transform=ax.transAxes)
 
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
@@ -261,18 +259,15 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("Atlas RT range",  f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
         ("Best MS1 RT",     f"{_fmt(mc_row.get('best_ms1_rt'), '{:.3f} min')} "),
         ("Best MS1 RT Δ",   _fmt(rt_err, '{:.3f}')),
-        ("Best MS1 ppm Δ",  _fmt(ppm, "{:.2f}")),
-        ("MS1 note",        _fmt(mc_row.get("ms1_notes"))),
-        ("MS2 note",        _fmt(mc_row.get("ms2_notes"))),
-        ("ID notes",        _fmt(mc_row.get("identification_notes"))),
+        ("Best MS1 ppm Δ",  _fmt(ppm, "{:.2f}"))
     ]
 
     y_start = 0.96
-    line_h  = 0.086  # Increased from 0.069 to accommodate larger font
+    y_end  = 0.086
     for label, value in rows:
-        ax.text(0.02, y_start, f"{label}:", fontsize=12.5, weight="bold", va="center", transform=ax.transAxes)
-        ax.text(0.38, y_start, value,        fontsize=12.5,                va="center", transform=ax.transAxes)
-        y_start -= line_h
+        ax.text(0.02, y_start, f"{label}:", fontsize=14, weight="bold", va="center", transform=ax.transAxes)
+        ax.text(0.38, y_start, value, fontsize=14, va="center", transform=ax.transAxes)
+        y_start -= y_end
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -282,7 +277,6 @@ def _plot_hit_info_table(
     ax,
     ms2_hits_compound_df: pd.DataFrame,
     mc_row: pd.Series,
-    total_files: int,
 ) -> None:
     """Render the best MS2 hit as a vertical Theoretical/Measured/Difference table on *ax*."""
     ax.axis("off")
@@ -325,55 +319,73 @@ def _plot_hit_info_table(
 
     score_str = f"{score:.4f}  ({num_matches}/{ref_frags} ions)" if not np.isnan(score) else "N/A"
 
+    # Wrap the fragment list so it stays within the table width
+    FRAG_WRAP_WIDTH = 80
+    if frag_str != "N/A":
+        frag_lines   = textwrap.wrap(frag_str, width=FRAG_WRAP_WIDTH)
+        frag_display = "\n".join(frag_lines) if frag_lines else "N/A"
+    else:
+        frag_display = "N/A"
+        frag_lines   = ["N/A"]
+    n_frag_lines = min(len(frag_lines), 3)
+
     # Column x-positions: row-label | Theoretical | Measured | Error/Score
-    col_x = [0.01, 0.28, 0.50, 0.72]
+    col_x = [0, 0.2, 0.4, 0.6]
 
-    # File name as title
-    ax.text(0.5, 0.97, fname_abbr, fontsize=13.75, weight="bold",
-            ha="center", va="center", transform=ax.transAxes)
+    # Layout constants
+    std_row_h  = 0.135
+    frag_row_h = std_row_h * max(1, n_frag_lines)
 
-    header_y = 0.80
-    row_h    = 0.2125  # Increased from 0.17 to accommodate larger font
+    # Row y-centres (header first, then rows stacked downward)
+    header_center = 0.83
+    ma_center     = header_center - std_row_h
+    rt_center     = header_center - 2 * std_row_h
+    frag_top      = rt_center - std_row_h / 2
+    frag_center   = frag_top - frag_row_h / 2
 
-    # Column header row
+    # File name as title (above the table)
+    ax.text(0.05, 0.97, fname_abbr, fontsize=13.75, weight="bold",
+            ha="left", va="center", transform=ax.transAxes)
+
+    GAP = 0.004
+    for y_center, h, color in [
+        (header_center, std_row_h,  "#d0d0d0"),
+        (ma_center,     std_row_h,  "white"),
+        (rt_center,     std_row_h,  "#f0f0f0"),
+        (frag_center,   frag_row_h, "white"),
+    ]:
+        ax.add_patch(Rectangle(
+            (0, y_center - h / 2 + GAP), 1.0, h - 2 * GAP,
+            transform=ax.transAxes, color=color, zorder=0,
+        ))
+
     for x, label in zip(col_x, ["BEST MATCH", "Theoretical", "Measured", "Error/Score"]):
-        ax.text(x, header_y, label, fontsize=12.5, weight="bold",
+        ax.text(x, header_center, label, fontsize=12.5, weight="bold", ha="left",
                 va="center", transform=ax.transAxes)
 
-    # Data rows
-    table_rows = [
-        ("Mass Accuracy",
-         _v(atlas_mz,    "{:.4f} m/z"),
-         _v(measured_mz, "{:.4f} m/z"),
-         _v(ppm_error,   "{:.2f} ppm")),
-        ("RT Accuracy",
-         _v(atlas_rt,    "{:.3f} min"),
-         _v(measured_rt, "{:.3f} min"),
-         _v(rt_error,    "{:.3f} min")),
-        ("Fragment Matches",
-         frag_str,
-         "",
-         score_str),
+    standard_rows = [
+        (ma_center, ("Mass Accuracy",
+                     _v(atlas_mz,    "{:.4f} m/z"),
+                     _v(measured_mz, "{:.4f} m/z"),
+                     _v(ppm_error,   "{:.2f} ppm"))),
+        (rt_center, ("RT Accuracy",
+                     _v(atlas_rt,    "{:.3f} min"),
+                     _v(measured_rt, "{:.3f} min"),
+                     _v(rt_error,    "{:.3f} min"))),
     ]
-
-    for row_idx, row_vals in enumerate(table_rows):
-        y  = header_y - row_h * (row_idx + 1)
-        bg = "#f0f0f0" if row_idx % 2 == 0 else "white"
-        ax.add_patch(Rectangle(
-            (0, y - row_h * 0.85), 1.0, row_h * 0.90,
-            transform=ax.transAxes, color=bg, zorder=0,
-        ))
+    for y_center, row_vals in standard_rows:
         for col_idx, val in enumerate(row_vals):
-            ax.text(col_x[col_idx], y,
-                    val,
-                    fontsize=12.5,
+            ax.text(col_x[col_idx], y_center, val, fontsize=12.5,
                     weight="bold" if col_idx == 0 else "normal",
-                    va="center", transform=ax.transAxes)
+                    ha="left", va="center", transform=ax.transAxes)
 
-    n_unique = ms2_hits_compound_df["file_path"].nunique()
-    ax.text(0.01, 0.04,
-            f"Files with ≥1 MS2 hit: {n_unique} / {total_files} total",
-            fontsize=11.25, style="italic", transform=ax.transAxes)
+    frag_text_top = frag_top - GAP * 2
+    ax.text(col_x[0], frag_text_top, "Fragment Matches", fontsize=12.5,
+            weight="bold", ha="left", va="top", transform=ax.transAxes)
+    ax.text(col_x[1], frag_text_top, frag_display, fontsize=11.0,
+            ha="left", va="top", transform=ax.transAxes)
+    ax.text(col_x[3], frag_text_top, score_str, fontsize=12.5,
+            ha="left", va="top", transform=ax.transAxes)
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -550,7 +562,7 @@ def make_identification_figure(
 
         # Row 3, all cols: MS2 hit summary
         ax_hits = fig.add_subplot(gs[2, 0:4])
-        _plot_hit_info_table(ax_hits, ms2_hits_df, mc_row, total_files)
+        _plot_hit_info_table(ax_hits, ms2_hits_df, mc_row)
 
         # Figure-level title and section dividers
         plt.suptitle(f"[{cmp_idx + 1:04d}]  |  {compound_name}  |  {adduct}\n", fontsize=20, weight="bold", y=0.97)

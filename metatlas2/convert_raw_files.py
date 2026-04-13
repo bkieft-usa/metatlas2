@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Consolidated file conversion script for Metatlas.
-Converts .raw files to .mzML, then to both .h5 and .parquet formats.
-Intended to run standalone as a cronjob, e.g.: convert_raw_files.py jgi.
-"""
 
 import argparse
 import logging
@@ -19,11 +14,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pymzml.run import Reader
 
-# Configure logging
-logger = logging.getLogger(__name__)
+import metatlas2.logging_config as lcf
+logger = lcf.get_logger('analysis_summary')
 
 # Vars
-RAW_FILES_BASE = "/pscratch/sd/b/bkieft/metatlas_lite_data/raw_data" # /global/cfs/cdirs/metatlas/raw_data/
+RAW_FILES_BASE = "/pscratch/sd/b/bkieft/metatlas_lite_data/raw_data/"
 LOG_FILE_BASE = f"{RAW_FILES_BASE}/file_conversion_logs"
 RAW_IMAGE = "quay.io/biocontainers/thermorawfileparser@sha256:3b930ef774b3d4e0d559f38903da2390f9b24b96a016a1761805b88ae78c2b40"
 FORMAT_VERSION = 5

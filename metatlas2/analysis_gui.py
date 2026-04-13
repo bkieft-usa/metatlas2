@@ -1,18 +1,14 @@
-import functools, json, os, time, sys, uuid, threading
+import functools, json, os, time, uuid, threading
 import numpy as np, pandas as pd
-from panel import state
 import plotly.graph_objects as go
 import dash
-from typing import Dict, Any
 from dash import dcc, html, ctx, Input, Output, State
 import dash_bootstrap_components as dbc
 from dash_extensions import EventListener
 import traceback
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import database_interact as dbi
-import logging_config as lcf
-
+import metatlas2.database_interact as dbi
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger("analysis_gui")
 
 MS2_OPTIONS = [
@@ -1103,8 +1099,8 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         try:
             _flush_to_db(state)
-            logger.info(f"Save and Exit: flush succeeded for compound {state.get('compound_idx')}")
-            msg = "Saved. You may return to the notebook to run the curation summary."
+            logger.info(f"Save and Exit.")
+            msg = "Analysis saved and GUI closed. You may return to the notebook to run the curation summary."
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"Save and Exit: flush failed for compound {state.get('compound_idx')}: {exc}")

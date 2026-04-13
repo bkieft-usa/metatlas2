@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import sys
 from pathlib import Path
-from IPython.display import display
 from typing import Dict, Tuple, List
 
 from sklearn.preprocessing import PolynomialFeatures
@@ -10,11 +9,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
 
-sys.path.append('/global/homes/b/bkieft/metatlas2/metatlas2')
-import database_interact as dbi
-import logging_config as lcf
-
-# Initialize logger properly at module level
+import metatlas2.database_interact as dbi
+import metatlas2.logging_config as lcf
 logger = lcf.get_logger('rt_align_tools')
 
 def apply_rt_alignment_to_target_atlases(
