@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
         libhdf5-dev \
         libffi-dev \
-        libzmq3-dev \
-        libcares-dev \
+        libzmq-dev \
+        libc-ares-dev \
         pkg-config \
         libgl1 \
     && rm -rf /var/lib/apt/lists/*
