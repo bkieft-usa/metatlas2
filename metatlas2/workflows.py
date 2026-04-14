@@ -1,5 +1,6 @@
 from typing import Dict, Any
 import logging
+import socket
 import threading, time, os
 from IPython.display import display, HTML
 
@@ -17,6 +18,22 @@ import metatlas2.notebook_generator as nbg
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('workflows')
+
+
+def _find_free_port(start: int, max_tries: int = 20) -> int:
+    """Return the first free TCP port in [start, start+max_tries)."""
+    for port in range(start, start + max_tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(
+        f"No free port found in the range {start}–{start + max_tries - 1}. "
+        "Close another notebook or specify a different starting port."
+    )
+
 
 def run_project_setup(
     project_name: str,
@@ -148,6 +165,8 @@ def run_auto_identification(
     rt_alignment_number: int = None,
     analysis_number: int = None,
     analysis_subset: list = None,
+    config_path: str = None,
+    image_tag: str = "latest",
 ) -> Dict[str, int]:
     """
     Runs targeted analysis using RT-aligned atlases from database.
@@ -174,11 +193,13 @@ def run_auto_identification(
 
     auto_id_obj.setup(
         project_name=project_name,
-        rt_alignment_number=rt_alignment_number, 
+        rt_alignment_number=rt_alignment_number,
         analysis_number=analysis_number,
         config=config,
         paths=paths,
         analysis_subset=analysis_subset,
+        config_path=config_path,
+        image_tag=image_tag,
     )
 
     logger.info(f"Checking for existing Auto Identification results within RT Alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}...")
@@ -314,6 +335,7 @@ def run_analysis_gui(
     logger.info("Launching Analysis GUI...")
     shutdown_holder = [None]
 
+    dash_app_port = _find_free_port(dash_app_port)
     dash_app = agu.build_dash_app(
         analysis_gui_obj=analysis_gui_obj,
         port=dash_app_port,
@@ -326,7 +348,7 @@ def run_analysis_gui(
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    time.sleep(3)
+    time.sleep(1)
 
     service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')
     url = f"{service_prefix}proxy/{dash_app_port}/"

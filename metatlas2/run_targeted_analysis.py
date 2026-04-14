@@ -22,7 +22,9 @@ SLURM_TEMPLATE = """\
 #SBATCH --output={analysis_output_dir}/pre_curation_%j.log
 #SBATCH --error={analysis_output_dir}/pre_curation_%j.err
 
-python -m metatlas2.run_targeted_analysis run \\
+export METATLAS2_IMAGE_TAG="{image_tag}"
+shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{image_tag} \\
+    python -m metatlas2.run_targeted_analysis run \\
     --config "{config}" \\
     --project "{project}" \\
     --rt-align-num {rt_align_num} \\
@@ -60,6 +62,17 @@ def parse_args():
     submit_parser.add_argument("--mem", default="64G")
     submit_parser.add_argument("--time", default="03:00:00")
     submit_parser.add_argument("--output", default=None, help="Override output path for the .sh script")
+    submit_parser.add_argument(
+        "--image",
+        default=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
+        help="Container image tag to embed in the SLURM script (default: METATLAS2_IMAGE_TAG env var or 'latest')",
+    )
+    submit_parser.add_argument(
+        "--script-only",
+        action="store_true",
+        default=False,
+        help="Write the SLURM script but do not call sbatch (used by the container wrapper)",
+    )
 
     return parser.parse_args()
 
@@ -90,6 +103,7 @@ def generate_slurm_script(args, paths) -> str:
         rt_align_num = args.rt_align_num,
         analysis_num = args.analysis_num,
         extra_flags = extra_flags_str,
+        image_tag = args.image,
     )
 
     if args.output:
@@ -177,6 +191,8 @@ def main():
     if args.command == "submit":
         out_path = generate_slurm_script(args, paths)
         print(f"Slurm script written to: {out_path}")
+        if args.script_only:
+            return
         result = subprocess.run(["sbatch", out_path], capture_output=True, text=True)
         print(result.stdout.strip())
         if result.returncode != 0:
@@ -214,6 +230,8 @@ def main():
             rt_alignment_number=args.rt_align_num,
             analysis_number=args.analysis_num,
             analysis_subset=args.analysis_subset,
+            config_path=os.path.abspath(args.config),
+            image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
         )
 
     print("Pre-curation workflow complete. Open the generated notebooks to curate.")

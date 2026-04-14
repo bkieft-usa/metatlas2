@@ -15,21 +15,26 @@ def generate_gui_notebooks(
 
     logger.info(f"Generating analysis GUI notebook for atlas {auto_id_obj.post_autoid_atlas_obj.atlas_uid}")
 
+    image_tag = getattr(auto_id_obj, "image_tag", "latest")
+    # Kernel name: pinned if a specific tag was used, otherwise the 'latest' spec
+    kernel_name = "metatlas2" if image_tag == "latest" else f"metatlas2-{image_tag}"
+
     logger.info("Building notebook cells...")
     nb = nbformat.v4.new_notebook()
 
-    kernel_name = "metatlas2"
+    logger.info(f"Notebook kernel set to '{kernel_name}' (image tag: {image_tag})")
+
     nb.metadata["kernelspec"] = {
         "display_name": kernel_name,
         "language": "python",
         "name": kernel_name,
     }
-    logger.info(f"Notebook kernel set to '{kernel_name}'")
 
     nb.cells = [
         _make_header_cell(auto_id_obj),
+        _make_kernel_info_cell(image_tag, kernel_name),
         _make_imports_cell(),
-        _make_variables_cell(auto_id_obj),
+        _make_variables_cell(auto_id_obj, image_tag),
         _make_parameters_cell(auto_id_obj),
         _make_gui_cell(),
         _make_summary_cell(),
@@ -68,6 +73,19 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
     src += "}"
     return nbformat.v4.new_code_cell(src)
 
+def _make_kernel_info_cell(image_tag: str, kernel_name: str) -> nbformat.NotebookNode:
+    text = (
+        f"## Kernel / container version\n"
+        f"This notebook was generated with image tag **`{image_tag}`** "
+        f"and is configured to use the **`{kernel_name}`** Jupyter kernel.\n\n"
+        f"To use a different version:\n"
+        f"1. Run `scripts/install_kernels.sh --tag <tag>` to install a pinned kernel.\n"
+        f"2. Switch kernels via **Kernel → Change Kernel…** in JupyterLab.\n"
+        f"3. Update `IMAGE_TAG` in the variables cell below to match."
+    )
+    return nbformat.v4.new_markdown_cell(text)
+
+
 def _make_header_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     text = (
         f"# **`{auto_id_obj.project_name}`**  \n"
@@ -93,14 +111,15 @@ def _make_imports_cell() -> nbformat.NotebookNode:
     return nbformat.v4.new_code_cell(src)
 
 
-def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
+def _make_variables_cell(auto_id_obj: "AutoIdentification", image_tag: str = "latest") -> nbformat.NotebookNode:
     src = (
         f"ANALYSIS_CONFIG  = {auto_id_obj.config_path!r}\n"
         f"PROJECT_NAME     = {auto_id_obj.project_name!r}\n"
         f"RT_ALIGN_NUM     = {auto_id_obj.rt_alignment_number!r}\n"
         f"ANALYSIS_NUM     = {auto_id_obj.analysis_number!r}\n"
         f"ANALYSIS_ATLAS   = {auto_id_obj.post_autoid_atlas_obj.atlas_uid!r}\n"
-        f"CHROMATOGRAPHY   = {auto_id_obj.post_autoid_atlas_obj.chromatography!r}"
+        f"CHROMATOGRAPHY   = {auto_id_obj.post_autoid_atlas_obj.chromatography!r}\n"
+        f"IMAGE_TAG        = {image_tag!r}  # tag used when this analysis was run"
     )
     return nbformat.v4.new_code_cell(src)
 

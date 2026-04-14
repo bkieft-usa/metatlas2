@@ -204,6 +204,131 @@ Launched from a generated notebook after curation is complete.
 
 ---
 
+## Container-Based Deployment
+
+metatlas2 is distributed as a **Podman/Docker container** hosted on the GitHub Container Registry (GHCR).  All Python dependencies are frozen inside the image, so analysts never need to clone the repository or manage a virtual environment.  The workflow components that run on the compute cluster (batch jobs via Shifter) and those that run interactively in JupyterLab (the curation notebook) both use the same image.
+
+---
+
+### Image Registry and Tagging
+
+Images are hosted at `ghcr.io/bkieft-usa/metatlas2` and follow a two-tag convention:
+
+| Tag | When it is built | Meaning |
+|---|---|---|
+| `latest` | Every push to `main` | The current HEAD of the main branch |
+| `v<MAJOR>.<MINOR>.<PATCH>` | Every semver git tag (e.g. `git tag v1.2.3 && git push --tags`) | A pinned, reproducible release |
+
+The GitHub Actions workflow (`.github/workflows/docker.yml`) builds and pushes the image automatically.  The `IMAGE_TAG` build-arg is injected at build time and exposed as the `METATLAS2_IMAGE_TAG` environment variable inside the container, so any code running inside knows exactly which version it is.
+
+The `AutoIdentification` dataclass records `image_tag` and `config_path` as fields set during `setup()`.  `notebook_generator.py` reads `auto_id_obj.image_tag` when writing the curation notebook so the image version used at analysis time is permanently embedded in the notebook metadata and variables cell.
+
+---
+
+### Keeping the Local Cache Current
+
+A cronjob pulls the latest image automatically in the background:
+
+```bash
+*/5 * * * * /path/to/metatlas2/scripts/pull_latest.sh >> ~/pull_metatlas2.log 2>&1
+```
+
+`scripts/pull_latest.sh` runs `podman pull ghcr.io/bkieft-usa/metatlas2:latest` and logs the result with a timestamp.  The first manual pull after initial setup is also done with this script.
+
+---
+
+### Host Wrapper Script (`scripts/metatlas2`)
+
+The analyst never invokes `podman run` directly.  The wrapper script handles volume mounts, environment variables, and the submit/sbatch split:
+
+```bash
+# Run the automated pre-curation workflow directly (e.g. from a login node)
+scripts/metatlas2 run --config analysis.yaml --project MY_PROJECT_0000_0000_00
+
+# Generate a Shifter SLURM script and submit it immediately
+scripts/metatlas2 submit --config analysis.yaml --project MY_PROJECT_0000_0000_00 --qos regular
+
+# Pin to a specific image tag instead of latest
+scripts/metatlas2 --image v1.2.3 run --config analysis.yaml --project MY_PROJECT_0000_0000_00
+
+# Use local working-tree edits instead of the installed image (dev mode)
+scripts/metatlas2 --dev run --config analysis.yaml --project MY_PROJECT_0000_0000_00
+```
+
+The wrapper always mounts:
+- `/pscratch/sd/b/bkieft/metatlas_lite_data` (read-only) — raw data, main DB, PubChem cache
+- `$HOME` — project output directories, config files, notebooks
+
+`--network=host` is passed for `run` mode so the Dash curation server and Jupyter kernel ZMQ ports bind directly on the host network stack, allowing JupyterHub to reach them.
+
+#### `submit` mode — container vs. host responsibility
+
+`sbatch` is a host-side SLURM command not available inside the container.  The split works as follows:
+
+1. The wrapper calls `podman run … submit --script-only --output /tmp/metatlas2_XXXX.sh` — Python generates and writes the SLURM `.sh` script to a temp path on `/tmp` (visible to both container and host via the bind mount), then exits.
+2. The wrapper reads the temp path from stdout and calls `sbatch /tmp/metatlas2_XXXX.sh` on the host.
+
+The SLURM script uses `shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{tag}` so the batch job runs inside the same container image.  The image tag is embedded in the script at generation time; pass `--image v1.2.3` to the wrapper to pin a specific release for a batch job.
+
+---
+
+### Jupyter Kernel Specs
+
+The curation notebooks require Python packages from inside the container.  Rather than installing packages on the host, a Jupyter kernel spec is registered that launches an `ipykernel` process inside a Podman container.  JupyterLab connects to it over ZMQ using `--network=host`.
+
+Run once (or after a new version release) to register the kernel specs:
+
+```bash
+# Install 'metatlas2' (latest) and 'metatlas2-dev' kernels
+scripts/install_kernels.sh
+
+# Also install a pinned kernel for a specific release tag
+scripts/install_kernels.sh --tag v1.2.3
+```
+
+Three kernel specs are available:
+
+| Kernel name | Image used | Source code |
+|---|---|---|
+| `metatlas2` | `latest` | Installed inside the image |
+| `metatlas2-dev` | `latest` | Local repo mounted at `/dev_repo`; `PYTHONPATH=/dev_repo` shadows installed code |
+| `metatlas2-{tag}` | `{tag}` | Installed inside the pinned image |
+
+Generated curation notebooks embed the kernel name in their `kernelspec` metadata.  When the analysis was run with a specific tag (e.g. `v1.2.3`), the notebook targets `metatlas2-v1.2.3`; when run with `latest`, it targets `metatlas2`.  Analysts can switch kernels at any time via **Kernel → Change Kernel…** in JupyterLab and update the `IMAGE_TAG` variable in the variables cell to match.
+
+---
+
+### Development Workflow
+
+To test local changes without waiting for CI to build and push an image:
+
+1. **Interactive / notebook**: Switch to the `metatlas2-dev` kernel.  The local repo at `/global/homes/b/bkieft/metatlas2` is mounted into the container and placed first on `PYTHONPATH`, so edits take effect on the next cell execution.
+2. **CLI `run` mode**: Add `--dev` to the wrapper:
+   ```bash
+   scripts/metatlas2 --dev run --config analysis.yaml --project ...
+   ```
+3. **SLURM batch**: Add `--dev` to the wrapper's `submit` call.  The generated SLURM script passes `--volume` and `PYTHONPATH` arguments to Shifter.
+
+When changes are ready, push to `main` (or tag a release) and the CI pipeline automatically builds and pushes the updated image to GHCR.  The cronjob then pulls it within 5 minutes.
+
+---
+
+### Container File Map
+
+```
+metatlas2/
+├── Dockerfile                        # Image definition; uv-based install; exposes IMAGE_TAG
+├── .github/
+│   └── workflows/
+│       └── docker.yml                # CI: build + push on main push and version tags
+└── scripts/
+    ├── metatlas2                     # Host wrapper (run/submit, --image, --dev)
+    ├── install_kernels.sh            # Registers metatlas2/metatlas2-dev/metatlas2-{tag} kernels
+    └── pull_latest.sh                # Cronjob helper: podman pull latest
+```
+
+---
+
 ## Output Directory Layout
 
 ```

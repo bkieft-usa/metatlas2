@@ -1,0 +1,96 @@
+#!/bin/bash
+# Host-side wrapper: runs metatlas2 commands inside a Podman container.
+#
+# Usage:
+#   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
+#   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
+#
+# Flags (consumed by this script, not forwarded to Python):
+#   --image TAG   Use a specific image tag instead of the default (latest).
+#                 Overrides the METATLAS2_IMAGE_TAG environment variable.
+#   --dev         Mount the local repository source over the installed package,
+#                 so edits to the working tree take effect immediately.
+#
+# The wrapper handles the submit/sbatch split:
+#   submit → container generates the SLURM script → host calls sbatch.
+
+set -euo pipefail
+
+IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
+# Honour a pre-set env var so cronjob refreshes propagate automatically
+IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
+DEV_MODE=false
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Parse wrapper-specific flags; pass everything else through to Python
+# ---------------------------------------------------------------------------
+PASSTHROUGH_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --image)        IMAGE_TAG="$2"; shift 2 ;;
+        --image=*)      IMAGE_TAG="${1#*=}"; shift ;;
+        --dev)          DEV_MODE=true; shift ;;
+        *)              PASSTHROUGH_ARGS+=("$1"); shift ;;
+    esac
+done
+
+IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+
+# ---------------------------------------------------------------------------
+# Volume mounts
+# Hard-coded data paths must match the paths in run_targeted_analysis.py
+# ---------------------------------------------------------------------------
+MOUNTS=(
+    -v "/pscratch/sd/b/bkieft/metatlas_lite_data:/pscratch/sd/b/bkieft/metatlas_lite_data:ro"
+    -v "${HOME}:${HOME}"
+)
+
+ENV_VARS=(
+    -e "METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
+    -e "HOME=${HOME}"
+    -e "JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
+)
+
+# Dev mode: overlay the local working tree on top of the installed package.
+# PYTHONPATH is searched before site-packages, so local edits take effect
+# without rebuilding the image.
+if [[ "${DEV_MODE}" == "true" ]]; then
+    MOUNTS+=(-v "${REPO_DIR}:/dev_repo:ro")
+    ENV_VARS+=(-e "PYTHONPATH=/dev_repo")
+fi
+
+# ---------------------------------------------------------------------------
+# Subcommand dispatch
+# ---------------------------------------------------------------------------
+SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
+
+if [[ "${SUBCOMMAND}" == "submit" ]]; then
+    # Generate the SLURM script inside the container (sbatch is not available
+    # there), write it to a temp file on the shared /tmp, then submit it from
+    # the host where sbatch lives.
+    TMPSCRIPT="$(mktemp /tmp/metatlas2_XXXXXX.sh)"
+    # shellcheck disable=SC2064
+    trap "rm -f '${TMPSCRIPT}'" EXIT
+
+    podman run --rm \
+        "${MOUNTS[@]}" \
+        "${ENV_VARS[@]}" \
+        -v "/tmp:/tmp" \
+        "${IMAGE}" \
+        "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
+
+    echo "Slurm script written to: ${TMPSCRIPT}"
+    sbatch "${TMPSCRIPT}"
+else
+    # run (or any other subcommand): forward directly.
+    # --network=host lets the Dash server and Jupyter kernel ports bind on the
+    # host network stack so JupyterHub can reach them.
+    podman run --rm \
+        --network=host \
+        "${MOUNTS[@]}" \
+        "${ENV_VARS[@]}" \
+        "${IMAGE}" \
+        "${PASSTHROUGH_ARGS[@]}"
+fi

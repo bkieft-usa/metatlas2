@@ -627,10 +627,12 @@ class AutoIdentification:
     post_autoid_atlas_obj: Optional[Atlas] = None
 
     # Paths and config
+    config_path: str = None
+    image_tag: str = "latest"
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
 
-    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, config: Dict[str, Any], paths: Dict[str, str], analysis_subset: Optional[List[str]] = None):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, config: Dict[str, Any], paths: Dict[str, str], analysis_subset: Optional[List[str]] = None, config_path: str = None, image_tag: str = "latest"):
         """
         Set up AutoIdentification object.
         Populates paths, config, and relevant atlas UID.
@@ -642,6 +644,8 @@ class AutoIdentification:
         self.paths = paths
         self.project_name = project_name
         self.analysis_subset = analysis_subset
+        self.config_path = config_path
+        self.image_tag = image_tag
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
 
 @dataclass
