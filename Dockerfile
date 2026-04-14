@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
         libhdf5-dev \
         libffi-dev \
-        libzmq-dev \
+        libzmq3-dev \
         libc-ares-dev \
         pkg-config \
         libgl1 \
