@@ -8,7 +8,7 @@ A programmer-oriented reference for understanding how a typical targeted metabol
 
 - [Module Map for Targeted Analysis](#module-map-for-targeted-analysis)
 - [Other Scripts and Tools](#other-scripts-and-tools)
-- [Adding to the central metatlas knowledge store](#adding-to-the-central-metatlas-knowledge-store)
+- [Adding new compounds to the central metatlas knowledge store](#adding-new-compounds-to-the-central-metatlas-knowledge-store)
   - [1. Create new Compounds](#1-create-new-compounds-in-the-main-database--compoundcreate_from_configconfig_path)
   - [2. Create new Atlases](#2-create-new-atlases-in-the-main-database--atlascreate_from_configconfig_path)
 - [Per-Project Workflow](#per-project-workflow)
@@ -18,14 +18,14 @@ A programmer-oriented reference for understanding how a typical targeted metabol
   - [Phase 3 — Auto Identification](#phase-3--auto-identification-wfsrun_auto_identification)
   - [Phase 4 — Analysis GUI](#phase-4--analysis-gui-wfsrun_analysis_gui)
   - [Phase 5 — Analysis Summary](#phase-5--analysis-summary-wfsrun_analysis_summary)
-- [Key Data Objects](#key-data-objects)
+- [Key Data Objects](#key-data-objects-classes-found-in-workflow_objects)
 - [First-Time Setup](#first-time-setup)
 - [Container-Based Deployment](#container-based-deployment)
   - [Architecture at a Glance](#architecture-at-a-glance)
   - [Execution Modes](#execution-modes)
   - [Container File Map](#container-file-map)
   - [Image Registry and Tagging](#image-registry-and-tagging)
-  - [Host Wrapper Script (scripts/metatlas2)](#host-wrapper-script-scriptsmetatlas2)
+  - [Host Wrapper Script (metatlas2.sh)](#host-wrapper-script-metatlas2sh)
   - [Jupyter Kernel Specs](#jupyter-kernel-specs)
   - [Development Workflow](#development-workflow)
   - [Keeping the Local Cache Current](#keeping-the-local-cache-current)
@@ -63,13 +63,9 @@ A programmer-oriented reference for understanding how a typical targeted metabol
 
 ---
 
-## Adding to the central metatlas knowledge store
-
-These steps run once per instrument method / compound list update. They populate the **main shared database** (`metatlas.duckdb`).
+## Adding new compounds to the central metatlas knowledge store
 
 ### 1. Create new Compounds in the main database — `Compound.create_from_config(config_path)`
-
-**Objects created:** `Compound`, `CompoundMZRT` (one per compound row in the input file)
 
 | Call | What it does |
 |---|---|
@@ -85,8 +81,6 @@ These steps run once per instrument method / compound list update. They populate
 ---
 
 ### 2. Create new Atlases in the main database — `Atlas.create_from_config(config_path)`
-
-**Objects created:** `Atlas` (one per chromatography × polarity × analysis_type combination)
 
 | Call | What it does |
 |---|---|
@@ -110,13 +104,13 @@ Run for every new experimental project via `python -m metatlas2.run_targeted_ana
 | `set_up_paths(config, project_name, ...)` | Builds all directory paths, creates output directories, and validates that the raw data and main DB exist |
 | `lcf.setup_logging(...)` | Configures rotating-file or stdout logging for the run |
 
-The three main phases are then called in sequence unless individually skipped.
+The three main phases are then called in sequence unless individually skipped (see below).
 
 ---
 
 ### Phase 1 — Project Setup: `wfs.run_project_setup(...)`
 
-**Objects created:** `Project`, `LCMSRun` (one per parquet file found on disk)
+Sets up the project directory structure and load LCMS run .parquet files into the database.
 
 | Call | What it does |
 |---|---|
@@ -133,11 +127,11 @@ The three main phases are then called in sequence unless individually skipped.
 
 ### Phase 2 — RT Alignment: `wfs.run_rt_alignment(...)`
 
-**Objects created:** `RTAlign`, `Atlas` (template + one aligned atlas per analysis type), `ExperimentalData`
+Creates an RT alignment model from QC files based on an alignment template atlas, then applies the model to all atlases in the config file.
 
 | Call | What it does |
 |---|---|
-| `RTAlign()` | Instantiates the RT alignment state container |
+| `RTAlign()` | Instantiates the RT alignment class object |
 | `RTAlign.setup(project_name, rt_alignment_number, config, paths)` | Reads chromatography and QC atlas UID from config; checks for an existing aligned-atlases CSV and sets `run_alignment = False` if `use_existing_rt_alignment` is True or if alignment is globally disabled |
 | `dbi.get_lcmsruns_from_db(project_db_path)` | Fetches all `LCMSRun` rows from the project database |
 | `lrt.filter_lcmsruns_list(lcmsruns, include_file_type, exclude_file_type, chromatography, ms_level=1)` | Filters runs to those used for alignment (typically QC files); result stored in `RTAlign.aligner_lcmsruns` |
@@ -160,11 +154,9 @@ The three main phases are then called in sequence unless individually skipped.
 
 Loops over every aligned atlas (each chromatography × polarity × analysis_type entry in the CSV). For each:
 
-**Objects created (per atlas loop):** `AutoIdentification`, `ExperimentalData`, `ManualCuration` entries, `Atlas` (post-autoid)
-
 | Call | What it does |
 |---|---|
-| `AutoIdentification()` | Instantiates the auto-ID state container |
+| `AutoIdentification()` | Instantiates the auto-ID class object |
 | `AutoIdentification.setup(project_name, rt_alignment_number, analysis_number, config, paths, analysis_subset)` | Populates metadata; `analysis_subset` allows restricting processing to a polarity–analysis_type subset |
 | `dbi.check_existing_auto_identification(auto_id_obj)` | Guards against re-running if results already exist in the database for this run number |
 | `dbi.get_lcmsruns_from_db(project_db_path)` | Fetches all `LCMSRun` rows |
@@ -186,13 +178,11 @@ Loops over every aligned atlas (each chromatography × polarity × analysis_type
 
 ### Phase 4 — Analysis GUI: `wfs.run_analysis_gui(...)`
 
-Launched from a generated curation notebook. Runs an interactive Dash app for manual review.
-
-**Objects created:** `AnalysisGUI`, `Atlas`
+Launched by the analyst from the curation notebook (auto-created during Phase 3). Runs an interactive Dash app for manual review of all compounds that were detected.
 
 | Call | What it does |
 |---|---|
-| `AnalysisGUI()` | Instantiates the GUI state container |
+| `AnalysisGUI()` | Instantiates the GUI class object |
 | `AnalysisGUI.setup(project_name, rt_alignment_number, analysis_number, config, paths)` | Populates metadata and paths |
 | `Atlas.from_database(project_db_path, pre_curation_atlas_uid, main_db_path)` | Loads the pre-curation (post-auto-ID) atlas into `AnalysisGUI.pre_curation_atlas_obj` |
 | `dbi.load_and_filter_gui_inputs(analysis_gui_obj, override_parameters)` | Queries the project DB for all MS1, MS2, hits, and manual-curation data; applies any analyst-supplied filter overrides; stores DataFrames in `AnalysisGUI.ms1_df`, `.ms2_df`, `.ms2_hits_df`, `.manual_curation_df` |
@@ -205,13 +195,11 @@ Launched from a generated curation notebook. Runs an interactive Dash app for ma
 
 ### Phase 5 — Analysis Summary: `wfs.run_analysis_summary(...)`
 
-Launched from a generated notebook after curation is complete.
-
-**Objects created:** `AnalysisSummary`, `Atlas` (post-curation)
+Launched by the analyst from the curation notebook. This creates summary files, tables, and figures for the entire analysis.
 
 | Call | What it does |
 |---|---|
-| `AnalysisSummary()` | Instantiates the summary state container |
+| `AnalysisSummary()` | Instantiates the summary class object |
 | `AnalysisSummary.setup(project_name, rt_alignment_number, analysis_number, config, paths)` | Populates metadata then immediately calls `load_data()` |
 | `AnalysisSummary.load_data()` | Pre-loads all four data tables from the project DB (`manual_curation_df`, `ms1_all_df`, `ms2_raw_all_df`, `ms2_hits_all_df`) plus `per_file_metrics_df` derived from MS1 data so summary functions don't re-query |
 | `Atlas.from_database(project_db_path, pre_curation_atlas_uid, main_db_path)` | Loads the pre-curation atlas into `AnalysisSummary.pre_curation_atlas_obj` |
@@ -219,26 +207,26 @@ Launched from a generated notebook after curation is complete.
 | `ldt.save_atlas_data_to_csv(post_curation_atlas_obj, curated_atlases_store_file)` | Saves the curated atlas to `TGA<N>/curated_atlases.csv` |
 | `asm.run_all_summaries(summary_obj, overwrite)` | Generates all output files: per-compound plots, QC tables, identification-confidence summaries, and export CSVs |
 
-**State after this phase:** All summary files are written to `TGA<N>/`; the curated atlas CSV is ready for downstream use.
+**State after this phase:** All summary files are written to the `RTA<N>/TGA<N>/` directory; the curated atlas CSV is ready for downstream use.
 
 ---
 
-## Key Data Objects
+## Key Data Objects (classes found in `workflow_objects`)
 
-| Object | Module | Purpose |
-|---|---|---|
-| `Compound` | `workflow_objects` | Immutable chemical identity record (name, InChI key, formula, PubChem CID, etc.) |
-| `CompoundMZRT` | `workflow_objects` | Reference RT/MZ window for a compound under a specific chromatography/polarity/adduct |
-| `Atlas` | `workflow_objects` | Named collection of `CompoundMZRT` entries for one chromatography × polarity × analysis type |
-| `LCMSRun` | `workflow_objects` | Metadata record for a single raw parquet file (path, type, polarity, MS level) |
-| `Project` | `workflow_objects` | Container holding project config, paths, and `LCMSRun` list during setup |
-| `RTAlign` | `workflow_objects` | Carries RT alignment state: QC atlas, filtered runs, model coefficients, and aligned atlases |
-| `ExperimentalData` | `workflow_objects` | Holds extracted `MS1Data`, `MS2Data`, `MS2Hit`, and `ManualCuration` lists for one atlas × LCMS run set |
-| `ManualCuration` | `workflow_objects` | Per-compound identification summary: best MS1 file, RT error, auto-ID flag, suggested RT bounds |
-| `MS1Data` / `MS2Data` / `MS2Hit` | `workflow_objects` | Thin wrappers (`_SpecData`) around a per-file DataFrame of spectral data or hit scores |
-| `AutoIdentification` | `workflow_objects` | Carries auto-ID state: pre/post atlases, filtered runs, `ExperimentalData`, and results |
-| `AnalysisGUI` | `workflow_objects` | Holds in-memory DataFrames and atlas objects for the interactive curation Dash app |
-| `AnalysisSummary` | `workflow_objects` | Pre-loads all analysis tables and holds pre/post-curation atlases for summary generation |
+| Object | Purpose |
+|---|---|
+| `Compound` |  Immutable chemical identity record (name, InChI key, formula, PubChem CID, etc.) |
+| `CompoundMZRT` | Reference RT/MZ window for a compound under a specific chromatography/polarity/adduct |
+| `Atlas` | Named collection of `CompoundMZRT` entries for one chromatography × polarity × analysis type |
+| `LCMSRun` | Metadata record for a single raw parquet file (path, type, polarity, MS level) |
+| `Project` | Container holding project config, paths, and `LCMSRun` list during setup |
+| `RTAlign` | Carries RT alignment state: QC atlas, filtered runs, model coefficients, and aligned atlases |
+| `ExperimentalData` | Holds extracted `MS1Data`, `MS2Data`, `MS2Hit`, and `ManualCuration` lists for one atlas × LCMS run set |
+| `ManualCuration` | Per-compound identification summary: best MS1 file, RT error, auto-ID flag, suggested RT bounds |
+| `MS1Data` / `MS2Data` / `MS2Hit` | Thin wrappers (`_SpecData`) around a per-file DataFrame of spectral data or hit scores |
+| `AutoIdentification` | Carries auto-ID state: pre/post atlases, filtered runs, `ExperimentalData`, and results |
+| `AnalysisGUI` | Holds in-memory DataFrames and atlas objects for the interactive curation Dash app |
+| `AnalysisSummary` | Pre-loads all analysis tables and holds pre/post-curation atlases for summary generation |
 
 ---
 
@@ -259,33 +247,27 @@ The repo is only needed for the `scripts/` directory and the `docs/`.  You do **
 
 ### 2. Set `METATLAS_DATA_DIR`
 
-All data paths (raw files, main database, PubChem cache) should be located in a single root directory.  Define it once in your shell profile so every tool picks it up automatically:
+Define the base directory of all input data (raw files, main database, PubChem cache) **once** in your shell profile so every tool picks it up automatically:
 
 ```bash
-echo 'export METATLAS_DATA_DIR="/path/to/your/metatlas_data"' >> ~/.bashrc
+echo 'export METATLAS_DATA_DIR="/global/cfs/cdirs/metatlas/"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Replace `/path/to/your/metatlas_data` with the actual path on your system, which should be `/global/cfs/cdirs/metatlas/`.  The directory must contain the sub-paths `raw_data/`, `databases/main_db/metatlas.duckdb`, and `databases/pubchem_cache/pubchem_global_cache.parquet`. Colloquially, it should also contain the MSMS References table at `databases/msms_refs/*tab`, but this location is configurable in the analysis `.yaml` file.
-
-### 3. Add `scripts/` to your PATH [optional]
+### 3. Add `scripts/` to your PATH
 
 ```bash
 echo 'export PATH="${HOME}/metatlas2/scripts:${PATH}"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-This step is optional, as you can always supply the direct path to the entrypoint script when invoking the workflow (i.e., inside the cloned repository). If you do add this line, you can type `metatlas2` from anywhere instead of the full path.
-
 ### 4. Authenticate to GHCR (one-time)
 
-The container image is hosted on the GitHub Container Registry, but it is currently private. To access it, log in with a Personal Access Token that has the `read:packages` scope:
+The container image is hosted on the GitHub Container Registry, but it is currently private. To access it, log in with a Personal Access Token (copied from your GitHub profile into a hidden file in your home directory called `.github_token`). Note: your token must have `read:packages` scope.
 
 ```bash
 podman login ghcr.io -u bkieft-usa --password-stdin <<< "$(cat ~/.github_token)"
 ```
-
-where `~/.github_token` is a file containing your PAT. You can find your access token in the online github interface, and save it to the hidden file `.github_token` in your home directory.
 
 ### 5. Install Jupyter kernel specs
 
@@ -293,103 +275,50 @@ where `~/.github_token` is a file containing your PAT. You can find your access 
 install_kernels.sh
 ```
 
-This registers two kernels by default. A third pinned kernel is optional:
-
-| Kernel | What it runs |
-|---|---|
-| `metatlas2` | Latest image, installed code |
-| `metatlas2-dev` | Latest image, local repo mounted (for development) |
-| `metatlas2-{tag}` | Pinned release — only installed when you pass `--tag v1.2.3` to the `metatlas` entrypoint script |
-
-Rerun `install_kernels.sh --tag <tag>` any time you want a pinned kernel for a specific release to match a generated notebook.
-
 ### Setup is complete
 
 You can now run analyses:
 
 ```bash
 # Direct run (e.g. from a login node)
-metatlas2 run --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
+metatlas2.sh run --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
 
 # Submit to SLURM
-metatlas2 submit --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
+metatlas2.sh submit --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
 
 # Dev mode (use local repo edits instead of the installed image)
-metatlas2 --dev run --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
+metatlas2.sh --dev run --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
 ```
 
 ---
 
 ## Container-Based Deployment
 
-metatlas2 is distributed as a **Podman/Docker container** hosted on the GitHub Container Registry (GHCR).  All Python dependencies are frozen inside the image, so analysts never need to clone the repository or manage a virtual environment.  The workflow components that run on the compute cluster (batch jobs via Shifter) and those that run interactively in JupyterLab (the curation notebook) both use the same image.
+metatlas2 is distributed as a **Podman/Docker container** hosted on the GitHub Container Registry (GHCR).  All Python dependencies are frozen inside the image, so analysts never need to clone the repository or manage a virtual environment.  The workflow components that run on the compute cluster (the automated targeted analysis in a shifter env) and those that run interactively in JupyterLab (the curation notebook) both use the same image.
 
 ### Architecture at a Glance
 
-Four distinct layers interact every time the entrypoint script is called.  Understanding which layer owns what removes most of the confusion:
+Four distinct layers interact every time the entrypoint script is called.
 
 | Layer | What lives here | Role |
 |---|---|---|
-| **GitHub** (`bkieft-usa/metatlas2`) | Source code, `Dockerfile`, CI workflow (`.github/workflows/docker.yml`) | Every push to `main` or semver tag triggers CI, which builds and pushes a new container image to GHCR |
-| **GHCR** (`ghcr.io/bkieft-usa/metatlas2`) | Frozen container images (`:latest`, `:v1.2.3`, …) | The versioned Python runtime; pulled to the login node by a cronjob (every 5 min) or manually |
-| **NERSC host filesystem** | `~/metatlas2/scripts/metatlas2` (bash wrapper), `~/.jupyter/kernels/` (kernel specs), `$METATLAS_DATA_DIR/` (raw data + databases on shared CFS), `~/<owner>_metabolomics_data/` (project outputs) | Input data, user config, project outputs, and the thin shell scripts that glue everything together; **no Python runs here** |
+| **GitHub** (`bkieft-usa/metatlas2`) | Source code, `Dockerfile`, CI workflow (`.github/workflows/docker.yml`) | Every push to `main` triggers a CI action, which builds and pushes a new container image to GHCR |
+| **GHCR** (`ghcr.io/bkieft-usa/metatlas2`) | Frozen container images (e.g., `:latest`, `:sha-fb90592`) | The versioned Python runtime; pulled to the login node by a cronjob (every 5 min) or manually |
+| **NERSC host filesystem** | `~/metatlas2/metatlas2.sh` (bash wrapper), `~/.jupyter/kernels/` (kernel specs), `$METATLAS_DATA_DIR/` (raw data + databases on shared CFS), `~/<owner>_metabolomics_data/` (project outputs) | Input data, user config, project outputs, and the thin shell scripts that glue everything together; **no Python runs here** |
 | **Container** (Podman process) | `/app/metatlas2/` (Python package + all deps, frozen at build time) | All Python execution; sees the host filesystem via bind mounts at **identical absolute paths** — no path translation |
-
-The host **never runs Python directly**.  `scripts/metatlas2` is a pure bash script whose only job is to assemble `podman run` arguments and call it.  The Jupyter kernel spec (written by `install_kernels.sh`) does the same for notebook kernels — JupyterHub just sees a kernel process that happens to live inside a container.
-
-```
-GitHub ──CI──▶ GHCR  (ghcr.io/bkieft-usa/metatlas2:latest / :v#.#.#)
-                  │
-                  │  podman pull  (cronjob every 5 min, or manual)
-                  ▼
-     NERSC host  (login node / JupyterHub spawner)
-     ├── ~/metatlas2/scripts/metatlas2        (bash entry point)
-     ├── ~/.jupyter/kernels/metatlas2/        (kernel spec for notebooks)
-     ├── $METATLAS_DATA_DIR/                  (shared CFS — read-only)
-     │   ├── raw_data/<owner>/<project>/
-     │   ├── databases/main_db/metatlas.duckdb
-     │   └── databases/pubchem_cache/
-     └── ~/<owner>_metabolomics_data/<project>/   (outputs — read-write)
-                  │
-                  │  podman run --rm
-                  │    -v $METATLAS_DATA_DIR:...:ro
-                  │    -v $HOME:$HOME
-                  │    [--network=host  for run / notebook modes]
-                  ▼
-     Container process  (ghcr.io/bkieft-usa/metatlas2:{tag})
-     └── /app/metatlas2/  (frozen Python + all dependencies)
-         reads/writes host filesystem via bind mounts (same absolute paths)
-```
 
 ---
 
 ### Execution Modes
 
-`scripts/metatlas2` routes to one of four execution modes based on the subcommand.  The table below shows where Python actually runs and what distinguishes each mode:
+`metatlas2.sh` routes to one of four execution modes based on the subcommand.  The table below shows where Python actually runs and what distinguishes each mode:
 
 | Subcommand | Where Python runs | Key distinction |
 |---|---|---|
 | `run` | Podman container on the **login node** | `--network=host` exposes the Dash curation server and kernel ZMQ ports on the host network so JupyterLab can reach them |
-| `submit` | ① Podman on login node writes the SLURM script, then ② **Shifter on a NERSC compute node** runs the workflow | `sbatch` is host-only — see the two-step handoff below; Shifter auto-mounts CFS and `$HOME` without explicit `-v` flags |
+| `submit` | Podman on login node writes the SLURM script, then **Shifter on a NERSC compute node** runs the workflow |
 | `add-compounds` / `add-atlases` | Podman container on the **login node** | `$METATLAS_DATA_DIR` is mounted **read-write** so the container can write to `metatlas.duckdb` on the shared CFS |
 | **Jupyter notebook** (Phases 4–5) | Podman container launched by the **Jupyter kernel spec** on the JupyterHub spawner | JupyterHub connects to `ipykernel` inside the container over ZMQ; `--network=host` makes the kernel's ZMQ sockets visible on the host network |
-
-#### The `submit` two-step
-
-`sbatch` is a host-side SLURM binary that does not exist inside the container.  The wrapper handles this transparently:
-
-1. It pre-allocates a temp file path with `mktemp /tmp/metatlas2_XXXXXX.sh` and mounts `/tmp:/tmp` into the container.
-2. It calls `podman run … submit --script-only --output /tmp/metatlas2_XXXX.sh` — Python generates the Shifter-based SLURM script at that path and exits.
-3. The wrapper then calls `sbatch /tmp/metatlas2_XXXX.sh` on the host.
-
-The generated SLURM script embeds the image tag at generation time (`shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{tag}`), so the compute node always runs the same image that was used to create the script.  Pass `--image v1.2.3` to the wrapper to pin a specific release.
-
-#### Why `--network=host`?
-
-Both `run` mode and the Jupyter kernel spec pass `--network=host`, making the container share the host's network namespace:
-
-- The **Dash curation app** (Phase 4) binds a localhost port; the JupyterLab iframe proxy can only reach it when the port exists on the host network stack.
-- The **`ipykernel` process** writes ZMQ socket addresses to the `{connection_file}` that JupyterHub provides; those addresses reference `localhost` on the host, so the kernel must bind them on the host network, not an isolated container network.
 
 ---
 
@@ -402,7 +331,7 @@ metatlas2/
 │   └── workflows/
 │       └── docker.yml                # CI: build + push on main push and version tags
 └── scripts/
-    ├── metatlas2                     # Host wrapper (run/submit, --image, --dev)
+    ├── metatlas2.sh                  # Host wrapper (run/submit, --image, --dev)
     ├── install_kernels.sh            # Registers metatlas2/metatlas2-dev/metatlas2-{tag} kernels
     └── pull_latest.sh                # Cronjob helper: podman pull latest
 ```
@@ -411,16 +340,12 @@ metatlas2/
 
 ### Image Registry and Tagging
 
-Images are hosted at `ghcr.io/bkieft-usa/metatlas2` and follow a two-tag convention:
+Images are hosted at `ghcr.io/bkieft-usa/metatlas2`.  Every push to `main` builds a new image and pushes **two tags simultaneously**:
 
-| Tag | When it is built | Meaning |
-|---|---|---|
-| `latest` | Every push to `main` | The current HEAD of the main branch |
-| `v<MAJOR>.<MINOR>.<PATCH>` | Every semver git tag (e.g. `git tag v1.2.3 && git push --tags`) | A pinned, reproducible release |
-
-The GitHub Actions workflow (`.github/workflows/docker.yml`) builds and pushes the image automatically.  The `IMAGE_TAG` build-arg is injected at build time and exposed as the `METATLAS2_IMAGE_TAG` environment variable inside the container, so any code running inside knows exactly which version it is.
-
-The `AutoIdentification` dataclass records `image_tag` and `config_path` as fields set during `setup()`.  `notebook_generator.py` reads `auto_id_obj.image_tag` when writing the curation notebook so the image version used at analysis time is permanently embedded in the notebook metadata and variables cell.
+| Tag | Meaning |
+|---|---|
+| `sha-<7chars>` | 7-character short SHA of the triggering commit — unique, immutable, directly traceable to a GitHub commit |
+| `latest` | Floating pointer to the most recent build; convenient for day-to-day use but not pinnable |
 
 ---
 
@@ -432,26 +357,24 @@ A cronjob pulls the latest image automatically in the background:
 */5 * * * * /path/to/metatlas2/scripts/pull_latest.sh >> ~/pull_metatlas2.log 2>&1
 ```
 
-`scripts/pull_latest.sh` runs `podman pull ghcr.io/bkieft-usa/metatlas2:latest` and logs the result with a timestamp.  The first manual pull after initial setup is also done with this script.
-
 ---
 
-### Host Wrapper Script (`scripts/metatlas2`)
+### Host Wrapper Script (`metatlas2.sh`)
 
 The analyst never invokes `podman run` directly.  The wrapper script handles volume mounts, environment variables, and the submit/sbatch split:
 
 ```bash
 # Run the automated pre-curation workflow directly (e.g. from a login node)
-scripts/metatlas2 run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
+metatlas2.sh run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
 
 # Generate a Shifter SLURM script and submit it immediately
-scripts/metatlas2 submit --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --qos regular
+metatlas2.sh submit --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
 
 # Pin to a specific image tag instead of latest
-scripts/metatlas2 --image v1.2.3 run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
+metatlas2.sh --image sha-a1b2c3d run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
 
 # Use local working-tree edits instead of the installed image (dev mode)
-scripts/metatlas2 --dev run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
+metatlas2.sh --dev run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
 ```
 
 The wrapper always mounts:
@@ -473,27 +396,15 @@ The SLURM script uses `shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{tag}
 
 ### Jupyter Kernel Specs
 
-The curation notebooks require Python packages from inside the container.  Rather than installing packages on the host, a Jupyter kernel spec is registered that launches an `ipykernel` process inside a Podman container.  JupyterLab connects to it over ZMQ using `--network=host`.
-
-Run once (or after a new version release) to register the kernel specs:
-
-```bash
-# Install 'metatlas2' (latest) and 'metatlas2-dev' kernels
-scripts/install_kernels.sh
-
-# Also install a pinned kernel for a specific release tag
-scripts/install_kernels.sh --tag v1.2.3
-```
-
 Three kernel specs are available:
 
-| Kernel name | Image used | Source code |
-|---|---|---|
-| `metatlas2` | `latest` | Installed inside the image |
-| `metatlas2-dev` | `latest` | Local repo's `metatlas2/` package mounted at `/app/metatlas2`; directly overlays the installed package without PYTHONPATH changes |
-| `metatlas2-{tag}` | `{tag}` | Installed inside the pinned image |
+| Kernel name | Image used | Source code | How it is registered |
+|---|---|---|---|
+| `metatlas2` | `latest` | Installed inside the image | Once, manually via `scripts/install_kernels.sh` during setup |
+| `metatlas2-dev` | `latest` | Local repo's `metatlas2/` package mounted at `/app/metatlas2` | Once, manually via `scripts/install_kernels.sh` during setup |
+| `metatlas2-<tag>` | `<tag>` | Installed inside the pinned image | **Automatically**, the first time `metatlas2.sh --image <tag> …` is called |
 
-Generated curation notebooks embed the kernel name in their `kernelspec` metadata.  When the analysis was run with a specific tag (e.g. `v1.2.3`), the notebook targets `metatlas2-v1.2.3`; when run with `latest`, it targets `metatlas2`.  Analysts can switch kernels at any time via **Kernel → Change Kernel…** in JupyterLab and update the `IMAGE_TAG` variable in the variables cell to match.
+Generated curation notebooks embed the kernel name in their `kernelspec` metadata so the notebook re-opens against the same image that was used to generate it.  Analysts can switch kernels at any time in JupyterLab.
 
 ---
 
@@ -502,13 +413,8 @@ Generated curation notebooks embed the kernel name in their `kernelspec` metadat
 To test local changes without waiting for CI to build and push an image:
 
 1. **Interactive / notebook**: Switch to the `metatlas2-dev` kernel.  The local repo's `metatlas2/` package directory is mounted at `/app/metatlas2` inside the container, directly overlaying the installed copy, so edits take effect on the next cell execution.
-2. **CLI `run` mode**: Add `--dev` to the wrapper:
-   ```bash
-   scripts/metatlas2 --dev run --config analysis.yaml --project ...
-   ```
-3. **SLURM batch**: Dev mode is not currently supported for SLURM batch jobs.  The SLURM template runs inside Shifter without volume mounts for the local repo; use `run` mode or the notebook kernel for iterative development.
-
-When changes are ready, push to `main` (or tag a release) and the CI pipeline automatically builds and pushes the updated image to GHCR.  The cronjob then pulls it within 5 minutes.
+2. **CLI `run` mode**: Add `--dev` to the wrapper script when calling a targeted analysis.
+3. **SLURM batch**: Dev mode is not currently supported for SLURM batch jobs.
 
 ---
 

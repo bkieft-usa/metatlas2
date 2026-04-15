@@ -77,6 +77,21 @@ if [[ "${DEV_MODE}" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Auto-install a Jupyter kernel spec for pinned image tags.
+# The two default kernels (metatlas2, metatlas2-dev) reference :latest and
+# stay valid across image updates — they only need to be installed once.
+# Pinned SHA tags are registered on first use so the analyst never has to
+# run install_kernels.sh --tag manually.
+# ---------------------------------------------------------------------------
+if [[ "${IMAGE_TAG}" != "latest" ]]; then
+    KERNEL_DIR="${HOME}/.local/share/jupyter/kernels/metatlas2-${IMAGE_TAG}"
+    if [[ ! -d "${KERNEL_DIR}" ]]; then
+        echo "Registering Jupyter kernel spec for ${IMAGE_TAG} ..."
+        "${SCRIPT_DIR}/install_kernels.sh" --tag "${IMAGE_TAG}"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Subcommand dispatch
 # ---------------------------------------------------------------------------
 SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
