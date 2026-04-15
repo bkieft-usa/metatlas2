@@ -2,16 +2,15 @@ import pandas as pd
 import numpy as np
 import duckdb
 import uuid
-import sys
+import re
 import os
 import json
-import sys
 import copy
 import getpass
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 
 import metatlas2.rt_align_tools as rat
@@ -21,8 +20,8 @@ import metatlas2.logging_config as lcf
 logger = lcf.get_logger('database_interact')
 
 @contextmanager
-def get_db_connection(db_path: str):
-    conn = duckdb.connect(str(db_path))
+def get_db_connection(db_path: str, read_only: bool = False):
+    conn = duckdb.connect(str(db_path), read_only=read_only)
     try:
         yield conn
     finally:
@@ -249,12 +248,15 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
     Extract all compound information for a given atlas UID from the database.
     Handles both main database and project database.
     """
-    with get_db_connection(database_path) as conn:
+    # When main_db_path is None the caller is querying the main DB directly;
+    # open it read-only so DuckDB does not try to create a WAL on a ro mount.
+    direct_main_db = main_db_path is None
+    with get_db_connection(database_path, read_only=direct_main_db) as conn:
 
         # Attach main database if needed for compound metadata
         if main_db_path:
             try:
-                conn.execute(f"ATTACH '{main_db_path}' AS main_db")
+                conn.execute(f"ATTACH '{main_db_path}' AS main_db (READ_ONLY)")
                 logger.info("Attached main database for compound metadata")
             except Exception as e:
                 logger.error(f"Error attaching main database: {e}")
@@ -344,7 +346,12 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
 
     return df
 
-def create_project_database(project_db_path: str, rt_align_path: str, overwrite: bool = False) -> bool:
+def create_project_database(
+    project_db_path: str, 
+    rt_align_path: str,
+    log_file_path: str = None,
+    overwrite: bool = False
+) -> bool:
     """
     Create project-specific database with required tables.
     Never overwrites existing databases - requires analyst to increment analysis number.
@@ -357,11 +364,19 @@ def create_project_database(project_db_path: str, rt_align_path: str, overwrite:
         logger.info(f"Project database already exists at {project_db_path}. Not overwriting.")
         return True
     elif project_db_path.exists() and overwrite:
-        logger.warning(f"Overwriting existing project database at {project_db_path} (overwrite=True)")
-        project_db_path.unlink()
-        shutil.rmtree(rt_align_path)
+        logger.warning(f"Overwriting existing project log and database at {project_db_path} (overwrite=True)")
+        log_file_path.unlink() if log_file_path and Path(log_file_path).exists() else None
+        project_db_path.unlink() if project_db_path.exists() else None
         logger.info(f"Deleted existing database at {project_db_path}")
-        logger.info(f"Deleted existing RT alignment output at {rt_alignment_path}")
+        logger.warning(f"Overwriting existing RT alignment output at {rt_alignment_path} (overwrite=True)")
+        tga_pattern = re.compile(r'^TGA\d+$')
+        for item in Path(rt_align_path).iterdir():
+            if item.is_dir() and tga_pattern.match(item.name):
+                for sub_item in item.iterdir():
+                    shutil.rmtree(sub_item) if sub_item.is_dir() else sub_item.unlink()
+            else:
+                shutil.rmtree(item) if item.is_dir() else item.unlink()
+        logger.info(f"Cleared existing RT alignment output at {rt_alignment_path}")
     elif not project_db_path.exists():
         logger.info(f"No existing project database found at {project_db_path}. Creating new database.")
 
@@ -1473,8 +1488,8 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
 
         else: # This will be a project database save, so we need to attach the main db for verification of compounds
 
-            # Attach main database for compound verification
-            conn.execute(f"ATTACH '{main_db_path}' AS main_db")
+            # Attach main database for compound verification (read-only: it lives on a ro mount)
+            conn.execute(f"ATTACH '{main_db_path}' AS main_db (READ_ONLY)")
 
             # Verify all compounds exist in database
             if not _verify_compounds_exist_in_db([comp.compound_uid for comp in atlas_obj.compound_mzrts.values()], conn):
@@ -1589,7 +1604,7 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
     """Return {inchi_key: compound_uid} for all inchi_keys found in the database."""
     if not inchi_keys:
         return {}
-    with get_db_connection(db_path) as conn:
+    with get_db_connection(db_path, read_only=True) as conn:
         placeholders = ','.join(['?'] * len(inchi_keys))
         rows = conn.execute(
             f"SELECT inchi_key, compound_uid FROM compounds WHERE inchi_key IN ({placeholders})",
@@ -1614,7 +1629,7 @@ def get_or_create_compound_mz_rt_uid(
     """
     Return (mz_rt_uid, reused_flag). If not found, generate a new UID (do not insert).
     """
-    with get_db_connection(db_path) as conn:
+    with get_db_connection(db_path, read_only=True) as conn:
         existing = conn.execute("""
             SELECT mz_rt_uid FROM compound_mzrt
             WHERE compound_uid = ?

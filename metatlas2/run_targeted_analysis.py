@@ -6,10 +6,6 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 
-import metatlas2.logging_config as lcf
-import metatlas2.load_tools as ldt
-import metatlas2.workflows as wfs
-
 SLURM_TEMPLATE = """\
 #!/bin/bash
 #SBATCH --job-name={project}
@@ -126,9 +122,15 @@ def set_up_paths(
 ) -> Dict[str, str]:
     """Build all workflow paths and create all output directories for a run."""
 
-    raw_data_path = "/pscratch/sd/b/bkieft/metatlas_lite_data/raw_data/"
-    main_db_path = "/pscratch/sd/b/bkieft/metatlas_lite_data/databases/metatlas.duckdb"
-    pubchem_cache_path = "/pscratch/sd/b/bkieft/metatlas_lite_data/databases/pubchem_cache/pubchem_global_cache.parquet"
+    data_dir = os.environ.get("METATLAS_DATA_DIR")
+    if data_dir is None:
+        raise EnvironmentError(
+            "METATLAS_DATA_DIR environment variable is not set. "
+            "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
+        )
+    raw_data_path = f"{data_dir}/raw_data/"
+    main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
+    pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.parquet"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
         return {
@@ -138,13 +140,13 @@ def set_up_paths(
         }
 
     owner = config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
-    project_output_dir = Path.home() / f"{owner}_metabolomics_data" /  project_name
+    project_output_dir = Path.home() / f"{owner}_metabolomics_data" / project_name
     project_short = str(project_name.split("_")[4]) + "_" + str(rt_alignment_number) + "_" + str(analysis_number)
     rta_dir = project_output_dir / f"RTA{rt_alignment_number}"
     analysis_dir = rta_dir / f"TGA{analysis_number}"
 
     paths = {
-        "raw_data_directory": str(raw_data_path / owner / project_name),
+        "raw_data_directory": str(Path(raw_data_path) / owner / project_name),
         "project_directory": str(project_output_dir),
         "log_path": str(project_output_dir / f"{project_short}.log"),
         "project_db_path": str(project_output_dir / f"{project_name}.duckdb"),
@@ -170,16 +172,12 @@ def set_up_paths(
     return paths
 
 def main():
+
+    print("Parsing arguments ...", flush=True)
     args = parse_args()
-    config = ldt.load_metatlas2_config(args.config)
-    paths = set_up_paths(
-        config=config,
-        project_name=args.project,
-        rt_alignment_number=args.rt_align_num,
-        analysis_number=args.analysis_num,
-    )
 
     print("Setting up logging...")
+    import metatlas2.logging_config as lcf
     if args.log_to_stdout:
         log_file = None
     else:
@@ -188,9 +186,28 @@ def main():
     lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
     logger = lcf.get_logger("run_targeted_analysis")
 
+    print("Loading libraries ...", flush=True)
+    logger.info("Loading libraries")
+    import metatlas2.load_tools as ldt
+    import metatlas2.workflows as wfs
+
+    print("Loading config ...", flush=True)
+    logger.info("Loading config")
+    config = ldt.load_metatlas2_config(args.config)
+
+    print("Setting up paths ...", flush=True)
+    logger.info("Setting up paths")
+    paths = set_up_paths(
+        config=config,
+        project_name=args.project,
+        rt_alignment_number=args.rt_align_num,
+        analysis_number=args.analysis_num,
+    )
+
     if args.command == "submit":
         out_path = generate_slurm_script(args, paths)
         print(f"Slurm script written to: {out_path}")
+        logger.info(f"Slurm script written to: {out_path}")
         if args.script_only:
             return
         result = subprocess.run(["sbatch", out_path], capture_output=True, text=True)

@@ -18,7 +18,13 @@ import metatlas2.logging_config as lcf
 logger = lcf.get_logger('analysis_summary')
 
 # Vars
-RAW_FILES_BASE = "/pscratch/sd/b/bkieft/metatlas_lite_data/raw_data/"
+_DATA_DIR = os.environ.get("METATLAS_DATA_DIR")
+if _DATA_DIR is None:
+    raise EnvironmentError(
+        "METATLAS_DATA_DIR environment variable is not set. "
+        "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
+    )
+RAW_FILES_BASE = f"{_DATA_DIR}/raw_data/"
 LOG_FILE_BASE = f"{RAW_FILES_BASE}/file_conversion_logs"
 RAW_IMAGE = "quay.io/biocontainers/thermorawfileparser@sha256:3b930ef774b3d4e0d559f38903da2390f9b24b96a016a1761805b88ae78c2b40"
 FORMAT_VERSION = 5

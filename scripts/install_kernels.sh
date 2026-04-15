@@ -33,6 +33,7 @@ install_kernel() {
     local display_name="$2"
     local image_tag="$3"
     local dev_mode="${4:-false}"
+    local data_dir="${METATLAS_DATA_DIR}"
 
     local tmpdir
     tmpdir="$(mktemp -d)"
@@ -44,34 +45,44 @@ install_kernel() {
         "${kernel_name}" "${display_name}" \
         "${IMAGE_REPO}:${image_tag}" "${image_tag}" \
         "${HOME}" "${dev_mode}" "${REPO_DIR}" \
+        "${data_dir}" \
         "${tmpdir}/kernel.json" \
     <<'PYEOF'
-import json, sys
+import json, os, sys
 
-kernel_name, display_name, image, tag, home, dev_mode, repo_dir, out = sys.argv[1:]
+kernel_name, display_name, image, tag, home, dev_mode, repo_dir, data_dir, out = sys.argv[1:]
 dev_mode = dev_mode == "true"
 
-DATA_MOUNT = (
-    "/pscratch/sd/b/bkieft/metatlas_lite_data"
-    ":/pscratch/sd/b/bkieft/metatlas_lite_data:ro"
-)
+# Resolve symlinks: on NERSC $HOME (/global/homes/b/...) is a symlink to the
+# real path (/global/u2/b/...).  Jupyter writes the kernel connection file
+# using the real (resolved) path, so the container must be able to open it
+# there.  Mount both the symlink path and the real path so files are
+# accessible under either name inside the container.
+real_home = os.path.realpath(home)
+
+DATA_MOUNT = f"{data_dir}:{data_dir}:ro"
 
 argv = [
     "podman", "run", "--rm",
     "--network", "host",
     "-v", DATA_MOUNT,
-    "-v", f"{home}:{home}",
+    "-v", f"{real_home}:{real_home}",
 ]
+
+# Also mount the symlink path if it differs, so $HOME inside the container
+# remains valid regardless of which path is used.
+if real_home != home:
+    argv += ["-v", f"{home}:{home}"]
 
 env = {
     "METATLAS2_IMAGE_TAG": tag,
+    "METATLAS_DATA_DIR": data_dir,
     "HOME": home,
     "JUPYTERHUB_SERVICE_PREFIX": "/",
 }
 
 if dev_mode:
-    argv += ["-v", f"{repo_dir}:/dev_repo:ro"]
-    env["PYTHONPATH"] = "/dev_repo"
+    argv += ["-v", f"{repo_dir}/metatlas2:/app/metatlas2:ro"]
 
 for k, v in env.items():
     argv += ["-e", f"{k}={v}"]
@@ -91,6 +102,13 @@ PYEOF
     jupyter kernelspec install "${tmpdir}" --user --name "${kernel_name}"
     echo "Installed kernel '${kernel_name}' → ${display_name}"
 }
+
+# Validate required environment variables
+if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
+    echo "Error: METATLAS_DATA_DIR is not set." >&2
+    echo "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it." >&2
+    exit 1
+fi
 
 # Always install the two standard kernels
 install_kernel "metatlas2"     "metatlas2 (latest)"            "latest" "false"

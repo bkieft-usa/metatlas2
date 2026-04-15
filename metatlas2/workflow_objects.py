@@ -449,6 +449,7 @@ class Project:
         exists = dbi.create_project_database(
             project_db_path=self.paths['project_db_path'],
             rt_align_path=self.paths['rt_alignment_output_dir'],
+            log_file_path=self.paths['log_path'],
             overwrite=overwrite_existing
         )
         if exists:

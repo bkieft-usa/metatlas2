@@ -4,12 +4,18 @@
 # Usage:
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
+#   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-atlases   --config_path FILE
 #
 # Flags (consumed by this script, not forwarded to Python):
 #   --image TAG   Use a specific image tag instead of the default (latest).
 #                 Overrides the METATLAS2_IMAGE_TAG environment variable.
 #   --dev         Mount the local repository source over the installed package,
 #                 so edits to the working tree take effect immediately.
+#
+# Notes:
+#   add-compounds / add-atlases mount the data directory read-write so they
+#   can write to metatlas.duckdb.  All other subcommands mount it read-only.
 #
 # The wrapper handles the submit/sbatch split:
 #   submit → container generates the SLURM script → host calls sbatch.
@@ -39,26 +45,35 @@ done
 IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
 
 # ---------------------------------------------------------------------------
+# Validate required environment variables
+# ---------------------------------------------------------------------------
+if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
+    echo "Error: METATLAS_DATA_DIR is not set." >&2
+    echo "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Volume mounts
-# Hard-coded data paths must match the paths in run_targeted_analysis.py
+# The data directory is defined by the METATLAS_DATA_DIR environment variable.
 # ---------------------------------------------------------------------------
 MOUNTS=(
-    -v "/pscratch/sd/b/bkieft/metatlas_lite_data:/pscratch/sd/b/bkieft/metatlas_lite_data:ro"
+    -v "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}:ro"
     -v "${HOME}:${HOME}"
 )
 
 ENV_VARS=(
     -e "METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
+    -e "METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
     -e "HOME=${HOME}"
     -e "JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
 )
 
-# Dev mode: overlay the local working tree on top of the installed package.
-# PYTHONPATH is searched before site-packages, so local edits take effect
-# without rebuilding the image.
+# Dev mode: bind-mount the local metatlas2/ package directory directly over
+# the installed copy inside the container.  This works regardless of sys.path
+# ordering because Python finds the files at the same /app/metatlas2/ path.
 if [[ "${DEV_MODE}" == "true" ]]; then
-    MOUNTS+=(-v "${REPO_DIR}:/dev_repo:ro")
-    ENV_VARS+=(-e "PYTHONPATH=/dev_repo")
+    MOUNTS+=(-v "${REPO_DIR}/metatlas2:/app/metatlas2:ro")
 fi
 
 # ---------------------------------------------------------------------------
@@ -83,6 +98,29 @@ if [[ "${SUBCOMMAND}" == "submit" ]]; then
 
     echo "Slurm script written to: ${TMPSCRIPT}"
     sbatch "${TMPSCRIPT}"
+
+elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" ]]; then
+    # These subcommands write to metatlas.duckdb — mount the data directory
+    # read-write instead of the default read-only.
+    DB_MOUNTS=(
+        -v "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}"
+        -v "${HOME}:${HOME}"
+    )
+    [[ "${DEV_MODE}" == "true" ]] && DB_MOUNTS+=(-v "${REPO_DIR}/metatlas2:/app/metatlas2:ro")
+
+    if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
+        PY_MODULE="metatlas2.add_compounds_to_db"
+    else
+        PY_MODULE="metatlas2.add_atlases_to_db"
+    fi
+
+    podman run --rm \
+        "${DB_MOUNTS[@]}" \
+        "${ENV_VARS[@]}" \
+        --entrypoint python \
+        "${IMAGE}" \
+        -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
+
 else
     # run (or any other subcommand): forward directly.
     # --network=host lets the Dash server and Jupyter kernel ports bind on the
