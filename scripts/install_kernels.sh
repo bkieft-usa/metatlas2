@@ -24,10 +24,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---------------------------------------------------------------------------
 # install_kernel <kernel_name> <display_name> <image_tag> <dev_mode>
 #   dev_mode = "true" mounts the local repo and sets PYTHONPATH
-# ---------------------------------------------------------------------------
 install_kernel() {
     local kernel_name="$1"
     local display_name="$2"
@@ -112,7 +110,7 @@ fi
 
 # Always install the two standard kernels
 install_kernel "metatlas2"     "metatlas2 (latest)"            "latest" "false"
-install_kernel "metatlas2-dev" "metatlas2 (dev – local repo)"  "latest" "true"
+install_kernel "metatlas2-dev" "metatlas2 (dev - local repo)"  "latest" "true"
 
 # Optionally install a pinned version kernel
 if [[ -n "${EXTRA_TAG}" ]]; then

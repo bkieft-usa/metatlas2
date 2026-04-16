@@ -24,7 +24,7 @@ if _DATA_DIR is None:
         "METATLAS_DATA_DIR environment variable is not set. "
         "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
     )
-RAW_FILES_BASE = f"{_DATA_DIR}/raw_data/"
+RAW_FILES_BASE = f"{_DATA_DIR}/lcmsruns/"
 LOG_FILE_BASE = f"{RAW_FILES_BASE}/file_conversion_logs"
 RAW_IMAGE = "quay.io/biocontainers/thermorawfileparser@sha256:3b930ef774b3d4e0d559f38903da2390f9b24b96a016a1761805b88ae78c2b40"
 FORMAT_VERSION = 5

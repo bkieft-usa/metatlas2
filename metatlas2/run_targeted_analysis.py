@@ -128,13 +128,13 @@ def set_up_paths(
             "METATLAS_DATA_DIR environment variable is not set. "
             "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
         )
-    raw_data_path = f"{data_dir}/raw_data/"
+    lcmsruns_path = f"{data_dir}/lcmsruns/"
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.parquet"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
         return {
-            "raw_data_directory": str(raw_data_path),
+            "lcmsruns_directory": str(lcmsruns_path),
             "main_db_path": str(main_db_path),
             "pubchem_cache_path": str(pubchem_cache_path)
         }
@@ -146,7 +146,7 @@ def set_up_paths(
     analysis_dir = rta_dir / f"TGA{analysis_number}"
 
     paths = {
-        "raw_data_directory": str(Path(raw_data_path) / owner / project_name),
+        "lcmsruns_directory": str(Path(lcmsruns_path) / owner / project_name),
         "project_directory": str(project_output_dir),
         "log_path": str(project_output_dir / f"{project_short}.log"),
         "project_db_path": str(project_output_dir / f"{project_name}.duckdb"),
@@ -160,8 +160,8 @@ def set_up_paths(
         "curated_atlases_store_file": str(analysis_dir / "curated_atlases.csv"),
     }
 
-    if not Path(paths["raw_data_directory"]).exists():
-        raise ValueError(f"Raw data directory not found: {paths['raw_data_directory']}")
+    if not Path(paths["lcmsruns_directory"]).exists():
+        raise ValueError(f"Raw data directory not found: {paths['lcmsruns_directory']}")
     if not Path(paths["main_db_path"]).exists():
         raise ValueError(f"Main database not found: {paths['main_db_path']}")
 

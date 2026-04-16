@@ -8,7 +8,7 @@ A programmer-oriented reference for understanding how a typical targeted metabol
 
 - [Module Map for Targeted Analysis](#module-map-for-targeted-analysis)
 - [Other Scripts and Tools](#other-scripts-and-tools)
-- [Adding new compounds to the central metatlas knowledge store](#adding-new-compounds-to-the-central-metatlas-knowledge-store)
+- [Adding to the central metatlas knowledge store](#adding-to-the-central-metatlas-knowledge-store)
   - [1. Create new Compounds](#1-create-new-compounds-in-the-main-database--compoundcreate_from_configconfig_path)
   - [2. Create new Atlases](#2-create-new-atlases-in-the-main-database--atlascreate_from_configconfig_path)
 - [Per-Project Workflow](#per-project-workflow)
@@ -63,7 +63,7 @@ A programmer-oriented reference for understanding how a typical targeted metabol
 
 ---
 
-## Adding new compounds to the central metatlas knowledge store
+## Adding to the central metatlas knowledge store
 
 ### 1. Create new Compounds in the main database — `Compound.create_from_config(config_path)`
 
@@ -117,7 +117,7 @@ Sets up the project directory structure and load LCMS run .parquet files into th
 | `Project()` | Instantiates an empty project container dataclass |
 | `Project.setup(project_name, config, paths, overwrite_existing)` | Orchestrates all setup sub-steps below |
 | `dbi.create_project_database(project_db_path, rt_align_path, overwrite)` | Creates the project-scoped DuckDB file; returns early if it already exists and overwrite is False |
-| `lrt.get_project_lcmsruns_from_disk(raw_data_directory)` | Walks the raw data directory to discover parquet files, inferring file type, chromatography, polarity, and MS level from filenames |
+| `lrt.get_project_lcmsruns_from_disk(lcmsruns_directory)` | Walks the raw data directory to discover parquet files, inferring file type, chromatography, polarity, and MS level from filenames |
 | `dbi.save_lcmsruns_to_db(project_db_path, project_name, lcmsruns_list, overwrite)` | Writes the run metadata list to the `lcmsruns` table in the project database |
 | `LCMSRun(**row)` | Wraps each run's metadata dict into a typed `LCMSRun` dataclass stored in `Project.lcmsruns` |
 
@@ -232,7 +232,7 @@ Launched by the analyst from the curation notebook. This creates summary files, 
 
 ## First-Time Setup
 
-Complete these steps once on any new machine or user account before running any analysis.
+Complete these steps **once** on any new machine or user account before running any analysis.
 
 **Prerequisites:** `podman` must be available on the host (`which podman`).  On NERSC login/compute nodes it is pre-installed.  `jupyter` must also be available on the host (it is used by `install_kernels.sh` only to register the spec; all actual Python runs inside the container).
 
@@ -261,7 +261,7 @@ echo 'export PATH="${HOME}/metatlas2/scripts:${PATH}"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### 4. Authenticate to GHCR (one-time)
+### 4. Authenticate to GHCR
 
 The container image is hosted on the GitHub Container Registry, but it is currently private. To access it, log in with a Personal Access Token (copied from your GitHub profile into a hidden file in your home directory called `.github_token`). Note: your token must have `read:packages` scope.
 
@@ -351,10 +351,10 @@ Images are hosted at `ghcr.io/bkieft-usa/metatlas2`.  Every push to `main` build
 
 ### Keeping the Local Cache Current
 
-A cronjob pulls the latest image automatically in the background:
+A cronjob pulls the latest image automatically in the background every 5 minutes to ensure the version on NERSC is up-to-date with the newest version in the container repository:
 
 ```bash
-*/5 * * * * /path/to/metatlas2/scripts/pull_latest.sh >> ~/pull_metatlas2.log 2>&1
+*/5 * * * * ~/metatlas2/scripts/pull_latest.sh >> ~/pull_metatlas2.log 2>&1
 ```
 
 ---

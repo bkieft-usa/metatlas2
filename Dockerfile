@@ -1,11 +1,5 @@
 FROM python:3.11-slim-bookworm
 
-# System libraries required by Python packages:
-#   pycurl     → libcurl4-openssl-dev
-#   tables     → libhdf5-dev
-#   pyzmq      → libzmq3-dev
-#   pycares    → libcares-dev
-#   pyopengl   → libgl1 (headless runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libcurl4-openssl-dev \

@@ -68,7 +68,7 @@ The `submit` subcommand writes a Slurm batch script to the analysis output direc
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--config` | Yes | — | Path to the analysis YAML config file (e.g. `configs/analysis.yaml`). |
-| `--project` | Yes | — | Project name. Must match the name of the raw data subdirectory under `raw_data/jgi/`. |
+| `--project` | Yes | — | Project name. Must match the name of the raw data subdirectory under `lcmsruns`. |
 | `--rt-align-num` | No | `0` | RT alignment iteration number. Increment this to run a new alignment attempt while preserving previous results. |
 | `--analysis-num` | No | `0` | Analysis iteration number. Increment to run multiple analysis passes under the same RT alignment. |
 | `--analysis-subset` | No | None | Comma-separated list of `POLARITY-ANALYSIS_TYPE` pairs to process (e.g. `POS-ISTD,POS-EMA`). When omitted, all atlases in the config are processed. |

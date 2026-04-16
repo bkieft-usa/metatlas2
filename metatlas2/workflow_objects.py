@@ -457,7 +457,7 @@ class Project:
         
         logger.info(f"Loading LCMS runs...")
         lcmsruns_list = lrt.get_project_lcmsruns_from_disk(
-            self.paths['raw_data_directory']
+            self.paths['lcmsruns_directory']
         )
 
         logger.info("Saving LCMS runs metadata to database...")
