@@ -411,7 +411,8 @@ class Atlas:
                     except Exception as e:
                         logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
 
-        logger.info("Atlas creation summary:")
+        logger.info("Summary of new atlases.")
+        logger.info("**Make sure to add these to your analysis config to use as project reference atlases:**")
         for info in summary:
             logger.info(f"Atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
         return

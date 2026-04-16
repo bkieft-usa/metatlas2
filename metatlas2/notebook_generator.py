@@ -6,7 +6,7 @@ logger = lcf.get_logger('notebook_generator')
 
 def generate_gui_notebooks(
     auto_id_obj: "AutoIdentification",
-) -> nbformat.NotebookNode:
+) -> str:
     """Build a complete notebook for one analysis."""
 
     if auto_id_obj.workflow_params.get("create_curation_notebooks", False) is not True:
@@ -16,7 +16,6 @@ def generate_gui_notebooks(
     logger.info(f"Generating analysis GUI notebook for atlas {auto_id_obj.post_autoid_atlas_obj.atlas_uid}")
 
     image_tag = getattr(auto_id_obj, "image_tag", "latest")
-    # Kernel name and display name must match what install_kernels.sh installs
     if image_tag == "latest":
         kernel_name = "metatlas2"
         kernel_display_name = "metatlas2 (latest)"
@@ -27,7 +26,7 @@ def generate_gui_notebooks(
     logger.info("Building notebook cells...")
     nb = nbformat.v4.new_notebook()
 
-    logger.info(f"Notebook kernel set to '{kernel_name}' (image tag: {image_tag})")
+    logger.info(f"Notebook kernel set to '{kernel_name}'")
 
     nb.metadata["kernelspec"] = {
         "display_name": kernel_display_name,
@@ -37,9 +36,9 @@ def generate_gui_notebooks(
     nb.metadata["language_info"] = {"name": "python"}
 
     nb.cells = [
-        _make_header_cell(auto_id_obj, image_tag, kernel_name),
+        _make_header_cell(auto_id_obj),
         _make_imports_cell(),
-        _make_variables_cell(auto_id_obj, image_tag),
+        _make_variables_cell(auto_id_obj),
         _make_parameters_cell(auto_id_obj),
         _make_gui_cell(),
         _make_summary_cell(),
@@ -59,7 +58,9 @@ def generate_gui_notebooks(
         nbformat.write(nb, f)
 
     logger.info(f"Notebook written to {out_path}")
-    print(f"Manual curation notebook generated: {out_path}")
+
+    return out_path
+
 
 def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     params = auto_id_obj.workflow_params
@@ -79,7 +80,7 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
     return nbformat.v4.new_code_cell(src)
 
 
-def _make_header_cell(auto_id_obj: "AutoIdentification", image_tag: str, kernel_name: str) -> nbformat.NotebookNode:
+def _make_header_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     text = (
         f"# **`{auto_id_obj.project_name}`**  \n"
         f"**Chromatography:** {auto_id_obj.post_autoid_atlas_obj.chromatography}  \n"
@@ -104,17 +105,14 @@ def _make_imports_cell() -> nbformat.NotebookNode:
     return nbformat.v4.new_code_cell(src)
 
 
-def _make_variables_cell(auto_id_obj: "AutoIdentification", image_tag: str = "latest") -> nbformat.NotebookNode:
+def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     src = (
         f"ANALYSIS_CONFIG  = {auto_id_obj.config_path!r}\n"
         f"PROJECT_NAME     = {auto_id_obj.project_name!r}\n"
         f"RT_ALIGN_NUM     = {auto_id_obj.rt_alignment_number!r}\n"
         f"ANALYSIS_NUM     = {auto_id_obj.analysis_number!r}\n"
         f"ANALYSIS_ATLAS   = {auto_id_obj.post_autoid_atlas_obj.atlas_uid!r}\n"
-        f"CHROMATOGRAPHY   = {auto_id_obj.post_autoid_atlas_obj.chromatography!r}\n"
-        f"IMAGE_TAG        = {image_tag!r}  "
-        f"# To use a different metatlas2 version: update this value, run "
-        f"'scripts/install_kernels.sh --tag IMAGE_TAG', then switch kernels in JupyterLab"
+        f"CHROMATOGRAPHY   = {auto_id_obj.post_autoid_atlas_obj.chromatography!r}"
     )
     return nbformat.v4.new_code_cell(src)
 

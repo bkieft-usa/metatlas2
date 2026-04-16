@@ -18,9 +18,12 @@ SLURM_TEMPLATE = """\
 #SBATCH --output={analysis_output_dir}/pre_curation_%j.log
 #SBATCH --error={analysis_output_dir}/pre_curation_%j.err
 
-export METATLAS2_IMAGE_TAG="{image_tag}"
-shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{image_tag} \\
-    python -m metatlas2.run_targeted_analysis run \\
+shifter --module=none \\
+    --image=docker:ghcr.io/bkieft-usa/metatlas2:{image_tag} \\
+    --env=METATLAS2_IMAGE_TAG={image_tag} \\
+    --env=METATLAS_DATA_DIR={metatlas_data_dir} \\
+    --env=HOME={home} \\
+    /app/.venv/bin/python -m metatlas2.run_targeted_analysis run \\
     --config "{config}" \\
     --project "{project}" \\
     --rt-align-num {rt_align_num} \\
@@ -100,6 +103,8 @@ def generate_slurm_script(args, paths) -> str:
         analysis_num = args.analysis_num,
         extra_flags = extra_flags_str,
         image_tag = args.image,
+        metatlas_data_dir = os.environ.get("METATLAS_DATA_DIR", ""),
+        home = os.environ.get("HOME", str(Path.home())),
     )
 
     if args.output:
@@ -141,7 +146,7 @@ def set_up_paths(
 
     owner = config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
     project_output_dir = Path.home() / f"{owner}_metabolomics_data" / project_name
-    project_short = str(project_name.split("_")[4]) + "_" + str(rt_alignment_number) + "_" + str(analysis_number)
+    project_short = str(project_name.split("_")[4]) + "_RTA" + str(rt_alignment_number) + "_TGA" + str(analysis_number)
     rta_dir = project_output_dir / f"RTA{rt_alignment_number}"
     analysis_dir = rta_dir / f"TGA{analysis_number}"
 
@@ -173,30 +178,17 @@ def set_up_paths(
 
 def main():
 
-    print("Parsing arguments ...", flush=True)
     args = parse_args()
 
-    print("Setting up logging...")
-    import metatlas2.logging_config as lcf
-    if args.log_to_stdout:
-        log_file = None
-    else:
-        log_file = paths["log_path"]
-
-    lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
-    logger = lcf.get_logger("run_targeted_analysis")
-
-    print("Loading libraries ...", flush=True)
-    logger.info("Loading libraries")
+    if not args.log_to_stdout and args.command == "run": print("==------- Loading modules...")
     import metatlas2.load_tools as ldt
     import metatlas2.workflows as wfs
+    import metatlas2.logging_config as lcf
 
-    print("Loading config ...", flush=True)
-    logger.info("Loading config")
+    if not args.log_to_stdout and args.command == "run": print("===------ Loading config...")
     config = ldt.load_metatlas2_config(args.config)
 
-    print("Setting up paths ...", flush=True)
-    logger.info("Setting up paths")
+    if not args.log_to_stdout and args.command == "run": print("====----- Setting up paths...")
     paths = set_up_paths(
         config=config,
         project_name=args.project,
@@ -204,21 +196,28 @@ def main():
         analysis_number=args.analysis_num,
     )
 
+    if not args.log_to_stdout and args.command == "run": print("=====---- Setting up logging...")
+    log_file = None if args.log_to_stdout else paths["log_path"]
+    lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
+    logger = lcf.get_logger("run_targeted_analysis")
+    logger.info("System set - starting pre-curation workflow")
+
     if args.command == "submit":
         out_path = generate_slurm_script(args, paths)
-        print(f"Slurm script written to: {out_path}")
         logger.info(f"Slurm script written to: {out_path}")
         if args.script_only:
             return
+        logger.info("Submitting slurm script...")
         result = subprocess.run(["sbatch", out_path], capture_output=True, text=True)
-        print(result.stdout.strip())
         if result.returncode != 0:
-            print(result.stderr.strip(), file=sys.stderr)
+            logger.error(f"Error submitting slurm script: {result.stderr.strip()}")
             sys.exit(result.returncode)
+        else:
+            logger.info(f"Slurm submission output: {result.stdout.strip()}")
         return
 
     if not args.skip_setup:
-        print("Running project setup...")
+        if not args.log_to_stdout and args.command == "run": print("======--- Setting up project specs...")
         logger.info("Running Project Setup")
         wfs.run_project_setup(
             project_name=args.project,
@@ -228,8 +227,8 @@ def main():
         )
 
     if not args.skip_rt_align:
-        print("Running RT alignment...")
-        logger.info("Running RT alignment ...")
+        if not args.log_to_stdout and args.command == "run": print("=======-- Running RT alignment...")
+        logger.info("Running RT Alignment ...")
         wfs.run_rt_alignment(
             project_name=args.project,
             rt_alignment_number=args.rt_align_num,
@@ -238,9 +237,9 @@ def main():
         )
 
     if not args.skip_auto_id:
-        print("Running Auto Identification...")
+        if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
         logger.info("Running Auto Identification")
-        wfs.run_auto_identification(
+        nb_path = wfs.run_auto_identification(
             project_name=args.project,
             config=config,
             paths=paths,
@@ -251,8 +250,10 @@ def main():
             image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
         )
 
-    print("Pre-curation workflow complete. Open the generated notebooks to curate.")
+    if not args.log_to_stdout and args.command == "run": print("========= Pre-curation workflow complete!")
     logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")
+
+    if not args.skip_auto_id and args.command == "run": print(f"\nGenerated notebook path: {nb_path}\n")
 
 
 if __name__ == "__main__":

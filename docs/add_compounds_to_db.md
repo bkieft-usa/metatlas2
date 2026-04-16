@@ -6,17 +6,17 @@
 
 ## Prerequisites
 
-- The metatlas2 conda environment is active.
-- The main database directory exists.
-- Each compound input file (TSV or CSV) contains at minimum the required columns described [below](#compound-input-file-format).
+Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this script. Each compound input file (TSV or CSV) must also contain at minimum the required columns described [below](#compound-input-file-format).
 
 ---
 
 ## Command-line usage
 
 ```bash
-python add_compounds_to_db.py --config_path /path/to/create_compounds.yaml
+metatlas2.sh add-compounds --config_path /path/to/create_compounds.yaml
 ```
+
+The `metatlas2` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
 

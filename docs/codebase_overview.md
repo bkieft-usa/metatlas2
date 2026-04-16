@@ -232,69 +232,13 @@ Launched by the analyst from the curation notebook. This creates summary files, 
 
 ## First-Time Setup
 
-Complete these steps **once** on any new machine or user account before running any analysis.
-
-**Prerequisites:** `podman` must be available on the host (`which podman`).  On NERSC login/compute nodes it is pre-installed.  `jupyter` must also be available on the host (it is used by `install_kernels.sh` only to register the spec; all actual Python runs inside the container).
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/bkieft-usa/metatlas2.git ~/metatlas2
-cd ~/metatlas2
-```
-
-The repo is only needed for the `scripts/` directory and the `docs/`.  You do **not** need to create a virtualenv or install anything.
-
-### 2. Set `METATLAS_DATA_DIR`
-
-Define the base directory of all input data (raw files, main database, PubChem cache) **once** in your shell profile so every tool picks it up automatically:
-
-```bash
-echo 'export METATLAS_DATA_DIR="/global/cfs/cdirs/metatlas/"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 3. Add `scripts/` to your PATH
-
-```bash
-echo 'export PATH="${HOME}/metatlas2/scripts:${PATH}"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 4. Authenticate to GHCR
-
-The container image is hosted on the GitHub Container Registry, but it is currently private. To access it, log in with a Personal Access Token (copied from your GitHub profile into a hidden file in your home directory called `.github_token`). Note: your token must have `read:packages` scope.
-
-```bash
-podman login ghcr.io -u bkieft-usa --password-stdin <<< "$(cat ~/.github_token)"
-```
-
-### 5. Install Jupyter kernel specs
-
-```bash
-install_kernels.sh
-```
-
-### Setup is complete
-
-You can now run analyses:
-
-```bash
-# Direct run (e.g. from a login node)
-metatlas2.sh run --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
-
-# Submit to SLURM
-metatlas2.sh submit --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
-
-# Dev mode (use local repo edits instead of the installed image)
-metatlas2.sh --dev run --config /path/to/analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0 --analysis-subset POS-ISTD
-```
+See [initial_setup.md](initial_setup.md) for the step-by-step instructions to configure your environment before running any metatlas2 workflow.
 
 ---
 
 ## Container-Based Deployment
 
-metatlas2 is distributed as a **Podman/Docker container** hosted on the GitHub Container Registry (GHCR).  All Python dependencies are frozen inside the image, so analysts never need to clone the repository or manage a virtual environment.  The workflow components that run on the compute cluster (the automated targeted analysis in a shifter env) and those that run interactively in JupyterLab (the curation notebook) both use the same image.
+metatlas2 is distributed as a **container image** hosted on the GitHub Container Registry (GHCR).  All Python dependencies are frozen inside the image, so analysts never need to clone the repository or manage a virtual environment.  Both the automated targeted analysis (running via Shifter on the compute cluster) and the interactive curation notebook (running via Shifter as a JupyterLab kernel) use the same image.
 
 ### Architecture at a Glance
 
@@ -305,7 +249,7 @@ Four distinct layers interact every time the entrypoint script is called.
 | **GitHub** (`bkieft-usa/metatlas2`) | Source code, `Dockerfile`, CI workflow (`.github/workflows/docker.yml`) | Every push to `main` triggers a CI action, which builds and pushes a new container image to GHCR |
 | **GHCR** (`ghcr.io/bkieft-usa/metatlas2`) | Frozen container images (e.g., `:latest`, `:sha-fb90592`) | The versioned Python runtime; pulled to the login node by a cronjob (every 5 min) or manually |
 | **NERSC host filesystem** | `~/metatlas2/metatlas2.sh` (bash wrapper), `~/.jupyter/kernels/` (kernel specs), `$METATLAS_DATA_DIR/` (raw data + databases on shared CFS), `~/<owner>_metabolomics_data/` (project outputs) | Input data, user config, project outputs, and the thin shell scripts that glue everything together; **no Python runs here** |
-| **Container** (Podman process) | `/app/metatlas2/` (Python package + all deps, frozen at build time) | All Python execution; sees the host filesystem via bind mounts at **identical absolute paths** — no path translation |
+| **Container** (Shifter process) | `/app/metatlas2/` (Python package + all deps, frozen at build time) | All Python execution; NERSC GPFS filesystems are auto-mounted at identical absolute paths — no path translation |
 
 ---
 
@@ -315,10 +259,10 @@ Four distinct layers interact every time the entrypoint script is called.
 
 | Subcommand | Where Python runs | Key distinction |
 |---|---|---|
-| `run` | Podman container on the **login node** | `--network=host` exposes the Dash curation server and kernel ZMQ ports on the host network so JupyterLab can reach them |
-| `submit` | Podman on login node writes the SLURM script, then **Shifter on a NERSC compute node** runs the workflow |
-| `add-compounds` / `add-atlases` | Podman container on the **login node** | `$METATLAS_DATA_DIR` is mounted **read-write** so the container can write to `metatlas.duckdb` on the shared CFS |
-| **Jupyter notebook** (Phases 4–5) | Podman container launched by the **Jupyter kernel spec** on the JupyterHub spawner | JupyterHub connects to `ipykernel` inside the container over ZMQ; `--network=host` makes the kernel's ZMQ sockets visible on the host network |
+| `run` | Shifter container on the **login node** | Uses the host network by default; exposes the Dash curation server and kernel ZMQ ports so JupyterLab can reach them |
+| `submit` | Shifter on login node writes the SLURM script, then **Shifter on a NERSC compute node** runs the workflow |
+| `add-compounds` / `add-atlases` | Shifter container on the **login node** | GPFS is auto-mounted read-write so the container can write to `metatlas.duckdb` on the shared CFS |
+| **Jupyter notebook** (Phases 4–5) | Shifter container launched by the **Jupyter kernel spec** on the JupyterHub spawner | JupyterHub connects to `ipykernel` inside the container over ZMQ; host network is used by default |
 
 ---
 
@@ -333,7 +277,7 @@ metatlas2/
 └── scripts/
     ├── metatlas2.sh                  # Host wrapper (run/submit, --image, --dev)
     ├── install_kernels.sh            # Registers metatlas2/metatlas2-dev/metatlas2-{tag} kernels
-    └── pull_latest.sh                # Cronjob helper: podman pull latest
+    └── pull_latest.sh                # Cronjob helper: shifterimg pull latest
 ```
 
 ---
@@ -361,7 +305,7 @@ A cronjob pulls the latest image automatically in the background every 5 minutes
 
 ### Host Wrapper Script (`metatlas2.sh`)
 
-The analyst never invokes `podman run` directly.  The wrapper script handles volume mounts, environment variables, and the submit/sbatch split:
+The analyst never invokes `shifter` directly.  The wrapper script handles environment variables, optional volume mounts (dev mode), and the submit/sbatch split:
 
 ```bash
 # Run the automated pre-curation workflow directly (e.g. from a login node)
@@ -377,17 +321,13 @@ metatlas2.sh --image sha-a1b2c3d run --config analysis.yaml --project MY_PROJECT
 metatlas2.sh --dev run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
 ```
 
-The wrapper always mounts:
-- `$METATLAS_DATA_DIR` (read-only) — raw data, main DB, PubChem cache
-- `$HOME` — project output directories, config files, notebooks
-
-`--network=host` is passed for `run` mode so the Dash curation server and Jupyter kernel ZMQ ports bind directly on the host network stack, allowing JupyterHub to reach them.
+Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch) inside the container at the same absolute paths, so no explicit `-v` flags are needed for data access. The host network is used by default, so the Dash curation server and Jupyter kernel ZMQ ports are directly reachable by JupyterHub.
 
 #### `submit` mode — container vs. host responsibility
 
 `sbatch` is a host-side SLURM command not available inside the container.  The split works as follows:
 
-1. The wrapper pre-generates a temp path with `mktemp /tmp/metatlas2_XXXXXX.sh`, mounts `/tmp:/tmp`, and calls `podman run … submit --script-only --output /tmp/metatlas2_XXXX.sh` — Python writes the SLURM `.sh` script to that path and exits.
+1. The wrapper pre-generates a temp path with `mktemp /tmp/metatlas2_XXXXXX.sh` and calls `shifter … --entrypoint submit --script-only --output /tmp/metatlas2_XXXX.sh` — Python writes the SLURM `.sh` script to that path and exits. `/tmp` is accessible in the container because GPFS is auto-mounted and `/tmp` is on local storage which shifter also makes available.
 2. The wrapper calls `sbatch` on the pre-known temp path directly.
 
 The SLURM script uses `shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{tag}` so the batch job runs inside the same container image.  The image tag is embedded in the script at generation time; pass `--image v1.2.3` to the wrapper to pin a specific release for a batch job.
@@ -413,7 +353,7 @@ Generated curation notebooks embed the kernel name in their `kernelspec` metadat
 To test local changes without waiting for CI to build and push an image:
 
 1. **Interactive / notebook**: Switch to the `metatlas2-dev` kernel.  The local repo's `metatlas2/` package directory is mounted at `/app/metatlas2` inside the container, directly overlaying the installed copy, so edits take effect on the next cell execution.
-2. **CLI `run` mode**: Add `--dev` to the wrapper script when calling a targeted analysis.
+2. **CLI `run`, `add-compounds`, `add-atlases`**: Add `--dev` to the wrapper script — the local `metatlas2/` package directory is bind-mounted over the installed copy inside the container.
 3. **SLURM batch**: Dev mode is not currently supported for SLURM batch jobs.
 
 ---

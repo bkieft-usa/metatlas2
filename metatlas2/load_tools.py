@@ -185,8 +185,6 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                         params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 20))
                         gui_colors = params.get('gui_lcmsruns_colors')
                         params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
-
-    logger.info(f"Loaded metatlas2 configuration from {config_path}")
     
     return config
 
@@ -227,7 +225,7 @@ def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
                 
                 # Only check file existence if path is not None
                 if atlas_info['path'] and not Path(atlas_info['path']).exists():
-                    logger.warning(f"Atlas file not found: {atlas_info['path']} for {chromatography}/{polarity}/{atlas_type}")
+                    raise FileNotFoundError(f"Atlas file not found: {atlas_info['path']} for {chromatography}/{polarity}/{atlas_type}")
 
     logger.info(f"Loaded atlas configuration from {atlas_config_path}")
     
@@ -271,10 +269,7 @@ def load_compound_config(compound_config_path: str) -> Dict[str, Any]:
                     continue
                 path_str = str(path)
                 if not Path(path_str).exists():
-                    logger.warning(
-                        f"Compound input file not found: {path_str} "
-                        f"for {chromatography}/{polarity}"
-                    )
+                    raise FileNotFoundError(f"Compound input file not found: {path_str} for {chromatography}/{polarity}")
                 validated_paths.append(path_str)
 
             pol_config['PATHS'] = validated_paths

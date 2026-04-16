@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install Jupyter kernel specs that launch metatlas2 inside a Podman container.
+# Install Jupyter kernel specs that launch metatlas2 inside a Shifter container.
 #
 # Usage:
 #   ./install_kernels.sh              # installs 'metatlas2' (latest) + 'metatlas2-dev'
@@ -38,7 +38,10 @@ install_kernel() {
     # shellcheck disable=SC2064
     trap "rm -rf '${tmpdir}'" RETURN
 
-    # Use Python for correct JSON serialisation
+    # Use Python to generate kernel.json.
+    # kernel.json calls shifter directly with {connection_file} in argv,
+    # matching the pattern used by the working metatlas-targeted kernel.
+    # shifter automatically mounts GPFS filesystems so no volume flags are needed.
     python3 - \
         "${kernel_name}" "${display_name}" \
         "${IMAGE_REPO}:${image_tag}" "${image_tag}" \
@@ -48,44 +51,32 @@ install_kernel() {
     <<'PYEOF'
 import json, os, sys
 
-kernel_name, display_name, image, tag, home, dev_mode, repo_dir, data_dir, out = sys.argv[1:]
+kernel_name, display_name, image, tag, home, dev_mode, repo_dir, data_dir, json_out = sys.argv[1:]
 dev_mode = dev_mode == "true"
-
-# Resolve symlinks: on NERSC $HOME (/global/homes/b/...) is a symlink to the
-# real path (/global/u2/b/...).  Jupyter writes the kernel connection file
-# using the real (resolved) path, so the container must be able to open it
-# there.  Mount both the symlink path and the real path so files are
-# accessible under either name inside the container.
 real_home = os.path.realpath(home)
 
-DATA_MOUNT = f"{data_dir}:{data_dir}:ro"
-
+# shifter argv — mirrors the working metatlas-targeted kernel pattern.
+# --module=none prevents Lmod from loading modules that could shadow the
+# container's Python.  Env vars are forwarded explicitly via --env so the
+# metatlas2 package knows the data directory and image tag at runtime.
 argv = [
-    "podman", "run", "--rm",
-    "--network", "host",
-    "-v", DATA_MOUNT,
-    "-v", f"{real_home}:{real_home}",
+    "shifter",
+    "--module=none",
+    "--entrypoint",
+    f"--env=METATLAS2_IMAGE_TAG={tag}",
+    f"--env=METATLAS_DATA_DIR={data_dir}",
+    f"--env=HOME={home}",
+    f"--image=docker:{image}",
 ]
 
-# Also mount the symlink path if it differs, so $HOME inside the container
-# remains valid regardless of which path is used.
-if real_home != home:
-    argv += ["-v", f"{home}:{home}"]
-
-env = {
-    "METATLAS2_IMAGE_TAG": tag,
-    "METATLAS_DATA_DIR": data_dir,
-    "HOME": home,
-    "JUPYTERHUB_SERVICE_PREFIX": "/",
-}
-
 if dev_mode:
-    argv += ["-v", f"{repo_dir}/metatlas2:/app/metatlas2:ro"]
+    argv.append(f"--volume={repo_dir}/metatlas2:/app/metatlas2:ro")
 
-for k, v in env.items():
-    argv += ["-e", f"{k}={v}"]
-
-argv += [image, "python", "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+argv += [
+    "/app/.venv/bin/python",
+    "-m", "ipykernel_launcher",
+    "-f", "{connection_file}",
+]
 
 spec = {
     "argv": argv,
@@ -93,7 +84,7 @@ spec = {
     "language": "python",
     "metadata": {"debugger": False},
 }
-with open(out, "w") as f:
+with open(json_out, "w") as f:
     json.dump(spec, f, indent=2)
 PYEOF
 

@@ -15,7 +15,7 @@ Notebooks are written to the analysis output directory:
     ...
 ```
 
-Open the notebook in JupyterLab at NERSC on a login or dedicated node. Make sure the kernel is set to **metatlas2**.
+Open the notebook in NERSC JupyterLab. The kernel is pre-set to **metatlas2 (latest)** in the notebook metadata. If prompted to select a kernel, choose **metatlas2 (latest)**. If it is not listed, run `install_kernels.sh` from a terminal and refresh the page.
 
 The notebook has six cells:
 

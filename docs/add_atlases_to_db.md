@@ -6,17 +6,17 @@
 
 ## Prerequisites
 
-- The metatlas2 conda environment is active.
-- The main metatlas database already exists and has been populated with compounds. Run `add_compounds_to_db.py` first to get all your atlas compounds into the main database (see [add_compounds_to_db.md](add_compounds_to_db.md)).
-- Each atlas input file (TSV or CSV) contains at minimum the required columns described [below](#atlas-input-file-format).
+Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this script. The main metatlas database must also already exist and be populated with compounds — run `add_compounds_to_db.py` first (see [add_compounds_to_db.md](add_compounds_to_db.md)). Each atlas input file (TSV or CSV) must contain at minimum the required columns described [below](#atlas-input-file-format).
 
 ---
 
 ## Command-line usage
 
 ```bash
-python add_atlases_to_db.py --config_path /path/to/create_atlases.yaml
+metatlas2 add-atlases --config_path /path/to/create_atlases.yaml
 ```
+
+The `metatlas2` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
 

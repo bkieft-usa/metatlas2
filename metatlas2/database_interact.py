@@ -359,6 +359,7 @@ def create_project_database(
 
     project_db_path = Path(project_db_path)
     rt_alignment_path = Path(rt_align_path)
+    log_file_path = Path(log_file_path) if log_file_path else None
 
     if project_db_path.exists() and not overwrite:
         logger.info(f"Project database already exists at {project_db_path}. Not overwriting.")

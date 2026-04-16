@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host-side wrapper: runs metatlas2 commands inside a Podman container.
+# Host-side wrapper: runs metatlas2 repo commands inside a Shifter container.
 #
 # Usage:
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
@@ -13,12 +13,11 @@
 #   --dev         Mount the local repository source over the installed package,
 #                 so edits to the working tree take effect immediately.
 #
-# Notes:
-#   add-compounds / add-atlases mount the data directory read-write so they
-#   can write to metatlas.duckdb.  All other subcommands mount it read-only.
+# Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch)
+# inside the container, so no explicit volume flags are needed for data access.
 #
 # The wrapper handles the submit/sbatch split:
-#   submit → container generates the SLURM script → host calls sbatch.
+#   submit -> container generates the SLURM script -> host calls sbatch.
 
 set -euo pipefail
 
@@ -42,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+IMAGE="docker:${IMAGE_REPO}:${IMAGE_TAG}"
 
 # ---------------------------------------------------------------------------
 # Validate required environment variables
@@ -54,33 +53,27 @@ if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Volume mounts
-# The data directory is defined by the METATLAS_DATA_DIR environment variable.
+# Common shifter flags.
+# GPFS paths (home, CFS, scratch) are auto-mounted by shifter -- no -v needed.
 # ---------------------------------------------------------------------------
-MOUNTS=(
-    -v "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}:ro"
-    -v "${HOME}:${HOME}"
+SHIFTER_ARGS=(
+    "--image=${IMAGE}"
+    "--env=METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
+    "--env=METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
+    "--env=HOME=${HOME}"
+    "--env=JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
 )
 
-ENV_VARS=(
-    -e "METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
-    -e "METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
-    -e "HOME=${HOME}"
-    -e "JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
-)
-
-# Dev mode: bind-mount the local metatlas2/ package directory directly over
-# the installed copy inside the container.  This works regardless of sys.path
-# ordering because Python finds the files at the same /app/metatlas2/ path.
+# Dev mode: bind-mount the local metatlas2/ package over the installed copy.
 if [[ "${DEV_MODE}" == "true" ]]; then
-    MOUNTS+=(-v "${REPO_DIR}/metatlas2:/app/metatlas2:ro")
+    SHIFTER_ARGS+=("--volume=${REPO_DIR}/metatlas2:/app/metatlas2:ro")
 fi
 
 # ---------------------------------------------------------------------------
 # Auto-install a Jupyter kernel spec for pinned image tags.
 # The two default kernels (metatlas2, metatlas2-dev) reference :latest and
-# stay valid across image updates — they only need to be installed once.
-# Pinned SHA tags are registered on first use so the analyst never has to
+# stay valid across image updates -- they only need to be installed once.
+# Pinned tags are registered on first use so the analyst never has to
 # run install_kernels.sh --tag manually.
 # ---------------------------------------------------------------------------
 if [[ "${IMAGE_TAG}" != "latest" ]]; then
@@ -98,52 +91,39 @@ SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
 
 if [[ "${SUBCOMMAND}" == "submit" ]]; then
     # Generate the SLURM script inside the container (sbatch is not available
-    # there), write it to a temp file on the shared /tmp, then submit it from
-    # the host where sbatch lives.
+    # there), write it to a temp file on the shared /tmp, then submit from host.
     TMPSCRIPT="$(mktemp /tmp/metatlas2_XXXXXX.sh)"
     # shellcheck disable=SC2064
     trap "rm -f '${TMPSCRIPT}'" EXIT
 
-    podman run --rm \
-        "${MOUNTS[@]}" \
-        "${ENV_VARS[@]}" \
-        -v "/tmp:/tmp" \
-        "${IMAGE}" \
+    shifter "${SHIFTER_ARGS[@]}" --entrypoint \
         "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
 
     echo "Slurm script written to: ${TMPSCRIPT}"
     sbatch "${TMPSCRIPT}"
 
 elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" ]]; then
-    # These subcommands write to metatlas.duckdb — mount the data directory
-    # read-write instead of the default read-only.
-    DB_MOUNTS=(
-        -v "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}"
-        -v "${HOME}:${HOME}"
-    )
-    [[ "${DEV_MODE}" == "true" ]] && DB_MOUNTS+=(-v "${REPO_DIR}/metatlas2:/app/metatlas2:ro")
-
     if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
         PY_MODULE="metatlas2.add_compounds_to_db"
     else
         PY_MODULE="metatlas2.add_atlases_to_db"
     fi
 
-    podman run --rm \
-        "${DB_MOUNTS[@]}" \
-        "${ENV_VARS[@]}" \
-        --entrypoint python \
-        "${IMAGE}" \
-        -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
+    # Run python directly, bypassing the default entrypoint.
+    # GPFS is auto-mounted read-write by shifter so metatlas.duckdb is writable.
+    shifter "${SHIFTER_ARGS[@]}" \
+        /app/.venv/bin/python -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
 
 else
-    # run (or any other subcommand): forward directly.
-    # --network=host lets the Dash server and Jupyter kernel ports bind on the
-    # host network stack so JupyterHub can reach them.
-    podman run --rm \
-        --network=host \
-        "${MOUNTS[@]}" \
-        "${ENV_VARS[@]}" \
-        "${IMAGE}" \
+    # run (or any other subcommand): use the container's default entrypoint.
+    LOG_TO_STDOUT=false
+    for arg in "${PASSTHROUGH_ARGS[@]}"; do
+        [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
+    done
+    if [[ "${LOG_TO_STDOUT}" == "false" && "${SUBCOMMAND}" == "run" ]]; then
+        echo "------- Launching metatlas2 container (tag=${IMAGE_TAG})..."
+    fi
+
+    shifter "${SHIFTER_ARGS[@]}" --entrypoint \
         "${PASSTHROUGH_ARGS[@]}"
 fi

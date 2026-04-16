@@ -12,8 +12,9 @@ The script can be run directly (`run` subcommand) or submitted as a Slurm batch 
 
 ## Prerequisites
 
-- The metatlas2 conda environment is active.
-- The main metatlas database contains the compounds and atlases for your project. Run `add_compounds_to_db.py` and `add_atlases_to_db.py` first (see the corresponding docs).
+Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this workflow. Additionally:
+
+- The main metatlas database contains the compounds and atlases for your project. Run `metatlas2 add-compounds` and `metatlas2 add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)).
 - LCMS run data files (.parquet format, converted from .raw and .mzML) are present at the expected path.
 - Atlas UIDs referenced in the input analysis configuration file (e.g., `analysis.yaml`) exist in the main database.
 
@@ -24,7 +25,7 @@ The script can be run directly (`run` subcommand) or submitted as a Slurm batch 
 ### Run directly
 
 ```bash
-python run_targeted_analysis.py run \
+metatlas2 run \
     --config        /path/to/analysis.yaml \
     --project       MyProject \
     [--rt-align-num  0] \
@@ -39,7 +40,7 @@ python run_targeted_analysis.py run \
 ### Submit as a Slurm job
 
 ```bash
-python run_targeted_analysis.py submit \
+metatlas2 submit \
     --config        /path/to/analysis.yaml \
     --project       MyProject \
     [--rt-align-num  0] \
@@ -313,14 +314,14 @@ LCMS run categories are inferred from filename substrings in the following prior
 
 ```bash
 # 1. Add the compounds you're trying to identify to the database, if necessary
-python add_compounds_to_db.py --config_path /path/to/create_compounds.yaml
+metatlas2 add-compounds --config_path /path/to/create_compounds.yaml
 
 # 2. Add reference atlases to the database, if necessary
-python add_atlases_to_db.py --config_path /path/to/create_atlases.yaml
+metatlas2 add-atlases --config_path /path/to/create_atlases.yaml
 #    → note the atlas UIDs printed in the log and add them to analysis.yaml
 
 # 3. Run the full pre-curation workflow
-python run_targeted_analysis.py run \
+metatlas2 run \
     --config  /path/to/analysis.yaml \
     --project MyProject \
     --rt-align-num 0 \
@@ -331,7 +332,7 @@ python run_targeted_analysis.py run \
 ### Re-running auto identification only, e.g., with new filtering parameters in the config YAML (skip setup and alignment)
 
 ```bash
-python run_targeted_analysis.py run \
+metatlas2 run \
     --config       /path/to/analysis.yaml \
     --project      MyProject \
     --rt-align-num 0 \
@@ -343,7 +344,7 @@ python run_targeted_analysis.py run \
 ### Running only a subset of atlases
 
 ```bash
-python run_targeted_analysis.py run \
+metatlas2 run \
     --config          /path/to/analysis.yaml \
     --project         MyProject \
     --analysis-subset POS-ISTD,POS-EMA
@@ -352,7 +353,7 @@ python run_targeted_analysis.py run \
 ### Submitting to Slurm
 
 ```bash
-python run_targeted_analysis.py submit \
+metatlas2 submit \
     --config      /path/to/analysis.yaml \
     --project     MyProject \
     --qos         regular \

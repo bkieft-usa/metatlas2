@@ -278,11 +278,13 @@ def run_auto_identification(
         )
 
         logger.info("Passing Atlas object to curation notebook generator...")
-        nbg.generate_gui_notebooks(
+        nb_path = nbg.generate_gui_notebooks(
             auto_id_obj=auto_id_obj
         )
 
     logger.info(f"Auto identification procedure complete for RT alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}!")
+
+    return nb_path
 
 def run_analysis_gui(
     project_name: str,

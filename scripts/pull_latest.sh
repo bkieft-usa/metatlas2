@@ -1,12 +1,13 @@
 #!/bin/bash
-# Pull the latest metatlas2 container image.
+# Pull the latest metatlas2 container image into the shifter cache.
+# shifter is used by both metatlas2.sh and the JupyterLab kernel.
 #
 # Register as a cronjob to keep the local image cache current:
 #   */5 * * * * /path/to/scripts/pull_latest.sh >> ~/pull_metatlas2.log 2>&1
 
 IMAGE="ghcr.io/bkieft-usa/metatlas2:latest"
-echo "[$(date -Iseconds)] Pulling ${IMAGE} ..."
-if podman pull "${IMAGE}"; then
+echo "[$(date -Iseconds)] Pulling docker:${IMAGE} via shifterimg ..."
+if shifterimg pull "docker:${IMAGE}"; then
     echo "[$(date -Iseconds)] Pull complete."
 else
     echo "[$(date -Iseconds)] Pull failed." >&2

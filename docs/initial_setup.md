@@ -2,7 +2,7 @@
 
 Complete these steps **once** on any new machine or user account before running any metatlas2 workflow (adding compounds, adding atlases, or running a targeted analysis).
 
-**Prerequisites:** `podman` must be available on the host (`which podman`). On NERSC login/compute nodes it is pre-installed. `jupyter` must also be available on the host (it is used by `install_kernels.sh` only to register the kernel spec; all actual Python execution happens inside the container).
+**Prerequisites:** `shifter` and `shifterimg` must be available on the host. On NERSC login/compute nodes both are pre-installed. `jupyter` must also be available on the host (it is used by `install_kernels.sh` only to register the kernel spec). All actual Python execution — both `metatlas2.sh` commands and JupyterLab notebook cells — runs inside the Shifter container image.
 
 ---
 
@@ -39,25 +39,15 @@ After this, commands like `metatlas2 run ...`, `metatlas2 add-compounds ...`, an
 
 ---
 
-## 4. Authenticate to GHCR
+## 4. Pull the container image
 
-The container image is hosted on the GitHub Container Registry (GHCR) at `ghcr.io/bkieft-usa/metatlas2`. It is currently private. Log in with a Personal Access Token that has `read:packages` scope. Save the token to `~/.github_token`:
-
-```bash
-podman login ghcr.io -u bkieft-usa --password-stdin <<< "$(cat ~/.github_token)"
-```
-
----
-
-## 5. Pull the container image
-
-The image is pulled automatically on first use, but you can also pull it manually:
+The image is public at `ghcr.io/bkieft-usa/metatlas2`. Pull it into the shifter cache:
 
 ```bash
 pull_latest.sh
 ```
 
-To keep the image current automatically, register `pull_latest.sh` as a cron job:
+This runs `shifterimg pull` to load the image into shifter's local cache. To keep the cache current automatically, register it as a cron job:
 
 ```bash
 */5 * * * * ~/metatlas2/scripts/pull_latest.sh >> ~/pull_metatlas2.log 2>&1
@@ -65,7 +55,7 @@ To keep the image current automatically, register `pull_latest.sh` as a cron job
 
 ---
 
-## 6. Install Jupyter kernel specs
+## 5. Install Jupyter kernel specs
 
 ```bash
 install_kernels.sh
