@@ -1,13 +1,4 @@
 #!/bin/bash
-# Install Jupyter kernel specs that launch metatlas2 inside a Shifter container.
-#
-# Usage:
-#   ./install_kernels.sh              # installs 'metatlas2' (latest) + 'metatlas2-dev'
-#   ./install_kernels.sh --tag v1.2.3 # also installs a pinned 'metatlas2-v1.2.3' kernel
-#
-# The installed kernels appear in JupyterLab's kernel selector.  Generated
-# curation notebooks embed the tag used at analysis time in their kernelspec
-# metadata; run this script with --tag to install a matching pinned kernel.
 
 set -euo pipefail
 
@@ -24,7 +15,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# install_kernel <kernel_name> <display_name> <image_tag> <dev_mode>
 #   dev_mode = "true" mounts the local repo and sets PYTHONPATH
 install_kernel() {
     local kernel_name="$1"
@@ -38,10 +28,6 @@ install_kernel() {
     # shellcheck disable=SC2064
     trap "rm -rf '${tmpdir}'" RETURN
 
-    # Use Python to generate kernel.json.
-    # kernel.json calls shifter directly with {connection_file} in argv,
-    # matching the pattern used by the working metatlas-targeted kernel.
-    # shifter automatically mounts GPFS filesystems so no volume flags are needed.
     python3 - \
         "${kernel_name}" "${display_name}" \
         "${IMAGE_REPO}:${image_tag}" "${image_tag}" \
