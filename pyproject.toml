@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=61.0"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -34,6 +34,7 @@ dependencies = [
     "mplcursors>=0.7",
     "nbformat>=5.10.4",
     "notebook>=7.5.4",
+    "nox>=2026.4.10",
     "numpy==2.2.6",
     "pandas==2.3.3",
     "panel>=1.8.7",
@@ -60,6 +61,27 @@ dependencies = [
     "tables==3.10.2",
     "tqdm==4.67.1",
     "xlsxwriter>=3.2.9",
+]
+
+[project.optional-dependencies]
+# Development dependencies
+dev = [
+    "nox>=2024.4.15",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "types-PyYAML",
+]
+
+# Testing dependencies
+test = [
+    "pytest>=8.3.4",
+    "pytest-cov>=6.0.0",
+    "coverage[toml]>=7.6.0",
+]
+
+# All optional dependencies combined
+all = [
+    "metatlas2[dev,test]",
 ]
 
 [tool.uv.extra-build-dependencies]
