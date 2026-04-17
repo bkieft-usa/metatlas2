@@ -23,6 +23,7 @@ shifter --module=none \\
     --env=METATLAS2_IMAGE_TAG={image_tag} \\
     --env=METATLAS_DATA_DIR={metatlas_data_dir} \\
     --env=HOME={home} \\
+    --env=PYTHONPATH=/app \\
     /app/.venv/bin/python -m metatlas2.run_targeted_analysis run \\
     --config "{config}" \\
     --project "{project}" \\

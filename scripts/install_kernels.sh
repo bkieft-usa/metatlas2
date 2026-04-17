@@ -59,18 +59,21 @@ real_home = os.path.realpath(home)
 # --module=none prevents Lmod from loading modules that could shadow the
 # container's Python.  Env vars are forwarded explicitly via --env so the
 # metatlas2 package knows the data directory and image tag at runtime.
+pythonpath = f"{repo_dir}:/app" if dev_mode else "/app"
+
 argv = [
     "shifter",
     "--module=none",
-    "--entrypoint",
     f"--env=METATLAS2_IMAGE_TAG={tag}",
     f"--env=METATLAS_DATA_DIR={data_dir}",
     f"--env=HOME={home}",
+    # metatlas2 is not installed as a proper wheel in the venv (no [build-system]
+    # in pyproject.toml), so we must put /app on PYTHONPATH so Python always
+    # finds /app/metatlas2/ regardless of the working directory at kernel launch.
+    # Dev mode prepends the local repo so edits take effect without a rebuild.
+    f"--env=PYTHONPATH={pythonpath}",
     f"--image=docker:{image}",
 ]
-
-if dev_mode:
-    argv.append(f"--volume={repo_dir}/metatlas2:/app/metatlas2:ro")
 
 argv += [
     "/app/.venv/bin/python",

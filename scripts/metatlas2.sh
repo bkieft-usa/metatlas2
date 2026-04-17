@@ -62,11 +62,18 @@ SHIFTER_ARGS=(
     "--env=METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
     "--env=HOME=${HOME}"
     "--env=JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
+    # metatlas2 has no [build-system] in pyproject.toml so it is not installed
+    # as a wheel in the venv.  Set PYTHONPATH=/app so Python always finds
+    # /app/metatlas2/ regardless of the working directory.
+    "--env=PYTHONPATH=/app"
 )
 
-# Dev mode: bind-mount the local metatlas2/ package over the installed copy.
+# Dev mode: put the local metatlas2/ package first on PYTHONPATH so edits
+# take effect immediately.  GPFS is auto-mounted by shifter, so the repo is
+# already visible inside the container at the same absolute path.
+# Also keep /app as fallback so other metatlas2 subpackages still resolve.
 if [[ "${DEV_MODE}" == "true" ]]; then
-    SHIFTER_ARGS+=("--volume=${REPO_DIR}/metatlas2:/app/metatlas2:ro")
+    SHIFTER_ARGS+=("--env=PYTHONPATH=${REPO_DIR}:/app")
 fi
 
 # ---------------------------------------------------------------------------
@@ -121,7 +128,7 @@ else
         [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
     done
     if [[ "${LOG_TO_STDOUT}" == "false" && "${SUBCOMMAND}" == "run" ]]; then
-        echo "------- Launching metatlas2 container (tag=${IMAGE_TAG})..."
+        echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG})..."
     fi
 
     shifter "${SHIFTER_ARGS[@]}" --entrypoint \
