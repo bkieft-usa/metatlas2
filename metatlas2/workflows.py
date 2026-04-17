@@ -288,8 +288,7 @@ def run_auto_identification(
 
 def run_analysis_gui(
     project_name: str,
-    config: Dict[str, Any],
-    paths: Dict[str, str],
+    config_path: str,
     rt_alignment_number: int = None,
     analysis_number: int = None,
     pre_curation_atlas: str = None,
@@ -303,20 +302,13 @@ def run_analysis_gui(
 
     from metatlas2.workflow_objects import Atlas, AnalysisGUI
 
-    if not os.path.exists(paths["project_db_path"]):
-        raise FileNotFoundError(
-            f"Project database not found: {paths['project_db_path']}. "
-            "Please run project setup first."
-        )
-
     analysis_gui_obj = AnalysisGUI()
 
     analysis_gui_obj.setup(
+        config_path=config_path,
         project_name=project_name, 
         rt_alignment_number=rt_alignment_number, 
         analysis_number=analysis_number,
-        config=config,
-        paths=paths,
     )
 
     analysis_gui_obj.pre_curation_atlas_obj = Atlas.from_database(
@@ -358,11 +350,10 @@ def run_analysis_gui(
     return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
 
 def run_analysis_summary(
+    config_path: str,
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
-    config: Dict[str, Any],
-    paths: Dict[str, str],
     pre_curation_atlas: str = None,
     overwrite: bool = False,
 ) -> None:
@@ -379,11 +370,10 @@ def run_analysis_summary(
     summary_obj = AnalysisSummary()
     
     summary_obj.setup(
+        config_path=config_path,
         project_name=project_name,
         rt_alignment_number=rt_alignment_number,
         analysis_number=analysis_number,
-        config=config,
-        paths=paths,
     )
 
     summary_obj.pre_curation_atlas_obj = Atlas.from_database(

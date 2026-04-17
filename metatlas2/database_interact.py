@@ -8,6 +8,7 @@ import json
 import copy
 import getpass
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -20,12 +21,54 @@ import metatlas2.logging_config as lcf
 logger = lcf.get_logger('database_interact')
 
 @contextmanager
-def get_db_connection(db_path: str, read_only: bool = False):
-    conn = duckdb.connect(str(db_path), read_only=read_only)
-    try:
-        yield conn
-    finally:
-        conn.close()
+def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 5, initial_retry_delay: float = 0.1):
+    """
+    Context manager for DuckDB connections with automatic retry on lock conflicts.
+    
+    Args:
+        db_path: Path to the database file
+        read_only: If True, open in read-only mode (allows concurrent readers)
+        max_retries: Maximum number of retry attempts on lock conflicts
+        initial_retry_delay: Initial delay in seconds before first retry (doubles with each attempt)
+    
+    Raises:
+        duckdb.IOException: If database lock cannot be acquired after all retries
+    """
+    retry_delay = initial_retry_delay
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            conn = duckdb.connect(str(db_path), read_only=read_only)
+            try:
+                yield conn
+                return  # Success - exit the retry loop
+            finally:
+                conn.close()
+        except duckdb.IOException as e:
+            last_error = e
+            # Check if this is a lock-related error
+            if "lock" in str(e).lower() or "conflicting lock" in str(e).lower():
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Database locked at {db_path}, retrying in {retry_delay:.2f}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    logger.error(
+                        f"Failed to acquire database lock after {max_retries} attempts. "
+                        f"Another process may be holding the lock. Error: {e}"
+                    )
+                    raise
+            else:
+                # Not a lock error, raise immediately
+                raise
+    
+    # Should not reach here, but just in case
+    if last_error:
+        raise last_error
 
 def get_provenance():
     """Get provenance information for database records."""
@@ -486,7 +529,7 @@ def get_rt_alignment_model_from_db(
     rt_alignment_number = rt_align_obj.rt_alignment_number
     qc_atlas_uid = rt_align_obj.qc_atlas_uid
     
-    with get_db_connection(project_db_path) as conn:
+    with get_db_connection(project_db_path, read_only=True) as conn:
         results = conn.execute("""
             SELECT *
             FROM rt_alignment
@@ -894,7 +937,7 @@ def get_lcmsruns_from_db(
         params.extend(file_types)
 
     where_clause = " AND ".join(where_conditions)
-    with get_db_connection(project_db_path) as conn:
+    with get_db_connection(project_db_path, read_only=True) as conn:
         files_df = conn.execute(f"""
             SELECT file_path, filename, file_format, file_type, chromatography, ms_level, polarity, created_by, created_date
             FROM lcmsruns
@@ -1658,7 +1701,7 @@ def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> Non
     if not Path(project_db_path).exists():
         raise FileNotFoundError(f"Project database not found: {project_db_path}")
 
-    with get_db_connection(project_db_path) as conn:
+    with get_db_connection(project_db_path, read_only=True) as conn:
         # Check MS1 and MS2 summary tables for existing entries
 
         ms1_data_exists = conn.execute(
@@ -1794,7 +1837,7 @@ def get_manual_curation_entries(
     compounds placed after their non-unlabeled counterparts.
     """
     try:
-        with get_db_connection(project_db_path) as conn:
+        with get_db_connection(project_db_path, read_only=True) as conn:
             query = """
                 SELECT *
                 FROM manual_curation
@@ -1886,7 +1929,7 @@ def get_ms1_data_for_compound(
             query += f" AND (inchi_key, adduct) IN (VALUES {placeholders})"
             for ik, ad in pairs:
                 params.extend([ik, ad])
-        with get_db_connection(project_db_path) as conn:
+        with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute(query, params).df()
     except Exception as e:
         logger.error(f"Error retrieving MS1 data: {e}")
@@ -1941,7 +1984,7 @@ def get_ms2_hits_for_compound(
             for ik, ad in pairs:
                 params.extend([ik, ad])
         query += " ORDER BY score DESC"
-        with get_db_connection(project_db_path) as conn:
+        with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute(query, params).df()
     except Exception as e:
         logger.error(f"Error retrieving MS2 hits: {e}")
@@ -1996,7 +2039,7 @@ def get_ms2_data_for_compound(
             for ik, ad in pairs:
                 params.extend([ik, ad])
         query += " ORDER BY file_path, rt"
-        with get_db_connection(project_db_path) as conn:
+        with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute(query, params).df()
     except Exception as e:
         logger.error(f"Error retrieving MS2 data: {e}")
@@ -2313,7 +2356,7 @@ def save_auto_identification_results_to_db(
 
     # Check for identical MS2 summary records before inserting any data
     logger.info("Checking for identical ManualCuration records before database insert...")
-    with get_db_connection(project_db_path) as conn:
+    with get_db_connection(project_db_path, read_only=True) as conn:
         _check_identical_manual_curation_exists(conn, manual_curation_records)
 
     # Bulk insert all records
@@ -2667,7 +2710,7 @@ def list_atlases_in_db(
             where_conditions.append("source = ?")
             params.append(source)
         
-        with get_db_connection(project_db_path) as conn:
+        with get_db_connection(project_db_path, read_only=True) as conn:
             query = "SELECT atlas_uid, atlas_name, analysis_type, chromatography, polarity, atlas_type, created_by, created_date, source FROM atlases"
             if where_conditions:
                 query += " WHERE " + " AND ".join(where_conditions)

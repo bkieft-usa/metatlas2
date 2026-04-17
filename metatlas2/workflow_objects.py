@@ -679,7 +679,7 @@ class AnalysisGUI:
     ms2_hits_df: Optional[pd.DataFrame] = None
     override_parameters: Dict[str, Any] = field(default_factory=dict)
 
-    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int, config: Dict[str, Any], paths: Dict[str, str]):
+    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
@@ -688,9 +688,9 @@ class AnalysisGUI:
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.config_path = config_path
-        self.config = config
-        self.paths = paths
         self.project_name = project_name
+        self.config = ldt.load_analysis_config(config_path)
+        self.paths = rta.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
 
 @dataclass
 class AnalysisSummary:
@@ -724,8 +724,6 @@ class AnalysisSummary:
         project_name: str,
         rt_alignment_number: int,
         analysis_number: int,
-        config: Dict[str, Any],
-        paths: Dict[str, str],
     ):
         """
         Set up AnalysisSummary object.
@@ -735,11 +733,10 @@ class AnalysisSummary:
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.config_path = config_path
-        self.config = config
-        self.paths = paths
+        self.config = ldt.load_analysis_config(config_path)
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.project_name = project_name
-
+        self.paths = rta.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
         self.load_data()
 
     def load_data(self) -> None:
