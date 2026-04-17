@@ -1992,6 +1992,21 @@ def get_ms2_hits_for_compound(
 
     if df.empty:
         logger.warning(f"No MS2 hits found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+    else:
+        # Ensure critical fields have default values if missing/NULL
+        default_fields = {
+            'mz_theoretical': 0.0,
+            'mz_measured': 0.0,
+            'ppm_error': 0.0,
+            'rt': 0.0,
+            'score': 0.0,
+            'precursor_MZ': 0.0
+        }
+        for field, default_val in default_fields.items():
+            if field in df.columns:
+                df[field] = df[field].fillna(default_val)
+            else:
+                df[field] = default_val
 
     return df
 

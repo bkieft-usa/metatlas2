@@ -633,10 +633,10 @@ def build_dash_app(
 
         fig = go.Figure(data=bars)
         fig.add_hline(y=0, line=dict(color="black", width=1.5))
-        fname = "_".join(os.path.basename(scan["file_path"]).split(".")[0].split("_")[11:])
+        fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
         ms2_title_text = (
             f"File: {fname}<br>"
-            f"Score: {scan.get('score', 0):.4f}  |  Scan RT: {scan['rt']:.4f} min | Precursor m/z: {scan['precursor_MZ']:.4f}  |  Ref m/z: {scan['mz_theoretical']:.4f}  |  ppm Δ: {scan['ppm_error']:.2f}"
+            f"Score: {scan.get('score', 0):.4f}  |  Scan RT: {scan.get('rt', 0):.4f} min | Precursor m/z: {scan.get('precursor_MZ', 0):.4f}  |  Ref m/z: {scan.get('mz_theoretical', 0):.4f}  |  ppm Δ: {scan.get('ppm_error', 0):.2f}"
         )
         fig.update_layout(
             title=dict(text=ms2_title_text, x=0.5, xanchor="center", font=dict(size=12)),

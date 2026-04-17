@@ -176,9 +176,6 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
         pubchem_cache_path: Path to cache file
         use_pubchem_cache: If True, try to use existing cache entries
         update_pubchem_cache: If True, force API lookup and update cache for all compounds
-        
-    Returns:
-        DataFrame with PubChem data merged into compounds
     """
 
     # Load existing global cache
@@ -272,4 +269,4 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
     logger.info(f"    Successful PubChem retrievals in cache: {len(successful_retrievals)}")
     logger.info(f"    Failed retrievals in cache: {len(failed_retrievals)}")
     
-    return
+    return compounds

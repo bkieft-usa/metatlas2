@@ -106,6 +106,7 @@ class Compound:
 
         compounds = []
         compound_mzrts = []
+        # This will only create the database if it doesn't already exist, unless you want to overwrite
         dbi.create_metatlas_database(main_db_path, overwrite=overwrite_db)
 
         for chrom, pol_dict in config['COMPOUNDS'].items():
@@ -116,7 +117,7 @@ class Compound:
                         continue
                     logger.info(f"Processing compound file: {file_path}")
                     compounds_df = ldt.load_compound_input(file_path)
-                    pcr.retrieve_pubchem_info(
+                    compounds_df = pcr.retrieve_pubchem_info(
                         compounds=compounds_df,
                         pubchem_cache_path=pubchem_cache_path,
                         use_pubchem_cache=config["PARAMS"].get("use_pubchem_cache", True),
@@ -689,7 +690,7 @@ class AnalysisGUI:
         self.analysis_number = analysis_number
         self.config_path = config_path
         self.project_name = project_name
-        self.config = ldt.load_analysis_config(config_path)
+        self.config = ldt.load_metatlas2_config(config_path)
         self.paths = rta.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
 
 @dataclass
@@ -733,7 +734,7 @@ class AnalysisSummary:
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.config_path = config_path
-        self.config = ldt.load_analysis_config(config_path)
+        self.config = ldt.load_metatlas2_config(config_path)
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.project_name = project_name
         self.paths = rta.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
