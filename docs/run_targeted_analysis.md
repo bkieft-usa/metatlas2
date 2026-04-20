@@ -54,7 +54,7 @@ metatlas2 submit \
     [--cpus      8] \
     [--mem       64G] \
     [--time      03:00:00] \
-    [--conda-env metatlas2] \
+    [--image     latest] \
     [--output    /path/to/custom_script.sh]
 ```
 
@@ -86,7 +86,7 @@ The `submit` subcommand writes a Slurm batch script to the analysis output direc
 | `--cpus` | `8` | Number of CPUs to request. |
 | `--mem` | `64G` | Memory to request (e.g. `64G`, `128G`). |
 | `--time` | `03:00:00` | Wall-clock time limit (`HH:MM:SS`). |
-| `--conda-env` | `metatlas2` | Name of the conda environment to activate in the job script. |
+| `--image` | `latest` | Container image tag to use for the job (can also be set via `METATLAS2_IMAGE_TAG` env var). |
 | `--output` | auto | Override the output path for the generated `.sh` batch script. Defaults to `<analysis_output_dir>/<project>_pre_curation.sh`. |
 
 ---

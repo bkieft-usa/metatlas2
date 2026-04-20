@@ -248,7 +248,7 @@ Four distinct layers interact every time the entrypoint script is called.
 |---|---|---|
 | **GitHub** (`bkieft-usa/metatlas2`) | Source code, `Dockerfile`, CI workflow (`.github/workflows/docker.yml`) | Every push to `main` triggers a CI action, which builds and pushes a new container image to GHCR |
 | **GHCR** (`ghcr.io/bkieft-usa/metatlas2`) | Frozen container images (e.g., `:latest`, `:sha-fb90592`) | The versioned Python runtime; pulled to the login node by a cronjob (every 5 min) or manually |
-| **NERSC host filesystem** | `~/metatlas2/metatlas2.sh` (bash wrapper), `~/.jupyter/kernels/` (kernel specs), `$METATLAS_DATA_DIR/` (raw data + databases on shared CFS), `~/<owner>_metabolomics_data/` (project outputs) | Input data, user config, project outputs, and the thin shell scripts that glue everything together; **no Python runs here** |
+| **NERSC host filesystem** | `~/metatlas2/scripts/metatlas2.sh` (bash wrapper), `~/.jupyter/kernels/` (kernel specs), `$METATLAS_DATA_DIR/` (raw data + databases on shared CFS), `~/<owner>_metabolomics_data/` (project outputs) | Input data, user config, project outputs, and the thin shell scripts that glue everything together; **no Python runs here** |
 | **Container** (Shifter process) | `/app/metatlas2/` (Python package + all deps, frozen at build time) | All Python execution; NERSC GPFS filesystems are auto-mounted at identical absolute paths — no path translation |
 
 ---
@@ -275,7 +275,7 @@ metatlas2/
 │   └── workflows/
 │       └── docker.yml                # CI: build + push on main push and version tags
 └── scripts/
-    ├── metatlas2.sh                  # Host wrapper (run/submit, --image, --dev)
+    ├── metatlas2.sh                     # Host wrapper script (run/submit, --image, --dev)
     ├── install_kernels.sh            # Registers metatlas2/metatlas2-dev/metatlas2-{tag} kernels
     └── pull_latest.sh                # Cronjob helper: shifterimg pull latest
 ```
