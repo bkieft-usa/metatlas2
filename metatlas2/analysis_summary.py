@@ -5,6 +5,12 @@ import os
 import textwrap
 from tqdm.notebook import tqdm
 
+from rdkit import Chem
+from rdkit.Chem import rdDepictor, rdMolDraw2D
+import cairosvg
+import io
+from PIL import Image
+        
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -168,22 +174,41 @@ def _plot_structure(
     inchi_key: str,
     size: int = 500,
 ) -> None:
-    """Draw the molecular structure using RDKit (SMILES first, InChI fallback)."""
+    """Draw the molecular structure using RDKit."""
     ax.axis("off")
     mol = None
     try:
-        from rdkit import Chem
-        from rdkit.Chem import Draw
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
         if mol is None and inchi:
             mol = Chem.MolFromInchi(inchi)
+        
         if mol is not None:
-            image = Draw.MolToImage(mol, size=(size, size))
+            # Use exact method from standard_annotation.py
+            mc = Chem.Mol(mol.ToBinary())
+            try:
+                Chem.Kekulize(mc)
+            except:
+                mc = Chem.Mol(mol.ToBinary())
+            
+            if not mc.GetNumConformers():
+                rdDepictor.Compute2DCoords(mc)
+            
+            # Generate SVG using MolDraw2DSVG (exact method from old code)
+            drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
+            drawer.DrawMolecule(mc)
+            drawer.FinishDrawing()
+            svg_data = drawer.GetDrawingText().replace('svg:', '')
+            
+            # Convert SVG to PNG for matplotlib display
+            png_data = cairosvg.svg2png(bytestring=svg_data.encode('utf-8'))
+            image = Image.open(io.BytesIO(png_data))
             ax.imshow(image, aspect="equal")
             return
+            
     except Exception as exc:
         logger.warning("Could not draw structure for %s: %s", inchi_key, exc)
+    
     ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
             ha="center", va="center", fontsize=10)
 
