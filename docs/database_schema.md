@@ -302,6 +302,7 @@ Stores extracted MS1 spectral data for each compound in each LCMS run.
 | `adduct` | TEXT | Adduct form |
 | `rt_alignment_number` | INTEGER | RT alignment iteration |
 | `analysis_number` | INTEGER | Analysis iteration |
+| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
 | `file_path` | TEXT | LCMS run file path |
 | `mz` | TEXT | JSON-encoded m/z array |
 | `raw_spectrum` | TEXT | JSON-encoded intensity array |
@@ -312,7 +313,7 @@ Stores extracted MS1 spectral data for each compound in each LCMS run.
 - One entry per compound per LCMS run
 - `raw_spectrum` contains JSON array of intensities across RT window
 - `mz` contains corresponding m/z values
-- Links to specific RT alignment and analysis iterations
+- Links to specific RT alignment, analysis iteration, and analysis type
 
 ### ms2_data Table
 
@@ -326,6 +327,7 @@ Stores extracted MS2 fragmentation spectra.
 | `adduct` | TEXT | Adduct form |
 | `rt_alignment_number` | INTEGER | RT alignment iteration |
 | `analysis_number` | INTEGER | Analysis iteration |
+| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
 | `file_path` | TEXT | LCMS run file path |
 | `rt` | REAL | Retention time of scan |
 | `raw_spectrum` | TEXT | JSON-encoded fragment spectrum |
@@ -339,7 +341,7 @@ Stores extracted MS2 fragmentation spectra.
 - Multiple MS2 scans can exist per compound per run
 - `raw_spectrum` is JSON array of (m/z, intensity) pairs
 - Precursor information links MS2 to parent ion
-- Links to specific RT alignment and analysis iterations
+- Links to specific RT alignment, analysis iteration, and analysis type
 
 ### ms2_hits Table
 
@@ -353,6 +355,7 @@ Stores spectral matching results from comparing experimental MS2 to reference li
 | `adduct` | TEXT | Adduct form |
 | `rt_alignment_number` | INTEGER | RT alignment iteration |
 | `analysis_number` | INTEGER | Analysis iteration |
+| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
 | `file_path` | TEXT | LCMS run file path |
 | `database` | TEXT | Reference database name |
 | `ref_id` | TEXT | Reference spectrum ID |
@@ -376,6 +379,7 @@ Stores spectral matching results from comparing experimental MS2 to reference li
 **Key Points**:
 - Multiple hits can exist per compound (different reference matches)
 - Spectral matching scores support identification confidence
+- Links to specific RT alignment, analysis iteration, and analysis type
 - Both query and reference spectra stored for visualization
 - Links to specific RT alignment and analysis iterations
 
@@ -395,6 +399,7 @@ Stores manual curation decisions and compound identification results.
 | `auto_ided` | BOOLEAN | Auto-identification flag |
 | `polarity` | TEXT | Ionization polarity |
 | `chromatography` | TEXT | Chromatography method |
+| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
 | `mz_tolerance` | REAL | m/z tolerance (ppm) |
 | `atlas_mz` | REAL | Atlas reference m/z |
 | `atlas_rt_peak` | REAL | Atlas reference RT peak |
@@ -430,6 +435,7 @@ Stores manual curation decisions and compound identification results.
 - `ms1_notes`, `ms2_notes` store standardized quality decisions
 - `best_ms1_*` fields identify the highest-quality samples/data for each compound to display in summaries
 - Acts as the bridge between automated and manual identification workflows
+- `analysis_type` allows the same compound to be analyzed independently in different workflows (e.g., ISTD vs EMA) within the same RT alignment and analysis iteration
 
 ---
 
