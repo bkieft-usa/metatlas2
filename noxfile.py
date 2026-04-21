@@ -157,8 +157,11 @@ def _run_test_with_docker(session, repo_root, fixtures_dir, config_file, test_pr
     
     session.log(f"Using Docker image: {docker_image}")
     
-    # Create temporary output directory
-    temp_output = tempfile.mkdtemp(prefix="metatlas2-test-output-")
+    # Create temporary data directory and copy fixtures
+    # Pipeline needs to write to METATLAS_DATA_DIR/projects/targeted_outputs/
+    temp_data_dir = tempfile.mkdtemp(prefix="metatlas2-test-data-")
+    session.log(f"Copying test fixtures to {temp_data_dir}...")
+    shutil.copytree(fixtures_dir, temp_data_dir, dirs_exist_ok=True)
     
     # Prepare environment variables for container
     container_env = {
@@ -171,10 +174,8 @@ def _run_test_with_docker(session, repo_root, fixtures_dir, config_file, test_pr
     docker_cmd = [
         "docker", "run",
         "--rm",
-        # Mount fixtures as read-only
-        "-v", f"{fixtures_dir.absolute()}:/data:ro",
-        # Mount output directory as read-write
-        "-v", f"{temp_output}:/tmp/home/test_owner_metabolomics_data:rw",
+        # Mount temp data directory as read-write (contains fixtures + will hold outputs)
+        "-v", f"{temp_data_dir}:/data:rw",
         # Mount config file
         "-v", f"{config_file.absolute()}:/config/system_test_analysis.yaml:ro",
     ]
@@ -201,12 +202,12 @@ def _run_test_with_docker(session, repo_root, fixtures_dir, config_file, test_pr
     session.run(*docker_cmd, external=True)
     
     # Set output location for pytest validation
-    # Pipeline writes to: {temp_output}/{project_name}/
-    output_dir = Path(temp_output) / test_project
+    # Pipeline writes to: {temp_data_dir}/projects/targeted_outputs/test_owner/{project_name}/
+    output_dir = Path(temp_data_dir) / "projects" / "targeted_outputs" / "test_owner" / test_project
     os.environ["TEST_OUTPUT_DIR"] = str(output_dir)
     
     # Return temp directory path for cleanup after tests
-    return temp_output
+    return temp_data_dir
 
 
 @nox.session
