@@ -751,27 +751,28 @@ class AnalysisSummary:
         project_db_path  = self.paths["project_db_path"]
         rt_alignment_num = self.rt_alignment_number
         analysis_num     = self.analysis_number
+        analysis_type    = self.pre_curation_atlas_obj.analysis_type if self.pre_curation_atlas_obj else None
 
         logger.info(
-            "AnalysisSummary.load_data: loading RT alignment %d, analysis %d…",
-            rt_alignment_num, analysis_num,
+            "AnalysisSummary.load_data: loading RT alignment %d, analysis %d, analysis_type %s…",
+            rt_alignment_num, analysis_num, analysis_type,
         )
 
         self.manual_curation_df = dbi.get_manual_curation_entries(
-            project_db_path, rt_alignment_num, analysis_num
+            project_db_path, rt_alignment_num, analysis_num, analysis_type=analysis_type
         )
         if self.manual_curation_df.empty:
             logger.error("load_data: no manual curation entries found.")
             return
 
         self.ms1_all_df = dbi.get_ms1_data_for_compound(
-            project_db_path, None, None, rt_alignment_num, analysis_num
+            project_db_path, None, None, rt_alignment_num, analysis_num, analysis_type=analysis_type
         )
         self.ms2_raw_all_df = dbi.get_ms2_data_for_compound(
-            project_db_path, None, None, rt_alignment_num, analysis_num
+            project_db_path, None, None, rt_alignment_num, analysis_num, analysis_type=analysis_type
         )
         self.ms2_hits_all_df = dbi.get_ms2_hits_for_compound(
-            project_db_path, None, None, rt_alignment_num, analysis_num
+            project_db_path, None, None, rt_alignment_num, analysis_num, analysis_type=analysis_type
         )
         self.per_file_metrics_df = asm.extract_per_file_metrics(self.ms1_all_df)
 

@@ -62,8 +62,7 @@ def load_msms_refs_file(file_path):
         logger.info(f"    Number of unique InChI keys: {df['inchi_key'].nunique()}")
         return df
     else:
-        logger.info("    Reference DataFrame is empty")
-        return None
+        raise ValueError("    Reference DataFrame is empty")
 
 def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
     """Load and validate new metatlas2 configuration from YAML file with type enforcement."""

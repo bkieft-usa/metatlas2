@@ -96,7 +96,7 @@ def find_ms2_hits(
             for hit_obj in hit_objs_with_data:
                 mask = combined['_hit_obj_id'] == id(hit_obj)
                 hit_obj.data = combined.loc[mask].drop(columns='_hit_obj_id').reset_index(drop=True)
-            logger.info(f"Compound {inchi_key} {adduct}: trimmed {total_for_compound} hits to top {max_hits} by score.")
+            logger.debug(f"Compound {inchi_key} {adduct}: trimmed {total_for_compound} hits to top {max_hits} by score.")
 
     # Print summary broken down by compound and file
     hits_list = [(h.inchi_key, h.adduct, h.filename, len(h.data))

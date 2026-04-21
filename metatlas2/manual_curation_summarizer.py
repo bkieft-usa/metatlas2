@@ -16,6 +16,13 @@ def create_manual_curation_obj(
     """
     from metatlas2.workflow_objects import ManualCuration
 
+    logger.info("Creating ManualCuration objects for each Compound in the Atlas...")
+    
+    logger.info("Building MS1 index and isomer dictionary...")
+    isomer_dict = _build_isomer_dict(auto_id_obj.pre_autoid_atlas_obj)
+    ms1_index = _build_ms1_index(auto_id_obj.experimental_data)
+    
+    logger.info("Starting Compound loop...")
     for atlas_compound_mzrt in auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values():
 
         compound_data = pd.DataFrame([{
@@ -66,53 +73,70 @@ def create_manual_curation_obj(
         _fill_best_ms1_to_manual_curation(
             manual_curation_obj,
             atlas_compound_mzrt,
-            auto_id_obj.experimental_data
+            ms1_index
         )
 
-        _add_isomers_to_manual_curation_obj(
-            manual_curation_obj,
-            auto_id_obj.pre_autoid_atlas_obj
-        )
+        isomer_list = isomer_dict.get(atlas_compound_mzrt.inchi_key, [])
+        manual_curation_obj.data.at[0, 'isomers'] = isomer_list
 
         _add_rt_suggestions_to_manual_curation_obj(
-            manual_curation_obj, 
-            auto_id_obj.experimental_data
+            manual_curation_obj,
+            atlas_compound_mzrt,
+            ms1_index
         )
 
         auto_id_obj.experimental_data.manual_curation.append(manual_curation_obj)
 
     return manual_curation_obj
 
+def _build_ms1_index(
+    exp_data_obj: "ExperimentalData"
+) -> Dict[tuple, List]:
+    """
+    Build an index of MS1 data by (inchi_key, adduct) for fast lookup.
+    Returns a dict: (inchi_key, adduct) -> list of MS1 _SpecData objects
+    """
+    ms1_index = {}
+    for ms1 in exp_data_obj.ms1_data:
+        key = (ms1.inchi_key, ms1.adduct)
+        if key not in ms1_index:
+            ms1_index[key] = []
+        ms1_index[key].append(ms1)
+    return ms1_index
+
 def _fill_best_ms1_to_manual_curation(
     manual_curation_obj: "ManualCuration",
     atlas_compound_mzrt: "CompoundMZRT",
-    exp_data_obj: "ExperimentalData"
+    ms1_index: Dict[tuple, List]
 ) -> None:
     """
     For a given atlas compound, find the best MS1 file (highest intensity)
     and fill manual_curation_obj.data with its info.
+    Uses pre-built ms1_index for fast lookup.
     """
     all_files = []
-    for ms1 in exp_data_obj.ms1_data:
-        if ms1.inchi_key == atlas_compound_mzrt.inchi_key and ms1.adduct == atlas_compound_mzrt.adduct:
-            if ms1.data is not None and not ms1.data.empty:
-                sum_intensity = ms1.data['i'].sum()
-                if sum_intensity > 0:
-                    idx = ms1.data['i'].idxmax()
-                    peak_height = ms1.data.loc[idx, 'i']
-                    peak_mz = ms1.data.loc[idx, 'mz']
-                    peak_rt = ms1.data.loc[idx, 'rt']
-                    mz_centroid = (ms1.data['i'] * ms1.data['mz']).sum() / sum_intensity
-                    ppm_error = (mz_centroid - atlas_compound_mzrt.mz) / atlas_compound_mzrt.mz * 1e6
-                    rt_error = peak_rt - atlas_compound_mzrt.rt_peak
-                    all_files.append({
-                        'filename': ms1.filename,
-                        'rt_peak': peak_rt,
-                        'mz_centroid': mz_centroid,
-                        'peak_height': peak_height,
-                        'ppm_error': ppm_error,
-                        'rt_error': rt_error
-                    })
+    key = (atlas_compound_mzrt.inchi_key, atlas_compound_mzrt.adduct)
+    ms1_list = ms1_index.get(key, [])
+    
+    for ms1 in ms1_list:
+        if ms1.data is not None and not ms1.data.empty:
+            sum_intensity = ms1.data['i'].sum()
+            if sum_intensity > 0:
+                idx = ms1.data['i'].idxmax()
+                peak_height = ms1.data.loc[idx, 'i']
+                peak_mz = ms1.data.loc[idx, 'mz']
+                peak_rt = ms1.data.loc[idx, 'rt']
+                mz_centroid = (ms1.data['i'] * ms1.data['mz']).sum() / sum_intensity
+                ppm_error = (mz_centroid - atlas_compound_mzrt.mz) / atlas_compound_mzrt.mz * 1e6
+                rt_error = peak_rt - atlas_compound_mzrt.rt_peak
+                all_files.append({
+                    'filename': ms1.filename,
+                    'rt_peak': peak_rt,
+                    'mz_centroid': mz_centroid,
+                    'peak_height': peak_height,
+                    'ppm_error': ppm_error,
+                    'rt_error': rt_error
+                })
                 
     if all_files:
         manual_curation_obj.data.loc[0, 'auto_ided'] = True
@@ -123,19 +147,6 @@ def _fill_best_ms1_to_manual_curation(
         manual_curation_obj.data.loc[0, 'best_ms1_intensity'] = float(best['peak_height'])
         manual_curation_obj.data.loc[0, 'best_ms1_ppm_error'] = float(best['ppm_error'])
         manual_curation_obj.data.loc[0, 'best_ms1_rt_error'] = float(best['rt_error'])
-
-def _add_isomers_to_manual_curation_obj(
-    manual_curation_obj: "ManualCuration",
-    atlas_obj: "Atlas"
-) -> None:
-    """
-    Add isomer information to a ManualCuration object for its inchi_key.
-    Modifies manual_curation_obj.data in-place.
-    """
-    inchi_key = manual_curation_obj.inchi_key
-    isomer_dict = _build_isomer_dict(atlas_obj)
-    isomer_list = isomer_dict.get(inchi_key, [])
-    manual_curation_obj.data.at[0, 'isomers'] = isomer_list
 
 def _build_isomer_dict(
     atlas_obj: "Atlas"
@@ -181,24 +192,25 @@ def _build_isomer_dict(
 
 def _add_rt_suggestions_to_manual_curation_obj(
     manual_curation_obj: "ManualCuration",
-    exp_data_obj: "ExperimentalData"
+    atlas_compound_mzrt: "CompoundMZRT",
+    ms1_index: Dict[tuple, List]
 ) -> None:
     """
-    Add RT bound suggestions to a ManualCuration object based on ms1 data from exp_data_obj.
-    Modifies manual_curation_obj.data in-place.
+    Add RT bound suggestions to a ManualCuration object based on ms1 data.
+    Uses pre-built ms1_index for fast lookup.
     """
     df = manual_curation_obj.data
-    inchi_key = manual_curation_obj.inchi_key
-    adduct = manual_curation_obj.adduct
+    key = (atlas_compound_mzrt.inchi_key, atlas_compound_mzrt.adduct)
+    ms1_list = ms1_index.get(key, [])
+    
     ms1_data_dict = {}
-    for ms1_data in getattr(exp_data_obj, 'ms1_data', []):
-        if getattr(ms1_data, 'inchi_key', None) == inchi_key and getattr(ms1_data, 'adduct', None) == adduct:
-            ms1_df = ms1_data.data
-            if ms1_df is not None and not ms1_df.empty:
-                ms1_data_dict[ms1_data.filename] = {
-                    'rt_vals': ms1_df['rt'].values,
-                    'i_vals': ms1_df['i'].values
-                }
+    for ms1_data in ms1_list:
+        ms1_df = ms1_data.data
+        if ms1_df is not None and not ms1_df.empty:
+            ms1_data_dict[ms1_data.filename] = {
+                'rt_vals': ms1_df['rt'].values,
+                'i_vals': ms1_df['i'].values
+            }
     suggestion = _suggest_rt_bounds_from_ms1(
         ms1_data_dict,
         atlas_rt_peak=df['atlas_rt_peak'].iloc[0],

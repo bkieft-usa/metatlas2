@@ -1335,6 +1335,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 adduct TEXT,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
+                analysis_type TEXT,
                 file_path TEXT,
                 mz TEXT,
                 raw_spectrum TEXT,
@@ -1351,6 +1352,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 adduct TEXT,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
+                analysis_type TEXT,
                 file_path TEXT,
                 rt REAL,
                 raw_spectrum TEXT,
@@ -1370,6 +1372,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 adduct TEXT,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
+                analysis_type TEXT,
                 file_path TEXT,
                 database TEXT,
                 ref_id TEXT,
@@ -1404,6 +1407,7 @@ def _create_database_tables(conn, db_type: str = "main"):
             auto_ided BOOLEAN,
             polarity TEXT,
             chromatography TEXT,
+            analysis_type TEXT,
             mz_tolerance REAL,
             atlas_mz REAL,
             atlas_rt_peak REAL,
@@ -1737,6 +1741,7 @@ def load_and_filter_gui_inputs(
     main_path = analysis_gui_obj.paths["main_db_path"]
     rt_alignment = analysis_gui_obj.rt_alignment_number
     analysis_num = analysis_gui_obj.analysis_number
+    analysis_type = analysis_gui_obj.pre_curation_atlas_obj.analysis_type
     remove_unidentified_compounds = analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)
 
     # Load atlas to act as reference for GUI curation
@@ -1748,10 +1753,10 @@ def load_and_filter_gui_inputs(
     atlas_compounds = manual_curation_atlas_df[["inchi_key", "adduct"]]
 
     # Load manual curation entries and MS1/MS2 data for compounds in this analysis (based on input atlas)
-    manual_curation_df = get_manual_curation_entries(project_path, rt_alignment, analysis_num, remove_unidentified_compounds, atlas_compounds=atlas_compounds)
-    ms1_df  = get_ms1_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
-    ms2_df  = get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
-    ms2_hits_df = get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds)
+    manual_curation_df = get_manual_curation_entries(project_path, rt_alignment, analysis_num, remove_unidentified_compounds, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
+    ms1_df  = get_ms1_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
+    ms2_df  = get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
+    ms2_hits_df = get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
 
     # Check if filtering is necessary
     ms1_min_pts   = override_parameters.get("ms1_min_num_points")
@@ -1827,6 +1832,7 @@ def get_manual_curation_entries(
     analysis_number: int,
     remove_unidentified_compounds: bool = True,
     atlas_compounds: pd.DataFrame = None,
+    analysis_type: str = None,
 ) -> pd.DataFrame:
     """
     Get all manual_curation entries for the given RT alignment and analysis number.
@@ -1835,6 +1841,8 @@ def get_manual_curation_entries(
     provided the query is restricted to those pairs and the result is returned in
     atlas order.  Otherwise rows are ordered by ascending RT peak with unlabeled
     compounds placed after their non-unlabeled counterparts.
+    
+    If ``analysis_type`` is provided, only records matching that analysis_type are returned.
     """
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
@@ -1844,6 +1852,9 @@ def get_manual_curation_entries(
                 WHERE rt_alignment_number = ? AND analysis_number = ?
             """
             params = [rt_alignment_number, analysis_number]
+            if analysis_type is not None:
+                query += " AND analysis_type = ?"
+                params.append(analysis_type)
             if remove_unidentified_compounds:
                 query += " AND auto_ided = TRUE"
             if atlas_compounds is not None and not atlas_compounds.empty:
@@ -1893,12 +1904,14 @@ def get_ms1_data_for_compound(
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
+    analysis_type: str = None,
 ) -> pd.DataFrame:
     """
     Get all MS1 data for a compound (inchi_key+adduct) for plotting EIC.
     If inchi_key or adduct is None, do not filter on that field.
     If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
     only rows matching those pairs are returned.
+    If analysis_type is provided, only rows matching that analysis_type are returned.
     """
     query = """
         SELECT *
@@ -1919,6 +1932,9 @@ def get_ms1_data_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
+        if analysis_type is not None:
+            query += " AND analysis_type = ?"
+            params.append(analysis_type)
         if atlas_compounds is not None and not atlas_compounds.empty:
             pairs = list(
                 atlas_compounds[["inchi_key", "adduct"]]
@@ -1947,12 +1963,14 @@ def get_ms2_hits_for_compound(
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
+    analysis_type: str = None,
 ) -> pd.DataFrame:
     """
     Get MS2 hits for a compound (inchi_key+adduct), ordered by score descending.
     If inchi_key or adduct is None, do not filter on that field.
     If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
     only rows matching those pairs are returned.
+    If analysis_type is provided, only rows matching that analysis_type are returned.
     """
     query = """
         SELECT *
@@ -1973,6 +1991,9 @@ def get_ms2_hits_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
+        if analysis_type is not None:
+            query += " AND analysis_type = ?"
+            params.append(analysis_type)
         if atlas_compounds is not None and not atlas_compounds.empty:
             pairs = list(
                 atlas_compounds[["inchi_key", "adduct"]]
@@ -2017,12 +2038,14 @@ def get_ms2_data_for_compound(
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
+    analysis_type: str = None,
 ) -> pd.DataFrame:
     """
     Get all MS2 data for a compound (inchi_key+adduct) for plotting query spectrum if no hits.
     If inchi_key or adduct is None, do not filter on that field.
     If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
     only rows matching those pairs are returned.
+    If analysis_type is provided, only rows matching that analysis_type are returned.
     """
     query = """
         SELECT *
@@ -2043,6 +2066,9 @@ def get_ms2_data_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
+        if analysis_type is not None:
+            query += " AND analysis_type = ?"
+            params.append(analysis_type)
         if atlas_compounds is not None and not atlas_compounds.empty:
             pairs = list(
                 atlas_compounds[["inchi_key", "adduct"]]
@@ -2277,6 +2303,7 @@ def save_auto_identification_results_to_db(
     main_db_path = auto_id_obj.paths['main_db_path']
     rt_alignment_number = auto_id_obj.rt_alignment_number
     analysis_number = auto_id_obj.analysis_number
+    analysis_type = auto_id_obj.pre_autoid_atlas_obj.analysis_type
     exp_data_obj = auto_id_obj.experimental_data
 
     # Get time and analyst for provenance
@@ -2301,7 +2328,7 @@ def save_auto_identification_results_to_db(
             continue
         metadata_record = _prepare_manual_curation_record(
             ci.data.iloc[0:1], compound_uid, ci.inchi_key, ci.adduct,
-            rt_alignment_number, analysis_number, prov
+            rt_alignment_number, analysis_number, analysis_type, prov
         )
         if metadata_record:
             manual_curation_records.append(metadata_record)
@@ -2326,7 +2353,7 @@ def save_auto_identification_results_to_db(
         for _, row in ms1_data_grouped.iterrows():
             ms1_data_record = _prepare_ms1_data_record(
                 row, compound_uid, ms1.inchi_key, ms1.adduct, ms1.filename,
-                rt_alignment_number, analysis_number, prov
+                rt_alignment_number, analysis_number, analysis_type, prov
             )
             if ms1_data_record:
                 ms1_data_records.append(ms1_data_record)
@@ -2350,7 +2377,7 @@ def save_auto_identification_results_to_db(
 
         for _, row in ms2_data_grouped.iterrows():
             ms2_data_record = _prepare_ms2_data_record(
-                row, compound_uid, ms2.inchi_key, ms2.adduct, rt_alignment_number, analysis_number, ms2.filename, prov
+                row, compound_uid, ms2.inchi_key, ms2.adduct, rt_alignment_number, analysis_number, analysis_type, ms2.filename, prov
             )
             if ms2_data_record:
                 ms2_data_records.append(ms2_data_record)
@@ -2364,7 +2391,7 @@ def save_auto_identification_results_to_db(
         for _, hit in ms2_hit.data.iterrows():
             ms2_hit_record = _prepare_ms2_hit_record(
                 hit, compound_uid, ms2_hit.inchi_key, ms2_hit.adduct, ms2_hit.filename,
-                rt_alignment_number, analysis_number, prov
+                rt_alignment_number, analysis_number, analysis_type, prov
             )
             if ms2_hit_record:
                 ms2_hits_records.append(ms2_hit_record)
@@ -2372,7 +2399,23 @@ def save_auto_identification_results_to_db(
     # Check for identical MS2 summary records before inserting any data
     logger.info("Checking for identical ManualCuration records before database insert...")
     with get_db_connection(project_db_path, read_only=True) as conn:
-        _check_identical_manual_curation_exists(conn, manual_curation_records)
+        manual_curation_records, duplicate_keys = _check_identical_manual_curation_exists(conn, manual_curation_records)
+    
+    # Filter out associated records for duplicate compounds
+    if duplicate_keys:
+        logger.info(f"Filtering {len(duplicate_keys)} duplicate compound(s) from ms2_hits, ms1_data, and ms2_data records...")
+        ms2_hits_records = [
+            rec for rec in ms2_hits_records 
+            if (rec[1], rec[2], rec[3], rec[6]) not in duplicate_keys  # compound_uid, inchi_key, adduct, analysis_type
+        ]
+        ms1_data_records = [
+            rec for rec in ms1_data_records 
+            if (rec[1], rec[2], rec[3], rec[6]) not in duplicate_keys  # compound_uid, inchi_key, adduct, analysis_type
+        ]
+        ms2_data_records = [
+            rec for rec in ms2_data_records 
+            if (rec[1], rec[2], rec[3], rec[6]) not in duplicate_keys  # compound_uid, inchi_key, adduct, analysis_type
+        ]
 
     # Bulk insert all records
     logger.info("Performing bulk database inserts...")
@@ -2422,33 +2465,47 @@ def write_gui_updates_to_db(
         logger.error(f"Error updating manual curation entry {curation_uid}: {e}")
         raise ValueError(f"Failed to update manual curation entry {curation_uid}. See logs for details.")
 
-def _check_identical_manual_curation_exists(conn, manual_curation_records: List[tuple]) -> None:
+def _check_identical_manual_curation_exists(conn, manual_curation_records: List[tuple]) -> tuple:
     """
     Check for identical manual curation records in the database before inserting new ones.
-    If an identical record exists (same compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number),
-    raise a ValueError to prevent duplicate entries.
+    If an identical record exists (same compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number, analysis_type),
+    filter it out to prevent duplicate entries.
+    
+    Returns:
+        tuple: (filtered_records, duplicate_keys) where duplicate_keys is a set of 
+               (compound_uid, inchi_key, adduct, analysis_type) tuples that were already in the database
     """
+    filtered_records = []
+    duplicate_keys = set()
+    
     for record in manual_curation_records:
         compound_uid = record[1]
         inchi_key = record[2]
         adduct = record[3]
         rt_alignment_number = record[4]
         analysis_number = record[5]
+        # analysis_type is at index 10 (after compound_name, auto_ided, polarity, chromatography)
+        analysis_type = record[10]
 
         existing = conn.execute("""
             SELECT curation_uid FROM manual_curation
             WHERE compound_uid = ? AND inchi_key = ? AND adduct = ?
-            AND rt_alignment_number = ? AND analysis_number = ?
+            AND rt_alignment_number = ? AND analysis_number = ? AND analysis_type = ?
         """, [
-            compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number
+            compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number, analysis_type
         ]).fetchone()
 
         if existing:
-            raise ValueError(
-                f"Identical manual curation record already exists for compound_uid {compound_uid}, "
-                f"inchi_key {inchi_key}, adduct {adduct}, rt_alignment_number {rt_alignment_number}, "
-                f"and analysis_number {analysis_number}. Please incremement the analysis number or run a new RT alignment to avoid duplicates."
+            duplicate_keys.add((compound_uid, inchi_key, adduct, analysis_type))
+            logger.info(
+                f"Skipping duplicate manual curation record for compound_uid {compound_uid}, "
+                f"inchi_key {inchi_key}, adduct {adduct}, analysis_type {analysis_type} (already exists for rt_alignment_number {rt_alignment_number}, "
+                f"analysis_number {analysis_number})"
             )
+        else:
+            filtered_records.append(record)
+    
+    return filtered_records, duplicate_keys
 
 def _prepare_manual_curation_record(
     manual_curation: pd.DataFrame,
@@ -2457,6 +2514,7 @@ def _prepare_manual_curation_record(
     adduct: str,
     rt_alignment_number: int,
     analysis_number: int,
+    analysis_type: str,
     prov: Dict
 ) -> Optional[tuple]:
     """Prepare compound metadata record for database insertion."""
@@ -2473,6 +2531,7 @@ def _prepare_manual_curation_record(
             bool(row.get('auto_ided', False)),
             row.get('polarity', ''),
             row.get('chromatography', ''),
+            analysis_type,
             float(row.get('mz_tolerance', 5.0)),
             float(row.get('atlas_mz', 0.0)),
             float(row.get('atlas_rt_peak', 0.0)),
@@ -2515,6 +2574,7 @@ def _prepare_ms1_data_record(
     filename: str,
     rt_alignment_number: int,
     analysis_number: int,
+    analysis_type: str,
     prov: Dict
 ) -> Optional[tuple]:
     """Prepare MS1 raw data record for database insertion."""
@@ -2526,6 +2586,7 @@ def _prepare_ms1_data_record(
             adduct,
             rt_alignment_number,
             analysis_number,
+            analysis_type,
             filename,
             json.dumps(row.get('mz', [])),
             json.dumps(row.get('raw_spectrum', ('[]', '[]'))),
@@ -2543,6 +2604,7 @@ def _prepare_ms2_data_record(
     adduct: str,
     rt_alignment_number: int,
     analysis_number: int,
+    analysis_type: str,
     filename: str,
     prov: Dict
 ) -> Optional[tuple]:
@@ -2555,6 +2617,7 @@ def _prepare_ms2_data_record(
             adduct,
             rt_alignment_number,
             analysis_number,
+            analysis_type,
             filename,
             float(row.get('rt', 0.0)),
             json.dumps(row.get('raw_spectrum', ('[]', '[]'))),
@@ -2576,6 +2639,7 @@ def _prepare_ms2_hit_record(
     filename: str,
     rt_alignment_number: int,
     analysis_number: int,
+    analysis_type: str,
     prov: Dict
 ) -> Optional[tuple]:
     """Prepare MS2 hit record for database insertion."""
@@ -2587,6 +2651,7 @@ def _prepare_ms2_hit_record(
             adduct,
             rt_alignment_number,
             analysis_number,
+            analysis_type,
             filename,
             hit.get('database', ''),
             hit.get('ref_id', ''),
@@ -2625,25 +2690,25 @@ def _bulk_insert_analysis_data(
             logger.info(f"Inserting {len(manual_curation_records)} compound metadata records...")
             conn.executemany("""
                 INSERT INTO manual_curation VALUES 
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, manual_curation_records)
         
         if ms2_hits_records:
             logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
             conn.executemany("""
-                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_hits_records)
         
         if ms1_data_records:
             logger.info(f"Inserting {len(ms1_data_records)} MS1 raw data records...")
             conn.executemany("""
-                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms1_data_records)
         
         if ms2_data_records:
             logger.info(f"Inserting {len(ms2_data_records)} MS2 raw data records...")
             conn.executemany("""
-                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, ms2_data_records)
 
 def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
