@@ -901,7 +901,7 @@ def build_dash_app(
             set(MS2_KEY_TO_LABEL)
             | set(MS1_KEY_TO_LABEL)
             | set(OTHER_KEY_TO_LABEL)
-            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m"}
+            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", " "}
         )
 
         if key not in ALL_HOTKEYS:
@@ -969,7 +969,7 @@ def build_dash_app(
             new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
             return new_state, dash.no_update
 
-        if key in ("j", "k"):
+        if key in ("j", "k", " "):
             delta = -1 if key == "j" else 1
             new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
             if new_idx == int(state["compound_idx"]):
