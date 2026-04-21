@@ -22,7 +22,6 @@
 set -euo pipefail
 
 IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
-# Honour a pre-set env var so cronjob refreshes propagate automatically
 IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
 DEV_MODE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -128,7 +127,11 @@ else
         [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
     done
     if [[ "${LOG_TO_STDOUT}" == "false" && "${SUBCOMMAND}" == "run" ]]; then
-        echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG})..."
+        if [[ "${DEV_MODE}" == "true" ]]; then
+            echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=dev)..."
+        else
+            echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=prod)..."
+        fi
     fi
 
     shifter "${SHIFTER_ARGS[@]}" --entrypoint \
