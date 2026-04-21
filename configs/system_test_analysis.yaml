@@ -1,7 +1,7 @@
 WORKFLOWS:
   PATHS:
     owner: test_owner
-    msms_refs_path: tests/fixtures/data/ms2_references.tsv
+    msms_refs_path: ms2_references.tsv
   RT_ALIGNMENT:
     HILICZ:
       ATLAS:
