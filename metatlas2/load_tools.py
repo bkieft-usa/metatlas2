@@ -5,7 +5,9 @@ import csv
 import yaml
 import ast
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any
+import grp
+import subprocess
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
@@ -374,3 +376,20 @@ def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"Atlas data file not found: {file_path}")
     return pd.read_csv(file_path)
+
+def change_ownership_to_metatlas_group(project_dir_path: str) -> None:
+    """Change ownership of project directory to metatlas group for HPC environments."""
+
+    group_name = 'metatlas'
+
+    try:
+        grp.getgrnam(group_name)
+    except KeyError:
+        logger.warning(f"Group '{group_name}' not found. Skipping ownership change.")
+        return
+
+    try:
+        subprocess.run(['chgrp', '-R', group_name, project_dir_path], check=True)
+        logger.info(f"Changed group of {project_dir_path} to {group_name}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to change group: {e}")

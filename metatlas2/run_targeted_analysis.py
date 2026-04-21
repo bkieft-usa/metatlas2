@@ -137,6 +137,7 @@ def set_up_paths(
     lcmsruns_path = f"{data_dir}/lcmsruns/"
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.parquet"
+    project_output_path = f"{data_dir}/projects/targeted_outputs/"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
         return {
@@ -146,8 +147,11 @@ def set_up_paths(
         }
 
     owner = config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
-    project_output_dir = Path.home() / f"{owner}_metabolomics_data" / project_name
-    project_short = str(project_name.split("_")[4]) + "_RTA" + str(rt_alignment_number) + "_TGA" + str(analysis_number)
+    project_output_dir = Path(project_output_path) / f"{owner}" / project_name
+    try:
+        project_short = str(project_name.split("_")[4]) + "_RTA" + str(rt_alignment_number) + "_TGA" + str(analysis_number)
+    except Exception as e:
+        raise ValueError(f"Could not parse short project name from full project name - is it malformed? Error: {e}")
     rta_dir = project_output_dir / f"RTA{rt_alignment_number}"
     analysis_dir = rta_dir / f"TGA{analysis_number}"
 

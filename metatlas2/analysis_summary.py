@@ -5,12 +5,6 @@ import os
 import textwrap
 from tqdm.notebook import tqdm
 
-from rdkit import Chem
-from rdkit.Chem import rdDepictor, rdMolDraw2D
-import cairosvg
-import io
-from PIL import Image
-        
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -25,8 +19,40 @@ import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('analysis_summary')
 
-# ── colour palette for EIC traces (one colour per file) ──────────────────────
-_FILE_COLORS = list(mcolors.TABLEAU_COLORS.values())
+def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) -> str:
+    """Determine color for a file based on color mapping.
+    
+    Matches file name against keys in color_map (case-insensitive substring match),
+    similar to the GUI logic. Falls back to gray if no match is found.
+    
+    Parameters
+    ----------
+    file_path : str
+        Full path to the file
+    color_map : dict, optional
+        Mapping from LCMS run identifier to color string (e.g. {'ISTD': 'blue', 'QC': 'green'})
+        If None, returns gray for all files.
+        
+    Returns
+    -------
+    str
+        Color string (matched color or 'gray' as fallback)
+    """
+    if color_map is None:
+        return "gray"
+    
+    # Extract short filename (similar to GUI)
+    raw_name = os.path.basename(str(file_path))
+    name_parts = raw_name.split(".")[0].split("_")
+    short_name = "_".join(name_parts[11:]) if len(name_parts) > 11 else raw_name
+    
+    # Match against color_map keys (case-insensitive substring match)
+    for key, color in color_map.items():
+        if key.lower() in short_name.lower():
+            return color
+    
+    # No match found, use gray
+    return "gray"
 
 def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
     """Parse a JSON-encoded spectrum string into (x_array, y_array) lists.
@@ -112,17 +138,17 @@ def _plot_mirror(
         for mz, intensity, color in zip(ref_mz, ref_int, frag_colors):
             ax.bar(mz, -intensity * scale, color=color, width=0.5, alpha=0.6)
 
-    ax.set_xlabel("m/z", fontsize=10, weight="bold")
-    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=10)
+    ax.set_xlabel("m/z", fontsize=12, weight="bold")
+    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=12)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
-    ax.tick_params(labelsize=10)
+    ax.tick_params(labelsize=12)
 
     score_str = f"{score:.3f}" if (isinstance(score, (int, float)) and not np.isnan(score)) else "N/A"
     rt_str    = f"{rt:.2f}"    if (isinstance(rt,    (int, float)) and not np.isnan(rt))    else "N/A"
 
-    ax.text(0.5, 1.10, title,                   fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.04, f"Score: {score_str}",   fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.01, f"RT: {rt_str} min",     fontsize=9,  weight="normal", ha="center", va="bottom",    transform=ax.transAxes)
+    ax.text(0.5, 1.13, title,                   fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.09, f"Score: {score_str}",   fontsize=14, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.02, f"RT: {rt_str} min",     fontsize=12,  weight="normal", ha="center", va="bottom",    transform=ax.transAxes)
 
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
@@ -144,9 +170,9 @@ def _plot_raw_ms2(
     ax.tick_params(labelsize=10)
 
     rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
-    ax.text(0.5, 1.10, title,               fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.04, "Score: N/A",        fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 0.99, f"RT: {rt_str} min", fontsize=9,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+    ax.text(0.5, 1.10, title,               fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.04, "Score: N/A",        fontsize=12, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 0.99, f"RT: {rt_str} min", fontsize=10,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
 
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
@@ -156,14 +182,14 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
     ax.set_xlim(0, 500)
     ax.set_ylim(-100, 1000)
     ax.axhline(y=0, color="black", linewidth=1.0)
-    ax.set_xlabel("m/z", fontsize=10, weight="bold")
-    ax.set_ylabel("Intensity", fontsize=10)
-    ax.tick_params(labelsize=10)
+    ax.set_xlabel("m/z", fontsize=12, weight="bold")
+    ax.set_ylabel("Intensity", fontsize=12)
+    ax.tick_params(labelsize=12)
     ax.text(0.5, 0.5, "No MS2 Data", transform=ax.transAxes,
             ha="center", va="center", fontsize=14, weight="bold", color="gray")
-    ax.text(0.5, 1.10, title,        fontsize=11, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.04, "Score: N/A", fontsize=11, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 0.99, "RT: N/A",    fontsize=9,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+    ax.text(0.5, 1.10, title,        fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.04, "Score: N/A", fontsize=12, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 0.99, "RT: N/A",    fontsize=12,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
 
@@ -178,6 +204,13 @@ def _plot_structure(
     ax.axis("off")
     mol = None
     try:
+        from rdkit import Chem
+        from rdkit.Chem import rdDepictor
+        from rdkit.Chem.Draw import rdMolDraw2D
+        import cairosvg
+        import io
+        from PIL import Image
+        
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
         if mol is None and inchi:
@@ -210,18 +243,33 @@ def _plot_structure(
         logger.warning("Could not draw structure for %s: %s", inchi_key, exc)
     
     ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
-            ha="center", va="center", fontsize=10)
+            ha="center", va="center", fontsize=12, weight="bold", color="gray")
 
 def _plot_eic(
     ax,
     ms1_compound_df: pd.DataFrame,
     mc_row: pd.Series,
     log_scale: bool = False,
+    color_map: Optional[Dict[str, str]] = None,
 ) -> None:
     """Plot EIC traces for all files of one compound.
 
     *ms1_compound_df* is already filtered to the target inchi_key + adduct.
     Each row holds the full EIC for one file in ``raw_spectrum`` (JSON [rt_list, i_list]).
+    
+    Parameters
+    ----------
+    ax : matplotlib axis
+        Axis to plot on
+    ms1_compound_df : pd.DataFrame
+        MS1 data for one compound (filtered to target inchi_key + adduct)
+    mc_row : pd.Series
+        Manual curation row for the compound
+    log_scale : bool
+        If True, plot log10(intensity)
+    color_map : dict, optional
+        Mapping from LCMS run identifier to color string (e.g. {'ISTD': 'blue'})
+        If None, all traces will be gray
     """
     rt_min  = mc_row.get("rt_min",       np.nan)
     rt_max  = mc_row.get("rt_max",       np.nan)
@@ -239,7 +287,7 @@ def _plot_eic(
         rt_arr, i_arr = _parse_spectrum(row["raw_spectrum"])
         if not rt_arr:
             continue
-        color = _FILE_COLORS[file_idx % len(_FILE_COLORS)]
+        color = _get_file_color(row["file_path"], color_map)
         # Shorten file label: take the sample-name portion after the 11th underscore segment
         raw_name  = os.path.basename(str(row["file_path"]))
         name_parts = raw_name.split(".")[0].split("_")
@@ -248,9 +296,9 @@ def _plot_eic(
             i_arr = [np.log10(max(v, 1)) for v in i_arr]
         ax.plot(rt_arr, i_arr, color=color, linewidth=1.0, alpha=0.7, label=fname_short)
 
-    ax.set_xlabel("Retention Time (min)", fontsize=12, weight="bold")
-    ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=12, weight="bold")
-    ax.tick_params(labelsize=11)
+    ax.set_xlabel("Retention Time (min)", fontsize=14, weight="bold")
+    ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=14, weight="bold")
+    ax.tick_params(labelsize=12)
     if not log_scale:
         ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     for spine in ax.spines.values():
@@ -258,7 +306,7 @@ def _plot_eic(
 
     if ms1_compound_df.empty:
         ax.text(0.5, 0.5, "No MS1 data", transform=ax.transAxes,
-                ha="center", va="center", fontsize=13, color="gray")
+                ha="center", va="center", fontsize=14, color="gray")
 
 
 def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
@@ -290,8 +338,8 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
     y_start = 0.96
     y_end  = 0.086
     for label, value in rows:
-        ax.text(0.02, y_start, f"{label}:", fontsize=14, weight="bold", va="center", transform=ax.transAxes)
-        ax.text(0.38, y_start, value, fontsize=14, va="center", transform=ax.transAxes)
+        ax.text(0.02, y_start, f"{label}:", fontsize=18, weight="bold", va="center", transform=ax.transAxes)
+        ax.text(0.38, y_start, value, fontsize=18, va="center", transform=ax.transAxes)
         y_start -= y_end
 
     ax.set_xlim(0, 1)
@@ -308,7 +356,7 @@ def _plot_hit_info_table(
 
     if ms2_hits_compound_df.empty:
         ax.text(0.5, 0.5, "No MS2 hits found.", transform=ax.transAxes,
-                ha="center", va="center", fontsize=16, color="gray")
+                ha="center", va="center", fontsize=25, color="gray")
         return
 
     # Single best hit overall
@@ -342,7 +390,7 @@ def _plot_hit_info_table(
             return "N/A"
         return fmt.format(val)
 
-    score_str = f"{score:.4f}  ({num_matches}/{ref_frags} ions)" if not np.isnan(score) else "N/A"
+    score_str = f"{score:.4f}" if not np.isnan(score) else "N/A"
 
     # Wrap the fragment list so it stays within the table width
     FRAG_WRAP_WIDTH = 80
@@ -368,8 +416,8 @@ def _plot_hit_info_table(
     frag_top      = rt_center - std_row_h / 2
     frag_center   = frag_top - frag_row_h / 2
 
-    # File name as title (above the table)
-    ax.text(0.05, 0.97, fname_abbr, fontsize=13.75, weight="bold",
+    # File name as title (above the table) - aligned with table left edge
+    ax.text(col_x[0], 0.97, fname_abbr, fontsize=15, weight="bold",
             ha="left", va="center", transform=ax.transAxes)
 
     GAP = 0.004
@@ -385,7 +433,7 @@ def _plot_hit_info_table(
         ))
 
     for x, label in zip(col_x, ["BEST MATCH", "Theoretical", "Measured", "Error/Score"]):
-        ax.text(x, header_center, label, fontsize=12.5, weight="bold", ha="left",
+        ax.text(x, header_center, label, fontsize=15, weight="bold", ha="left",
                 va="center", transform=ax.transAxes)
 
     standard_rows = [
@@ -400,16 +448,16 @@ def _plot_hit_info_table(
     ]
     for y_center, row_vals in standard_rows:
         for col_idx, val in enumerate(row_vals):
-            ax.text(col_x[col_idx], y_center, val, fontsize=12.5,
+            ax.text(col_x[col_idx], y_center, val, fontsize=15,
                     weight="bold" if col_idx == 0 else "normal",
                     ha="left", va="center", transform=ax.transAxes)
 
     frag_text_top = frag_top - GAP * 2
-    ax.text(col_x[0], frag_text_top, "Fragment Matches", fontsize=12.5,
+    ax.text(col_x[0], frag_text_top, "Fragment Matches", fontsize=15,
             weight="bold", ha="left", va="top", transform=ax.transAxes)
-    ax.text(col_x[1], frag_text_top, frag_display, fontsize=11.0,
+    ax.text(col_x[1], frag_text_top, frag_display, fontsize=15,
             ha="left", va="top", transform=ax.transAxes)
-    ax.text(col_x[3], frag_text_top, score_str, fontsize=12.5,
+    ax.text(col_x[3], frag_text_top, score_str, fontsize=15,
             ha="left", va="top", transform=ax.transAxes)
 
     ax.set_xlim(0, 1)
@@ -448,6 +496,13 @@ def make_identification_figure(
     """
     project_db_path  = summary_obj.paths["project_db_path"]
     main_db_path     = summary_obj.paths.get("main_db_path")
+
+    # ── Get color mapping for EIC plots (from override or config) ───────────
+    color_map = None
+    if hasattr(summary_obj, 'override_parameters') and summary_obj.override_parameters.get('gui_lcmsruns_colors'):
+        color_map = summary_obj.override_parameters['gui_lcmsruns_colors']
+    elif hasattr(summary_obj, 'workflow_params') and summary_obj.workflow_params.get('gui_lcmsruns_colors'):
+        color_map = summary_obj.workflow_params['gui_lcmsruns_colors']
 
     # ── Resolve output directory ─────────────────────────────────────────────
     if output_loc is None:
@@ -573,13 +628,13 @@ def make_identification_figure(
 
         # Row 2, Col 0: linear EIC
         ax_eic_lin = fig.add_subplot(gs[1, 0])
-        _plot_eic(ax_eic_lin, ms1_df, mc_row, log_scale=False)
-        ax_eic_lin.set_title("EIC (linear scale)", fontsize=12)
+        _plot_eic(ax_eic_lin, ms1_df, mc_row, log_scale=False, color_map=color_map)
+        ax_eic_lin.set_title("EIC (linear scale)", fontsize=18)
 
         # Row 2, Col 1: log-scale EIC
         ax_eic_log = fig.add_subplot(gs[1, 1])
-        _plot_eic(ax_eic_log, ms1_df, mc_row, log_scale=True)
-        ax_eic_log.set_title("EIC (log₁₀ scale)", fontsize=12)
+        _plot_eic(ax_eic_log, ms1_df, mc_row, log_scale=True, color_map=color_map)
+        ax_eic_log.set_title("EIC (log₁₀ scale)", fontsize=18)
 
         # Row 2, Cols 2-3: compound metadata table
         ax_info = fig.add_subplot(gs[1, 2:4])
@@ -590,7 +645,7 @@ def make_identification_figure(
         _plot_hit_info_table(ax_hits, ms2_hits_df, mc_row)
 
         # Figure-level title and section dividers
-        plt.suptitle(f"[{cmp_idx + 1:04d}]  |  {compound_name}  |  {adduct}\n", fontsize=20, weight="bold", y=0.97)
+        plt.suptitle(f"[{cmp_idx + 1:04d}]  |  {compound_name}  |  {adduct}  |  {inchi_key}\n", fontsize=25, weight="bold", y=0.97)
         for y_line in [0.60, 0.345]:
             fig.add_artist(plt.Line2D(
                 [0.08, 0.92], [y_line, y_line],
@@ -1065,7 +1120,7 @@ def _render_eic_thumbnail(
         ax.plot(rt_arr, i_arr, color="steelblue", linewidth=0.8)
     else:
         ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
-                ha="center", va="center", fontsize=7, color="gray")
+                ha="center", va="center", fontsize=10, color="gray")
 
     # RT vlines: rt_min = red dashed, rt_peak = black dotted, rt_max = black dashed
     _vline = lambda val, color, ls: (
@@ -1090,7 +1145,7 @@ def _render_eic_thumbnail(
     ax.xaxis.label.set_visible(False)
     ax.yaxis.label.set_visible(False)
 
-    ax.set_title(fname_short, fontsize=5, pad=2, loc="center")
+    ax.set_title(fname_short, fontsize=10, pad=2, loc="center")
 
     for spine in ax.spines.values():
         spine.set_linewidth(0.5)
@@ -1160,7 +1215,7 @@ def _write_compound_eic_pdf(
                 axes_flat[slot_idx].set_visible(False)
 
             page_label = f"({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
-            fig.suptitle(f"{title_base}  {page_label}", fontsize=8, y=1.005)
+            fig.suptitle(f"{title_base}  {page_label}", fontsize=12, y=1.005)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -1284,11 +1339,6 @@ def make_eic_thumbnails(
             )
 
         logger.debug("Wrote EIC PDFs for %s", compound_name)
-
-    logger.info(
-        "EIC thumbnail PDFs complete.\n  Shared y:      %s\n  Independent y: %s",
-        dir_shared, dir_indep,
-    )
 
 def _file_group(file_path: str) -> str:
     """Return the file group label: the segment at underscore-separated index 11 of the stem.
@@ -1821,6 +1871,6 @@ def run_all_summaries(
     )
 
     logger.info("Saving input yaml config to analysis output directory...")
-    with open(f"{summary_obj.paths['analysis_output_dir']}/analysis_config.yaml", "w") as f:
+    with open(f"{summary_obj.paths['analysis_output_dir']}/RTA{summary_obj.rt_alignment_number}_TGA{summary_obj.analysis_number}_analysis_config.yaml", "w") as f:
         with open(summary_obj.config_path, "r") as original:
             f.write(original.read())

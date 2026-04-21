@@ -355,6 +355,7 @@ def run_analysis_summary(
     rt_alignment_number: int,
     analysis_number: int,
     pre_curation_atlas: str = None,
+    override_parameters: Dict[str, Any] = None,
     overwrite: bool = False,
 ) -> None:
     """
@@ -385,6 +386,9 @@ def run_analysis_summary(
     logger.info(f"Loading workflow parameters for analysis summary from config...")
     summary_obj.workflow_params = summary_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][summary_obj.pre_curation_atlas_obj.chromatography][summary_obj.pre_curation_atlas_obj.polarity][summary_obj.pre_curation_atlas_obj.analysis_type]['PARAMS']
     
+    logger.info(f"Setting override parameters for analysis summary...")
+    summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
+    
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
     summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(
         summary_obj=summary_obj
@@ -402,33 +406,9 @@ def run_analysis_summary(
         overwrite=overwrite,
     )
 
-def run_atlas_finder(
-    project_db_path: str,
-    atlas_uid: str = None,
-    atlas_name: str = None,
-    analysis_type: str = None,
-    chromatography: str = None,
-    polarity: str = None,
-    atlas_type: str = None,
-    created_by: str = None,
-    created_date: str = None,
-    source: str = None
-):
-    """
-    Run the atlas finder utility to query the database for atlases matching user-specified criteria.
-    """
-    
-    df = dbi.find_atlases_in_database(
-        database_path=project_db_path,
-        atlas_uid=atlas_uid,
-        atlas_name=atlas_name,
-        analysis_type=analysis_type,
-        chromatography=chromatography,
-        polarity=polarity,
-        atlas_type=atlas_type,
-        created_by=created_by,
-        created_date=created_date,
-        source=source
+    logger.info("Changing group ownership of project output folder to the 'metatlas' group...")
+    ldt.change_ownership_to_metatlas_group(
+        project_dir_path=summary_obj.paths['project_directory']
     )
 
-    return df
+    logger.info(f"Analysis summary procedure complete for RTA{summary_obj.rt_alignment_number} and TGA{summary_obj.analysis_number}!")

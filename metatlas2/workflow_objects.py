@@ -703,6 +703,7 @@ class AnalysisSummary:
 
     # Attributes added during analysis
     workflow_params: Dict[str, Any] = field(default_factory=dict)
+    override_parameters: Dict[str, Any] = field(default_factory=dict)
     pre_curation_atlas_obj: Optional[Atlas] = None
     post_curation_atlas_obj: Optional[Atlas] = None
     summary_data: Optional[pd.DataFrame] = None

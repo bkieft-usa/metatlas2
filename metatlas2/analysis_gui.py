@@ -122,12 +122,6 @@ def build_dash_app(
         if other_note not in OTHER_OPTIONS:
             other_note = "no selection"
         
-        # Auto-set MS2 note if no MS2 data available and not already set
-        if ms2_note == "no selection":
-            n_scans = _count_ms2_scans(row, rt_min, rt_max)
-            if n_scans == 0:
-                ms2_note = "0.0, no match or no MSMS collected"
-        
         return {
             "session_id":    session_id or str(uuid.uuid4()),
             "edit_seq":      int(edit_seq),
