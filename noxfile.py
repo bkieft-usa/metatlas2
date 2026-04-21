@@ -85,7 +85,7 @@ def system_test(session):
     session.log("Running validation tests...")
     session.log("=" * 60)
     # Install pytest if not available (needed in CI environments)
-    session.install("pytest>=8.3.4")
+    session.run("python", "-m", "pip", "install", "pytest>=8.3.4", external=True)
     session.run("python", "-m", "pytest", "tests/test_system.py", "-v", "--tb=short")
     
     # Clean up after tests complete
