@@ -52,3 +52,46 @@ jobs:
             IMAGE_TAG=${{ steps.meta.outputs.sha_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  system-test:
+    runs-on: ubuntu-latest
+    needs: build-push
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install nox
+        run: pip install nox
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Pull Docker image
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+      
+      - name: Run system test
+        run: nox -s system_test
+        env:
+          METATLAS2_IMAGE_TAG: latest
+      
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-test-outputs
+          path: |
+            /tmp/metatlas2-test-output-*/
+            ~/.test_owner_metabolomics_data/
+          retention-days: 7
+          if-no-files-found: warn

@@ -1,0 +1,118 @@
+WORKFLOWS:
+  PATHS:
+    owner: test_owner
+    msms_refs_path: tests/fixtures/data/ms2_references.tsv
+  RT_ALIGNMENT:
+    HILICZ:
+      ATLAS:
+        uid: atlas-test-242cd7485564b4e5
+      PARAMS:
+        include_lcmsruns:
+          - QC
+        exclude_lcmsruns:
+          - NEG
+        use_existing_rt_alignment: false
+        ppm_error: 20.0
+        extra_time: 1.0
+        polynomial_degree: 2
+        min_observations_per_compound: 1
+        min_compounds_for_modeling: 2
+        r2_threshold: 0.3
+        apply_model_to_min_max: true
+        exclude_inchikeys: []
+
+  TARGETED_ANALYSES:
+    HILICZ:
+      POS:
+        ISTD:
+          ATLAS:
+            uid: atlas-test-7e3c0794ac3ed436
+          PARAMS:
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: false
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 5.0e4
+            ms1_min_num_points: 3
+            ppm_error: 5.0
+            extra_time: 1.0
+            ms2_min_score: 0.05
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.1
+            gui_require_all_evaluated: false
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXPERIMENTAL: green
+
+        EMA:
+          ATLAS:
+            uid: atlas-test-119437acbaa03b7c
+          PARAMS:
+            include_lcmsruns:
+              - EXPERIMENTAL
+              - ISTD
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui:
+                - INJBL
+                - BLANK
+              id_sheet:
+                - INJBL
+                - BLANK
+                - REFSTD
+              chromatograms:
+                - INJBL
+                - BLANK
+              id_plots:
+                - INJBL
+                - BLANK
+                - REFSTD
+              data_sheets:
+                - INJBL
+                - BLANK
+            do_alignment: true
+            create_curation_notebooks: false  # Skip notebook generation for CI
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            ms1_min_peak_intensity: 5.0e4
+            ms1_min_num_points: 3
+            ppm_error: 5.0
+            extra_time: 1.0
+            ms2_min_score: 0.05
+            ms2_min_matching_frags: 1
+            ms2_frag_mz_tolerance: 0.1
+            gui_require_all_evaluated: false
+            gui_top_n_hits: 20
+            gui_lcmsruns_colors:
+              ISTD: blue
+              QC: blue
+              EXPERIMENTAL: green
+              EXCTRL: red
