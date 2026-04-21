@@ -149,28 +149,12 @@ def _plot_mirror(
             order = np.argsort(int_np[valid_idx])[::-1][:top_n]
             top_idx = valid_idx[order]
 
-            x_span = float(np.nanmax(mz_np[valid]) - np.nanmin(mz_np[valid])) if np.sum(valid) > 1 else 1.0
-            y_span = float(np.nanmax(int_np[valid])) if np.any(valid) else 1.0
-            x_tol = max(0.01, 0.03 * x_span)
-            y_tol = max(1.0, 0.08 * y_span)
-
-            placed = []
             for idx in top_idx:
-                x_txt = float(mz_np[idx]) - 0.15  # slightly left
-                y_base = float(int_np[idx]) * 1.02
-                y_txt = y_base
-
-                # Greedy vertical bump to reduce label collisions
-                for _ in range(10):
-                    overlaps = any(abs(x_txt - px) < x_tol and abs(y_txt - py) < y_tol for px, py in placed)
-                    if not overlaps:
-                        break
-                    y_txt += 0.06 * y_span
-
-                placed.append((x_txt, y_txt))
+                x_txt = float(mz_np[idx])
+                y_txt = float(int_np[idx]) * 1.02
                 ax.text(
                     x_txt, y_txt, f"{mz_np[idx]:.4f}",
-                    fontsize=8, ha="right", va="bottom", rotation=35, color="black",
+                    fontsize=8, ha="center", va="bottom", rotation=90, color="black",
                     bbox=dict(facecolor="white", edgecolor="none", alpha=0.65, pad=0.2),
                     clip_on=False,
                 )
@@ -248,6 +232,8 @@ def _plot_structure(
         from rdkit.Chem.Draw import rdMolDraw2D
         import io
         from PIL import Image
+        from svglib.svglib import svg2rlg
+        from reportlab.graphics import renderPM
         
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
@@ -255,7 +241,7 @@ def _plot_structure(
             mol = Chem.MolFromInchi(inchi)
         
         if mol is not None:
-            # Use exact method from standard_annotation.py
+            # Use exact method from standard_annotation.py - generate SVG
             mc = Chem.Mol(mol.ToBinary())
             try:
                 Chem.Kekulize(mc)
@@ -265,11 +251,15 @@ def _plot_structure(
             if not mc.GetNumConformers():
                 rdDepictor.Compute2DCoords(mc)
             
-            # Generate PNG directly using MolDraw2DCairo (avoids X11 dependencies)
-            drawer = rdMolDraw2D.MolDraw2DCairo(size, size)
+            # Generate SVG (no X11 dependencies like the old code)
+            drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
             drawer.DrawMolecule(mc)
             drawer.FinishDrawing()
-            png_data = drawer.GetDrawingText()
+            svg_data = drawer.GetDrawingText().replace('svg:', '')
+            
+            # Convert SVG to PNG using svglib (no X11 dependencies)
+            drawing = svg2rlg(io.BytesIO(svg_data.encode('utf-8')))
+            png_data = renderPM.drawToString(drawing, fmt='PNG')
             
             # Display PNG in matplotlib
             image = Image.open(io.BytesIO(png_data))
@@ -683,7 +673,7 @@ def make_identification_figure(
 
         # Figure-level title and section dividers
         plt.suptitle(f"[{cmp_idx + 1:04d}] |  {adduct}  |  {inchi_key}\n{compound_name}\n", fontsize=20, weight="bold", y=0.97)
-        for y_line in [0.60, 0.345]:
+        for y_line in [0.62, 0.345]:
             fig.add_artist(plt.Line2D(
                 [0.08, 0.92], [y_line, y_line],
                 transform=fig.transFigure,
