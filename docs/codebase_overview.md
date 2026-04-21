@@ -6,6 +6,7 @@ A programmer-oriented reference for understanding how a typical targeted metabol
 
 ## Table of Contents
 
+- [Database Schema](#database-schema)
 - [Module Map for Targeted Analysis](#module-map-for-targeted-analysis)
 - [Other Scripts and Tools](#other-scripts-and-tools)
 - [Adding to the central metatlas knowledge store](#adding-to-the-central-metatlas-knowledge-store)
@@ -30,6 +31,19 @@ A programmer-oriented reference for understanding how a typical targeted metabol
   - [Development Workflow](#development-workflow)
   - [Keeping the Local Cache Current](#keeping-the-local-cache-current)
 - [Output Directory Layout](#output-directory-layout)
+
+---
+
+## Database Schema
+
+For detailed information about the database structure, tables, and their relationships to workflow classes, see **[database_schema.md](database_schema.md)**.
+
+This comprehensive guide covers:
+- Main database vs. project database architecture
+- Complete table schemas with field descriptions
+- How workflow classes map to database tables
+- Entity relationships and foreign key constraints
+- Design principles and usage examples
 
 ---
 
