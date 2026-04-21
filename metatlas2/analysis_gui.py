@@ -619,16 +619,16 @@ def build_dash_app(
                 frag_colors = ["red"] * len(mz_q)
 
             scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
-            bars.append(go.Bar(x=mz_q, y=int_q, marker_color=frag_colors, width=0.5,
+            bars.append(go.Bar(x=mz_q, y=int_q, marker_color=frag_colors, width=0.25,
                        showlegend=False,
                        hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Query</extra>"))
             bars.append(go.Bar(x=mz_r, y=[-i * scale for i in int_r],
-                       marker_color=frag_colors, width=0.5,
+                       marker_color=frag_colors, width=0.25,
                        showlegend=False,
                        hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Reference</extra>"))
         else:
             mz, ints = _parse_spectrum_cached(scan["raw_spectrum"])
-            bars.append(go.Bar(x=mz, y=ints, marker_color="red", width=0.5,
+            bars.append(go.Bar(x=mz, y=ints, marker_color="red", width=0.25,
                        showlegend=False,
                        hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>MS2</extra>"))
 

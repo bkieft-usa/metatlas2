@@ -128,27 +128,66 @@ def _plot_mirror(
 
     if qry_mz and qry_int:
         for mz, intensity, color in zip(qry_mz, qry_int, frag_colors):
-            ax.bar(mz, intensity, color=color, width=0.5, alpha=0.85)
+            ax.bar(mz, intensity, color=color, width=1.0, alpha=0.85)
 
     scale = 1.0
     if ref_mz and ref_int:
-        if len(frag_colors) != len(ref_mz):
-            frag_colors = ["steelblue"] * len(ref_mz)
+        ref_colors = ["steelblue"] * len(ref_mz)
         scale = (max(qry_int) / max(ref_int)) if (qry_int and max(ref_int) > 0) else 1.0
-        for mz, intensity, color in zip(ref_mz, ref_int, frag_colors):
-            ax.bar(mz, -intensity * scale, color=color, width=0.5, alpha=0.6)
+        for mz, intensity, color in zip(ref_mz, ref_int, ref_colors):
+            ax.bar(mz, -intensity * scale, color=color, width=1.0, alpha=0.6)
 
-    ax.set_xlabel("m/z", fontsize=12, weight="bold")
-    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=12)
+    # Label top 5 (or fewer) query peaks by intensity, with simple overlap avoidance
+    if qry_mz and qry_int:
+        mz_np = np.array(qry_mz, dtype=float)
+        int_np = np.array(qry_int, dtype=float)
+        valid = np.isfinite(mz_np) & np.isfinite(int_np) & (int_np > 0)
+
+        if np.any(valid):
+            valid_idx = np.where(valid)[0]
+            top_n = min(5, len(valid_idx))
+            order = np.argsort(int_np[valid_idx])[::-1][:top_n]
+            top_idx = valid_idx[order]
+
+            x_span = float(np.nanmax(mz_np[valid]) - np.nanmin(mz_np[valid])) if np.sum(valid) > 1 else 1.0
+            y_span = float(np.nanmax(int_np[valid])) if np.any(valid) else 1.0
+            x_tol = max(0.01, 0.03 * x_span)
+            y_tol = max(1.0, 0.08 * y_span)
+
+            placed = []
+            for idx in top_idx:
+                x_txt = float(mz_np[idx]) - 0.15  # slightly left
+                y_base = float(int_np[idx]) * 1.02
+                y_txt = y_base
+
+                # Greedy vertical bump to reduce label collisions
+                for _ in range(10):
+                    overlaps = any(abs(x_txt - px) < x_tol and abs(y_txt - py) < y_tol for px, py in placed)
+                    if not overlaps:
+                        break
+                    y_txt += 0.06 * y_span
+
+                placed.append((x_txt, y_txt))
+                ax.text(
+                    x_txt, y_txt, f"{mz_np[idx]:.4f}",
+                    fontsize=8, ha="right", va="bottom", rotation=35, color="black",
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.65, pad=0.2),
+                    clip_on=False,
+                )
+
+            ax.margins(y=0.20)
+
+    ax.set_xlabel("m/z", fontsize=14, weight="bold")
+    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=14)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
-    ax.tick_params(labelsize=12)
+    ax.tick_params(labelsize=14)
 
     score_str = f"{score:.3f}" if (isinstance(score, (int, float)) and not np.isnan(score)) else "N/A"
-    rt_str    = f"{rt:.2f}"    if (isinstance(rt,    (int, float)) and not np.isnan(rt))    else "N/A"
+    rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
 
-    ax.text(0.5, 1.13, title,                   fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.09, f"Score: {score_str}",   fontsize=14, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.02, f"RT: {rt_str} min",     fontsize=12,  weight="normal", ha="center", va="bottom",    transform=ax.transAxes)
+    ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.07, f"Score: {score_str}", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
 
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
@@ -163,11 +202,11 @@ def _plot_raw_ms2(
     ax.axhline(y=0, color="black", linewidth=1.0)
     if mz_arr and int_arr:
         for mz, intensity in zip(mz_arr, int_arr):
-            ax.bar(mz, intensity, color="tomato", width=0.5, alpha=0.85)
-    ax.set_xlabel("m/z", fontsize=10, weight="bold")
-    ax.set_ylabel("Intensity", fontsize=10)
+            ax.bar(mz, intensity, color="tomato", width=1.0, alpha=0.85)
+    ax.set_xlabel("m/z", fontsize=14, weight="bold")
+    ax.set_ylabel("Intensity", fontsize=14)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
-    ax.tick_params(labelsize=10)
+    ax.tick_params(labelsize=14)
 
     rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
     ax.text(0.5, 1.10, title,               fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
@@ -182,14 +221,14 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
     ax.set_xlim(0, 500)
     ax.set_ylim(-100, 1000)
     ax.axhline(y=0, color="black", linewidth=1.0)
-    ax.set_xlabel("m/z", fontsize=12, weight="bold")
-    ax.set_ylabel("Intensity", fontsize=12)
-    ax.tick_params(labelsize=12)
+    ax.set_xlabel("m/z", fontsize=14, weight="bold")
+    ax.set_ylabel("Intensity", fontsize=14)
+    ax.tick_params(labelsize=14)
     ax.text(0.5, 0.5, "No MS2 Data", transform=ax.transAxes,
             ha="center", va="center", fontsize=14, weight="bold", color="gray")
     ax.text(0.5, 1.10, title,        fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     ax.text(0.5, 1.04, "Score: N/A", fontsize=12, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 0.99, "RT: N/A",    fontsize=12,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+    ax.text(0.5, 0.99, "RT: N/A",    fontsize=10,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
 
@@ -207,7 +246,6 @@ def _plot_structure(
         from rdkit import Chem
         from rdkit.Chem import rdDepictor
         from rdkit.Chem.Draw import rdMolDraw2D
-        import cairosvg
         import io
         from PIL import Image
         
@@ -227,14 +265,13 @@ def _plot_structure(
             if not mc.GetNumConformers():
                 rdDepictor.Compute2DCoords(mc)
             
-            # Generate SVG using MolDraw2DSVG (exact method from old code)
-            drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
+            # Generate PNG directly using MolDraw2DCairo (avoids X11 dependencies)
+            drawer = rdMolDraw2D.MolDraw2DCairo(size, size)
             drawer.DrawMolecule(mc)
             drawer.FinishDrawing()
-            svg_data = drawer.GetDrawingText().replace('svg:', '')
+            png_data = drawer.GetDrawingText()
             
-            # Convert SVG to PNG for matplotlib display
-            png_data = cairosvg.svg2png(bytestring=svg_data.encode('utf-8'))
+            # Display PNG in matplotlib
             image = Image.open(io.BytesIO(png_data))
             ax.imshow(image, aspect="equal")
             return
@@ -277,11 +314,11 @@ def _plot_eic(
 
     # RT boundary and atlas peak lines
     if not np.isnan(rt_min):
-        ax.axvline(rt_min,  color="red",   linestyle="--", linewidth=1.0, alpha=0.7, label="_rt_min")
+        ax.axvline(rt_min,  color="red",   linestyle="--", linewidth=1.5, alpha=0.7, label="_rt_min")
     if not np.isnan(rt_max):
-        ax.axvline(rt_max,  color="red",   linestyle="--", linewidth=1.0, alpha=0.7, label="_rt_max")
+        ax.axvline(rt_max,  color="red",   linestyle="--", linewidth=1.5, alpha=0.7, label="_rt_max")
     if not np.isnan(rt_peak):
-        ax.axvline(rt_peak, color="black", linestyle=":",  linewidth=1.2, alpha=0.7, label="_atlas_peak")
+        ax.axvline(rt_peak, color="black", linestyle=":",  linewidth=1.5, alpha=0.7, label="_atlas_peak")
 
     for file_idx, row in ms1_compound_df.iterrows():
         rt_arr, i_arr = _parse_spectrum(row["raw_spectrum"])
@@ -298,7 +335,7 @@ def _plot_eic(
 
     ax.set_xlabel("Retention Time (min)", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=14, weight="bold")
-    ax.tick_params(labelsize=12)
+    ax.tick_params(labelsize=14)
     if not log_scale:
         ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     for spine in ax.spines.values():
@@ -403,7 +440,7 @@ def _plot_hit_info_table(
     n_frag_lines = min(len(frag_lines), 3)
 
     # Column x-positions: row-label | Theoretical | Measured | Error/Score
-    col_x = [0, 0.2, 0.4, 0.6]
+    col_x = [0, 0.3, 0.6, 0.9]
 
     # Layout constants
     std_row_h  = 0.135
@@ -645,7 +682,7 @@ def make_identification_figure(
         _plot_hit_info_table(ax_hits, ms2_hits_df, mc_row)
 
         # Figure-level title and section dividers
-        plt.suptitle(f"[{cmp_idx + 1:04d}]  |  {compound_name}  |  {adduct}  |  {inchi_key}\n", fontsize=25, weight="bold", y=0.97)
+        plt.suptitle(f"[{cmp_idx + 1:04d}] |  {adduct}  |  {inchi_key}\n{compound_name}\n", fontsize=20, weight="bold", y=0.97)
         for y_line in [0.60, 0.345]:
             fig.add_artist(plt.Line2D(
                 [0.08, 0.92], [y_line, y_line],
