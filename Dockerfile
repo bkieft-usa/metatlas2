@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libcairo2 \
         libpango-1.0-0 \
         libgdk-pixbuf2.0-0 \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Bring in uv from the official image
