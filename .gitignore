@@ -1,0 +1,17 @@
+.python-version
+/data/
+!tests/fixtures/data/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+metatlas2/__pycache__/**
+notebooks/.ipynb_checkpoints/**
+configs/.ipynb_checkpoints/**
+metatlas2/.ipynb_checkpoints/**
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/

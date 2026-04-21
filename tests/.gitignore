@@ -1,0 +1,10 @@
+# Test outputs (generated during test runs - do not commit)
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Test fixture data should BE committed (tests/fixtures/data/)
+# This is intentionally empty to ensure fixtures are tracked
+!tests/fixtures/data/

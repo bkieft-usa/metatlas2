@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml" version="1.1">
+  <cvList count="1">
+    <cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" version="4.1.0"/>
+  </cvList>
+  <fileDescription>
+    <fileContent>
+      <cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum"/>
+      <cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum"/>
+    </fileContent>
+    <sourceFileList count="1">
+      <sourceFile id="sf1" name="20260420_SYSTEM_TEST_HILICZ_POS_Sample5_MS1_POS.raw" location="file:///">
+        <cvParam cvRef="MS" accession="MS:1000768" name="Thermo nativeID format"/>
+        <cvParam cvRef="MS" accession="MS:1000563" name="Thermo RAW format"/>
+      </sourceFile>
+    </sourceFileList>
+  </fileDescription>
+  <run id="run1" defaultInstrumentConfigurationRef="IC1">
+    <spectrumList count="0"/>
+  </run>
+</mzML>
