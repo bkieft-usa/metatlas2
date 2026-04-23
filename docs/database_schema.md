@@ -12,6 +12,7 @@ This document describes the metatlas2 database schema, table structure, and how 
   - [compound_mzrt Table](#compound_mzrt-table)
   - [atlases Table](#atlases-table)
   - [atlas_compound_associations Table](#atlas_compound_associations-table)
+  - [projects Table](#projects-table)
 - [Project Database Schema](#project-database-schema)
   - [lcmsruns Table](#lcmsruns-table)
   - [atlases Table (Project)](#atlases-table-project)
@@ -44,6 +45,7 @@ Metatlas2 uses lightweight **DuckDB** for data storage. The system maintains two
   - Reference RT/MZ data (compound_mzrt entries, added after curation)
   - Reference atlases (curated sets of compounds)
   - Compound-atlas associations (one compound can belong to many atlases)
+  - Project registry (tracks all projects for meta-analysis)
 
 ### 2. **Project Database** (Experimental Results)
 - **Purpose**: Stores project-specific experimental data and derived results in a standardized format
@@ -67,7 +69,7 @@ This separation allows for:
 
 ## Main Database Schema
 
-The main database contains four core tables that define reference compounds and atlases.
+The main database contains five core tables that define reference compounds, atlases, and project tracking.
 
 ### compounds Table
 
@@ -179,6 +181,24 @@ Junction table linking atlases to their constituent compounds and mzrt entries.
 - Each association links to a specific mzrt entry (adduct + method combination)
 - `association_order` preserves compound ordering within the atlas
 - Foreign keys enforce referential integrity
+
+### projects Table
+
+Tracks all projects created with metatlas2 for meta-analysis and project discovery. This table enables users to find all project database files across the system.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `project_uid` | TEXT (PK) | Unique identifier (e.g., `prj-a1b2c3...`) |
+| `project_name` | TEXT | Project name |
+| `project_db_path` | TEXT | Absolute path to project database file |
+| `created_by` | TEXT | Username of creator |
+| `created_date` | TEXT | ISO timestamp of creation |
+
+**Key Points**:
+- Automatically populated when a project is set up via `Project.setup()`
+- Enables discovery of all project databases for cross-project meta-analysis
+- Each project is registered once; duplicate entries are prevented
+- `project_db_path` provides the full path to the project's DuckDB file
 
 ---
 

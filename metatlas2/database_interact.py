@@ -105,6 +105,8 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"ms2-hits-{uuid.uuid4().hex[:32]}"
     elif entity_type == "manual_curation":
         return f"mcr-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "project":
+        return f"prj-{uuid.uuid4().hex[:32]}"
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
@@ -898,6 +900,51 @@ def save_lcmsruns_to_db(
     logger.info(f"Saved {total_files} LCMS runs to database.")
     return total_files
 
+def save_project_to_main_db(
+    main_db_path: str,
+    project_name: str,
+    project_db_path: str
+) -> str:
+    """
+    Register a project in the main database for meta-analysis tracking.
+    
+    Args:
+        main_db_path: Path to the main database
+        project_name: Name of the project
+        project_db_path: Absolute path to the project database
+        
+    Returns:
+        project_uid: Unique identifier for the project
+    """
+    with get_db_connection(main_db_path) as conn:
+        prov = get_provenance()
+        
+        # Check if project already exists
+        existing = conn.execute(
+            "SELECT project_uid FROM projects WHERE project_name = ? AND project_db_path = ?",
+            (project_name, project_db_path)
+        ).fetchone()
+        
+        if existing:
+            logger.info(f"Project '{project_name}' already registered in main database with UID {existing[0]}.")
+            return existing[0]
+        
+        # Generate new project UID and insert
+        project_uid = _generate_uid("project")
+        conn.execute(
+            "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
+            (
+                project_uid,
+                project_name,
+                project_db_path,
+                prov["analyst"],
+                prov["timestamp"],
+            ),
+        )
+        
+        logger.info(f"Registered project '{project_name}' in main database with UID {project_uid}.")
+        return project_uid
+
 def get_lcmsruns_from_db(
     project_db_path: str,
     file_types: Optional[List[str]] = None,
@@ -1211,6 +1258,16 @@ def _create_database_tables(conn, db_type: str = "main"):
                 FOREIGN KEY (atlas_uid) REFERENCES atlases (atlas_uid),
                 FOREIGN KEY (compound_uid) REFERENCES compounds (compound_uid),
                 FOREIGN KEY (mz_rt_uid) REFERENCES compound_mzrt (mz_rt_uid)
+            )
+        """)
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                project_uid TEXT PRIMARY KEY,
+                project_name TEXT,
+                project_db_path TEXT,
+                created_by TEXT,
+                created_date TEXT
             )
         """)
         

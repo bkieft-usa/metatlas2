@@ -5,6 +5,7 @@ import getpass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
+from tqdm.notebook import tqdm
 
 import pubchempy as pcp
 
@@ -22,59 +23,48 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
     """Get comprehensive compound data from PubChem using InChI key."""
     try:
         # Get CID from InChI key
-        cid_result = pcp.get_compounds(inchi_key, namespace='inchikey', 
+        cid_result = pcp.get_compounds(inchi_key, namespace='inchikey',
                                         as_dataframe=True, listkey_count=5)
 
         if cid_result.empty:
             return None
-            
+
         cid_result = cid_result.reset_index()
         cid = cid_result['cid'].to_string(index=False)
-        
+
         # Handle multiple CIDs
         if "\n" in cid:
             cid = (cid.rstrip().split('\n'))[-1]
-        
-        # Extract SMILES if available due to broken API response
-        smiles = ""
-        try:
-            cid_result_subset = cid_result[cid_result['cid'] == int(cid)]
-            cid_result_subset_dict = cid_result_subset.to_dict()
-            if "record" in cid_result_subset_dict:
-                if "props" in cid_result_subset_dict["record"][0]:
-                    smiles = cid_result_subset_dict["record"][0]["props"][0]["value"]["sval"]
-        except:
-            smiles = ""
 
         # Get detailed compound information
         compound = pcp.Compound.from_cid(cid)
-        
+
         # Filter synonyms to remove some common problematic entries
         filtered_synonyms = _filter_synonym_list(compound.synonyms) if compound.synonyms else []
-        
+
         # Extract all available properties
         compound_data = {
             "pubchem_cid": str(compound.cid) if compound.cid else "",
-            "iupac_name": compound.iupac_name or "",
+            "iupac_name": str(compound.iupac_name) if compound.iupac_name else "",
             "synonyms": filtered_synonyms,
-            "inchi": compound.inchi or "",
-            "smiles": smiles if smiles else "",
-            "formula": compound.molecular_formula or "",
-            "mono_isotopic_molecular_weight": str(compound.monoisotopic_mass) if compound.monoisotopic_mass else "",
+            "inchi": str(compound.inchi) if compound.inchi else "",
+            "smiles": str(compound.smiles) if compound.smiles else "",
+            "formula": str(compound.molecular_formula) if compound.molecular_formula else "",
+            "mono_isotopic_molecular_weight": float(compound.monoisotopic_mass) if compound.monoisotopic_mass is not None else None,
             "cas_number": "",
             "pubchem_retrieval_date": timestamp,
             "pubchem_compound_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{compound.cid}" if compound.cid else ""
         }
-        
+
         # Extract CAS number from synonyms
         if compound.synonyms:
             for synonym in compound.synonyms:
                 if not compound_data["cas_number"] and '-' in synonym and len(synonym.split('-')) == 3:
                     compound_data["cas_number"] = synonym
                     break
-        
+
         return compound_data
-        
+
     except Exception as e:
         logger.warning(f"Error retrieving PubChem data for {inchi_key}: {e}")
         return None
@@ -210,7 +200,7 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
         new_entries = 0
         updated_entries = 0
         
-        for inchi_key in compounds_to_fetch:
+        for inchi_key in tqdm(compounds_to_fetch, desc="Fetching PubChem data"):
             was_in_cache = inchi_key in pubchem_cache
             
             # Get PubChem data via API
