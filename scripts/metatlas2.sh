@@ -115,13 +115,16 @@ elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" ]
         PY_MODULE="metatlas2.add_atlases_to_db"
     fi
 
-    # Run python directly, bypassing the default entrypoint.
-    # GPFS is auto-mounted read-write by shifter so metatlas.duckdb is writable.
+    if [[ "${DEV_MODE}" == "true" ]]; then
+        echo "Lauching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev)..."
+    else
+        echo "Lauching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=prod)..."
+    fi
+
     shifter "${SHIFTER_ARGS[@]}" \
         /app/.venv/bin/python -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
 
-else
-    # run (or any other subcommand): use the container's default entrypoint.
+else # run main targeted pipeline
     LOG_TO_STDOUT=false
     for arg in "${PASSTHROUGH_ARGS[@]}"; do
         [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
