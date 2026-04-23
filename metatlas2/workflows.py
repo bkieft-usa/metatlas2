@@ -357,6 +357,7 @@ def run_analysis_summary(
     pre_curation_atlas: str = None,
     override_parameters: Dict[str, Any] = None,
     overwrite: bool = False,
+    skip_outputs: list = None
 ) -> None:
     """
     Run all summary outputs for a completed analysis.
@@ -404,6 +405,7 @@ def run_analysis_summary(
     asm.run_all_summaries(
         summary_obj=summary_obj,
         overwrite=overwrite,
+        skip_outputs=skip_outputs
     )
 
     logger.info("Changing group ownership of project output folder to the 'metatlas' group...")

@@ -5,7 +5,7 @@ import getpass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 import pubchempy as pcp
 
@@ -66,7 +66,7 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> Dict[str, Any]:
         return compound_data
 
     except Exception as e:
-        logger.warning(f"Error retrieving PubChem data for {inchi_key}: {e}")
+        #logger.warning(f"Error retrieving PubChem data for {inchi_key}: {e}")
         return None
 
 def _filter_synonym_list(synonyms: List[str]) -> str:

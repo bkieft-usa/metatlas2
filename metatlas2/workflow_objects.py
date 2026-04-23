@@ -454,6 +454,16 @@ class Project:
             log_file_path=self.paths['log_path'],
             overwrite=overwrite_existing
         )
+        
+        # Register project in main database for meta-analysis tracking
+        if 'main_db_path' in self.paths:
+            logger.info(f"Registering project '{self.project_name}' in main database...")
+            dbi.save_project_to_main_db(
+                main_db_path=self.paths['main_db_path'],
+                project_name=self.project_name,
+                project_db_path=self.paths['project_db_path']
+            )
+        
         if exists:
             return
         

@@ -70,13 +70,13 @@ def build_dash_app(
     port=8050,
     shutdown_holder=None
 ):
-    logger.info("Starting the app factory for the Analysis GUI...")
+    logger.debug("Starting the app factory for the Analysis GUI...")
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.manual_curation_df
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
 
-    logger.info(f"Analysis starting with {len(manual_curation_df)} compounds.")
+    logger.info(f"Analysis starting with {len(manual_curation_df)} compounds:")
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
@@ -92,7 +92,7 @@ def build_dash_app(
             requests_pathname_prefix=f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/",
             suppress_callback_exceptions=True,
         )
-        logger.info("App built successfully")
+        logger.debug("App built successfully")
         app.config.prevent_initial_callbacks = "initial_duplicate"
     except Exception as e:
         traceback.print_exc()
@@ -240,7 +240,7 @@ def build_dash_app(
                         [
                             dcc.Graph(
                                 id="ms1-graph",
-                                config={"editable": True, "displayModeBar": True, "edits": {"titleText": False}},
+                                config={"displayModeBar": True, "edits": {"shapePosition": True, "titleText": False}},
                                 style={"height": "475px"},
                             ),
                             dcc.Graph(id="ms2-graph", config={"displayModeBar": True}, style={"height": "475px"}),
@@ -274,7 +274,7 @@ def build_dash_app(
         fluid=True,
     )
 
-    logger.info("Layout constructed successfully")
+    logger.debug("Layout constructed successfully")
 
     def _parse_isomers(isomers_val):
         if isomers_val is None or (isinstance(isomers_val, float) and np.isnan(isomers_val)):
@@ -370,7 +370,7 @@ def build_dash_app(
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(sid, -1)
             if seq <= latest_seq:
-                #logger.info(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
+                #logger.debug(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
                 return state
             latest_flushed_seq_by_session[sid] = seq
 
@@ -433,6 +433,8 @@ def build_dash_app(
 
         sub = analysis_gui_obj.ms1_df[(analysis_gui_obj.ms1_df["inchi_key"] == inchi) & (analysis_gui_obj.ms1_df["adduct"] == adduct)]
 
+        # Collect y_max from data so static vertical traces span the full plot height
+        y_max_data = 0.0
         fig = go.Figure()
         for fp in sub["file_path"].unique():
             short_name = "_".join(os.path.basename(fp).split(".")[0].split("_")[11:])
@@ -440,6 +442,8 @@ def build_dash_app(
             for _, r in sub[sub["file_path"] == fp].iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
+                    if intensity:
+                        y_max_data = max(y_max_data, max(intensity))
                     fig.add_trace(go.Scatter(
                         x=rt, y=intensity, mode="lines", name=short_name,
                         line=dict(color=color, width=1.5),
@@ -448,20 +452,56 @@ def build_dash_app(
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"MS1 parse error {fp}: {e}")
+        if y_max_data == 0.0:
+            y_max_data = 1.0
 
-        fig.add_vline(x=row["atlas_rt_peak"], line=dict(color="black", width=1.5))
+        # Atlas RT peak line (black, static) - rendered as a trace so it is never draggable.
+        # config.edits.shapePosition=True (needed for purple shape dragging) makes ALL shapes
+        # draggable, so static reference lines must be traces instead.
+        fig.add_trace(go.Scatter(
+            x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
+            y=[0, y_max_data],
+            mode="lines",
+            line=dict(color="black", width=2),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+
+        # Suggested RT lines (orange, static) - also traces for the same reason
         if pd.notnull(row.get("suggested_rt_min")):
-            fig.add_vline(x=row["suggested_rt_min"], line=dict(color="orange", dash="dot", width=1.5))
+            fig.add_trace(go.Scatter(
+                x=[row["suggested_rt_min"], row["suggested_rt_min"]],
+                y=[0, y_max_data],
+                mode="lines",
+                line=dict(color="orange", width=1.5),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
         if pd.notnull(row.get("suggested_rt_max")):
-            fig.add_vline(x=row["suggested_rt_max"], line=dict(color="orange", dash="dot", width=1.5))
+            fig.add_trace(go.Scatter(
+                x=[row["suggested_rt_max"], row["suggested_rt_max"]],
+                y=[0, y_max_data],
+                mode="lines",
+                line=dict(color="orange", width=1.5, dash="dash"),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
 
-        for x, name in [(rt_min, "RT min"), (rt_max, "RT max")]:
-            fig.add_shape(
-                type="line", x0=x, x1=x, y0=0, y1=1,
-                xref="x", yref="paper",
-                line=dict(color="purple", width=2.5, dash="dash"),
-                name=name, editable=True,
-            )
+        # RT min (purple, solid, editable) - MUST be shape[0] to match rt_drag callback
+        fig.add_shape(
+            type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(color="purple", width=2.5),
+            name="RT min", editable=True,
+        )
+
+        # RT max (purple, dashed, editable) - MUST be shape[1] to match rt_drag callback
+        fig.add_shape(
+            type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(color="purple", width=2.5, dash="dash"),
+            name="RT max", editable=True,
+        )
 
         isomer_str = "No Isomers Found"
         try:
@@ -501,42 +541,32 @@ def build_dash_app(
                         "rt_max":      iso_rt_max,
                         "rt":          iso_rt,
                         "mz":          iso_mz,
+                        "df_idx":      iso_df_idx,
                     })
 
                 if resolved_isomers:
-                    LABEL_WIDTH_PROXY = 0.15
-                    stagger_levels = []
-                    for i, iso in enumerate(resolved_isomers):
-                        mid_i = (iso["rt_min"] + iso["rt_max"]) / 2
-                        occupied = set()
-                        for j in range(i):
-                            prev = resolved_isomers[j]
-                            mid_j = (prev["rt_min"] + prev["rt_max"]) / 2
-                            rt_overlap = (
-                                iso["rt_min"] <= prev["rt_max"] and iso["rt_max"] >= prev["rt_min"]
-                            )
-                            label_overlap = abs(mid_i - mid_j) < LABEL_WIDTH_PROXY
-                            if rt_overlap or label_overlap:
-                                occupied.add(stagger_levels[j])
-                        level = 0.0
-                        while level in occupied:
-                            level = round(level + 0.05, 3)
-                        stagger_levels.append(level)
-
-                    for iso, y_level in zip(resolved_isomers, stagger_levels):
-                        fig.add_vrect(
+                    for iso in resolved_isomers:
+                        iso_ms1_note = manual_curation_df.at[iso["df_idx"], "ms1_notes"] if "ms1_notes" in manual_curation_df.columns else "keep"
+                        if iso_ms1_note == "remove":
+                            continue
+                        fig.add_shape(
+                            type="rect",
                             x0=iso["rt_min"], x1=iso["rt_max"],
+                            y0=0, y1=1,
+                            xref="x", yref="paper",
                             fillcolor="lightgray", opacity=0.35,
                             layer="below", line_width=0,
+                            editable=False,
                         )
                         fig.add_annotation(
-                            x=(iso["rt_min"] + iso["rt_max"]) / 2,
-                            y=y_level,
+                            x=iso["rt_min"],
+                            y=0.5,
                             xref="x", yref="paper",
                             text=f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})",
                             showarrow=False,
                             font=dict(size=8, color="dimgray"),
-                            xanchor="center", yanchor="bottom",
+                            xanchor="right", yanchor="middle",
+                            textangle=-90,
                             bgcolor="rgba(255,255,255,0.7)",
                             bordercolor="gray", borderwidth=1,
                             captureevents=False,
@@ -586,7 +616,7 @@ def build_dash_app(
 
         if len(scans) == 0:
             fig = go.Figure()
-            fig.add_annotation(text=f"{row['compound_name']} – No MS2 data",
+            fig.add_annotation(text=f"{row['compound_name']} - No MS2 data",
                                xref="paper", yref="paper", x=0.5, y=0.5,
                                showarrow=False, font=dict(size=14))
             fig.update_layout(
@@ -598,46 +628,109 @@ def build_dash_app(
             return fig
 
         bars = []
+        label_points = []
         scale = 1.0
         ms2_idx = max(0, min(state["ms2_idx"], len(scans) - 1))
         scan = scans.iloc[ms2_idx]
         qry = scan.get("qry_spectrum") if "qry_spectrum" in scan.index else None
         ref = scan.get("ref_spectrum") if "ref_spectrum" in scan.index else None
+        num_ref_fragments = 0
+        num_matching_fragments = 0
         if pd.notnull(qry) and pd.notnull(ref):
             mz_q, int_q = _parse_spectrum_cached(scan["qry_spectrum"])
             mz_r, int_r = _parse_spectrum_cached(scan["ref_spectrum"])
 
             raw_colors = scan.get("aligned_fragment_colors") if "aligned_fragment_colors" in scan.index else None
             if pd.notnull(raw_colors) and raw_colors:
-                try:
-                    frag_colors = json.loads(raw_colors)
-                    if len(frag_colors) != len(mz_q):
-                        raise ValueError(f"color length mismatch: {len(frag_colors)} != {len(mz_q)}")
-                except Exception:
-                    frag_colors = ["red"] * len(mz_q)
-            else:
-                frag_colors = ["red"] * len(mz_q)
+                frag_colors = json.loads(raw_colors)
+                if len(frag_colors) != len(mz_q):
+                    raise ValueError(f"color length mismatch: {len(frag_colors)} != {len(mz_q)}")
+                num_ref_fragments = len(mz_r)
+                num_matching_fragments = sum(1 for c in frag_colors if c == "green")
 
             scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
-            bars.append(go.Bar(x=mz_q, y=int_q, marker_color=frag_colors, width=0.25,
-                       showlegend=False,
-                       hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Query</extra>"))
-            bars.append(go.Bar(x=mz_r, y=[-i * scale for i in int_r],
-                       marker_color=frag_colors, width=0.25,
-                       showlegend=False,
-                       hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Reference</extra>"))
+            ref_y = [-i * scale for i in int_r]
+
+            bars.append(go.Bar(
+                x=mz_q, y=int_q, marker_color=frag_colors, width=0.25,
+                showlegend=False,
+                hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Query</extra>"
+            ))
+            bars.append(go.Bar(
+                x=mz_r, y=ref_y, marker_color=frag_colors, width=0.25,
+                showlegend=False,
+                hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Reference</extra>"
+            ))
+
+            label_points.extend(zip(mz_q, int_q))
+            label_points.extend(zip(mz_r, ref_y))
         else:
             mz, ints = _parse_spectrum_cached(scan["raw_spectrum"])
-            bars.append(go.Bar(x=mz, y=ints, marker_color="red", width=0.25,
-                       showlegend=False,
-                       hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>MS2</extra>"))
+            bars.append(go.Bar(
+                x=mz, y=ints, marker_color="red", width=0.25,
+                showlegend=False,
+                hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>MS2</extra>"
+            ))
+            label_points.extend(zip(mz, ints))
 
         fig = go.Figure(data=bars)
         fig.add_hline(y=0, line=dict(color="black", width=1.5))
+
+        y_vals = [y for _, y in label_points] or [0]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
+        label_pad = y_span * 0.01
+        y_pad = y_span * 0.01
+        TEXT_HEIGHT_OFFSET = y_span * 0.01  # vertical offset per stagger level
+
+        top_label_idxs = {
+            idx
+            for idx, _ in sorted(
+                enumerate(label_points),
+                key=lambda item: abs(item[1][1]),
+                reverse=True,
+            )[:5] # top 5 fragment peaks by intensity
+        }
+
+        # Sort top labels by x-position for overlap detection
+        top_labels_sorted = sorted(
+            [(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs],
+            key=lambda item: item[1]  # sort by mz_val
+        )
+
+        MIN_MZ_GAP = 5.0  # m/z units - labels closer than this are considered overlapping
+        prev_mz = None
+        stagger_level = 0
+
+        for idx, mz_val, y_val in top_labels_sorted:
+            # Determine base y position above the bar
+            y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
+            
+            # Check for horizontal overlap with previous label
+            if prev_mz is not None and abs(mz_val - prev_mz) < MIN_MZ_GAP:
+                stagger_level += 1
+            else:
+                stagger_level = 0
+            
+            # Apply stagger offset
+            y_position = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
+            
+            fig.add_annotation(
+                x=mz_val,
+                y=y_position,
+                text=f"{mz_val:.4f}",
+                showarrow=False,
+                xanchor="center",
+                yanchor="bottom" if y_val >= 0 else "top",
+                font=dict(size=12, color="black"),
+                textangle=0,
+            )
+            prev_mz = mz_val
+
         fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
         ms2_title_text = (
             f"File: {fname}<br>"
-            f"Score: {scan.get('score', 0):.4f}  |  Scan RT: {scan.get('rt', 0):.4f} min | Precursor m/z: {scan.get('precursor_MZ', 0):.4f}  |  Ref m/z: {scan.get('mz_theoretical', 0):.4f}  |  ppm Δ: {scan.get('ppm_error', 0):.2f}"
+            f"Score: {scan.get('score', 0):.4f}  |  Matches: {num_matching_fragments}/{num_ref_fragments}  |  Scan RT: {scan.get('rt', 0):.4f} min | Precursor m/z: {scan.get('precursor_MZ', 0):.4f}  |  Ref m/z: {scan.get('mz_theoretical', 0):.4f}  |  ppm Δ: {scan.get('ppm_error', 0):.2f}"
         )
         fig.update_layout(
             title=dict(text=ms2_title_text, x=0.5, xanchor="center", font=dict(size=12)),
@@ -646,12 +739,16 @@ def build_dash_app(
             margin=dict(l=50, r=20, t=80, b=40),
             plot_bgcolor="white",
             xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=False, zeroline=False),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                range=[y_min - y_pad, y_max + y_pad],
+            ),
         )
 
         return fig
 
-    logger.info("App helpers defined successfully")
+    logger.debug("App helpers defined successfully")
 
     # all app callbacks that fire when GUI is interacted with
     @app.callback(
@@ -864,19 +961,31 @@ def build_dash_app(
     def rt_drag(relayout, state):
         if not relayout or state is None:
             raise dash.exceptions.PreventUpdate
+        
+        rt_min_shape_idx = 0
+        rt_max_shape_idx = 1
+        
         new_min, new_max = state["rt_min"], state["rt_max"]
         updated = False
         for k, v in relayout.items():
             if not (k.startswith("shapes[") and k.endswith("].x0")):
                 continue
-            dragged_x = float(v)
-            dist_min = abs(dragged_x - state["rt_min"])
-            dist_max = abs(dragged_x - state["rt_max"])
-            if dist_min <= dist_max:
-                new_min = dragged_x
-            else:
-                new_max = dragged_x
-            updated = True
+            
+            # Extract shape index from the key (e.g., "shapes[0].x0" -> 0)
+            try:
+                idx_str = k.split("[")[1].split("]")[0]
+                shape_idx = int(idx_str)
+            except (IndexError, ValueError):
+                continue
+            
+            # Process the editable purple lines
+            if shape_idx == rt_min_shape_idx:
+                new_min = float(v)
+                updated = True
+            elif shape_idx == rt_max_shape_idx:
+                new_max = float(v)
+                updated = True
+        
         if not updated:
             raise dash.exceptions.PreventUpdate
         return _patch_rt_change(state, new_min, new_max)
@@ -1100,7 +1209,7 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         try:
             _flush_to_db(state)
-            logger.info(f"Save and Exit.")
+            logger.debug(f"Save and Exit.")
             msg = "Analysis saved and GUI closed. You may return to the notebook to run the curation summary."
         except Exception as exc:
             traceback.print_exc()
@@ -1112,8 +1221,8 @@ def build_dash_app(
 
         return msg, True
 
-    logger.info("Callbacks registered")
+    logger.debug("Callbacks registered")
 
-    logger.info("App setup complete")
+    logger.debug("App setup complete")
 
     return app

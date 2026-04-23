@@ -2,6 +2,7 @@ from typing import Optional, List, Tuple, Dict
 from pathlib import Path
 import json
 import os
+import statistics
 import textwrap
 from tqdm.notebook import tqdm
 
@@ -12,7 +13,6 @@ matplotlib.use('Agg')
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.ticker import ScalarFormatter
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from matplotlib.patches import Rectangle
 
 import metatlas2.database_interact as dbi
@@ -57,7 +57,7 @@ def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) 
 def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
     """Parse a JSON-encoded spectrum string into (x_array, y_array) lists.
 
-    The stored format is a JSON array of two lists: [[x0, x1, …], [y0, y1, …]].
+    The stored format is a JSON array of two lists: [[x0, x1, ...], [y0, y1, ...]].
     For ms1_data.raw_spectrum the x-axis is retention time; for ms2_data and
     ms2_hits spectra the x-axis is m/z.
     """
@@ -73,43 +73,39 @@ def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
     except Exception:
         return [], []
 
-def _get_compound_formula(
-    project_db_path: str,
+def _get_compound_info(
+    main_db_path: str,
     inchi_key: str,
-    main_db_path: Optional[str] = None,
-) -> Optional[str]:
-    """Return the compound formula for *inchi_key*, checking main_db first then project_db."""
-    for db_path in filter(None, [main_db_path, project_db_path]):
-        try:
-            with dbi.get_db_connection(db_path) as conn:
-                row = conn.execute(
-                    "SELECT formula FROM compounds WHERE inchi_key = ? LIMIT 1",
-                    [inchi_key],
-                ).fetchone()
-            if row and row[0]:
-                return row[0]
-        except Exception as exc:
-            logger.warning("Could not retrieve formula from %s for %s: %s", db_path, inchi_key, exc)
-    return None
+) -> Optional[Tuple[str, str, str, str]]:
+    """Return the compound info for *inchi_key* from main_db: formula, smiles, inchi, pubchem_cid."""
+    try:
+        with dbi.get_db_connection(main_db_path) as conn:
+            row = conn.execute(
+                "SELECT formula, smiles, inchi, pubchem_cid FROM compounds WHERE inchi_key = ? LIMIT 1",
+                [inchi_key],
+            ).fetchone()
+        if row and any(row):
+            return row[0], row[1], row[2], row[3]
+    except Exception as exc:
+        logger.warning("Could not retrieve info from %s for %s: %s", main_db_path, inchi_key, exc)
+    return None, None, None, None
 
-def _get_compound_smiles(
-    project_db_path: str,
+def _get_monoisotopic_mass(
+    main_db_path: str,
     inchi_key: str,
-    main_db_path: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str]]:
-    """Return (smiles, inchi) for *inchi_key*, checking main_db first then project_db."""
-    for db_path in filter(None, [main_db_path, project_db_path]):
-        try:
-            with dbi.get_db_connection(db_path) as conn:
-                row = conn.execute(
-                    "SELECT smiles, inchi FROM compounds WHERE inchi_key = ? LIMIT 1",
-                    [inchi_key],
-                ).fetchone()
-            if row and (row[0] or row[1]):
-                return row[0] or None, row[1] or None
-        except Exception as exc:
-            logger.warning("Could not retrieve structure from %s for %s: %s", db_path, inchi_key, exc)
-    return None, None
+) -> Optional[float]:
+    """Return the monoisotopic mass for *inchi_key*."""
+    try:
+        with dbi.get_db_connection(main_db_path) as conn:
+            row = conn.execute(
+                "SELECT mono_isotopic_molecular_weight FROM compounds WHERE inchi_key = ? LIMIT 1",
+                [inchi_key],
+            ).fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception as exc:
+        logger.warning("Could not retrieve mass from %s for %s: %s", main_db_path, inchi_key, exc)
+    return None
 
 def _plot_mirror(
     ax,
@@ -128,16 +124,14 @@ def _plot_mirror(
 
     if qry_mz and qry_int:
         for mz, intensity, color in zip(qry_mz, qry_int, frag_colors):
-            ax.bar(mz, intensity, color=color, width=1.0, alpha=0.85)
+            ax.bar(mz, intensity, color=color, width=1.1, alpha=0.85)
 
     scale = 1.0
     if ref_mz and ref_int:
-        ref_colors = ["steelblue"] * len(ref_mz)
         scale = (max(qry_int) / max(ref_int)) if (qry_int and max(ref_int) > 0) else 1.0
-        for mz, intensity, color in zip(ref_mz, ref_int, ref_colors):
-            ax.bar(mz, -intensity * scale, color=color, width=1.0, alpha=0.6)
+        for mz, intensity, color in zip(ref_mz, ref_int, frag_colors):
+            ax.bar(mz, -intensity * scale, color=color, width=1.1, alpha=0.6)
 
-    # Label top 5 (or fewer) query peaks by intensity, with simple overlap avoidance
     if qry_mz and qry_int:
         mz_np = np.array(qry_mz, dtype=float)
         int_np = np.array(qry_int, dtype=float)
@@ -149,15 +143,35 @@ def _plot_mirror(
             order = np.argsort(int_np[valid_idx])[::-1][:top_n]
             top_idx = valid_idx[order]
 
-            for idx in top_idx:
+            # Sort labels left-to-right so stagger logic is applied in x-order
+            top_idx_sorted = sorted(top_idx, key=lambda i: mz_np[i])
+            MIN_MZ_GAP = 5.0  # m/z units below which labels are considered overlapping horizontally
+            y_max = float(int_np[valid_idx].max())
+            TEXT_HEIGHT_FRACTION = 0.08  # fraction of y-axis range per stagger level
+            
+            prev_x = None
+            stagger_level = 0
+
+            for idx in top_idx_sorted:
                 x_txt = float(mz_np[idx])
-                y_txt = float(int_np[idx]) * 1.02
+                y_base = float(int_np[idx]) * 1.02
+
+                # Check for horizontal overlap with previous label
+                if prev_x is not None and abs(x_txt - prev_x) < MIN_MZ_GAP:
+                    stagger_level += 1
+                else:
+                    stagger_level = 0
+
+                # Add stagger offset in data coordinates
+                y_txt = y_base + stagger_level * (y_max * TEXT_HEIGHT_FRACTION)
+
                 ax.text(
                     x_txt, y_txt, f"{mz_np[idx]:.4f}",
-                    fontsize=8, ha="center", va="bottom", rotation=90, color="black",
+                    fontsize=10, ha="center", va="bottom", rotation=0, color="black",
                     bbox=dict(facecolor="white", edgecolor="none", alpha=0.65, pad=0.2),
                     clip_on=False,
                 )
+                prev_x = x_txt
 
             ax.margins(y=0.20)
 
@@ -186,7 +200,7 @@ def _plot_raw_ms2(
     ax.axhline(y=0, color="black", linewidth=1.0)
     if mz_arr and int_arr:
         for mz, intensity in zip(mz_arr, int_arr):
-            ax.bar(mz, intensity, color="tomato", width=1.0, alpha=0.85)
+            ax.bar(mz, intensity, color="tomato", width=1.1, alpha=0.85)
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity", fontsize=14)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
@@ -203,7 +217,7 @@ def _plot_raw_ms2(
 def _plot_empty_ms2(ax, title: str = "") -> None:
     """Draw a blank MS2 panel with a 'No MS2 Data' annotation."""
     ax.set_xlim(0, 500)
-    ax.set_ylim(-100, 1000)
+    ax.set_ylim(0, 1e6)
     ax.axhline(y=0, color="black", linewidth=1.0)
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity", fontsize=14)
@@ -223,52 +237,75 @@ def _plot_structure(
     inchi_key: str,
     size: int = 500,
 ) -> None:
-    """Draw the molecular structure using RDKit."""
+    """Draw molecular structure without any RDKit drawing backend."""
     ax.axis("off")
-    mol = None
+
     try:
         from rdkit import Chem
-        from rdkit.Chem import rdDepictor
-        from rdkit.Chem.Draw import rdMolDraw2D
+        from rdkit.Chem import AllChem, rdDepictor
+        from PIL import Image, ImageDraw, ImageFont
         import io
-        from PIL import Image
-        from svglib.svglib import svg2rlg
-        from reportlab.graphics import renderPM
-        
+
+        mol = None
         if smiles:
             mol = Chem.MolFromSmiles(smiles)
         if mol is None and inchi:
             mol = Chem.MolFromInchi(inchi)
-        
+
         if mol is not None:
-            # Use exact method from standard_annotation.py - generate SVG
-            mc = Chem.Mol(mol.ToBinary())
-            try:
-                Chem.Kekulize(mc)
-            except:
-                mc = Chem.Mol(mol.ToBinary())
-            
-            if not mc.GetNumConformers():
-                rdDepictor.Compute2DCoords(mc)
-            
-            # Generate SVG (no X11 dependencies like the old code)
-            drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
-            drawer.DrawMolecule(mc)
-            drawer.FinishDrawing()
-            svg_data = drawer.GetDrawingText().replace('svg:', '')
-            
-            # Convert SVG to PNG using svglib (no X11 dependencies)
-            drawing = svg2rlg(io.BytesIO(svg_data.encode('utf-8')))
-            png_data = renderPM.drawToString(drawing, fmt='PNG')
-            
-            # Display PNG in matplotlib
-            image = Image.open(io.BytesIO(png_data))
-            ax.imshow(image, aspect="equal")
+            if not mol.GetNumConformers():
+                rdDepictor.Compute2DCoords(mol)
+
+            # ---- Render via py2opsin-free pure-python: use molsvg ----
+            # Use 'rdkit.Chem.Draw' is BLOCKED. Use external: 'datamol' also
+            # wraps rdkit draw. Best option: render via 'chembl_beaker' or
+            # standalone 'svglib'. Most practical: use 'mols2grid' svg path
+            # or 'rdkit.Chem.rdMolDescriptors' for mol block + external tool.
+
+            # MOST PRACTICAL: generate mol SVG via standalone `molsvg` package
+            # OR use `cirpy` to fetch structure image from external service
+            import urllib.request
+            url = f"https://cactus.nci.nih.gov/chemical/structure/{inchi_key}/image?format=png&width={size}&height={size}"
+            with urllib.request.urlopen(url, timeout=10) as response:
+                img = Image.open(io.BytesIO(response.read())).convert("RGB")
+
+            # Annotate with InChIKey
+            if inchi_key:
+                font_size = 25
+                line_height = int(font_size * 1.2)
+                max_width = size - 20
+                avg_char_width = font_size / 2
+                lines, current_line = [], ""
+                for char in inchi_key:
+                    test_line = current_line + char
+                    if len(test_line) * avg_char_width > max_width:
+                        lines.append(current_line)
+                        current_line = char
+                    else:
+                        current_line = test_line
+                if current_line:
+                    lines.append(current_line)
+
+                text_height = len(lines) * line_height + 20
+                new_img = Image.new("RGB", (size, size + text_height), "white")
+                new_img.paste(img, (0, 0))
+                draw_obj = ImageDraw.Draw(new_img)
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", font_size)
+                except Exception:
+                    font = ImageFont.load_default()
+                y_position = size + 10
+                for line in lines:
+                    draw_obj.text((10, y_position), line, fill="black", font=font)
+                    y_position += line_height
+                img = new_img
+
+            ax.imshow(img, aspect="equal")
             return
-            
+
     except Exception as exc:
         logger.warning("Could not draw structure for %s: %s", inchi_key, exc)
-    
+
     ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
             ha="center", va="center", fontsize=12, weight="bold", color="gray")
 
@@ -351,25 +388,28 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
     rows = [
         ("Compound",        _fmt(mc_row.get("compound_name"))),
         ("Formula",         _fmt(mc_row.get("formula"))),
+        ("SMILES",          _fmt(mc_row.get("smiles"))),
         ("Adduct",          _fmt(mc_row.get("adduct"))),
         ("Polarity",        _fmt(mc_row.get("polarity"))),
         ("Chromatography",  _fmt(mc_row.get("chromatography"))),
         ("Atlas m/z",       _fmt(mc_row.get("atlas_mz"),      "{:.4f}")),
-        ("Atlas RT peak",   _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
+        ("Measured m/z",    _fmt(mc_row.get("best_ms1_mz"),   "{:.4f}")),
+        ("m/z ppm Δ",  _fmt(ppm, "{:.2f}")),
         ("Atlas RT range",  f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
-        ("Best MS1 RT",     f"{_fmt(mc_row.get('best_ms1_rt'), '{:.3f} min')} "),
-        ("Best MS1 RT Δ",   _fmt(rt_err, '{:.3f}')),
-        ("Best MS1 ppm Δ",  _fmt(ppm, "{:.2f}"))
+        ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
+        ("Atlas RT peak",   _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
+        ("Measured RT",     f"{_fmt(mc_row.get('best_ms1_rt'), '{:.3f} min')} "),
+        ("RT Δ",   _fmt(rt_err, '{:.3f}')),
     ]
 
     y_start = 0.96
     y_end  = 0.086
     for label, value in rows:
-        ax.text(0.02, y_start, f"{label}:", fontsize=18, weight="bold", va="center", transform=ax.transAxes)
-        ax.text(0.38, y_start, value, fontsize=18, va="center", transform=ax.transAxes)
+        ax.text(0.02, y_start, f"{label}:", fontsize=13, weight="bold", va="center", transform=ax.transAxes)
+        ax.text(0.34, y_start, value, fontsize=13, va="center", transform=ax.transAxes)
         y_start -= y_end
 
-    ax.set_xlim(0, 1)
+    ax.set_xlim(-0.1, 1)
     ax.set_ylim(0, 1)
 
 
@@ -391,8 +431,8 @@ def _plot_hit_info_table(
 
     # Abbreviated file name used as the table title
     raw_name   = os.path.basename(str(best_hit["file_path"]))
-    name_parts = raw_name.split(".")[0].split("_")
-    fname_abbr = "_".join(name_parts[11:]) if len(name_parts) > 11 else raw_name
+    name_without_ext = raw_name.split(".")[0]
+    name_without_ext = name_without_ext.replace("_ms2_pos", "").replace("_ms2_neg", "")
 
     # Scalar values
     atlas_mz    = float(mc_row.get("atlas_mz",           np.nan))
@@ -417,7 +457,7 @@ def _plot_hit_info_table(
             return "N/A"
         return fmt.format(val)
 
-    score_str = f"{score:.4f}" if not np.isnan(score) else "N/A"
+    score_str = f"{score:.4f}\n{num_matches}/{ref_frags}" if not np.isnan(score) else "N/A"
 
     # Wrap the fragment list so it stays within the table width
     FRAG_WRAP_WIDTH = 80
@@ -430,7 +470,7 @@ def _plot_hit_info_table(
     n_frag_lines = min(len(frag_lines), 3)
 
     # Column x-positions: row-label | Theoretical | Measured | Error/Score
-    col_x = [0, 0.3, 0.6, 0.9]
+    col_x = [0, 0.3, 0.6, 0.8]
 
     # Layout constants
     std_row_h  = 0.135
@@ -444,10 +484,10 @@ def _plot_hit_info_table(
     frag_center   = frag_top - frag_row_h / 2
 
     # File name as title (above the table) - aligned with table left edge
-    ax.text(col_x[0], 0.97, fname_abbr, fontsize=15, weight="bold",
+    ax.text(col_x[0], 0.97, name_without_ext, fontsize=14, weight="bold",
             ha="left", va="center", transform=ax.transAxes)
 
-    GAP = 0.004
+    GAP = 0.005
     for y_center, h, color in [
         (header_center, std_row_h,  "#d0d0d0"),
         (ma_center,     std_row_h,  "white"),
@@ -479,7 +519,7 @@ def _plot_hit_info_table(
                     weight="bold" if col_idx == 0 else "normal",
                     ha="left", va="center", transform=ax.transAxes)
 
-    frag_text_top = frag_top - GAP * 2
+    frag_text_top = frag_top - GAP * 2.5
     ax.text(col_x[0], frag_text_top, "Fragment Matches", fontsize=15,
             weight="bold", ha="left", va="top", transform=ax.transAxes)
     ax.text(col_x[1], frag_text_top, frag_display, fontsize=15,
@@ -489,6 +529,70 @@ def _plot_hit_info_table(
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
+
+def _plot_ms2(
+    ax,
+    panel_idx: int,
+    top3: pd.DataFrame,
+    ms2_raw_df: pd.DataFrame,
+) -> None:
+    """Populate one MS2 panel (mirror, raw, or empty) on *ax*.
+
+    Parameters
+    ----------
+    panel_idx:
+        0, 1, or 2 — which of the three top-hit panels to render.
+    top3:
+        Up to three best MS2 hits for the compound, sorted descending by score.
+    ms2_raw_df:
+        Raw MS2 scans for the compound (used as fallback when there are no hits).
+    """
+    _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
+    title = _MIRROR_TITLES[panel_idx]
+
+    if panel_idx < len(top3):
+        hit = top3.iloc[panel_idx]
+        qry_mz, qry_int = _parse_spectrum(hit.get("qry_spectrum"))
+        ref_mz, ref_int = _parse_spectrum(hit.get("ref_spectrum"))
+
+        raw_colors = hit.get("aligned_fragment_colors")
+        frag_colors = None
+        try:
+            if raw_colors and pd.notnull(raw_colors):
+                parsed = json.loads(raw_colors)
+                if len(parsed) == len(qry_mz):
+                    frag_colors = parsed
+        except Exception:
+            pass
+
+        if qry_mz and ref_mz:
+            _plot_mirror(
+                ax, qry_mz, qry_int, ref_mz, ref_int,
+                frag_colors=frag_colors,
+                score=float(hit.get("score", np.nan)),
+                rt=float(hit.get("rt", np.nan)),
+                title=title,
+            )
+        elif qry_mz:
+            _plot_raw_ms2(
+                ax, qry_mz, qry_int,
+                rt=float(hit.get("rt", np.nan)),
+                title=title,
+            )
+        else:
+            _plot_empty_ms2(ax, title=title)
+
+    elif panel_idx == 0 and not ms2_raw_df.empty:
+        raw_row = ms2_raw_df.iloc[0]
+        mz_arr, int_arr = _parse_spectrum(raw_row.get("raw_spectrum"))
+        _plot_raw_ms2(
+            ax, mz_arr, int_arr,
+            rt=float(raw_row.get("rt", np.nan)),
+            title=title,
+        )
+    else:
+        _plot_empty_ms2(ax, title=title)
+
 
 def make_identification_figure(
     summary_obj: "AnalysisSummary",
@@ -504,7 +608,7 @@ def make_identification_figure(
     ├──────────────────────────────────────────────────────────────────┤
     │   EIC (linear)   │   EIC (log)    │  Compound info table        │  Row 2
     ├──────────────────────────────────────────────────────────────────┤
-    │           MS2 hit summary (file x score x ref x …)              │  Row 3
+    │           MS2 hit summary (file x score x ref x ...)              │  Row 3
     └──────────────────────────────────────────────────────────────────┘
 
     Parameters
@@ -512,7 +616,7 @@ def make_identification_figure(
     summary_obj:
         A configured ``AnalysisSummary`` object with ``paths``,
         ``rt_alignment_number``, and ``analysis_number`` already set
-        (call ``summary_obj.setup(…)`` first).  Data tables are loaded
+        (call ``summary_obj.setup(...)`` first).  Data tables are loaded
         automatically on first call via ``summary_obj.load_data()`` if
         they have not already been cached on the object.
     output_loc:
@@ -557,14 +661,11 @@ def make_identification_figure(
         len(manual_curation_df), total_files,
     )
 
-    _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
-
     for cmp_idx, mc_row in tqdm(manual_curation_df.reset_index(drop=True).iterrows(), total=len(manual_curation_df), desc="Generating ID figures"):
         compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx}"
         inchi_key     = mc_row.get("inchi_key", "")
         adduct        = mc_row.get("adduct", "")
-        formula = _get_compound_formula(project_db_path, inchi_key, main_db_path) or "N/A"
-        smiles, inchi = _get_compound_smiles(project_db_path, inchi_key, main_db_path)
+        formula, smiles, inchi, _ = _get_compound_info(main_db_path, inchi_key) or (None, None, None, None)
         mc_row['formula'] = formula
         mc_row['smiles']  = smiles
         mc_row['inchi']   = inchi
@@ -603,51 +704,9 @@ def make_identification_figure(
             height_ratios=[1.45, 1.2, 1.35],
         )
 
+        # Row 1, Cols 0-2: up to three MS2 hit panels (mirror, raw, or empty)
         for i in range(3):
-            ax_ms2 = fig.add_subplot(gs[0, i])
-            if i < len(top3):
-                hit = top3.iloc[i]
-                qry_mz,  qry_int  = _parse_spectrum(hit.get("qry_spectrum"))
-                ref_mz,  ref_int  = _parse_spectrum(hit.get("ref_spectrum"))
-
-                raw_colors = hit.get("aligned_fragment_colors")
-                frag_colors = None
-                try:
-                    if raw_colors and pd.notnull(raw_colors):
-                        parsed = json.loads(raw_colors)
-                        if len(parsed) == len(qry_mz):
-                            frag_colors = parsed
-                except Exception:
-                    pass
-
-                if qry_mz and ref_mz:
-                    _plot_mirror(
-                        ax_ms2, qry_mz, qry_int, ref_mz, ref_int,
-                        frag_colors=frag_colors,
-                        score=float(hit.get("score", np.nan)),
-                        rt=float(hit.get("rt", np.nan)),
-                        title=_MIRROR_TITLES[i],
-                    )
-                elif qry_mz:
-                    # Hit row exists but ref_spectrum missing - show raw query
-                    _plot_raw_ms2(
-                        ax_ms2, qry_mz, qry_int,
-                        rt=float(hit.get("rt", np.nan)),
-                        title=_MIRROR_TITLES[i],
-                    )
-                else:
-                    _plot_empty_ms2(ax_ms2, title=_MIRROR_TITLES[i])
-            elif i == 0 and not ms2_raw_df.empty:
-                # No hits at all - show best raw MS2 scan in first panel
-                raw_row = ms2_raw_df.iloc[0]
-                mz_arr, int_arr = _parse_spectrum(raw_row.get("raw_spectrum"))
-                _plot_raw_ms2(
-                    ax_ms2, mz_arr, int_arr,
-                    rt=float(raw_row.get("rt", np.nan)),
-                    title=_MIRROR_TITLES[i],
-                )
-            else:
-                _plot_empty_ms2(ax_ms2, title=_MIRROR_TITLES[i])
+            _plot_ms2(fig.add_subplot(gs[0, i]), i, top3, ms2_raw_df)
 
         # Row 1, Col 3: molecular structure
         ax_struct = fig.add_subplot(gs[0, 3])
@@ -717,91 +776,88 @@ def _rt_quality(rt_error: float, chromatography: str) -> float:
 def _total_score_and_msi(
     msms_q: float, mz_q: float, rt_q: float
 ) -> Tuple[float, str]:
-    """Compute total ID score (0-3) and MSI level string."""
+    """Compute total ID score (0-3) and MSI level string.
+    """
     scores = [v for v in [msms_q, mz_q, rt_q] if isinstance(v, float) and not np.isnan(v)]
     total = float(np.nansum([msms_q, mz_q, rt_q]))
 
-    msms_is_one = (isinstance(msms_q, float) and not np.isnan(msms_q) and msms_q == 1.0)
-    other_ones  = sum(
-        1 for v in [mz_q, rt_q]
-        if isinstance(v, float) and not np.isnan(v) and v == 1.0
-    )
-    if msms_is_one and other_ones >= 1:
-        msi = "Level 1"
-    elif total >= 1.5:
-        msi = "Level 2 (putative)"
-    elif len(scores) > 0:
-        msi = "Level 3+ (putative)"
+    if isinstance(msms_q, float) and msms_q == -1:
+        msi = "REMOVE, INVALIDATED BY BAD MSMS MATCH"
+    elif len(scores) > 0 and statistics.median(scores) < 1:
+        msi = "putative"
+    elif total == 3:
+        msi = "Exceeds Level 1"
     else:
-        msi = ""
+        msi = "Level 1"
     return total, msi
 
 def _find_overlapping_compounds(
     manual_curation_df: pd.DataFrame,
     compound_idx: int,
+    main_db_path: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """
-    Return two ``//``-separated strings: overlapping compound labels and their InChIKeys.
-
-    A compound overlaps if its atlas m/z is within ±0.005 Da (or monoisotopic mass
-    within ±0.005 Da) **and** its RT range intersects the target compound's RT range.
+    """Find compounds with overlapping RT windows and similar m/z or monoisotopic mass.
+    
+    Returns a tuple of (compound_names, compound_indices) where each is a '//' separated string.
+    Compounds are considered overlapping if:
+    - Their RT windows overlap (rt_min to rt_max ranges intersect), AND
+    - Either their m/z values are within 0.005 OR their monoisotopic masses are within 0.005
     """
     mc = manual_curation_df.reset_index(drop=True)
     row = mc.iloc[compound_idx]
-
-    mz_target     = row["atlas_mz"]
-    rt_min_target = row["atlas_rt_min"]
-    rt_max_target = row["atlas_rt_max"]
-    label_target  = row["compound_name"]
-    adduct_target = row["adduct"]
-    ik_target     = row["inchi_key"]
-
-    # Count duplicate labels to decide if we need to disambiguate with adduct
-    label_counts = mc["compound_name"].value_counts()
-
-    overlapping_labels: List[str] = []
-    inchi_key_map:      Dict[str, str] = {}
-
+    
+    mz_target = row["atlas_mz"]
+    rt_min_target = row["rt_min"]
+    rt_max_target = row["rt_max"]
+    inchi_key_target = row["inchi_key"]
+    
+    # Get monoisotopic mass for target compound
+    mass_target = _get_monoisotopic_mass(main_db_path, inchi_key_target)
+    
+    overlapping: List[Tuple[int, str, str]] = []  # (index, name, inchi_key)
+    
     for idx, other in mc.iterrows():
         if idx == compound_idx:
             continue
-        mz_other     = other["atlas_mz"]
-        rt_min_other = other["atlas_rt_min"]
-        rt_max_other = other["atlas_rt_max"]
+            
+        # Check RT overlap: ranges [a1, a2] and [b1, b2] overlap if max(a1, b1) <= min(a2, b2)
+        rt_min_other = other["rt_min"]
+        rt_max_other = other["rt_max"]
+        rt_overlap = (max(rt_min_target, rt_min_other) <= min(rt_max_target, rt_max_other))
+        
+        if not rt_overlap:
+            continue
+            
+        # Check m/z similarity (exclude if both are 0 or invalid)
+        mz_other = other["atlas_mz"]
+        mz_similar = False
+        if mz_target != 0 and mz_other != 0 and not np.isnan(mz_target) and not np.isnan(mz_other):
+            mz_similar = abs(mz_target - mz_other) <= 0.005
+        
+        # Check monoisotopic mass similarity (exclude if both are 0 or invalid)
+        mass_similar = False
+        if mass_target is not None and mass_target != 0 and main_db_path:
+            inchi_key_other = other["inchi_key"]
+            mass_other = _get_monoisotopic_mass(main_db_path, inchi_key_other)
+            if mass_other is not None and mass_other != 0:
+                mass_similar = abs(mass_target - mass_other) <= 0.005
+        
+        if mz_similar or mass_similar:
+            overlapping.append((int(idx) + 1, other["compound_name"], other["inchi_key"]))
+    
+    # Include the target compound itself
+    overlapping.append((compound_idx + 1, row["compound_name"], row["inchi_key"]))
+    
+    # Sort by index
+    overlapping.sort(key=lambda x: x[0])
+    
+    # Format as names only (no InChI keys) and indices
+    names = [name for _, name, _ in overlapping]
+    indices = [str(idx) for idx, _, _ in overlapping]
+    
+    return "//".join(names), "//".join(indices)
 
-        mz_overlap = abs(mz_other - mz_target) <= 0.005
-
-        rt_overlap = (
-            (rt_min_other <= rt_min_target <= rt_max_other) or
-            (rt_min_other <= rt_max_target <= rt_max_other) or
-            (rt_min_target <= rt_min_other <= rt_max_target) or
-            (rt_min_target <= rt_max_other <= rt_max_target)
-        )
-
-        if mz_overlap and rt_overlap:
-            name = other["compound_name"] or f"compound_{idx}"
-            key  = (f"{name} {other['adduct']}"
-                    if label_counts.get(name, 0) > 1 else name)
-            overlapping_labels.append(key)
-            inchi_key_map[key] = other.get("inchi_key", "")
-
-    if not overlapping_labels:
-        return "", ""
-
-    # Include the compound itself in its own overlapping set (original behaviour)
-    self_key = (f"{label_target} {adduct_target}"
-                if label_counts.get(label_target, 0) > 1 else label_target)
-    overlapping_labels.append(self_key)
-    inchi_key_map[self_key] = ik_target
-
-    sorted_labels = sorted(overlapping_labels, key=str)
-    return (
-        "//".join(sorted_labels),
-        "//".join(inchi_key_map.get(k, "") for k in sorted_labels),
-    )
-
-
-def make_stats_table(
+def make_final_id_sheet(
     summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     output_filename: str = "Final_Identifications.xlsx",
@@ -810,19 +866,13 @@ def make_stats_table(
     """Build the per-compound summary Excel workbook for one analysis.
 
     Reads ``manual_curation`` and ``ms2_hits`` from the project database and
-    produces a single Excel file with two sheets:
-
-    * **Final_Identifications** - one row per compound with quality scores,
+    produces a single Excel file: **Final_Identifications** - one row per compound with quality scores,
       MS1/MS2 summary values, mz/RT metrics, and formatted section headers.
-
-    The function is the refactored equivalent of ``make_stats_table`` v1
-    but uses the new database-backed ``AnalysisSummary`` architecture instead
-    of the metatlas in-memory dataset objects.
 
     Parameters
     ----------
     summary_obj:
-        A configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        A configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
     output_loc:
         Override the output directory.  Defaults to
         ``<project_directory>/analysis_tables/rt<N>_analysis<M>/``.
@@ -839,7 +889,9 @@ def make_stats_table(
         output_loc = Path(output_loc)
     output_loc.mkdir(parents=True, exist_ok=True)
 
-    output_filename = f"{summary_obj.project_name}_RTA{summary_obj.rt_alignment_number}_TGA{summary_obj.analysis_number}_{output_filename}"
+    analysis_info = f"{summary_obj.post_curation_atlas_obj.chromatography}-{summary_obj.post_curation_atlas_obj.polarity}-{summary_obj.post_curation_atlas_obj.analysis_type}"
+    run_info = f"RTA{summary_obj.rt_alignment_number}-TGA{summary_obj.analysis_number}"
+    output_filename = f"{summary_obj.project_name}_{analysis_info}-{run_info}_{output_filename}"
     if not output_filename.endswith(".xlsx"):
         output_filename += ".xlsx"
     excel_path = output_loc / output_filename
@@ -854,32 +906,34 @@ def make_stats_table(
         return pd.DataFrame()
 
     manual_curation_df = manual_curation_df.reset_index(drop=True)
-    logger.info("Processing %d compounds…", len(manual_curation_df))
+    logger.info("Processing %d compounds...", len(manual_curation_df))
 
     rows: List[dict] = []
 
-    for compound_idx, mc_row in tqdm(manual_curation_df.iterrows(), total=len(manual_curation_df), desc="Making stats table"):
+    for compound_idx, mc_row in tqdm(manual_curation_df.iterrows(), total=len(manual_curation_df), desc="Adding compounds to final ID sheet"):
         compound_name = mc_row.get("compound_name") or f"compound_{compound_idx}"
         inchi_key     = mc_row.get("inchi_key",   "")
         adduct        = mc_row.get("adduct",       "")
-        mc_row['formula'] = _get_compound_formula(summary_obj.paths["project_db_path"], inchi_key, summary_obj.paths.get("main_db_path"))
-
+        polarity      = mc_row.get("polarity",     "")
+        
+        # Get compound metadata from main database
+        formula, smiles, inchi, pubchem_cid = _get_compound_info(summary_obj.paths.get("main_db_path"), inchi_key) or (None, None, None, None)
+        exact_mass = _get_monoisotopic_mass(summary_obj.paths.get("main_db_path"), inchi_key)
+        
+        # Find overlapping compounds
+        overlapping_names, overlapping_indices = _find_overlapping_compounds(
+            manual_curation_df, compound_idx, summary_obj.paths.get("main_db_path")
+        )
+        
         mz_theoretical = float(mc_row.get("atlas_mz",            np.nan))
         mz_measured    = float(mc_row.get("best_ms1_mz",         np.nan))
-        mz_delta       = (abs(mz_theoretical - mz_measured)
-                          if not (np.isnan(mz_theoretical) or np.isnan(mz_measured))
-                          else np.nan)
         ppm_error      = float(mc_row.get("best_ms1_ppm_error",  np.nan))
         rt_error       = float(mc_row.get("best_ms1_rt_error",   np.nan))
         rt_measured    = float(mc_row.get("best_ms1_rt",         np.nan))
         max_intensity  = float(mc_row.get("best_ms1_intensity",  np.nan))
         max_int_file   = mc_row.get("best_ms1_file", "")
 
-        overlap_labels, overlap_keys = _find_overlapping_compounds(
-            manual_curation_df, compound_idx
-        )
-
-        mz_q = _mz_quality(ppm_error, mz_delta if not np.isnan(mz_delta) else np.nan)
+        mz_q = _mz_quality(ppm_error, abs(mz_theoretical - mz_measured) if not (np.isnan(mz_theoretical) or np.isnan(mz_measured)) else np.nan)
         rt_q = _rt_quality(rt_error, chromatography)
 
         ms2_notes = mc_row.get("ms2_notes") or "no selection"
@@ -893,7 +947,7 @@ def make_stats_table(
         msms_file          = ""
         msms_rt            = np.nan
         msms_score         = np.nan
-        msms_num_ions      = np.nan
+        msms_num_ions      = ""
         msms_matching_ions = ""
 
         if not ms2_hits_all_df.empty:
@@ -906,17 +960,23 @@ def make_stats_table(
                 msms_file  = str(best_hit.get("file_path", ""))
                 msms_rt    = float(best_hit.get("rt",    np.nan))
                 msms_score = float(best_hit.get("score", np.nan))
+                
+                num_matches = int(best_hit.get("num_matches", 0))
+                ref_frags   = int(best_hit.get("ref_frags", 0))
+                msms_num_ions = f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches)
 
                 try:
                     mf = json.loads(best_hit.get("matched_fragments", "[]"))
-                    msms_num_ions      = len(mf)
                     msms_matching_ions = ",".join(f"{m:.3f}" for m in mf)
                 except Exception:
-                    msms_num_ions      = int(best_hit.get("num_matches", 0))
                     msms_matching_ions = ""
 
-                if msms_num_ions == 1 and not np.isnan(msms_score):
-                    single_ion = mf[0] if mf else np.nan
+                if num_matches == 1 and not np.isnan(msms_score):
+                    try:
+                        mf = json.loads(best_hit.get("matched_fragments", "[]"))
+                        single_ion = mf[0] if mf else np.nan
+                    except Exception:
+                        single_ion = np.nan
                     ppm_tol    = float(mc_row.get("mz_tolerance", 5.0))
                     precursor_match = (
                         abs(single_ion - mz_theoretical) / mz_theoretical * 1e6 <= ppm_tol
@@ -934,29 +994,29 @@ def make_stats_table(
                         msms_q     = 0.5
                         total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
 
-        raw_isomers = mc_row.get("isomers")
-        try:
-            isomer_list = json.loads(raw_isomers) if raw_isomers else []
-            isomer_str  = ", ".join(str(x) for x in isomer_list) if isomer_list else ""
-        except Exception:
-            isomer_str = str(raw_isomers) if raw_isomers else ""
-
         rows.append({
-            "compound_number":         compound_idx + 1,
-            "identified_metabolite":   overlap_labels or compound_name,
+            "identified_metabolite":   overlapping_names,
+            "identified_metabolite_idx": overlapping_indices,
             "label":                   compound_name,
-            "overlapping_compound":    overlap_labels,
-            "overlapping_inchi_keys":  overlap_keys,
-            "formula":                 mc_row.get("formula",   ""),
-            "polarity":                mc_row.get("polarity",  ""),
+            "compound_number":         compound_idx + 1,
+            "mz_adduct":               adduct,
+            "mz_adduct_mz":            round(mz_theoretical, 4) if not np.isnan(mz_theoretical) else np.nan,
+            "pubchem_cid":             pubchem_cid if pubchem_cid else "",
+            "smiles":                  smiles if smiles else "",
+            "inchi":                   inchi if inchi else "",
+            "formula":                 formula if formula else "",
+            "exact_mass":              round(exact_mass, 6) if exact_mass is not None else np.nan,
             "inchi_key":               inchi_key,
+            "polarity":                polarity,
+            "chromatography":          chromatography,
             "msms_quality":            msms_q,
             "mz_quality":              mz_q,
             "rt_quality":              rt_q,
             "total_score":             total_score,
             "msi_level":               msi_level,
-            "isomer_details":          isomer_str,
             "identification_notes":    mc_row.get("identification_notes", ""),
+            "analyst_notes":           mc_row.get("analyst_notes", ""),
+            "other_notes":             mc_row.get("other_notes",   ""),
             "ms1_notes":               mc_row.get("ms1_notes",            ""),
             "ms2_notes":               ms2_notes,
             "max_intensity":           max_intensity,
@@ -967,13 +1027,11 @@ def make_stats_table(
             "msms_numberofions":       msms_num_ions,
             "msms_matchingions":       msms_matching_ions,
             "msms_score":              round(msms_score, 4) if not np.isnan(msms_score) else np.nan,
-            "mz_adduct":               adduct,
             "mz_theoretical":          round(mz_theoretical, 4) if not np.isnan(mz_theoretical) else np.nan,
             "mz_measured":             round(mz_measured,    4) if not np.isnan(mz_measured)    else np.nan,
-            "mz_error":                round(mz_delta,       4) if not np.isnan(mz_delta)       else np.nan,
             "mz_ppmerror":             round(ppm_error,      4) if not np.isnan(ppm_error)      else np.nan,
-            "rt_min":                  round(float(mc_row.get("atlas_rt_min", np.nan)), 2),
-            "rt_max":                  round(float(mc_row.get("atlas_rt_max", np.nan)), 2),
+            "rt_min":                  round(float(mc_row.get("rt_min", np.nan)), 2),
+            "rt_max":                  round(float(mc_row.get("rt_max", np.nan)), 2),
             "rt_theoretical":          round(float(mc_row.get("atlas_rt_peak", np.nan)), 2),
             "rt_measured":             round(rt_measured, 2) if not np.isnan(rt_measured) else np.nan,
             "rt_error":                round(rt_error,    2) if not np.isnan(rt_error)    else np.nan,
@@ -990,20 +1048,22 @@ def make_stats_table(
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
 
     HEADER2 = [
-        "Compound #", "Identified Metabolite", "Name of metabolite searched for",
-        "Labels of Overlapping Compounds", "Inchi Keys of Overlapping Compounds",
-        "Molecular Formula", "Polarity", "Inchi Key",
+        "Identified Metabolite(s) Name", "Identified Metabolite(s) #",
+        "Target Metabolite Name", "Target Metabolite #", "Target Metabolite Adduct",
+        "Target Metabolite+Adduct m/z",
+        "Target Metabolite PubChem CID", "Target Metabolite SMILES", "Target Metabolite InChI",
+        "Target Metabolite Formula", "Target Metabolite Mass", "Target Metabolite InChIKey",
+        "Run Polarity", "Run Chromatography",
         "MSMS Score (0 to 1)", "m/z score (0 to 1)", "RT score (0 to 1)",
-        "Total ID Score (0 to 3)", "Mass Spec Initiative ID Level", "Isomer details",
-        "Identification notes", "MS1 notes", "MS2 notes",
+        "Total ID Score (0 to 3)", "Mass Spec Initiative ID Level",
+        "Identification notes", "Analyst notes", "Other notes", "MS1 notes", "MS2 notes",
         "Maximum MS1 intensity across all files", "Filename w/ maximum MS1",
         "Retention time of max intensity MS1 peak",
         "File with highest MSMS match score", "RT of highest matched MSMS scan",
         "Number of ion matches in MSMS spectra to reference",
         "List of ion matches in MSMS spectra to reference",
         "MSMS score (highest across all samples)",
-        "Adduct", "Theoretical m/z", "Measured m/z",
-        "Mass error (delta Da)", "Mass error (delta ppm)",
+        "Theoretical m/z", "Measured m/z", "Mass error (delta ppm)",
         "Min retention time (min)", "Max retention time (min)",
         "Theoretical retention time (peak)",
         "Detected RT (peak)", "RT error (absolute delta)",
@@ -1015,32 +1075,34 @@ def make_stats_table(
         "1 (delta RT ≤0.5), 0.5 (delta RT >0.5 & ≤2), 0 (delta RT >2 min)"
     )
     HEADER3 = [
-        "Unique for study",
-        "Isomers may not be chromatographically or spectrally resolvable.",
-        "Name of standard reference compound in library match.",
-        "Compound with similar m/z (±0.005) and overlapping RT window.",
-        "InChI Keys for the overlapping compounds listed in previous column.",
-        "", "",
-        "Neutralised InChI Key",
+        "Name of final identification. Some compounds (i.e., isomers) are not chromatographically or spectrally resolvable and are separated by \"//\". Some compounds are detected w/ >1 adduct (increases identification confidence but only use 1 for analysis). \"Unresolvable\" determined by having similar m/z (abs difference <= 0.005) or monoisotopic molecular weight (abs difference <= 0.005) AND overlapping RT (min or max within the RT-min-max-range of similar compound)",
+        "Index of the metabolite(s) in nextdoor column, unique for study",
+        "Name and InChIKey of standard reference compound that was searched for in the spectral data",
+        "Index of the metabolite in nextdoor column, unique for study",
+        "",
+        "m/z of the compound with the specified adduct",
+        "", "", "",
+        "Molecular formula from PubChem",
+        "Monoisotopic molecular mass (neutral except for permanently charged molecules)",
+        "Neutralized version of InChIKey",
+        "Metabolite detected in this instrument polarity",
+        "Metabolite detected in this column chromatography",
         "1 (MSMS matches ref. std.), 0.5 (possible match), 0 (no MSMS or no ref.), -1 (bad match)",
         "1 (delta ppm ≤5 or delta Da ≤0.0015), 0.5 (delta ppm 5-10), 0 (>10 ppm)",
         rt_q_desc,
         "Sum of m/z, RT and MSMS scores",
         "Level 1 = Two orthogonal properties match authentic standard; else = putative",
-        "Isomers share formula and similar RT; MSMS may differentiate",
-        "", "", "",
+        "", "", "", "", "",
         "Highest MS1 peak height across all files in the analysis",
         "File containing the highest MS1 peak height",
         "Retention time of the highest MS1 peak",
         "File with the top-scoring MS2 database hit",
         "Retention time of the top-scoring MS2 scan",
-        "Number of fragment ions matching the reference spectrum",
+        "Number of matched ions / number of reference ions",
         "m/z values of matching fragment ions",
         "Highest MS2 hit score across all files (0-1)",
-        "Ion adduct used for m/z calculation",
         "Theoretical m/z for compound / adduct pair",
         "Measured m/z (best MS1 scan)",
-        "Absolute difference between theoretical and measured m/z",
         "PPM difference between theoretical and measured m/z",
         "Atlas RT window minimum",
         "Atlas RT window maximum",
@@ -1050,17 +1112,14 @@ def make_stats_table(
     ]
 
     _SECTION_SPANS = [
-        ("A1:G1",  "COMPOUND ANNOTATION"),
-        ("H1:H1",  "INCHI KEY"),
-        ("I1:M1",  "COMPOUND IDENTIFICATION SCORES"),
-        ("N1:P1",  "ANNOTATION NOTES"),
-        ("Q1:Q1",  "MS2 NOTES"),
-        ("R1:T1",  "MS1 INTENSITY INFORMATION"),
-        ("U1:Y1",  "MSMS INFORMATION"),
-        ("Z1:Z1",  "ADDUCT"),
-        ("AA1:AE1","ION / M/Z INFORMATION"),
-        ("AF1:AI1","CHROMATOGRAPHIC PEAK INFORMATION"),
-        ("AJ1:AJ1","RT EVALUATION"),
+        ("A1:L1",  "COMPOUND ANNOTATION"),
+        ("M1:N1",  "RUN DETAILS"),
+        ("O1:S1",  "COMPOUND IDENTIFICATION SCORES"),
+        ("T1:X1",  "ANNOTATION NOTES"),
+        ("Y1:AA1",  "MS1 INTENSITY INFORMATION"),
+        ("AB1:AF1", "MSMS INFORMATION"),
+        ("AG1:AI1","ION / M/Z INFORMATION"),
+        ("AJ1:AN1","CHROMATOGRAPHIC PEAK INFORMATION"),
     ]
 
     with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
@@ -1074,6 +1133,7 @@ def make_stats_table(
         f_blue       = workbook.add_format({"bg_color": "#DCFFFF"})
         f_yellow     = workbook.add_format({"bg_color": "#FFFFDC"})
         f_rose       = workbook.add_format({"bg_color": "#FFDCFF"})
+        f_gray       = workbook.add_format({"bg_color": "#D3D3D3"})
         f_header     = workbook.add_format({
             "bold": True, "align": "center", "valign": "vcenter",
             "text_wrap": True, "border": 1,
@@ -1082,7 +1142,10 @@ def make_stats_table(
 
         worksheet.set_row(1, 60)
         worksheet.set_row(2, 60)
-        worksheet.set_column("R:R", None, f_scientific)
+        worksheet.set_column("A:A", 25)
+        worksheet.set_column("C:C", 25)
+        worksheet.set_column("L:L", 25)
+        worksheet.set_column("Y:Y", None, f_scientific)
 
         # Row 1: section header merges
         for span, title in _SECTION_SPANS:
@@ -1101,13 +1164,13 @@ def make_stats_table(
 
         # Conditional background colours per section
         nrows = len(final_df) + 4
-        worksheet.conditional_format(f"I1:M{nrows}", {"type": "no_errors", "format": f_blue})
-        worksheet.conditional_format(f"N1:Q{nrows}", {"type": "no_errors", "format": f_rose})
-        worksheet.conditional_format(f"R1:T{nrows}", {"type": "no_errors", "format": f_yellow})
-        worksheet.conditional_format(f"U1:Y{nrows}", {"type": "no_errors", "format": f_rose})
-        worksheet.conditional_format(f"AA1:AE{nrows}", {"type": "no_errors", "format": f_yellow})
-        worksheet.conditional_format(f"AF1:AI{nrows}", {"type": "no_errors", "format": f_yellow})
-        worksheet.conditional_format(f"AJ1:AJ{nrows}", {"type": "no_errors", "format": f_rose})
+        worksheet.conditional_format(f"M1:N{nrows}", {"type": "no_errors", "format": f_gray})
+        worksheet.conditional_format(f"O1:S{nrows}", {"type": "no_errors", "format": f_blue})
+        worksheet.conditional_format(f"T1:X{nrows}", {"type": "no_errors", "format": f_rose})
+        worksheet.conditional_format(f"Y1:AA{nrows}", {"type": "no_errors", "format": f_yellow})
+        worksheet.conditional_format(f"AB1:AF{nrows}", {"type": "no_errors", "format": f_rose})
+        worksheet.conditional_format(f"AG1:AI{nrows}", {"type": "no_errors", "format": f_yellow})
+        worksheet.conditional_format(f"AJ1:AN{nrows}", {"type": "no_errors", "format": f_yellow})
 
     logger.info("Exported stats table to %s", excel_path)
     return final_df
@@ -1277,7 +1340,7 @@ def make_eic_thumbnails(
     Parameters
     ----------
     summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
     output_loc:
         Override base output directory.  Defaults to
         ``<project_directory>/analysis_tables/rt<N>_analysis<M>/``.
@@ -1311,8 +1374,7 @@ def make_eic_thumbnails(
 
     manual_curation_df = manual_curation_df.reset_index(drop=True)
     n_compounds = len(manual_curation_df)
-    logger.info("Generating EIC thumbnail PDFs for %d compounds…", n_compounds)
-
+    logger.info("Generating EIC thumbnail PDFs for %d compounds...", n_compounds)
     for cmp_idx, mc_row in tqdm(manual_curation_df.iterrows(), total=len(manual_curation_df), desc="Generating EIC thumbnails"):
         compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx}"
         inchi_key     = mc_row.get("inchi_key", "")
@@ -1370,7 +1432,7 @@ def make_eic_thumbnails(
 def _file_group(file_path: str) -> str:
     """Return the file group label: the segment at underscore-separated index 11 of the stem.
 
-    Example: ``…_groupA_…mzML`` → ``"groupA"`` (assuming groupA is at position 11).
+    Example: ``..._groupA_...mzML`` → ``"groupA"`` (assuming groupA is at position 11).
     Falls back to the full stem when the filename has fewer than 12 ``_`` segments.
     """
     if not file_path:
@@ -1567,7 +1629,7 @@ def make_boxplots(
     Parameters
     ----------
     summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
         Data tables and per-file metrics are loaded automatically via
         ``summary_obj.load_data()`` on first call if not already cached.
     output_loc:
@@ -1679,7 +1741,7 @@ def make_manual_curation_csv(
     Parameters
     ----------
     summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
         ``manual_curation_df`` is loaded automatically if not already cached.
     output_loc:
         Override output directory.  Defaults to
@@ -1744,12 +1806,12 @@ def make_best_ms2_hit_fragment_ions_csv(
     file_name       : basename of the file containing the best hit
     rt_peak         : retention time of the best-scoring MS2 scan (min)
     mz_peak         : measured precursor m/z of the best-scoring MS2 scan
-    spectrum        : query spectrum as JSON ``[[mz0, mz1, …], [int0, int1, …]]``
+    spectrum        : query spectrum as JSON ``[[mz0, mz1, ...], [int0, int1, ...]]``
 
     Parameters
     ----------
     summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
         Data tables are loaded automatically if not already cached.
     output_loc:
         Override output directory.  Defaults to
@@ -1844,6 +1906,7 @@ def make_best_ms2_hit_fragment_ions_csv(
 def run_all_summaries(
     summary_obj: "AnalysisSummary",
     overwrite: bool = False,
+    skip_outputs: Optional[List[str]] = None
 ) -> None:
     """Run all summary outputs for one analysis.
 
@@ -1863,7 +1926,7 @@ def run_all_summaries(
     Parameters
     ----------
     summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(…)`` first).
+        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
     overwrite:
         Passed through to all sub-functions.
     """
@@ -1874,23 +1937,29 @@ def run_all_summaries(
         logger.error("No manual curation entries found - aborting run_all_summaries.")
         return
 
-    logger.info("Making Identification figures…")
-    make_identification_figure(summary_obj, output_loc=output_loc, overwrite=overwrite)
+    if "final_id_sheet" not in (skip_outputs or []):
+        logger.info("Making Final Identification sheet...")
+        make_final_id_sheet(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("Making EIC thumbnails…")
-    make_eic_thumbnails(summary_obj, output_loc=output_loc, overwrite=overwrite)
+    if "id_figures" not in (skip_outputs or []):
+        logger.info("Making Identification figures...")
+        make_identification_figure(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("Making Stats table…")
-    make_stats_table(summary_obj, output_loc=output_loc, overwrite=overwrite)
+    if "eic_thumbnails" not in (skip_outputs or []):
+        logger.info("Making EIC thumbnails...")
+        make_eic_thumbnails(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("Making Boxplots…")
-    make_boxplots(summary_obj, output_loc=output_loc, overwrite=overwrite)
+    if "boxplots" not in (skip_outputs or []):
+        logger.info("Making Boxplots...")
+        make_boxplots(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("Making Manual curation CSV…")
-    make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+    if "manual_curation_csv" not in (skip_outputs or []):
+        logger.info("Making Manual curation CSV...")
+        make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("Making best MS2 hit fragment ions CSV…")
-    make_best_ms2_hit_fragment_ions_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+    if "best_ms2_hits_csv" not in (skip_outputs or []):
+        logger.info("Making best MS2 hit fragment ions CSV...")
+        make_best_ms2_hit_fragment_ions_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
     logger.info("Exporting post-curation atlas data CSV...")
     summary_obj.post_curation_atlas_obj.to_dataframe().to_csv(

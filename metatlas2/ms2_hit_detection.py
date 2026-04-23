@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
+from tqdm import tqdm
 
 from matchms.similarity import CosineHungarian
 from matchms import Spectrum
@@ -59,11 +60,11 @@ def find_ms2_hits(
         logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(process_job, job, reference_df, auto_id_obj.workflow_params) for job in jobs]
-            for future in as_completed(futures):
+            for future in tqdm(as_completed(futures), total=len(jobs), desc="Detecting MS2 hits for MS2 scans"):
                 results.append(future.result())
     else:
         logger.info("Using sequential processing for hit detection...")
-        results = [process_job(job, reference_df, auto_id_obj.workflow_params) for job in jobs]
+        results = [process_job(job, reference_df, auto_id_obj.workflow_params) for job in tqdm(jobs, desc="Processing MS2 hits")]
 
     # Assign results to ExperimentalData.ms2_hits as MS2Hit objects
     for inchi_key, adduct, filename, ms2_hits_df in results:

@@ -192,15 +192,15 @@ def main():
 
     args = parse_args()
 
-    if not args.log_to_stdout and args.command == "run": print("==------- Loading modules...")
+    if not args.log_to_stdout and args.command == "run": print("==------- Loading metatlas2 modules...")
     import metatlas2.load_tools as ldt
     import metatlas2.workflows as wfs
     import metatlas2.logging_config as lcf
 
-    if not args.log_to_stdout and args.command == "run": print("===------ Loading config...")
+    if not args.log_to_stdout and args.command == "run": print("===------ Loading user-supplied config...")
     config = ldt.load_metatlas2_config(args.config)
 
-    if not args.log_to_stdout and args.command == "run": print("====----- Setting up paths...")
+    if not args.log_to_stdout and args.command == "run": print("====----- Setting up project paths...")
     paths = set_up_paths(
         config=config,
         project_name=args.project,
@@ -208,7 +208,7 @@ def main():
         analysis_number=args.analysis_num,
     )
 
-    if not args.log_to_stdout and args.command == "run": print("=====---- Setting up logging...")
+    if not args.log_to_stdout and args.command == "run": print("=====---- Setting up workflow logging...")
     log_file = None if args.log_to_stdout else paths["log_path"]
     lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
     logger = lcf.get_logger("run_targeted_analysis")

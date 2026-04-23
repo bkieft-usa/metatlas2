@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List, Any
+from tqdm import tqdm
 
 from scipy.interpolate import interp1d
 from scipy.signal import find_peaks, peak_widths, peak_prominences
@@ -23,7 +24,7 @@ def create_manual_curation_obj(
     ms1_index = _build_ms1_index(auto_id_obj.experimental_data)
     
     logger.info("Starting Compound loop...")
-    for atlas_compound_mzrt in auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values():
+    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Creating manual curation objects"):
 
         compound_data = pd.DataFrame([{
             'compound_uid': atlas_compound_mzrt.compound_uid,

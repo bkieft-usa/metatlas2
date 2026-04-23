@@ -140,7 +140,8 @@ def _make_summary_cell() -> nbformat.NotebookNode:
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    pre_curation_atlas=ANALYSIS_ATLAS\n"
+        "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
+        "    overwrite=False\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)

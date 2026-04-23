@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
+from tqdm import tqdm
 
 import metatlas2.rt_align_tools as rat
 import metatlas2.pubchem_retrieval as pcr
@@ -435,6 +436,7 @@ def create_project_database(
 def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
     """
     Create main metatlas database with required tables.
+    If database already exists and overwrite=False, does nothing (allows adding to existing DB).
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -446,7 +448,8 @@ def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
     elif overwrite and not db_path.exists():
         logger.info(f"No existing main database found at {db_path}. Creating new database.")
     elif not overwrite and db_path.exists():
-        raise ValueError(f"Database already exists at {db_path}. Use overwrite=True to replace it.")
+        logger.info(f"Database already exists at {db_path}. Skipping database creation.")
+        return
     elif not overwrite and not db_path.exists():
         logger.info(f"No existing main database found at {db_path}. Creating new database.")
 
@@ -2378,7 +2381,7 @@ def save_auto_identification_results_to_db(
 
     # CompoundInfo
     logger.info(f"Processing manual curation entries...")
-    for ci in exp_data_obj.manual_curation:
+    for ci in tqdm(exp_data_obj.manual_curation, desc="Processing manual curation entries"):
         compound_uid = compound_uid_map.get(ci.inchi_key)
         if not compound_uid:
             logger.warning(f"Could not find compound_uid for {ci.inchi_key}, skipping")
@@ -2392,7 +2395,7 @@ def save_auto_identification_results_to_db(
 
     # MS1Data
     logger.info(f"Processing MS1 data entries...")
-    for ms1 in exp_data_obj.ms1_data:
+    for ms1 in tqdm(exp_data_obj.ms1_data, desc="Processing MS1 data entries"):
         compound_uid = compound_uid_map.get(ms1.inchi_key)
         if not compound_uid or ms1.data.empty:
             continue
@@ -2417,7 +2420,7 @@ def save_auto_identification_results_to_db(
 
     # MS2Data
     logger.info(f"Processing MS2 data entries...")
-    for ms2 in exp_data_obj.ms2_data:
+    for ms2 in tqdm(exp_data_obj.ms2_data, desc="Processing MS2 data entries"):
         compound_uid = compound_uid_map.get(ms2.inchi_key)
         if not compound_uid or ms2.data.empty:
             continue
@@ -2441,7 +2444,7 @@ def save_auto_identification_results_to_db(
 
     # MS2Hits
     logger.info(f"Processing MS2 hit entries...")
-    for ms2_hit in exp_data_obj.ms2_hits:
+    for ms2_hit in tqdm(exp_data_obj.ms2_hits, desc="Processing MS2 hit entries"):
         compound_uid = compound_uid_map.get(ms2_hit.inchi_key)
         if not compound_uid or ms2_hit.data.empty:
             continue
@@ -2738,35 +2741,68 @@ def _bulk_insert_analysis_data(
     manual_curation_records: List[tuple],
     ms2_hits_records: List[tuple],
     ms1_data_records: List[tuple],
-    ms2_data_records: List[tuple]
+    ms2_data_records: List[tuple],
+    batch_size: int = 500
 ) -> None:
-    """Perform bulk inserts for all analysis data types."""
+    """Perform bulk inserts for all analysis data types with progress tracking.
+    
+    Args:
+        project_db_path: Path to project database
+        manual_curation_records: List of manual curation record tuples
+        ms2_hits_records: List of MS2 hits record tuples
+        ms1_data_records: List of MS1 data record tuples
+        ms2_data_records: List of MS2 data record tuples
+        batch_size: Number of records to insert per batch (default 500)
+    """
+    
+    def _insert_in_batches(conn, query: str, records: List[tuple], desc: str):
+        """Helper to insert records in batches with progress bar."""
+        total_records = len(records)
+        num_batches = (total_records + batch_size - 1) // batch_size
+        
+        for i in tqdm(range(num_batches), desc=f"{desc} in {num_batches} batches ({total_records} records)"):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, total_records)
+            batch = records[start_idx:end_idx]
+            conn.executemany(query, batch)
     
     with get_db_connection(project_db_path) as conn:
         if manual_curation_records:
             logger.info(f"Inserting {len(manual_curation_records)} compound metadata records...")
-            conn.executemany("""
-                INSERT INTO manual_curation VALUES 
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, manual_curation_records)
-        
-        if ms2_hits_records:
-            logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
-            conn.executemany("""
-                INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms2_hits_records)
+            _insert_in_batches(
+                conn,
+                """INSERT INTO manual_curation VALUES 
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                manual_curation_records,
+                "Inserting manual curation records"
+            )
         
         if ms1_data_records:
             logger.info(f"Inserting {len(ms1_data_records)} MS1 raw data records...")
-            conn.executemany("""
-                INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms1_data_records)
+            _insert_in_batches(
+                conn,
+                """INSERT INTO ms1_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ms1_data_records,
+                "Inserting MS1 data records"
+            )
         
         if ms2_data_records:
             logger.info(f"Inserting {len(ms2_data_records)} MS2 raw data records...")
-            conn.executemany("""
-                INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, ms2_data_records)
+            _insert_in_batches(
+                conn,
+                """INSERT INTO ms2_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ms2_data_records,
+                "Inserting MS2 data records"
+            )
+
+        if ms2_hits_records:
+            logger.info(f"Inserting {len(ms2_hits_records)} MS2 hits records...")
+            _insert_in_batches(
+                conn,
+                """INSERT INTO ms2_hits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ms2_hits_records,
+                "Inserting MS2 hits records"
+            )
 
 def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
     """

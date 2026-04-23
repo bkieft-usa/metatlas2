@@ -1,7 +1,8 @@
 import pandas as pd
 import pyarrow.parquet as pq
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, Any
+from tqdm import tqdm
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -86,7 +87,7 @@ def extract_eic_and_ms2_from_parquet(
                     continue
     else:
         logger.info("Using sequential processing...")
-        for parquet_file in project_files_list:
+        for parquet_file in tqdm(project_files_list, desc="Extracting data from parquet files"):
             try:
                 file_results = _process_single_parquet_file(
                     parquet_file, compound_mzrts, workflow_params, only_ms_level

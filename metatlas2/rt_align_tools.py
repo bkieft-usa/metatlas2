@@ -3,6 +3,7 @@ import numpy as np
 import sys
 from pathlib import Path
 from typing import Dict, Tuple, List
+from tqdm import tqdm
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
@@ -171,10 +172,10 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     # Table: Compound number to name mapping (ordered by RT), now with residuals
     ax_table = fig.add_subplot(gs[1, :])
     ax_table.axis('off')
-    table_data = modeling_results_df[['compound_num', 'inchi_key', 'adduct', 'atlas_rt_peak', 'residual']].copy()
+    table_data = modeling_results_df[['compound_num', 'compound_name', 'inchi_key', 'adduct', 'atlas_rt_peak', 'residual']].copy()
     table_data['atlas_rt_peak'] = table_data['atlas_rt_peak'].round(3)
     table_data['residual'] = table_data['residual'].round(4)
-    table_data.columns = ['#', 'InChi Key', 'Adduct', 'Atlas RT (min)', 'Residual (min)']
+    table_data.columns = ['#', 'Compound Name', 'InChi Key', 'Adduct', 'Atlas RT (min)', 'Residual (min)']
     table = ax_table.table(cellText=table_data.values,
                         colLabels=table_data.columns,
                         loc='center',
@@ -233,10 +234,11 @@ def build_rt_alignment_model(
         ms1_lookup.setdefault(key, []).append(ms1)
 
     compound_stats = []
-    for compound_mzrt in atlas.compound_mzrts.values():
+    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Building RT alignment model"):
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
         compound_uid = compound_mzrt.compound_uid
+        compound_name = compound_mzrt.compound_name
         atlas_rt_peak = compound_mzrt.rt_peak
         atlas_rt_min = compound_mzrt.rt_min
         atlas_rt_max = compound_mzrt.rt_max
@@ -278,6 +280,7 @@ def build_rt_alignment_model(
 
         compound_stats.append({
             'compound_uid': compound_uid,
+            'compound_name': compound_name,
             'inchi_key': inchi_key,
             'adduct': adduct,
             'atlas_rt_peak': atlas_rt_peak,
@@ -380,7 +383,7 @@ def create_file_matching_summary(
         key = (ms1.inchi_key, ms1.adduct)
         ms1_lookup.setdefault(key, []).append(ms1)
 
-    for compound_mzrt in atlas.compound_mzrts.values():
+    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Creating file matching summary"):
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
         total_compounds += 1
