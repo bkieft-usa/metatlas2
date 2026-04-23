@@ -10,10 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libc-ares-dev \
         pkg-config \
         libgl1 \
-        libcairo2 \
-        libpango-1.0-0 \
-        libgdk-pixbuf2.0-0 \
-        libxrender1 \
+        imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
 # Bring in uv from the official image
