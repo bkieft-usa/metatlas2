@@ -360,14 +360,25 @@ Three kernel specs are available:
 
 Generated curation notebooks embed the kernel name in their `kernelspec` metadata so the notebook re-opens against the same image that was used to generate it.  Analysts can switch kernels at any time in JupyterLab.
 
+> **Dev kernel caveat — two separate layers:**
+> The `metatlas2-dev` kernel is only partially "local". It has two distinct layers with different update mechanisms:
+>
+> | Layer | Source | How to update |
+> |---|---|---|
+> | **Python source code** (`metatlas2/`, scripts) | Your local repo on disk | Edit and save — changes are live on the next kernel restart |
+> | **Runtime environment** (Python interpreter, installed packages, system libraries) | The Docker image (`/app/.venv/`, `/usr/lib/`) | Requires a full 3-step sequence: push to `main` (triggers CI image build) → `pull_latest.sh` → `install_kernels.sh` |
+>
+> In other words: edits to `.py` files are immediately reflected, but changes to `pyproject.toml` dependencies, `Dockerfile` system packages, or any other environment-level change are **not** visible until a new image has been built, pulled, and the kernel spec refreshed.
+
 ---
 
 ### Development Workflow
 
 To test local changes without waiting for CI to build and push an image:
 
-1. **Interactive / notebook**: Switch to the `metatlas2-dev` kernel.  The local repo's `metatlas2/` package directory is mounted at `/app/metatlas2` inside the container, directly overlaying the installed copy, so edits take effect on the next cell execution.
-2. **CLI `run`, `add-compounds`, `add-atlases`**: Add `--dev` to the wrapper script — the local `metatlas2/` package directory is bind-mounted over the installed copy inside the container.
+1. **Interactive / notebook**: Switch to the `metatlas2-dev` kernel.  The local repo's `metatlas2/` package directory is mounted at `/app/metatlas2` inside the container, directly overlaying the installed copy, so edits take effect on the next cell execution.  
+   **Important:** only Python source code changes are picked up this way.  If you change `pyproject.toml` (add/upgrade a package) or the `Dockerfile` (add a system library), those changes live in the container image — you must push to `main`, wait for CI to build and push the new image, then run `pull_latest.sh` and `install_kernels.sh` before the dev kernel reflects them.
+2. **CLI `run`, `add-compounds`, `add-atlases`**: Add `--dev` to the wrapper script — the local `metatlas2/` package directory is bind-mounted over the installed copy inside the container.  The same caveat applies: environment-level changes require a new image.
 3. **SLURM batch**: Dev mode is not currently supported for SLURM batch jobs.
 
 ---
