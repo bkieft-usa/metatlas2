@@ -137,6 +137,7 @@ def build_dash_app(
             "last_saved":    None,
             "isomer_snap_idx":   0,
             "flush_error":   None,
+            "ms1_log_scale":  False,
         }
 
     def _patch_with_seq(state, **changes):
@@ -238,6 +239,14 @@ def build_dash_app(
                     ),
                     dbc.Col(
                         [
+                            dbc.Row(
+                                dbc.Col(
+                                    dbc.Button("Log [p]", id="ms1-log-toggle", color="secondary", size="sm", outline=True),
+                                    width="auto",
+                                ),
+                                justify="end",
+                                className="mb-1",
+                            ),
                             dcc.Graph(
                                 id="ms1-graph",
                                 config={"displayModeBar": True, "edits": {"shapePosition": True, "titleText": False}},
@@ -412,6 +421,9 @@ def build_dash_app(
 
     # main figures for ms data display
     def _make_ms1_figure(state):
+        log_scale = state.get("ms1_log_scale", False)
+        y_bottom = 1.0 if log_scale else 0.0
+
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
             if not isinstance(lcmsruns_color_map, dict):
@@ -460,7 +472,7 @@ def build_dash_app(
         # draggable, so static reference lines must be traces instead.
         fig.add_trace(go.Scatter(
             x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
-            y=[0, y_max_data],
+            y=[y_bottom, y_max_data],
             mode="lines",
             line=dict(color="black", width=2),
             showlegend=False,
@@ -471,7 +483,7 @@ def build_dash_app(
         if pd.notnull(row.get("suggested_rt_min")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_min"], row["suggested_rt_min"]],
-                y=[0, y_max_data],
+                y=[y_bottom, y_max_data],
                 mode="lines",
                 line=dict(color="orange", width=1.5),
                 showlegend=False,
@@ -480,7 +492,7 @@ def build_dash_app(
         if pd.notnull(row.get("suggested_rt_max")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_max"], row["suggested_rt_max"]],
-                y=[0, y_max_data],
+                y=[y_bottom, y_max_data],
                 mode="lines",
                 line=dict(color="orange", width=1.5, dash="dash"),
                 showlegend=False,
@@ -554,7 +566,7 @@ def build_dash_app(
                         # behind all data traces, matching the original layer="below" intent.
                         iso_rect_trace = go.Scatter(
                             x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
-                            y=[0, y_max_data, y_max_data, 0, 0],
+                            y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
                             mode="lines",
                             fill="toself",
                             fillcolor="rgba(211,211,211,0.35)",
@@ -607,7 +619,7 @@ def build_dash_app(
             margin=dict(l=50, r=20, t=125, b=40), dragmode="pan",
             plot_bgcolor="white",
             xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=False, zeroline=False),
+            yaxis=dict(showgrid=False, zeroline=False, type="log" if log_scale else "linear"),
         )
 
         return fig
@@ -931,6 +943,17 @@ def build_dash_app(
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
+        Input("ms1-log-toggle", "n_clicks"),
+        State("session-store", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_ms1_log(_, state):
+        if state is None:
+            raise dash.exceptions.PreventUpdate
+        return _patch_with_seq(state, ms1_log_scale=not state.get("ms1_log_scale", False))
+
+    @app.callback(
+        Output("session-store", "data", allow_duplicate=True),
         Input("analyst-notes", "value"),
         State("session-store", "data"),
         State("controls-compound-idx", "data"),
@@ -1015,7 +1038,7 @@ def build_dash_app(
             set(MS2_KEY_TO_LABEL)
             | set(MS1_KEY_TO_LABEL)
             | set(OTHER_KEY_TO_LABEL)
-            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", " "}
+            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", "p", " "}
         )
 
         if key not in ALL_HOTKEYS:
@@ -1106,6 +1129,9 @@ def build_dash_app(
             new_state["_nav_programmatic"] = True
             return new_state, new_idx
 
+        if key == "p":
+            return _patch_with_seq(state, ms1_log_scale=not state.get("ms1_log_scale", False)), dash.no_update
+
         if key in MS2_KEY_TO_LABEL:
             return _patch_with_seq(state, ms2_note=MS2_KEY_TO_LABEL[key]), dash.no_update
         if key in MS1_KEY_TO_LABEL:
@@ -1190,6 +1216,7 @@ def build_dash_app(
         Output("ms2-radio", "value"),
         Output("other-radio", "value"),
         Output("controls-compound-idx", "data"),
+        Output("ms1-log-toggle", "children"),
         Input("session-store", "data"),
         prevent_initial_call=True,
     )
@@ -1199,7 +1226,8 @@ def build_dash_app(
         ms2_val   = state["ms2_note"]   if state["ms2_note"]   in MS2_OPTIONS   else "no selection"
         ms1_val   = state["ms1_note"]   if state["ms1_note"]   in MS1_OPTIONS   else "keep"
         other_val = state["other_note"] if state["other_note"] in OTHER_OPTIONS else "no selection"
-        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"]
+        log_label = "Linear [p]" if state.get("ms1_log_scale", False) else "Log [p]"
+        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"], log_label
 
     @app.callback(
         Output("save-exit-status", "children"),
