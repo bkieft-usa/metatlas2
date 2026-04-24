@@ -85,3 +85,44 @@ metatlas2 run \
 | **[parquet_file_structure.md](docs/parquet_file_structure.md)** | Parquet file format specification for MS1/MS2 data storage |
 
 ---
+
+## Development & Testing
+
+### System Test
+
+An end-to-end system test validates the full pipeline using synthetic fixtures in `tests/fixtures/data/`. Run it with:
+
+```bash
+nox -s system_test
+```
+
+The test auto-detects the environment and runs the pipeline inside a container:
+
+| Environment | Detection | Container runtime |
+|---|---|---|
+| NERSC | `NERSC_HOST` or `SLURM_CLUSTER_NAME` env var | Shifter via `metatlas2.sh --dev` |
+| GitHub Actions / local | neither env var set | Docker (`ghcr.io/bkieft-usa/metatlas2`) |
+
+The Docker image tag defaults to `latest` and can be overridden:
+
+```bash
+METATLAS2_IMAGE_TAG=sha-abc1234 nox -s system_test
+```
+
+**Requirements:**
+- NERSC: `metatlas2.sh` on PATH, Shifter access
+- Local / CI: Docker installed and running, `uv` on PATH
+
+**What is validated** (by `tests/test_system.py`):
+- Output directory and all expected files exist (`<project>.duckdb`, `RTA0/`, `RTA0/TGA0/`, RT-aligned and auto-IDed atlas CSVs)
+- Database schema and row counts match `tests/fixtures/expected_baseline.json`
+
+The temporary data directory created during the test is deleted automatically after pytest completes.
+
+### CI/CD
+
+GitHub Actions (`.github/workflows/docker.yml`) runs on every push to `main`:
+1. Builds and pushes the Docker image to `ghcr.io/bkieft-usa/metatlas2` (tagged `latest` and `sha-<short-sha>`)
+2. Runs `nox -s system_test` against the freshly built image
+
+---

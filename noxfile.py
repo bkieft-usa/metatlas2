@@ -85,8 +85,7 @@ def system_test(session):
     session.log("Running validation tests...")
     session.log("=" * 60)
     # Install test dependencies (needed in CI environments)
-    uv_path = shutil.which("uv")
-    session.run(uv_path, "pip", "install", "pytest>=8.3.4", "duckdb>=1.4.4", external=True)
+    session.run("uv", "pip", "install", "pytest>=8.3.4", "duckdb>=1.4.4", external=True)
     session.run("python", "-m", "pytest", "tests/test_system.py", "-v", "--tb=short")
     
     # Clean up after tests complete
