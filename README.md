@@ -4,21 +4,24 @@
 
 ### Key Features
 
-- **Compound and Atlas Management**: Centralized DuckDB database for compounds and reference atlases with PubChem metadata integration
-- **Automated RT Alignment**: Polynomial-based retention time correction using quality control (QC) samples and Atlas compounds
-- **MS2 Hit Detection**: Automated MS2 spectral matching against reference libraries
-- **Interactive Curation GUI**: Jupyter-based interactive interface for manual peak review and validation
-- **Batch Processing**: Support for SLURM cluster submission and parallel processing
-- **Container-Based Deployment**: Reproducible environment using Shifter/Docker containers
-- **Flexible Configuration**: YAML-based configuration for projects, compounds, and atlases
+- **Compound and Atlas Management**: Centralized DuckDB database for Compounds and reference Atlases with PubChem metadata integration. Also stores all completed Projects with metadata (e.g., Project database location on disk) to facilitate meta-analyses.
+- **Automated RT Alignment**: Polynomial-based retention time correction using a subset of LCMSRun files (i.e., quality control samples) and a subset of Compounds (e.g., a pre-defined Atlas with historical RTs for quality controlled Compounds)
+- **MS1 and MS2 Data Extraction**: Automated MS1 and MS2 data extraction and matching to user-defined reference compounds (i.e., an Atlas of findable Compounds)
+- **MS2 Hit Detection**: Automated MS2 spectral matching against a reference libraries of MSMS data
+- **Interactive Curation GUI**: JupyterLab-based interactive interface for manual peak review, validation, and notes storage
+- **Batch Processing**: Support for SLURM cluster submission or real-time runs on a dedicated node
+- **Container-Based Deployment**: Reproducible environment using Shifter/Docker containers for portability
+- **Flexible Configuration**: Standardized, YAML-based configuration for creating new Compounds, Atlases, and Analyses
 
-### Workflow Stages
+### Workflow Stages for a Typical Targeted Analysis
 
-1. **Project Setup** — Initialize project database and retrieve LC-MS run files
-2. **RT Alignment** — Fit and apply retention time correction models
-3. **Auto Identification** — Extract MS1/MS2 data and score MS2 hits
-4. **Manual Curation** — Interactive GUI-based peak review and validation
-5. **Analysis Summary** — Export validated results and summary statistics
+| # | Stage | Interface | Description |
+|---|-------|-----------|-------------|
+| 1 | **Project Setup** | CLI | Initialize Project file system locations and database, retrieve and store LCMSRun files from disk |
+| 2 | **RT Alignment** | CLI | Fit and apply retention time correction models to empirical data |
+| 3 | **Auto Identification** | CLI | Extract MS1/MS2 data from LCMSRun files and score MS2 hits against MSMS reference database |
+| 4 | **Manual Curation** | JupyterLab NB | Interactive GUI-based peak review and validation to select retention time windows and vet MS2 data |
+| 5 | **Analysis Summary** | JupyterLab NB | Export validated results and summary statistics after curation |
 
 ---
 
@@ -44,17 +47,18 @@ See **[initial_setup.md](docs/initial_setup.md)** for complete setup instruction
 ```bash
 # 1. Add compounds to the main database
 metatlas2 add-compounds \
-    --config_path /path/to/create_compounds.yaml
+    --config_path /global/cfs/cdirs/metatlas/configs/compounds/<config_name>.yaml
 
 # 2. Add reference atlases to the main database
 metatlas2 add-atlases \
-    --config_path /path/to/create_atlases.yaml
+    --config_path /global/cfs/cdirs/metatlas/configs/atlases/<config_name>.yaml
 
-# 3. Run targeted analysis
+# 3. Run targeted analysis (will generate notebooks for manual curation)
 metatlas2 run \
-    --config /path/to/analysis.yaml \
+    --config /global/cfs/cdirs/metatlas/configs/analyses/<config_name>.yaml
     --project MyProject \
-    --overwrite
+    --rt-align-num 0 \ 
+    --analysis-num 0
 ```
 
 ---
@@ -84,46 +88,5 @@ metatlas2 run \
 | **[database_schema.md](docs/database_schema.md)** | Complete database schema documentation including table structures and relationships |
 | **[parquet_file_structure.md](docs/parquet_file_structure.md)** | Parquet file format specification for MS1/MS2 data storage |
 | **[development_and_testing.md](docs/development_and_testing.md)** | System test setup, fixture generation, CI/CD pipeline, and code quality tools |
-
----
-
-## Development & Testing
-
-### System Test
-
-An end-to-end system test validates the full pipeline using synthetic fixtures in `tests/fixtures/data/`. Run it with:
-
-```bash
-nox -s system_test
-```
-
-The test auto-detects the environment and runs the pipeline inside a container:
-
-| Environment | Detection | Container runtime |
-|---|---|---|
-| NERSC | `NERSC_HOST` or `SLURM_CLUSTER_NAME` env var | Shifter via `metatlas2.sh --dev` |
-| GitHub Actions / local | neither env var set | Docker (`ghcr.io/bkieft-usa/metatlas2`) |
-
-The Docker image tag defaults to `latest` and can be overridden:
-
-```bash
-METATLAS2_IMAGE_TAG=sha-abc1234 nox -s system_test
-```
-
-**Requirements:**
-- NERSC: `metatlas2.sh` on PATH, Shifter access
-- Local / CI: Docker installed and running, `uv` on PATH
-
-**What is validated** (by `tests/test_system.py`):
-- Output directory and all expected files exist (`<project>.duckdb`, `RTA0/`, `RTA0/TGA0/`, RT-aligned and auto-IDed atlas CSVs)
-- Database schema and row counts match `tests/fixtures/expected_baseline.json`
-
-The temporary data directory created during the test is deleted automatically after pytest completes.
-
-### CI/CD
-
-GitHub Actions (`.github/workflows/docker.yml`) runs on every push to `main`:
-1. Builds and pushes the Docker image to `ghcr.io/bkieft-usa/metatlas2` (tagged `latest` and `sha-<short-sha>`)
-2. Runs `nox -s system_test` against the freshly built image
 
 ---

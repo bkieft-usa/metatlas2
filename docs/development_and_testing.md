@@ -184,7 +184,7 @@ Runs after `build-push` succeeds:
 
 1. Checks out the repository
 2. Sets up Python 3.11
-3. Installs `uv` and `nox`
+3. Installs `uv`, `nox`, `pytest`, and `duckdb`
 4. Pulls the freshly built `latest` image
 5. Runs `nox -s system_test`
 
