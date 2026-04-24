@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libgl1 \
         imagemagick \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Bring in uv from the official image

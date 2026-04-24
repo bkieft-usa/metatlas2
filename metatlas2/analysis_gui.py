@@ -549,15 +549,20 @@ def build_dash_app(
                         iso_ms1_note = manual_curation_df.at[iso["df_idx"], "ms1_notes"] if "ms1_notes" in manual_curation_df.columns else "keep"
                         if iso_ms1_note == "remove":
                             continue
-                        fig.add_shape(
-                            type="rect",
-                            x0=iso["rt_min"], x1=iso["rt_max"],
-                            y0=0, y1=1,
-                            xref="x", yref="paper",
-                            fillcolor="lightgray", opacity=0.35,
-                            layer="below", line_width=0,
-                            editable=False,
+                        # Rendered as a trace (not a shape) so config.edits.shapePosition
+                        # cannot make it draggable.  Inserted at index 0 so it appears
+                        # behind all data traces, matching the original layer="below" intent.
+                        iso_rect_trace = go.Scatter(
+                            x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
+                            y=[0, y_max_data, y_max_data, 0, 0],
+                            mode="lines",
+                            fill="toself",
+                            fillcolor="rgba(211,211,211,0.35)",
+                            line=dict(width=0, color="rgba(0,0,0,0)"),
+                            showlegend=False,
+                            hoverinfo="skip",
                         )
+                        fig.data = (iso_rect_trace,) + fig.data
                         fig.add_annotation(
                             x=iso["rt_min"],
                             y=0.5,

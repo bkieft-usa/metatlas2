@@ -147,7 +147,7 @@ def _plot_mirror(
             top_idx_sorted = sorted(top_idx, key=lambda i: mz_np[i])
             MIN_MZ_GAP = 5.0  # m/z units below which labels are considered overlapping horizontally
             y_max = float(int_np[valid_idx].max())
-            TEXT_HEIGHT_FRACTION = 0.08  # fraction of y-axis range per stagger level
+            TEXT_HEIGHT_FRACTION = 0.09  # fraction of y-axis range per stagger level
             
             prev_x = None
             stagger_level = 0
@@ -237,14 +237,16 @@ def _plot_structure(
     inchi_key: str,
     size: int = 500,
 ) -> None:
-    """Draw molecular structure without any RDKit drawing backend."""
+    """Draw molecular structure using RDKit MolDraw2DSVG, converted to a PIL image via cairosvg."""
     ax.axis("off")
 
     try:
-        from rdkit import Chem
-        from rdkit.Chem import AllChem, rdDepictor
-        from PIL import Image, ImageDraw, ImageFont
         import io
+        from rdkit import Chem
+        from rdkit.Chem import rdDepictor
+        from rdkit.Chem.Draw import rdMolDraw2D
+        from PIL import Image, ImageDraw, ImageFont
+        import cairosvg
 
         mol = None
         if smiles:
@@ -253,32 +255,33 @@ def _plot_structure(
             mol = Chem.MolFromInchi(inchi)
 
         if mol is not None:
-            if not mol.GetNumConformers():
-                rdDepictor.Compute2DCoords(mol)
+            mc = Chem.Mol(mol.ToBinary())
+            try:
+                Chem.Kekulize(mc)
+            except Exception:
+                mc = Chem.Mol(mol.ToBinary())
+            if not mc.GetNumConformers():
+                rdDepictor.Compute2DCoords(mc)
 
-            # ---- Render via py2opsin-free pure-python: use molsvg ----
-            # Use 'rdkit.Chem.Draw' is BLOCKED. Use external: 'datamol' also
-            # wraps rdkit draw. Best option: render via 'chembl_beaker' or
-            # standalone 'svglib'. Most practical: use 'mols2grid' svg path
-            # or 'rdkit.Chem.rdMolDescriptors' for mol block + external tool.
+            drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
+            drawer.DrawMolecule(mc)
+            drawer.FinishDrawing()
+            svg_str = drawer.GetDrawingText()
 
-            # MOST PRACTICAL: generate mol SVG via standalone `molsvg` package
-            # OR use `cirpy` to fetch structure image from external service
-            import urllib.request
-            url = f"https://cactus.nci.nih.gov/chemical/structure/{inchi_key}/image?format=png&width={size}&height={size}"
-            with urllib.request.urlopen(url, timeout=10) as response:
-                img = Image.open(io.BytesIO(response.read())).convert("RGB")
+            img = Image.open(
+                io.BytesIO(cairosvg.svg2png(bytestring=svg_str.encode("utf-8"),
+                                            output_width=size, output_height=size))
+            ).convert("RGB")
 
-            # Annotate with InChIKey
+            # Annotate with InChIKey below the structure
             if inchi_key:
                 font_size = 25
                 line_height = int(font_size * 1.2)
-                max_width = size - 20
                 avg_char_width = font_size / 2
                 lines, current_line = [], ""
                 for char in inchi_key:
                     test_line = current_line + char
-                    if len(test_line) * avg_char_width > max_width:
+                    if len(test_line) * avg_char_width > size - 20:
                         lines.append(current_line)
                         current_line = char
                     else:
@@ -402,8 +405,8 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("RT Δ",   _fmt(rt_err, '{:.3f}')),
     ]
 
-    y_start = 0.96
-    y_end  = 0.086
+    y_start = 1.05
+    y_end  = 0.09
     for label, value in rows:
         ax.text(0.02, y_start, f"{label}:", fontsize=13, weight="bold", va="center", transform=ax.transAxes)
         ax.text(0.34, y_start, value, fontsize=13, va="center", transform=ax.transAxes)
@@ -732,7 +735,7 @@ def make_identification_figure(
 
         # Figure-level title and section dividers
         plt.suptitle(f"[{cmp_idx + 1:04d}] |  {adduct}  |  {inchi_key}\n{compound_name}\n", fontsize=20, weight="bold", y=0.97)
-        for y_line in [0.62, 0.345]:
+        for y_line in [0.61, 0.345]:
             fig.add_artist(plt.Line2D(
                 [0.08, 0.92], [y_line, y_line],
                 transform=fig.transFigure,
