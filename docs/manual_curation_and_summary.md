@@ -17,6 +17,8 @@ Notebooks are written to the analysis output directory:
 
 Open the notebook in NERSC JupyterLab. The kernel is pre-set to **metatlas2 (latest)** in the notebook metadata. If prompted to select a kernel, choose **metatlas2 (latest)**. If it is not listed, run `install_kernels.sh` from a terminal and refresh the page.
 
+> **Note:** The metatlas2 kernels run inside a Shifter container, not on the NERSC host system. This means all Python packages and system libraries (including libxrender for molecular structure rendering) come from the container image, ensuring a consistent environment across all users. The container automatically mounts NERSC filesystems at the same paths, so your data files are directly accessible. For technical details about the containerized architecture, see [codebase_overview.md](codebase_overview.md#container-based-deployment).
+
 The notebook has six cells:
 
 | Cell | Type | Purpose |
