@@ -137,7 +137,6 @@ def build_dash_app(
             "last_saved":    None,
             "isomer_snap_idx":   0,
             "flush_error":   None,
-            "ms1_log_scale":  False,
         }
 
     def _patch_with_seq(state, **changes):
@@ -239,14 +238,6 @@ def build_dash_app(
                     ),
                     dbc.Col(
                         [
-                            dbc.Row(
-                                dbc.Col(
-                                    dbc.Button("Log [p]", id="ms1-log-toggle", color="secondary", size="sm", outline=True),
-                                    width="auto",
-                                ),
-                                justify="end",
-                                className="mb-1",
-                            ),
                             dcc.Graph(
                                 id="ms1-graph",
                                 config={"displayModeBar": True, "edits": {"shapePosition": True, "titleText": False}},
@@ -421,8 +412,7 @@ def build_dash_app(
 
     # main figures for ms data display
     def _make_ms1_figure(state):
-        log_scale = state.get("ms1_log_scale", False)
-        y_bottom = 1.0 if log_scale else 0.0
+        y_bottom = 0.0
 
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
@@ -447,15 +437,115 @@ def build_dash_app(
 
         # Collect y_max from data so static vertical traces span the full plot height
         y_max_data = 0.0
+        # First pass: calculate y_max_data from all MS1 spectra
+        for fp in sub["file_path"].unique():
+            for _, r in sub[sub["file_path"] == fp].iterrows():
+                try:
+                    rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
+                    if intensity:
+                        y_max_data = max(y_max_data, max(intensity))
+                except Exception as e:
+                    traceback.print_exc()
+                    logger.error(f"MS1 parse error {fp}: {e}")
+        if y_max_data == 0.0:
+            y_max_data = 1.0
+
         fig = go.Figure()
+        
+        # Add isomer rectangles FIRST so they appear behind MS1 data traces
+        isomer_str = "No Isomers Found"
+        try:
+            isomers = _parse_isomers(row.get("isomers"))
+            if isomers:
+                isomer_lines = []
+                resolved_isomers = []
+                for iso in isomers:
+                    iso_inchi = iso.get('inchi_key', '')
+                    iso_name   = iso.get('compound_name', '')
+                    iso_adduct = iso.get('adduct', '')
+                    iso_rt     = iso.get('rt', None)
+                    iso_mz     = iso.get('mz', None)
+
+                    mask = (
+                        (manual_curation_df["inchi_key"] == iso_inchi) &
+                        (manual_curation_df["compound_name"] == iso_name) &
+                        (manual_curation_df["adduct"] == iso_adduct)
+                    )
+                    matches = manual_curation_df[mask]
+
+                    if len(matches) > 1:
+                        raise ValueError(f"There were multiple matches of isomer {iso_name} {iso_adduct} {iso_inchi} to the manual curation object")
+
+                    if matches.empty:
+                        continue
+
+                    iso_df_idx      = matches.index[0]
+                    iso_display_idx = iso_df_idx + 1
+                    iso_rt_min      = float(matches.iloc[0]["rt_min"])
+                    iso_rt_max      = float(matches.iloc[0]["rt_max"])
+                    resolved_isomers.append({
+                        "display_idx": iso_display_idx,
+                        "name":        iso_name,
+                        "adduct":      iso_adduct,
+                        "rt_min":      iso_rt_min,
+                        "rt_max":      iso_rt_max,
+                        "rt":          iso_rt,
+                        "mz":          iso_mz,
+                        "df_idx":      iso_df_idx,
+                    })
+
+                if resolved_isomers:
+                    for iso in resolved_isomers:
+                        iso_ms1_note = manual_curation_df.at[iso["df_idx"], "ms1_notes"] if "ms1_notes" in manual_curation_df.columns else "keep"
+                        if iso_ms1_note == "remove":
+                            continue
+                        # Add as trace so it appears behind all data traces
+                        iso_rect_trace = go.Scatter(
+                            x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
+                            y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
+                            mode="lines",
+                            fill="toself",
+                            fillcolor="rgba(211,211,211,0.35)",
+                            line=dict(width=0, color="rgba(0,0,0,0)"),
+                            showlegend=False,
+                            hoverinfo="skip",
+                        )
+                        fig.add_trace(iso_rect_trace)
+                        fig.add_annotation(
+                            x=iso["rt_min"],
+                            y=0.5,
+                            xref="x", yref="paper",
+                            text=f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})",
+                            showarrow=False,
+                            font=dict(size=8, color="dimgray"),
+                            xanchor="right", yanchor="middle",
+                            textangle=-90,
+                            bgcolor="rgba(255,255,255,0.7)",
+                            bordercolor="gray", borderwidth=1,
+                            captureevents=False,
+                        )
+                        rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
+                        mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
+                        isomer_lines.append(
+                            f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
+                            f"RT: {rt_str}  |  m/z: {mz_str}"
+                        )
+                    isomer_str = "<br>".join(isomer_lines)
+                else:
+                    isomer_str = "No Isomers Found" 
+            else:
+                isomer_str = "No Isomers Found"
+        except Exception as exc:
+            traceback.print_exc()
+            logger.error(f"Isomer detection failed with {exc}")
+
+        # Now add MS1 data traces (they will appear on top of isomer rectangles)
         for fp in sub["file_path"].unique():
             short_name = "_".join(os.path.basename(fp).split(".")[0].split("_")[11:])
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in short_name.lower()), "gray")
             for _, r in sub[sub["file_path"] == fp].iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
-                    if intensity:
-                        y_max_data = max(y_max_data, max(intensity))
                     fig.add_trace(go.Scatter(
                         x=rt, y=intensity, mode="lines", name=short_name,
                         line=dict(color=color, width=1.5),
@@ -464,8 +554,6 @@ def build_dash_app(
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"MS1 parse error {fp}: {e}")
-        if y_max_data == 0.0:
-            y_max_data = 1.0
 
         # Atlas RT peak line (black, static) - rendered as a trace so it is never draggable.
         # config.edits.shapePosition=True (needed for purple shape dragging) makes ALL shapes
@@ -515,94 +603,6 @@ def build_dash_app(
             name="RT max", editable=True,
         )
 
-        isomer_str = "No Isomers Found"
-        try:
-            isomers = _parse_isomers(row.get("isomers"))
-            if isomers:
-                isomer_lines = []
-                resolved_isomers = []
-                for iso in isomers:
-                    iso_inchi = iso.get('inchi_key', '')
-                    iso_name   = iso.get('compound_name', '')
-                    iso_adduct = iso.get('adduct', '')
-                    iso_rt     = iso.get('rt', None)
-                    iso_mz     = iso.get('mz', None)
-
-                    mask = (
-                        (manual_curation_df["inchi_key"] == iso_inchi) &
-                        (manual_curation_df["compound_name"] == iso_name) &
-                        (manual_curation_df["adduct"] == iso_adduct)
-                    )
-                    matches = manual_curation_df[mask]
-
-                    if len(matches) > 1:
-                        raise ValueError(f"There were multiple matches of isomer {iso_name} {iso_adduct} {iso_inchi} to the manual curation object")
-
-                    if matches.empty:
-                        continue
-
-                    iso_df_idx      = matches.index[0]
-                    iso_display_idx = iso_df_idx + 1
-                    iso_rt_min      = float(matches.iloc[0]["rt_min"])
-                    iso_rt_max      = float(matches.iloc[0]["rt_max"])
-                    resolved_isomers.append({
-                        "display_idx": iso_display_idx,
-                        "name":        iso_name,
-                        "adduct":      iso_adduct,
-                        "rt_min":      iso_rt_min,
-                        "rt_max":      iso_rt_max,
-                        "rt":          iso_rt,
-                        "mz":          iso_mz,
-                        "df_idx":      iso_df_idx,
-                    })
-
-                if resolved_isomers:
-                    for iso in resolved_isomers:
-                        iso_ms1_note = manual_curation_df.at[iso["df_idx"], "ms1_notes"] if "ms1_notes" in manual_curation_df.columns else "keep"
-                        if iso_ms1_note == "remove":
-                            continue
-                        # Rendered as a trace (not a shape) so config.edits.shapePosition
-                        # cannot make it draggable.  Inserted at index 0 so it appears
-                        # behind all data traces, matching the original layer="below" intent.
-                        iso_rect_trace = go.Scatter(
-                            x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
-                            y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
-                            mode="lines",
-                            fill="toself",
-                            fillcolor="rgba(211,211,211,0.35)",
-                            line=dict(width=0, color="rgba(0,0,0,0)"),
-                            showlegend=False,
-                            hoverinfo="skip",
-                        )
-                        fig.data = (iso_rect_trace,) + fig.data
-                        fig.add_annotation(
-                            x=iso["rt_min"],
-                            y=0.5,
-                            xref="x", yref="paper",
-                            text=f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})",
-                            showarrow=False,
-                            font=dict(size=8, color="dimgray"),
-                            xanchor="right", yanchor="middle",
-                            textangle=-90,
-                            bgcolor="rgba(255,255,255,0.7)",
-                            bordercolor="gray", borderwidth=1,
-                            captureevents=False,
-                        )
-                        rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
-                        mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
-                        isomer_lines.append(
-                            f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
-                            f"RT: {rt_str}  |  m/z: {mz_str}"
-                        )
-                    isomer_str = "<br>".join(isomer_lines)
-                else:
-                    isomer_str = "No Isomers Found" 
-            else:
-                isomer_str = "No Isomers Found"
-        except Exception as exc:
-            traceback.print_exc()
-            logger.error(f"Isomer detection failed with {exc}")
-
         compound_display_idx = state["compound_idx"] + 1
 
         ms1_title_text = (
@@ -619,7 +619,7 @@ def build_dash_app(
             margin=dict(l=50, r=20, t=125, b=40), dragmode="pan",
             plot_bgcolor="white",
             xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=False, zeroline=False, type="log" if log_scale else "linear"),
+            yaxis=dict(showgrid=False, zeroline=False),
         )
 
         return fig
@@ -943,17 +943,6 @@ def build_dash_app(
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
-        Input("ms1-log-toggle", "n_clicks"),
-        State("session-store", "data"),
-        prevent_initial_call=True,
-    )
-    def toggle_ms1_log(_, state):
-        if state is None:
-            raise dash.exceptions.PreventUpdate
-        return _patch_with_seq(state, ms1_log_scale=not state.get("ms1_log_scale", False))
-
-    @app.callback(
-        Output("session-store", "data", allow_duplicate=True),
         Input("analyst-notes", "value"),
         State("session-store", "data"),
         State("controls-compound-idx", "data"),
@@ -1038,7 +1027,7 @@ def build_dash_app(
             set(MS2_KEY_TO_LABEL)
             | set(MS1_KEY_TO_LABEL)
             | set(OTHER_KEY_TO_LABEL)
-            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", "p", " "}
+            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", " "}
         )
 
         if key not in ALL_HOTKEYS:
@@ -1129,9 +1118,6 @@ def build_dash_app(
             new_state["_nav_programmatic"] = True
             return new_state, new_idx
 
-        if key == "p":
-            return _patch_with_seq(state, ms1_log_scale=not state.get("ms1_log_scale", False)), dash.no_update
-
         if key in MS2_KEY_TO_LABEL:
             return _patch_with_seq(state, ms2_note=MS2_KEY_TO_LABEL[key]), dash.no_update
         if key in MS1_KEY_TO_LABEL:
@@ -1216,7 +1202,6 @@ def build_dash_app(
         Output("ms2-radio", "value"),
         Output("other-radio", "value"),
         Output("controls-compound-idx", "data"),
-        Output("ms1-log-toggle", "children"),
         Input("session-store", "data"),
         prevent_initial_call=True,
     )
@@ -1226,8 +1211,7 @@ def build_dash_app(
         ms2_val   = state["ms2_note"]   if state["ms2_note"]   in MS2_OPTIONS   else "no selection"
         ms1_val   = state["ms1_note"]   if state["ms1_note"]   in MS1_OPTIONS   else "keep"
         other_val = state["other_note"] if state["other_note"] in OTHER_OPTIONS else "no selection"
-        log_label = "Linear [p]" if state.get("ms1_log_scale", False) else "Log [p]"
-        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"], log_label
+        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"]
 
     @app.callback(
         Output("save-exit-status", "children"),

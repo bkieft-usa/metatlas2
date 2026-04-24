@@ -176,7 +176,7 @@ def _plot_mirror(
             ax.margins(y=0.20)
 
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
-    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=14)
+    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=14, weight="bold")
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     ax.tick_params(labelsize=14)
 
@@ -207,9 +207,9 @@ def _plot_raw_ms2(
     ax.tick_params(labelsize=14)
 
     rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
-    ax.text(0.5, 1.10, title,               fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.04, "Score: N/A",        fontsize=12, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 0.99, f"RT: {rt_str} min", fontsize=10,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
+    ax.text(0.5, 1.13, title,               fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.07, "Score: N/A",        fontsize=12, weight="bold",   ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=10,  weight="normal", ha="center", va="top",    transform=ax.transAxes)
 
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
@@ -220,7 +220,7 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
     ax.set_ylim(0, 1e6)
     ax.axhline(y=0, color="black", linewidth=1.0)
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
-    ax.set_ylabel("Intensity", fontsize=14)
+    ax.set_ylabel("Intensity", fontsize=14, weight="bold")
     ax.tick_params(labelsize=14)
     ax.text(0.5, 0.5, "No MS2 Data", transform=ax.transAxes,
             ha="center", va="center", fontsize=14, weight="bold", color="gray")
@@ -237,16 +237,13 @@ def _plot_structure(
     inchi_key: str,
     size: int = 500,
 ) -> None:
-    """Draw molecular structure using RDKit MolDraw2DSVG, converted to a PIL image via cairosvg."""
+    """Draw molecular structure using RDKit's MolToImage (requires libXrender, available in container)."""
     ax.axis("off")
 
     try:
-        import io
         from rdkit import Chem
-        from rdkit.Chem import rdDepictor
-        from rdkit.Chem.Draw import rdMolDraw2D
+        from rdkit.Chem import Draw
         from PIL import Image, ImageDraw, ImageFont
-        import cairosvg
 
         mol = None
         if smiles:
@@ -255,30 +252,17 @@ def _plot_structure(
             mol = Chem.MolFromInchi(inchi)
 
         if mol is not None:
-            mc = Chem.Mol(mol.ToBinary())
-            try:
-                Chem.Kekulize(mc)
-            except Exception:
-                mc = Chem.Mol(mol.ToBinary())
-            if not mc.GetNumConformers():
-                rdDepictor.Compute2DCoords(mc)
+            # Generate structure image directly (requires libXrender)
+            img = Draw.MolToImage(mol, size=(size, size), kekulize=True)
 
-            drawer = rdMolDraw2D.MolDraw2DSVG(size, size)
-            drawer.DrawMolecule(mc)
-            drawer.FinishDrawing()
-            svg_str = drawer.GetDrawingText()
-
-            img = Image.open(
-                io.BytesIO(cairosvg.svg2png(bytestring=svg_str.encode("utf-8"),
-                                            output_width=size, output_height=size))
-            ).convert("RGB")
-
-            # Annotate with InChIKey below the structure
+            # Add InChIKey annotation below the structure
             if inchi_key:
                 font_size = 25
                 line_height = int(font_size * 1.2)
                 avg_char_width = font_size / 2
                 lines, current_line = [], ""
+                
+                # Word-wrap the InChIKey
                 for char in inchi_key:
                     test_line = current_line + char
                     if len(test_line) * avg_char_width > size - 20:
@@ -289,18 +273,26 @@ def _plot_structure(
                 if current_line:
                     lines.append(current_line)
 
+                # Create new image with space for text
                 text_height = len(lines) * line_height + 20
                 new_img = Image.new("RGB", (size, size + text_height), "white")
                 new_img.paste(img, (0, 0))
+                
+                # Draw text
                 draw_obj = ImageDraw.Draw(new_img)
                 try:
-                    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", font_size)
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
                 except Exception:
-                    font = ImageFont.load_default()
+                    try:
+                        font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", font_size)
+                    except Exception:
+                        font = ImageFont.load_default()
+                
                 y_position = size + 10
                 for line in lines:
                     draw_obj.text((10, y_position), line, fill="black", font=font)
                     y_position += line_height
+                
                 img = new_img
 
             ax.imshow(img, aspect="equal")
@@ -391,7 +383,6 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
     rows = [
         ("Compound",        _fmt(mc_row.get("compound_name"))),
         ("Formula",         _fmt(mc_row.get("formula"))),
-        ("SMILES",          _fmt(mc_row.get("smiles"))),
         ("Adduct",          _fmt(mc_row.get("adduct"))),
         ("Polarity",        _fmt(mc_row.get("polarity"))),
         ("Chromatography",  _fmt(mc_row.get("chromatography"))),
@@ -405,7 +396,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("RT Δ",   _fmt(rt_err, '{:.3f}')),
     ]
 
-    y_start = 1.05
+    y_start = 1.03
     y_end  = 0.09
     for label, value in rows:
         ax.text(0.02, y_start, f"{label}:", fontsize=13, weight="bold", va="center", transform=ax.transAxes)
@@ -596,23 +587,12 @@ def _plot_ms2(
     else:
         _plot_empty_ms2(ax, title=title)
 
-
 def make_identification_figure(
     summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     overwrite: bool = True,
 ) -> None:
     """Generate per-compound identification figures for an analysis.
-
-    Each figure is a 3-row x 4-column PDF:
-
-    ┌──────────────────────────────────────────────────────────────────┐
-    │  Best MS2 mirror  │  2nd best MS2  │  3rd best MS2  │ Structure │  Row 1
-    ├──────────────────────────────────────────────────────────────────┤
-    │   EIC (linear)   │   EIC (log)    │  Compound info table        │  Row 2
-    ├──────────────────────────────────────────────────────────────────┤
-    │           MS2 hit summary (file x score x ref x ...)              │  Row 3
-    └──────────────────────────────────────────────────────────────────┘
 
     Parameters
     ----------
@@ -628,7 +608,6 @@ def make_identification_figure(
     overwrite:
         When *False*, skip compounds whose PDF already exists on disk.
     """
-    project_db_path  = summary_obj.paths["project_db_path"]
     main_db_path     = summary_obj.paths.get("main_db_path")
 
     # ── Get color mapping for EIC plots (from override or config) ───────────
