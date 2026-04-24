@@ -83,6 +83,7 @@ metatlas2 run \
 | **[codebase_overview.md](docs/codebase_overview.md)** | Programmer-oriented reference: module structure, workflow phases, and key classes |
 | **[database_schema.md](docs/database_schema.md)** | Complete database schema documentation including table structures and relationships |
 | **[parquet_file_structure.md](docs/parquet_file_structure.md)** | Parquet file format specification for MS1/MS2 data storage |
+| **[development_and_testing.md](docs/development_and_testing.md)** | System test setup, fixture generation, CI/CD pipeline, and code quality tools |
 
 ---
 
