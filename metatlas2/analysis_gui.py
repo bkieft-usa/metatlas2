@@ -160,6 +160,7 @@ def build_dash_app(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(0)),
             dcc.Store(id="controls-compound-idx", storage_type="memory", data=0),
+            dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
             keyboard_listener,
             dbc.Row(
                 [
@@ -185,6 +186,18 @@ def build_dash_app(
                             dbc.Button("Snap to Isomer  [m]", id="snap-to-isomer", color="warning", className="my-2 w-100"),
                             dbc.Textarea(id="analyst-notes", placeholder="Analyst notes …", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
                             dbc.Textarea(id="id-notes", placeholder="Identification notes …", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
+                            html.Div(
+                                [
+                                    html.Label("EIC y-axis scale:", className="fw-bold"),
+                                    dcc.RadioItems(
+                                        id="yaxis-scale-radio",
+                                        options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
+                                        value="linear",
+                                        labelStyle={"display": "inline-block", "margin-right": "12px"},
+                                    ),
+                                ],
+                                className="my-3",
+                            ),
                             html.Div(
                                 [
                                     html.Label("MS1 quality:", className="fw-bold"),
@@ -411,7 +424,7 @@ def build_dash_app(
         return state
 
     # main figures for ms data display
-    def _make_ms1_figure(state):
+    def _make_ms1_figure(state, yaxis_scale="linear"):
         y_bottom = 0.0
 
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
@@ -619,7 +632,7 @@ def build_dash_app(
             margin=dict(l=50, r=20, t=125, b=40), dragmode="pan",
             plot_bgcolor="white",
             xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=False, zeroline=False),
+            yaxis=dict(showgrid=False, zeroline=False, type=yaxis_scale),
         )
 
         return fig
@@ -1027,7 +1040,7 @@ def build_dash_app(
             set(MS2_KEY_TO_LABEL)
             | set(MS1_KEY_TO_LABEL)
             | set(OTHER_KEY_TO_LABEL)
-            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", " "}
+            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", " ", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
         )
 
         if key not in ALL_HOTKEYS:
@@ -1060,14 +1073,14 @@ def build_dash_app(
         if changed:
             return _patch_rt_change(state, rt_min, rt_max), dash.no_update
 
-        if key == "l":
+        if key in ("l", "ArrowUp"):
             row = _compound_row(state["compound_idx"])
             n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
             if n_scans == 0:
                 raise dash.exceptions.PreventUpdate
             return _patch_with_seq(state, ms2_idx=max(state["ms2_idx"] - 1, 0)), dash.no_update
 
-        if key == ";":
+        if key in (";", "ArrowDown"):
             row = _compound_row(state["compound_idx"])
             n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
             if n_scans == 0:
@@ -1095,7 +1108,14 @@ def build_dash_app(
             new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
             return new_state, dash.no_update
 
-        if key in ("j", "k", " "):
+        if key in ("j", "k", " ", "ArrowLeft", "ArrowRight"):
+            # ArrowLeft = previous, ArrowRight = next
+            if key == "ArrowLeft":
+                delta = -1
+            elif key == "ArrowRight":
+                delta = 1
+            else:
+                delta = -1 if key == "j" else 1
             delta = -1 if key == "j" else 1
             new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
             if new_idx == int(state["compound_idx"]):
@@ -1132,14 +1152,16 @@ def build_dash_app(
         Output("ms2-graph", "figure"),
         Output("error-banner", "children"),
         Input("session-store", "data"),
+        Input("yaxis-scale-radio", "value"),
         prevent_initial_call=False,
     )
-    def update_figures(state):
+    def update_figures(state, yaxis_scale):
         if state is None:
             raise dash.exceptions.PreventUpdate
         flush_err = state.get("flush_error")
         try:
-            ms1_fig, ms2_fig = _make_ms1_figure(state), _make_ms2_figure(state)
+            ms1_fig = _make_ms1_figure(state, yaxis_scale)
+            ms2_fig = _make_ms2_figure(state)
             if flush_err:
                 banner = html.Span(
                     f"⚠ {flush_err}",
