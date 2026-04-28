@@ -8,61 +8,97 @@ from pathlib import Path
 from typing import Dict, Any
 import grp
 import subprocess
+import joblib
+from matchms import Spectrum
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
 
-def load_msms_refs_file(file_path):
+def load_msms_refs_file(file_path: Path) -> dict[str, list[Spectrum]]:
     """
-    Load the msms_refs.tab file and convert it to a DataFrame format suitable for MS2 matching.
-    
+    Load the msms_refs.tab file and return a dict mapping inchi_key -> list of matchms Spectrum objects.
+    Results are cached to a .pkl file on disk and reloaded on subsequent calls if the source file
+    has not been modified.
+
     Args:
         file_path: Path to the msms_refs.tab file
-        
+
     Returns:
-        DataFrame with columns: ['database', 'id', 'name', 'spectrum', 'collision_energy', 
-                                'precursor_mz', 'polarity', 'adduct', 'formula', 'mono_isotopic_molecular_weight', 
-                                'inchi_key', 'inchi', 'smiles']
+        dict mapping inchi_key (str) -> list of matchms Spectrum objects
     """
-    
+    file_path = Path(file_path)
+    cache_path = file_path.with_suffix('.refs_cache.pkl')
+
+    # Return cached version if it exists and is newer than the source file (rebuild when new msms refs is defined in config)
+    if cache_path.exists() and cache_path.stat().st_mtime > file_path.stat().st_mtime:
+        logger.info(f"Loading reference spectra from cache: {cache_path}")
+        refs_by_inchi_key = joblib.load(cache_path)
+        total = sum(len(v) for v in refs_by_inchi_key.values())
+        logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys (from cache).")
+        return refs_by_inchi_key
+
+    # Otherwise parse from the source .tab file
     logger.info(f"Loading reference spectra from {file_path}...")
 
-    # Read the tab-separated file with explicit column names
-    df = pd.read_csv(file_path, sep='\t', header=None, names=[
-        'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy', 
-        'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id', 
-        'experiment', 'instrument', 'formula', 'mono_isotopic_molecular_weight', 'inchi_key', 'inchi', 'smiles'
-    ])
+    col_names = [
+        'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy',
+        'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id',
+        'experiment', 'instrument', 'formula', 'mono_isotopic_molecular_weight',
+        'inchi_key', 'inchi', 'smiles'
+    ]
+    df = pd.read_csv(file_path, sep='\t', header=None, names=col_names, low_memory=False)
 
-    # Convert spectrum strings to numpy arrays using ast.literal_eval
-    def parse_spectrum(spec_str):
-        try:
-            spectrum = ast.literal_eval(spec_str)
-            if len(spectrum) == 2 and len(spectrum[0]) == len(spectrum[1]):
-                return np.array(spectrum)
-            else:
-                return None
-        except:
-            return None
-
-    df['spectrum_parsed'] = df['spectrum'].apply(parse_spectrum)
-
-    # Remove rows with unparseable spectra
-    df = df.dropna(subset=['spectrum_parsed'])
-    df['spectrum'] = df['spectrum_parsed']
-    df = df.drop('spectrum_parsed', axis=1)
-
-    # Clean up data types
     df['precursor_mz'] = pd.to_numeric(df['precursor_mz'], errors='coerce')
-    df['collision_energy'] = pd.to_numeric(df['collision_energy'], errors='coerce') 
+    df['collision_energy'] = pd.to_numeric(df['collision_energy'], errors='coerce')
     df['mono_isotopic_molecular_weight'] = pd.to_numeric(df['mono_isotopic_molecular_weight'], errors='coerce')
 
-    if not df.empty:
-        logger.info(f"    Number of total references: {df.shape[0]}")
-        logger.info(f"    Number of unique InChI keys: {df['inchi_key'].nunique()}")
-        return df
-    else:
-        raise ValueError("    Reference DataFrame is empty")
+    refs_by_inchi_key: dict[str, list[Spectrum]] = {}
+    n_skipped = 0
+
+    for row in df.itertuples(index=False):
+        try:
+            spectrum_data = ast.literal_eval(row.spectrum)
+            if len(spectrum_data) != 2 or len(spectrum_data[0]) != len(spectrum_data[1]):
+                n_skipped += 1
+                continue
+            mz = np.array(spectrum_data[0], dtype=np.float32)
+            intensities = np.array(spectrum_data[1], dtype=np.float32)
+        except Exception:
+            n_skipped += 1
+            continue
+
+        if len(mz) == 0 or len(intensities) == 0:
+            n_skipped += 1
+            continue
+
+        precursor_mz = row.precursor_mz
+        spec = Spectrum(
+            mz=mz,
+            intensities=intensities,
+            metadata={
+                'precursor_mz': float(precursor_mz) if not np.isnan(precursor_mz) else 0.0,
+                'database': str(row.database),
+                'id': str(row.id),
+                'name': str(row.name),
+                'inchi_key': str(row.inchi_key),
+            }
+        )
+        refs_by_inchi_key.setdefault(row.inchi_key, []).append(spec)
+
+    if not refs_by_inchi_key:
+        raise ValueError("Reference DataFrame is empty after parsing — check the input file format.")
+
+    total = sum(len(v) for v in refs_by_inchi_key.values())
+    logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
+    if n_skipped > 0:
+        logger.warning(f"  Skipped {n_skipped} rows due to unparseable or empty spectra.")
+
+    # Save cache
+    logger.info(f"  Saving reference cache to {cache_path}...")
+    joblib.dump(refs_by_inchi_key, cache_path, compress=0)
+    logger.info(f"  Cache saved.")
+
+    return refs_by_inchi_key
 
 def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
     """Load and validate new metatlas2 configuration from YAML file with type enforcement."""
@@ -90,15 +126,12 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
             if 'ATLAS' not in chrom_config:
                 raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS section")
             
-            # Check for uid field but allow None/empty
             if 'uid' not in chrom_config['ATLAS']:
                 raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS uid field")
             
-            # Convert uid to string or None
             uid = chrom_config['ATLAS']['uid']
             chrom_config['ATLAS']['uid'] = str(uid) if uid else None
             
-            # Validate and convert RT alignment parameters if present
             if 'PARAMS' in chrom_config:
                 params = chrom_config['PARAMS']
                 params['ppm_error'] = float(params.get('ppm_error', 20.0))
@@ -110,14 +143,11 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                 params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
                 params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
 
-                # include/exclude lcmsruns: list or None
                 params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
                 params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
 
-                # exclude_inchikeys: list or empty
                 params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
 
-    # Validate TARGETED_ANALYSES section if present
     if 'TARGETED_ANALYSES' in config['WORKFLOWS']:
         targeted = config['WORKFLOWS']['TARGETED_ANALYSES']
         for chromatography, chrom_config in targeted.items():
@@ -126,40 +156,31 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                     if 'ATLAS' not in analysis_config:
                         raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS section")
                     
-                    # Check for uid field but allow None/empty
                     if 'uid' not in analysis_config['ATLAS']:
                         raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS uid field")
                     
-                    # Convert uid to string or None
                     uid = analysis_config['ATLAS']['uid']
                     analysis_config['ATLAS']['uid'] = str(uid) if uid else None
                     
-                    # Validate and convert analysis parameters if present
                     if 'PARAMS' in analysis_config:
                         params = analysis_config['PARAMS']
 
-                        # Boolean workflow flags
                         params['do_alignment'] = bool(params.get('do_alignment', True))
                         params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
                         params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
                         params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
 
-                        # MS1 parameters
                         params['ppm_error'] = float(params.get('ppm_error', 5.0))
                         params['extra_time'] = float(params.get('extra_time', 0.0))
                         params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
                         params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
 
-                        # MS2 parameters
                         params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
                         params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
                         params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
 
-                        # include_lcmsruns: flat list
                         params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
 
-                        # exclude_lcmsruns: nested dict of lists (keyed by workflow step)
-                        # e.g. {data_extraction: [...], gui: [...], ...}
                         excl = params.get('exclude_lcmsruns')
                         if excl is None:
                             params['exclude_lcmsruns'] = {}
@@ -169,11 +190,6 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                                 for step, runs in excl.items()
                             }
                         elif isinstance(excl, list):
-                            # Backwards compatibility: flat list -> wrap under 'data_extraction'
-                            logger.warning(
-                                f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name}: "
-                                f"exclude_lcmsruns is a flat list; wrapping under 'data_extraction'"
-                            )
                             params['exclude_lcmsruns'] = {'data_extraction': list(excl)}
                         else:
                             raise ValueError(
@@ -181,7 +197,6 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                                 f"exclude_lcmsruns must be a dict or list"
                             )
 
-                        # GUI parameters
                         params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
                         params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 20))
                         gui_colors = params.get('gui_lcmsruns_colors')

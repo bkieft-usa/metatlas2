@@ -37,28 +37,28 @@ OTHER_OPTIONS = [
 ]
 
 MS2_HOTKEYS = {
-    "no selection":                                "q",
-    "-1.0, poor match, should remove":             "w",
-    "0.0, no match or no MSMS collected":          "e",
+    "no selection": "q",
+    "-1.0, poor match, should remove": "w",
+    "0.0, no match or no MSMS collected": "e",
     "0.5, partial or putative match of fragments": "r",
-    "1.0, good match":                             "t",
-    "0.5, co-isolated precursor, partial match":   "y",
-    "1.0, co-isolated precursor, good match":      "u",
-    "0.5, single ion match, no evidence":          "i",
-    "1.0, single ion match, ISTD/ref evidence":    "o",
+    "1.0, good match": "t",
+    "0.5, co-isolated precursor, partial match": "y",
+    "1.0, co-isolated precursor, good match": "u",
+    "0.5, single ion match, no evidence": "i",
+    "1.0, single ion match, ISTD/ref evidence": "o",
 }
 MS1_HOTKEYS = {
-    "keep":                 "1",
-    "remove":               "2",
+    "keep": "1",
+    "remove": "2",
     "unresolvable isomers": "3",
-    "poor peak shape":      "4",
+    "poor peak shape": "4",
 }
 OTHER_HOTKEYS = {
-    "no selection":           "5",
+    "no selection": "5",
     "potential rt shifting":  "6",
-    "high ppm diff":          "7",
+    "high ppm diff": "7",
     "noisy or high background": "8",
-    "needs review":           "9",
+    "needs review": "9",
 }
 
 MS2_KEY_TO_LABEL = {v: k for k, v in MS2_HOTKEYS.items()}
@@ -80,7 +80,7 @@ def build_dash_app(
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
-        {"label": f"{i+1}: {row['compound_name']}", "value": i}
+        {"label": f"{i+1}: {row['compound_name']}", "value": i+1}
         for i, row in manual_curation_df.reset_index().iterrows()
     ]
 
@@ -123,20 +123,20 @@ def build_dash_app(
             other_note = "no selection"
         
         return {
-            "session_id":    session_id or str(uuid.uuid4()),
-            "edit_seq":      int(edit_seq),
-            "compound_idx":  compound_idx,
-            "ms2_idx":       ms2_idx,
-            "rt_min":        rt_min,
-            "rt_max":        rt_max,
-            "ms1_note":      ms1_note,
-            "ms2_note":      ms2_note,
-            "other_note":    other_note,
+            "session_id": session_id or str(uuid.uuid4()),
+            "edit_seq": int(edit_seq),
+            "compound_idx": compound_idx,
+            "ms2_idx": ms2_idx,
+            "rt_min": rt_min,
+            "rt_max": rt_max,
+            "ms1_note": ms1_note,
+            "ms2_note": ms2_note,
+            "other_note": other_note,
             "analyst_notes": row.get("analyst_notes") or "",
-            "id_notes":      row.get("identification_notes") or "",
-            "last_saved":    None,
-            "isomer_snap_idx":   0,
-            "flush_error":   None,
+            "id_notes": row.get("identification_notes") or "",
+            "last_saved": None,
+            "isomer_snap_idx": 0,
+            "flush_error": None,
         }
 
     def _patch_with_seq(state, **changes):
@@ -169,16 +169,16 @@ def build_dash_app(
                             dbc.Row(
                                 [
                                     dbc.Col(
-                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=0, clearable=False, style={"width": "100%"}),
+                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=1, clearable=False, style={"width": "100%"}),
                                         width=12, className="mb-3",
                                     ),
                                 ],
                             ),
                             dbc.Row(
                                 [
-                                    dbc.Col(dbc.Button("◀ Prev ID [j]", id="prev-btn", color="primary", className="me-2"), width="auto"),
+                                    dbc.Col(dbc.Button("◀ Prev ID [j,<]", id="prev-btn", color="primary", className="me-2"), width="auto"),
                                     dbc.Col(html.Div(id="compound-counter", className="fw-bold")),
-                                    dbc.Col(dbc.Button("Next ID ▶  [k]", id="next-btn", color="primary", className="ms-2"), width="auto"),
+                                    dbc.Col(dbc.Button("Next ID ▶  [k,>, ]", id="next-btn", color="primary", className="ms-2"), width="auto"),
                                 ],
                                 className="my-2 align-items-center",
                             ),
@@ -247,7 +247,7 @@ def build_dash_app(
                             html.Div(id="error-banner", className="my-2"),
                         ],
                         width=3,
-                        style={"fontSize": "calc(1rem - 2pt)"},
+                        style={"fontSize": "1rem"},
                     ),
                     dbc.Col(
                         [
@@ -290,26 +290,14 @@ def build_dash_app(
     logger.debug("Layout constructed successfully")
 
     def _parse_isomers(isomers_val):
-        if isomers_val is None or (isinstance(isomers_val, float) and np.isnan(isomers_val)):
-            return []
         if isinstance(isomers_val, list):
             return isomers_val
-        if isinstance(isomers_val, dict):
-            return [isomers_val]
-        if isinstance(isomers_val, str):
-            try:
-                parsed = json.loads(isomers_val)
-            except Exception:
-                return []
-            if isinstance(parsed, list):
-                return parsed
-            if isinstance(parsed, dict):
-                return [parsed]
-        return []
+        else:
+            raise ValueError(f"Unexpected isomers format (not an empty list or list of dicts): {isomers_val!r}")
 
     def _get_sorted_isomer_rt_bounds(row):
         """Return list of (rt_min, rt_max) for isomers, sorted by rt_min."""
-        isomers_val = row.get("isomers") if "isomers" in row.index else None
+        isomers_val = row.get("isomers") if "isomers" in row.index else []
         isomers = _parse_isomers(isomers_val)
         if not isomers:
             return []
@@ -320,10 +308,10 @@ def build_dash_app(
                 (manual_curation_df["compound_name"] == iso.get("compound_name", "")) &
                 (manual_curation_df["adduct"] == iso.get("adduct", ""))
             )
-            matches = manual_curation_df[mask]
-            if matches.empty:
+            isomer_match = manual_curation_df[mask]
+            if isomer_match.empty:
                 continue
-            bounds.append((float(matches.iloc[0]["rt_min"]), float(matches.iloc[0]["rt_max"])))
+            bounds.append((float(isomer_match.iloc[0]["rt_min"]), float(isomer_match.iloc[0]["rt_max"])))
         return sorted(bounds, key=lambda x: x[0])
 
     def _get_ms2_scans(inchi_key, adduct, rt_min=None, rt_max=None):
@@ -383,19 +371,18 @@ def build_dash_app(
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(sid, -1)
             if seq <= latest_seq:
-                #logger.debug(f"Skipping stale flush sid={sid} seq={seq} latest={latest_seq}")
                 return state
             latest_flushed_seq_by_session[sid] = seq
 
         row = _compound_row(state["compound_idx"])
         updates = {
-            "rt_min":               state["rt_min"],
-            "rt_max":               state["rt_max"],
-            "rt_peak":              (state["rt_min"] + state["rt_max"]) / 2,
-            "ms2_notes":            state["ms2_note"],
-            "ms1_notes":            state["ms1_note"],
-            "other_notes":          state["other_note"],
-            "analyst_notes":        state["analyst_notes"],
+            "rt_min": state["rt_min"],
+            "rt_max": state["rt_max"],
+            "rt_peak": (state["rt_min"] + state["rt_max"]) / 2,
+            "ms2_notes": state["ms2_note"],
+            "ms1_notes": state["ms1_note"],
+            "other_notes": state["other_note"],
+            "analyst_notes": state["analyst_notes"],
             "identification_notes": state["id_notes"],
         }
 
@@ -410,15 +397,15 @@ def build_dash_app(
                     manual_curation_df.at[df_idx, col] = val
 
         state["last_saved"] = {
-            "name":          row["compound_name"],
-            "rt_min":        state["rt_min"],
-            "rt_max":        state["rt_max"],
-            "ms1":           state["ms1_note"],
-            "ms2":           state["ms2_note"],
-            "other":         state["other_note"],
+            "name": row["compound_name"],
+            "rt_min": state["rt_min"],
+            "rt_max": state["rt_max"],
+            "ms1": state["ms1_note"],
+            "ms2": state["ms2_note"],
+            "other": state["other_note"],
             "analyst_notes": state.get("analyst_notes", ""),
-            "id_notes":      state.get("id_notes", ""),
-            "timestamp":     time.strftime("%H:%M:%S"),
+            "id_notes": state.get("id_notes", ""),
+            "timestamp": time.strftime("%H:%M:%S"),
         }
         state["flush_error"] = None
         return state
@@ -465,60 +452,65 @@ def build_dash_app(
 
         fig = go.Figure()
         
-        # Add isomer rectangles FIRST so they appear behind MS1 data traces
         isomer_str = "No Isomers Found"
         try:
-            isomers = _parse_isomers(row.get("isomers"))
+            isomers = _parse_isomers(row.get("isomers")) # all study isomers for this compound
             if isomers:
                 isomer_lines = []
                 resolved_isomers = []
+                # First, build resolved_isomers as before
                 for iso in isomers:
                     iso_inchi = iso.get('inchi_key', '')
-                    iso_name   = iso.get('compound_name', '')
+                    iso_name = iso.get('compound_name', '')
                     iso_adduct = iso.get('adduct', '')
-                    iso_rt     = iso.get('rt', None)
-                    iso_mz     = iso.get('mz', None)
-
+                    iso_rt = iso.get('rt', None)
+                    iso_mz = iso.get('mz', None)
                     mask = (
                         (manual_curation_df["inchi_key"] == iso_inchi) &
                         (manual_curation_df["compound_name"] == iso_name) &
                         (manual_curation_df["adduct"] == iso_adduct)
                     )
-                    matches = manual_curation_df[mask]
-
-                    if len(matches) > 1:
-                        raise ValueError(f"There were multiple matches of isomer {iso_name} {iso_adduct} {iso_inchi} to the manual curation object")
-
-                    if matches.empty:
+                    isomer_match = manual_curation_df[mask]
+                    if len(isomer_match) > 1:
+                        raise ValueError(f"There were multiple isomer_match of isomer {iso_name} {iso_adduct} {iso_inchi} to the manual curation object")
+                    if isomer_match.empty:
                         continue
-
-                    iso_df_idx      = matches.index[0]
-                    iso_display_idx = iso_df_idx + 1
-                    iso_rt_min      = float(matches.iloc[0]["rt_min"])
-                    iso_rt_max      = float(matches.iloc[0]["rt_max"])
+                    if isomer_match.iloc[0]["ms1_notes"] == "remove":
+                        continue
+                    iso_df_idx = isomer_match.index[0]
+                    iso_display_idx = iso_df_idx
+                    iso_rt_min = float(isomer_match.iloc[0]["rt_min"])
+                    iso_rt_max = float(isomer_match.iloc[0]["rt_max"])
                     resolved_isomers.append({
                         "display_idx": iso_display_idx,
-                        "name":        iso_name,
-                        "adduct":      iso_adduct,
-                        "rt_min":      iso_rt_min,
-                        "rt_max":      iso_rt_max,
-                        "rt":          iso_rt,
-                        "mz":          iso_mz,
-                        "df_idx":      iso_df_idx,
+                        "name": iso_name,
+                        "adduct": iso_adduct,
+                        "rt_min": iso_rt_min,
+                        "rt_max": iso_rt_max,
+                        "rt": iso_rt,
+                        "mz": iso_mz,
+                        "df_idx": iso_df_idx,
                     })
-
+                # Now, for each isomer, check if its window overlaps with any other
                 if resolved_isomers:
-                    for iso in resolved_isomers:
-                        iso_ms1_note = manual_curation_df.at[iso["df_idx"], "ms1_notes"] if "ms1_notes" in manual_curation_df.columns else "keep"
-                        if iso_ms1_note == "remove":
-                            continue
-                        # Add as trace so it appears behind all data traces
+                    def _window_overlaps(a_min, a_max, b_min, b_max):
+                        return (a_min <= b_max) and (b_min <= a_max)
+                    
+                    for i, iso in enumerate(resolved_isomers):
+                        overlaps = False
+                        for j, other in enumerate(resolved_isomers):
+                            if i == j:
+                                continue
+                            if _window_overlaps(iso["rt_min"], iso["rt_max"], other["rt_min"], other["rt_max"]):
+                                overlaps = True
+                                break
+                        fillcolor = "rgba(255,128,128,0.35)" if overlaps else "rgba(128,192,255,0.35)"  # light red if overlaps, else light blue
                         iso_rect_trace = go.Scatter(
                             x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
                             y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
                             mode="lines",
                             fill="toself",
-                            fillcolor="rgba(211,211,211,0.35)",
+                            fillcolor=fillcolor,
                             line=dict(width=0, color="rgba(0,0,0,0)"),
                             showlegend=False,
                             hoverinfo="skip",
@@ -543,9 +535,9 @@ def build_dash_app(
                             f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
                             f"RT: {rt_str}  |  m/z: {mz_str}"
                         )
-                    isomer_str = "<br>".join(isomer_lines)
+                    isomer_str = "<br>".join(isomer_lines) if resolved_isomers else "No Isomers Found"
                 else:
-                    isomer_str = "No Isomers Found" 
+                    isomer_str = "No Isomers Found"
             else:
                 isomer_str = "No Isomers Found"
         except Exception as exc:
@@ -555,7 +547,7 @@ def build_dash_app(
         # Now add MS1 data traces (they will appear on top of isomer rectangles)
         for fp in sub["file_path"].unique():
             short_name = "_".join(os.path.basename(fp).split(".")[0].split("_")[11:])
-            color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in short_name.lower()), "gray")
+            color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fp.lower()), "gray")
             for _, r in sub[sub["file_path"] == fp].iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
@@ -616,7 +608,7 @@ def build_dash_app(
             name="RT max", editable=True,
         )
 
-        compound_display_idx = state["compound_idx"] + 1
+        compound_display_idx = state["compound_idx"]
 
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi}</span><br>"
@@ -760,7 +752,7 @@ def build_dash_app(
         fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
         ms2_title_text = (
             f"File: {fname}<br>"
-            f"Score: {scan.get('score', 0):.4f}  |  Matches: {num_matching_fragments}/{num_ref_fragments}  |  Scan RT: {scan.get('rt', 0):.4f} min | Precursor m/z: {scan.get('precursor_MZ', 0):.4f}  |  Ref m/z: {scan.get('mz_theoretical', 0):.4f}  |  ppm Δ: {scan.get('ppm_error', 0):.2f}"
+            f"Score: {scan.get('score', 0):.4f}  |  Isomer Matches: {num_matching_fragments}/{num_ref_fragments}  |  Scan RT: {scan.get('rt', 0):.4f} min | Precursor m/z: {scan.get('precursor_MZ', 0):.4f}  |  Ref m/z: {scan.get('mz_theoretical', 0):.4f}  |  ppm Δ: {scan.get('ppm_error', 0):.2f}"
         )
         fig.update_layout(
             title=dict(text=ms2_title_text, x=0.5, xanchor="center", font=dict(size=12)),
@@ -802,7 +794,9 @@ def build_dash_app(
         if compound_idx is None:
             raise dash.exceptions.PreventUpdate
 
-        compound_idx = int(compound_idx)
+
+        # Convert 1-based user input to 0-based index for internal use
+        compound_idx = int(compound_idx) - 1
 
         if old_state is not None and int(old_state.get("compound_idx", -1)) == compound_idx:
             raise dash.exceptions.PreventUpdate
@@ -846,9 +840,9 @@ def build_dash_app(
         if trigger not in ("prev-btn", "next-btn") or state is None:
             raise dash.exceptions.PreventUpdate
 
+
         delta = -1 if trigger == "prev-btn" else 1
         new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
-
         if new_idx == int(state["compound_idx"]):
             raise dash.exceptions.PreventUpdate
 
@@ -869,7 +863,8 @@ def build_dash_app(
         new_state["last_saved"] = state.get("last_saved")
         new_state["flush_error"] = flush_error
         new_state["_nav_programmatic"] = True
-        return new_state, new_idx
+        # Return 1-based index for dropdown value
+        return new_state, new_idx + 1
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -1001,7 +996,6 @@ def build_dash_app(
             if not (k.startswith("shapes[") and k.endswith("].x0")):
                 continue
             
-            # Extract shape index from the key (e.g., "shapes[0].x0" -> 0)
             try:
                 idx_str = k.split("[")[1].split("]")[0]
                 shape_idx = int(idx_str)
@@ -1109,14 +1103,10 @@ def build_dash_app(
             return new_state, dash.no_update
 
         if key in ("j", "k", " ", "ArrowLeft", "ArrowRight"):
-            # ArrowLeft = previous, ArrowRight = next
-            if key == "ArrowLeft":
-                delta = -1
-            elif key == "ArrowRight":
+            if key == " " or key == "k" or key == "ArrowRight":
                 delta = 1
-            else:
-                delta = -1 if key == "j" else 1
-            delta = -1 if key == "j" else 1
+            elif key == "j" or key == "ArrowLeft":
+                delta = -1
             new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
             if new_idx == int(state["compound_idx"]):
                 raise dash.exceptions.PreventUpdate
@@ -1136,7 +1126,8 @@ def build_dash_app(
             new_state["last_saved"] = state.get("last_saved")
             new_state["flush_error"] = flush_error
             new_state["_nav_programmatic"] = True
-            return new_state, new_idx
+            # Return 1-based index for dropdown value
+            return new_state, new_idx + 1
 
         if key in MS2_KEY_TO_LABEL:
             return _patch_with_seq(state, ms2_note=MS2_KEY_TO_LABEL[key]), dash.no_update
@@ -1230,10 +1221,10 @@ def build_dash_app(
     def sync_controls(state):
         if state is None:
             raise dash.exceptions.PreventUpdate
-        ms2_val   = state["ms2_note"]   if state["ms2_note"]   in MS2_OPTIONS   else "no selection"
-        ms1_val   = state["ms1_note"]   if state["ms1_note"]   in MS1_OPTIONS   else "keep"
+        ms2_val = state["ms2_note"] if state["ms2_note"] in MS2_OPTIONS else "no selection"
+        ms1_val = state["ms1_note"] if state["ms1_note"] in MS1_OPTIONS else "keep"
         other_val = state["other_note"] if state["other_note"] in OTHER_OPTIONS else "no selection"
-        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"]
+        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"] + 1
 
     @app.callback(
         Output("save-exit-status", "children"),

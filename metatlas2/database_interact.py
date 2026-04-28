@@ -1952,8 +1952,11 @@ def get_manual_curation_entries(
         )
     else:
         df['has_unlabeled'] = df['compound_name'].str.contains('unlabeled', case=False, na=False).astype(int)
-        df = df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, True])
-        df = df.drop('has_unlabeled', axis=1)
+        df = (
+            df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, True])
+            .drop('has_unlabeled', axis=1)
+            .reset_index(drop=True)
+        )
 
     return df
 
@@ -2236,7 +2239,7 @@ def create_new_atlas_after_auto_id(
 
     # Deep-copy every CompoundMZRT and apply curation updates
     new_compound_mzrts = {}
-    for dict_key, cmzrt in source_atlas.compound_mzrts.items():
+    for dict_key, cmzrt in tqdm(source_atlas.compound_mzrts.items(), desc="Creating new Atlas from curated compounds"):
         new_cmzrt = copy.deepcopy(cmzrt)
         curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
         # Remove compounds from original atlas that were not auto-identified (curation_row has auto_ided=False)

@@ -158,37 +158,47 @@ def _build_isomer_dict(
       - mz or mono_isotopic_molecular_weight within 0.005
       - OR inchi_key prefix (before '-') identical
     """
+    atlas_df = atlas_obj.to_dataframe().reset_index(drop=True)
+    n = len(atlas_df)
+    mzs = atlas_df["mz"].to_numpy(dtype=float)
+    # Some rows may not have mono_isotopic_molecular_weight
+    if "mono_isotopic_molecular_weight" in atlas_df.columns:
+        masses = atlas_df["mono_isotopic_molecular_weight"].to_numpy(dtype=float)
+    else:
+        masses = np.full(n, np.nan)
+    inchi_keys = atlas_df["inchi_key"].astype(str).to_numpy()
+    inchi_prefixes = np.array([ik.split("-")[0] for ik in inchi_keys], dtype=object)
+
+    # Pairwise comparisons
+    mz_i, mz_j = mzs[:, None], mzs[None, :]
+    mz_valid = (~np.isnan(mz_i)) & (~np.isnan(mz_j))
+    mz_similar = mz_valid & (np.abs(mz_i - mz_j) <= 0.005)
+
+    m_i, m_j = masses[:, None], masses[None, :]
+    mass_valid = (~np.isnan(m_i)) & (~np.isnan(m_j))
+    mass_similar = mass_valid & (np.abs(m_i - m_j) <= 0.005)
+
+    prefix_i, prefix_j = inchi_prefixes[:, None], inchi_prefixes[None, :]
+    prefix_match = prefix_i == prefix_j
+
+    # Exclude self-matches for isomer detection
+    self_mask = np.eye(n, dtype=bool)
+
+    isomer_mask = (mz_similar | mass_similar | prefix_match) & (~self_mask)
+
     isomer_dict: Dict[str, List[Dict[str, Any]]] = {}
-    atlas_df = atlas_obj.to_dataframe()
-    for _, row in atlas_df.iterrows():
-        mz = row["mz"]
-        mono_isotopic_molecular_weight = row.get("mono_isotopic_molecular_weight", None)
-        inchi_prefix = row["inchi_key"].split("-")[0]
-        
-        def is_isomer(atlas_row):
-            if atlas_row["inchi_key"] == row["inchi_key"]:
-                return False
-            mz_close = abs(atlas_row["mz"] - mz) <= 0.005
-            mass_close = (
-                mono_isotopic_molecular_weight is not None and 
-                atlas_row.get("mono_isotopic_molecular_weight", None) is not None and
-                abs(atlas_row["mono_isotopic_molecular_weight"] - mono_isotopic_molecular_weight) <= 0.005
-            )
-            prefix_match = atlas_row["inchi_key"].split("-")[0] == inchi_prefix
-            return mz_close or mass_close or prefix_match
-        
-        isomers = atlas_df[atlas_df.apply(is_isomer, axis=1)]
+    for idx, row in atlas_df.iterrows():
+        isomer_idxs = np.where(isomer_mask[idx])[0]
         isomer_dict[row["inchi_key"]] = [
             {
-                "inchi_key": atlas_row["inchi_key"],
-                "adduct": atlas_row["adduct"],
-                "compound_name": atlas_row.get("compound_name", ""),
-                "rt": atlas_row["rt_peak"],
-                "mz": atlas_row["mz"],
+                "inchi_key": atlas_df.iloc[j]["inchi_key"],
+                "adduct": atlas_df.iloc[j]["adduct"],
+                "compound_name": atlas_df.iloc[j].get("compound_name", ""),
+                "rt": atlas_df.iloc[j]["rt_peak"],
+                "mz": atlas_df.iloc[j]["mz"],
             }
-            for _, atlas_row in isomers.iterrows()
+            for j in isomer_idxs
         ]
-    
     return isomer_dict
 
 def _add_rt_suggestions_to_manual_curation_obj(
