@@ -46,7 +46,7 @@ def generate_gui_notebooks(
 
     logger.info("Generating notebook file...")
     fname = (
-        f"{auto_id_obj.post_autoid_atlas_obj.chromatography}"
+        f"{auto_id_obj.project_name}"
         f"_{auto_id_obj.post_autoid_atlas_obj.analysis_type}"
         f"_{auto_id_obj.post_autoid_atlas_obj.polarity}"
         f"_RTA{auto_id_obj.rt_alignment_number}"
@@ -70,6 +70,10 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
         "ms2_min_score",
         "ms2_min_matching_frags",
         "gui_lcmsruns_colors",
+        "gui_require_all_evaluated",
+        "note_options_overrides",
+        "upload_to_gdrive",
+        "skip_outputs",
     ]
     src = "# Parameters to override for GUI analysis\n"
     src += "OVERRIDE_PARAMS = {\n"
@@ -141,6 +145,7 @@ def _make_summary_cell() -> nbformat.NotebookNode:
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
         "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
+        "    override_parameters=OVERRIDE_PARAMS,\n"
         "    overwrite=False\n"
         ")"
     )

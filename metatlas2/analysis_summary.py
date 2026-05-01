@@ -4,8 +4,9 @@ import json
 import os
 import statistics
 import textwrap
-from tqdm.notebook import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import warnings
+from tqdm.auto import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,10 @@ import metatlas2.database_interact as dbi
 import metatlas2.rclone as rcl
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('analysis_summary')
+
+def _strip_non_chars(text: str) -> str:
+    """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
+    return "".join(c for c in text if ord(c) not in range(0xFDD0, 0xFDF0) and ord(c) & 0xFFFF not in (0xFFFE, 0xFFFF))
 
 def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) -> str:
     """Determine color for a file based on color mapping.
@@ -52,23 +57,6 @@ def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
     except Exception:
         return [], []
 
-# def _get_compound_info(
-#     main_db_path: str,
-#     inchi_key: str,
-# ) -> Optional[Tuple[str, str, str, str]]:
-#     """Return the compound info for *inchi_key* from main_db: formula, smiles, inchi, pubchem_cid."""
-#     try:
-#         with dbi.get_db_connection(main_db_path) as conn:
-#             row = conn.execute(
-#                 "SELECT formula, smiles, inchi, pubchem_cid FROM compounds WHERE inchi_key = ? LIMIT 1",
-#                 [inchi_key],
-#             ).fetchone()
-#         if row and any(row):
-#             return row[0], row[1], row[2], row[3]
-#     except Exception as exc:
-#         logger.warning("Could not retrieve info from %s for %s: %s", main_db_path, inchi_key, exc)
-#     return None, None, None, None
-
 def _get_compound_info_batch(
     main_db_path: str,
     inchi_keys: List[str],
@@ -99,23 +87,6 @@ def _get_compound_info_batch(
     except Exception as exc:
         logger.warning("Batch compound info query failed: %s", exc)
         return {}
-
-def _get_monoisotopic_mass(
-    main_db_path: str,
-    inchi_key: str,
-) -> Optional[float]:
-    """Return the monoisotopic mass for *inchi_key*."""
-    try:
-        with dbi.get_db_connection(main_db_path) as conn:
-            row = conn.execute(
-                "SELECT mono_isotopic_molecular_weight FROM compounds WHERE inchi_key = ? LIMIT 1",
-                [inchi_key],
-            ).fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-    except Exception as exc:
-        logger.warning("Could not retrieve mass from %s for %s: %s", main_db_path, inchi_key, exc)
-    return None
 
 def _plot_mirror(
     ax,
@@ -415,19 +386,19 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
 
 def _plot_hit_info_table(
     ax,
-    ms2_hits_compound_df: pd.DataFrame,
+    top3: pd.DataFrame,
     mc_row: pd.Series,
 ) -> None:
     """Render the best MS2 hit as a vertical Theoretical/Measured/Difference table on *ax*."""
     ax.axis("off")
 
-    if ms2_hits_compound_df.empty:
+    if top3.empty:
         ax.text(0.5, 0.5, "No MS2 hits found.", transform=ax.transAxes,
                 ha="center", va="center", fontsize=25, color="gray")
         return
 
-    # Single best hit overall
-    best_hit = ms2_hits_compound_df.sort_values("score", ascending=False).iloc[0]
+    # Best hit is top3.iloc[0] — identical to what the mirror plot displays
+    best_hit = top3.iloc[0]
 
     # Abbreviated file name used as the table title
     raw_name = os.path.basename(str(best_hit["file_path"]))
@@ -600,7 +571,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
 
     mc_row = pd.Series(kwargs["mc_row_dict"])
     fig_path = Path(kwargs["fig_path"])
-    cmp_idx = kwargs["compound_idx"] + 1
+    cmp_idx = kwargs["compound_idx"]
     compound_name = kwargs["compound_name"]
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
@@ -643,10 +614,10 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ax_eic_log.set_title("EIC (log₁₀ scale)", fontsize=18)
 
     _plot_compound_info_table(fig.add_subplot(gs[1, 2:4]), mc_row)
-    _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), ms2_hits_df, mc_row)
+    _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), top3, mc_row)
 
-    plt.suptitle(
-        f"[{cmp_idx:04d}] |  {adduct}  |  {inchi_key}\n{compound_name}\n",
+    fig.suptitle(
+        f"[{cmp_idx:04d}] |  {_strip_non_chars(adduct)}  |  {inchi_key}\n{_strip_non_chars(compound_name)}\n",
         fontsize=20, weight="bold", y=0.97,
     )
     for y_line in [0.61, 0.345]:
@@ -656,7 +627,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
             color="black", linewidth=1, clip_on=False,
         ))
 
-    plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return compound_name
 
@@ -713,12 +684,11 @@ def make_identification_figure(
 
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
-        user_idx = cmp_idx + 1
-        compound_name = mc_row.get("compound_name") or f"compound_{user_idx}"
+        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx}"
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
 
-        safe_name = f"{user_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+        safe_name = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
         fig_path = output_loc / f"{safe_name}.pdf"
 
         if not overwrite and fig_path.exists():
@@ -737,7 +707,7 @@ def make_identification_figure(
             "compound_name": compound_name,
             "adduct":       adduct,
             "inchi_key":    inchi_key,
-            "compound_idx": user_idx,
+            "compound_idx": cmp_idx,
             "fig_path":     str(fig_path),
             "overwrite":    overwrite,
             "color_map":    color_map,
@@ -755,7 +725,7 @@ def make_identification_figure(
 
     pbar = tqdm(total=len(tasks), desc="Generating ID figures", unit="compound")
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
             executor.submit(_identification_figure_worker, task): task["compound_name"]
             for task in tasks
@@ -848,6 +818,7 @@ def _compute_all_overlapping_compounds(
         dtype=float,
     )
     names = mc["compound_name"].tolist()
+    inchi_keys = mc["inchi_key"].tolist()
 
     rt_overlap = (
         np.maximum(rt_min[:, None], rt_min[None, :]) <=
@@ -862,16 +833,20 @@ def _compute_all_overlapping_compounds(
     mass_valid = (m_i != 0) & (m_j != 0) & ~np.isnan(m_i) & ~np.isnan(m_j)
     mass_similar = mass_valid & (np.abs(m_i - m_j) <= 0.005)
 
-    overlap = rt_overlap & (mz_similar | mass_similar)
+    both_mass_zero = (m_i == 0) & (m_j == 0)
+    overlap = rt_overlap & (mz_similar | mass_similar) & ~both_mass_zero
     np.fill_diagonal(overlap, True)
 
     result: dict[int, Tuple[str, str]] = {}
     for i in range(n):
         js = np.where(overlap[i])[0]
-        result[i] = (
-            "//".join(names[j] for j in js),
-            "//".join(str(j + 1) for j in js),
-        )
+        if len(js) <= 1:
+            result[i] = ("", "")
+        else:
+            result[i] = (
+                "//".join(names[j] for j in js),
+                "//".join(inchi_keys[j] for j in js),
+            )
     return result
 
 def make_final_id_sheet(
@@ -931,13 +906,15 @@ def make_final_id_sheet(
     logger.info("Processing %d compounds...", len(manual_curation_df))
     rows: List[dict] = []
 
+    # Precompute overlapping compounds using the helper function
+    overlapping_map = _compute_all_overlapping_compounds(manual_curation_df, mass_map)
+
     for compound_idx, mc_row in tqdm(
         manual_curation_df.iterrows(),
         total=len(manual_curation_df),
         desc="Adding compounds to final ID sheet",
     ):
-        user_idx = compound_idx + 1  # 1-based, consistent with manual_curation_df index
-        compound_name = mc_row.get("compound_name") or f"compound_{user_idx}"
+        compound_name = mc_row.get("compound_name") or f"compound_{compound_idx}"
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
         polarity = mc_row.get("polarity", "")
@@ -945,53 +922,9 @@ def make_final_id_sheet(
         formula, smiles, inchi, pubchem_cid = compound_info_map.get(inchi_key, (None, None, None, None))
         exact_mass = mass_map.get(inchi_key)
 
-        # --- Isomer / overlapping compound columns ---
-        # isomers is a list of dicts with keys: inchi_key, compound_name, rt, adduct
-        raw_isomers: list[dict] = mc_row.get("isomers") or []
-
-        if raw_isomers:
-            # Combine this compound with its isomers into one list for sorting
-            all_entries = [
-                {
-                    "compound_name": compound_name,
-                    "inchi_key": inchi_key,
-                    "rt": float(mc_row.get("atlas_rt_peak", np.nan)),
-                    "adduct": adduct,
-                }
-            ] + [
-                {
-                    "compound_name": iso.get("compound_name", ""),
-                    "inchi_key": iso.get("inchi_key", ""),
-                    "rt": float(iso.get("rt", np.nan)),
-                    "adduct": iso.get("adduct", ""),
-                }
-                for iso in raw_isomers
-            ]
-
-            # Sort by RT, NaNs last
-            all_entries.sort(key=lambda e: (np.isnan(e["rt"]), e["rt"]))
-
-            # Detect name collisions and append adduct where needed
-            from collections import Counter
-            name_counts = Counter(e["compound_name"] for e in all_entries)
-            duplicate_names = {n for n, c in name_counts.items() if c > 1}
-
-            sorted_names = []
-            sorted_inchi_keys = []
-            for entry in all_entries:
-                name = entry["compound_name"]
-                if name in duplicate_names:
-                    name = f"{name} {entry['adduct']}"
-                sorted_names.append(name)
-                sorted_inchi_keys.append(entry["inchi_key"])
-
-            identified_metabolite = ", ".join(sorted_names)
-            overlapping_compound = ", ".join(sorted_names)
-            overlapping_inchi_keys = ", ".join(sorted_inchi_keys)
-        else:
-            identified_metabolite = compound_name
-            overlapping_compound = ""
-            overlapping_inchi_keys = ""
+        # --- Overlapping compound columns using _compute_all_overlapping_compounds ---
+        overlapping_compound, overlapping_inchi_keys = overlapping_map.get(compound_idx, ("", ""))
+        identified_metabolite = compound_name if not overlapping_compound else overlapping_compound
 
         # --- MS1 metrics ---
         mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
@@ -1011,7 +944,7 @@ def make_final_id_sheet(
         mz_q = _mz_quality(ppm_error, mz_error_da)
         rt_q = _rt_quality(rt_error, chromatography)
 
-        ms2_notes = mc_row.get("ms2_notes") or "no selection"
+        ms2_notes = mc_row.get("ms2_notes", "") or ""
         try:
             msms_q = float(str(ms2_notes).split(",")[0])
         except (ValueError, AttributeError):
@@ -1067,7 +1000,7 @@ def make_final_id_sheet(
 
         rows.append({
             # --- COMPOUND ANNOTATION ---
-            "index": user_idx,
+            "index": compound_idx,
             "identified_metabolite": identified_metabolite,
             "label": compound_name,
             "overlapping_compound": overlapping_compound,
@@ -1085,15 +1018,15 @@ def make_final_id_sheet(
             "isomer_details": "",
             "identification_notes": mc_row.get("identification_notes", ""),
             "analyst_notes": mc_row.get("analyst_notes", ""),
-            "other_notes": mc_row.get("other_notes", ""),
-            "ms1_notes": mc_row.get("ms1_notes", ""),
+            "other_notes": mc_row.get("other_notes", "") or "",
+            "ms1_notes": mc_row.get("ms1_notes", "") or "",
             "ms2_notes": ms2_notes,
             # --- MS1 INTENSITY INFORMATION ---
             "max_intensity": max_intensity,
-            "max_intensity_file": max_int_file,
+            "max_intensity_file": Path(max_int_file).name if max_int_file else "",
             "ms1_rt_peak": rt_measured,
             # --- MSMS INFORMATION ---
-            "msms_file": msms_file,
+            "msms_file": Path(msms_file).name if msms_file else "",
             "msms_rt": round(msms_rt, 2) if not np.isnan(msms_rt) else np.nan,
             "msms_numberofions": msms_num_ions,
             "msms_matchingions": msms_matching_ions,
@@ -1461,7 +1394,7 @@ def _render_eic_thumbnail(
     ax.yaxis.set_major_formatter(fmt)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
 
-    ax.tick_params(axis="both", labelsize=7, length=2, pad=1)
+    ax.tick_params(axis="both", labelsize=10, length=2, pad=1)
     ax.xaxis.label.set_visible(False)
     ax.yaxis.label.set_visible(False)
 
@@ -1498,7 +1431,7 @@ def _write_compound_eic_pdf(
 
     total_files = len(file_items)
     total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
-    title_base = f"[{compound_idx:04d}] {compound_name} | {adduct}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
+    title_base = f"[{compound_idx:04d}] {_strip_non_chars(compound_name)} | {_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
 
     with PdfPages(pdf_path) as pdf:
         for page_idx in range(total_pages):
@@ -1518,7 +1451,7 @@ def _write_compound_eic_pdf(
                 ax = axes_flat[slot_idx]
                 rt_arr = item["rt_arr"]
                 i_arr = item["i_arr"]
-                fname_s = _short_fname(item["file_path"])
+                fname_s = _strip_non_chars(_short_fname(item["file_path"]))
 
                 if shared_y:
                     y_max = y_max_global
@@ -1536,7 +1469,9 @@ def _write_compound_eic_pdf(
 
             page_label = f"({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
             fig.suptitle(f"{title_base}  {page_label}\n", fontsize=12, y=1.005)
-            pdf.savefig(fig, bbox_inches="tight")
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=r"Glyph \d+ .* missing from font", category=UserWarning)
+                pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
 def _compound_pdf_worker(kwargs: dict) -> str:
@@ -1661,7 +1596,7 @@ def make_eic_thumbnails(
 
     pbar = tqdm(total=len(tasks), desc="Generating EIC thumbnails", unit="compound")
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
             executor.submit(_compound_pdf_worker, task): task["compound_name"]
             for task in tasks
@@ -1722,7 +1657,8 @@ def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
     if ms1_all_df.empty:
         return pd.DataFrame(columns=[
             "inchi_key", "adduct", "file_path", "file_group",
-            "peak_height", "rt_peak", "mz_centroid",
+            "peak_height", "peak_area", "rt_peak", "rt_centroid",
+            "mz_peak", "mz_centroid",
         ])
 
     records = []
@@ -1738,7 +1674,10 @@ def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
         }
 
         if not i_arr or max(i_arr) <= 0:
-            records.append({**base, "peak_height": np.nan, "rt_peak": np.nan, "mz_centroid": np.nan})
+            records.append({**base,
+                            "peak_height": np.nan, "peak_area": np.nan,
+                            "rt_peak": np.nan, "rt_centroid": np.nan,
+                            "mz_peak": np.nan, "mz_centroid": np.nan})
             continue
 
         i_np = np.array(i_arr, dtype=float)
@@ -1746,21 +1685,28 @@ def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
         idx_max = int(np.argmax(i_np))
         peak_height = float(i_np[idx_max])
         rt_peak_val = float(rt_np[idx_max])
+        total_i = i_np.sum()
+        rt_centroid_val = float((rt_np * i_np).sum() / total_i)
+        peak_area_val = float(np.trapz(i_np, rt_np))
 
         mz_centroid = np.nan
+        mz_peak_val = np.nan
         mz_json = row.get("mz")
         if mz_json is not None and not (isinstance(mz_json, float) and np.isnan(mz_json)):
             try:
                 mz_np = np.array(json.loads(mz_json), dtype=float)
-                total_i = i_np.sum()
                 if len(mz_np) == len(i_np) and total_i > 0:
                     mz_centroid = float((mz_np * i_np).sum() / total_i)
+                    mz_peak_val = float(mz_np[idx_max])
             except Exception:
                 pass
 
         records.append({**base,
                         "peak_height": peak_height,
+                        "peak_area": peak_area_val,
                         "rt_peak": rt_peak_val,
+                        "rt_centroid": rt_centroid_val,
+                        "mz_peak": mz_peak_val,
                         "mz_centroid": mz_centroid})
 
     return pd.DataFrame(records)
@@ -1774,8 +1720,6 @@ def _plot_compound_boxplot(
     compound_name: str,
     adduct: str,
     ylabel: str,
-    rt_alignment_num: int,
-    analysis_num: int,
     compound_idx: int = 0,
 ) -> None:
     """Draw a grouped boxplot for one compound onto *ax*.
@@ -1812,13 +1756,13 @@ def _plot_compound_boxplot(
     if not data_per_group:
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=8, color="gray")
-        # New title formatting: large top line, smaller below
         title_top = f"{compound_idx:04d}  {compound_name}  {adduct}"
         if metric == "mz_centroid":
-            title_bottom = f"m/z centroid: {atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'}   |   RT alignment {rt_alignment_num}, analysis {analysis_num}"
+            title_bottom = f"m/z centroid: {atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'}"
+            ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
         else:
-            title_bottom = f"RT alignment {rt_alignment_num}, analysis {analysis_num}"
-        ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
+            ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
+        
         return
 
     positions = list(range(len(valid_groups)))
@@ -1847,21 +1791,22 @@ def _plot_compound_boxplot(
         ref_val = np.log10(atlas_ref) if (log_scale and atlas_ref > 0) else atlas_ref
         ax.axhline(ref_val, color="red", linestyle="--", linewidth=0.8, alpha=0.8,
                    label=f"Atlas {atlas_ref:.5g}")
-        ax.legend(fontsize=5, loc="upper right", framealpha=0.5)
+        ax.legend(fontsize=10, loc="upper right", framealpha=0.5)
 
     ax.set_xticks(positions)
-    ax.set_xticklabels(valid_groups, rotation=45, ha="right", fontsize=5)
-    ax.tick_params(axis="y", labelsize=6)
-    ax.set_ylabel(ylabel, fontsize=6)
+    ax.set_xticklabels(valid_groups, rotation=45, ha="right", fontsize=10)
+    ax.tick_params(axis="y", labelsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
 
     # Title formatting: large top line, smaller below
     title_top = f"{compound_idx:04d}  {compound_name}  {adduct}"
     if metric == "mz_centroid":
         mz_val = atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'
-        title_bottom = f"m/z centroid: {mz_val}   |   RT alignment {rt_alignment_num}, analysis {analysis_num}"
+        title_bottom = f"m/z centroid: {mz_val}"
+        ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
     else:
-        title_bottom = f"RT alignment {rt_alignment_num}, analysis {analysis_num}"
-    ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
+        ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
+    
 
     # For linear scales, remove scientific notation multiplier
     if not log_scale:
@@ -1880,11 +1825,9 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     inchi_key = kwargs["inchi_key"]
     cmp_idx = kwargs["compound_idx"]
     overwrite = kwargs["overwrite"]
-    rt_alignment_num = kwargs["rt_alignment_num"]
-    analysis_num = kwargs["analysis_num"]
-    atlas_ref_dict = kwargs["atlas_ref_dict"]   # pre-sliced {attr: value} for this compound
-    metric_configs = kwargs["metric_configs"]   # [(metric, log_scale, ylabel, atlas_attr, str(dir))]
-    cmp_metrics = kwargs["cmp_metrics"]      # DataFrame already filtered to this compound
+    atlas_ref_dict = kwargs["atlas_ref_dict"]
+    metric_configs = kwargs["metric_configs"]
+    cmp_metrics = kwargs["cmp_metrics"]
 
     safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
 
@@ -1897,15 +1840,16 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
         atlas_ref = atlas_ref_dict.get(atlas_attr) if atlas_attr else None
 
         fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
-        _plot_compound_boxplot(
-            ax, cmp_metrics, metric, log_scale,
-            atlas_ref, compound_name, adduct, ylabel,
-            rt_alignment_num, analysis_num,
-            compound_idx=cmp_idx,
-        )
-        with PdfPages(pdf_path) as pdf:
-            pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
+        try:
+            _plot_compound_boxplot(
+                ax, cmp_metrics, metric, log_scale,
+                atlas_ref, compound_name, adduct, ylabel,
+                compound_idx=cmp_idx,
+            )
+            with PdfPages(pdf_path) as pdf:
+                pdf.savefig(fig, bbox_inches="tight")
+        finally:
+            plt.close(fig)
 
     return compound_name
 
@@ -1916,8 +1860,6 @@ def make_boxplots(
     overwrite: bool = True,
     max_workers: Optional[int] = None,
 ) -> None:
-    rt_alignment_num = summary_obj.rt_alignment_number
-    analysis_num = summary_obj.analysis_number
 
     if output_loc is None:
         raise ValueError("output_loc must be provided for boxplot output.")
@@ -1987,9 +1929,7 @@ def make_boxplots(
             "inchi_key": inchi_key,
             "compound_idx": cmp_idx,
             "overwrite": overwrite,
-            "rt_alignment_num": rt_alignment_num,
-            "analysis_num": analysis_num,
-            "atlas_ref_dict": atlas_lookup.get(key, {}),  # only this compound's values
+            "atlas_ref_dict": atlas_lookup.get(key, {}),
             "metric_configs": metric_configs_with_dirs,
             "cmp_metrics": pf_groups.get(key, empty_df),
         })
@@ -2006,7 +1946,7 @@ def make_boxplots(
 
     pbar = tqdm(total=len(tasks), desc="Generating boxplots", unit="compound")
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
             executor.submit(_boxplot_compound_worker, task): task["compound_name"]
             for task in tasks
@@ -2091,7 +2031,7 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     if output_loc is None:
         raise ValueError("output_loc must be provided for best MS2 hit CSV output.")
-    output_loc = Path(output_loc)
+    output_loc = Path(output_loc) / "additional_data"
     output_loc.mkdir(parents=True, exist_ok=True)
 
     if not output_filename.endswith(".csv"):
@@ -2168,10 +2108,252 @@ def make_best_ms2_hit_fragment_ions_csv(
     )
     return result_df
 
+def make_data_sheets(
+    summary_obj: "AnalysisSummary",
+    output_loc: Optional[Path] = None,
+    overwrite: bool = True,
+) -> None:
+    """Export per-compound, per-file quantitative metric tables as wide-format CSVs.
+
+    Writes one CSV per metric into ``output_loc/data_sheets/``:
+
+    - ``peak_height.csv``   — maximum EIC intensity per file
+    - ``peak_area.csv``     — trapezoidal area under the EIC per file
+    - ``rt_peak.csv``       — retention time at peak intensity per file
+    - ``rt_centroid.csv``   — intensity-weighted mean retention time per file
+    - ``mz_peak.csv``       — m/z at peak intensity per file
+    - ``mz_centroid.csv``   — intensity-weighted mean m/z per file
+
+    Each CSV is wide-format: rows = compounds (compound_name, inchi_key, adduct),
+    columns = one per input file (file stem without extension).
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured :class:`AnalysisSummary` object (call ``.setup(...)`` first).
+    output_loc:
+        Base output directory.  A ``data_sheets`` sub-directory is created inside it.
+    overwrite:
+        When *False*, existing CSVs are skipped rather than overwritten.
+    """
+    if output_loc is None:
+        raise ValueError("output_loc must be provided for data sheet export.")
+    out_dir = Path(output_loc) / "data_sheets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
+    manual_curation_df = summary_obj.manual_curation_df
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.error("No manual curation entries found - data sheets not written.")
+        return
+
+    per_file_df = summary_obj.per_file_metrics_df
+    if per_file_df is None or per_file_df.empty:
+        logger.warning("per_file_metrics_df is empty - data sheets not written.")
+        return
+
+    # Join compound_name and compound_index from manual_curation_df
+    mc_reset = manual_curation_df.reset_index(drop=True)
+    mc_slim = mc_reset[["inchi_key", "adduct", "compound_name"]].copy()
+    mc_slim["compound_index"] = mc_reset.index
+    mc_slim = mc_slim.drop_duplicates(subset=["inchi_key", "adduct"])
+    pfm = per_file_df.merge(mc_slim, on=["inchi_key", "adduct"], how="left")
+
+    # Column labels: file stem (basename without extension)
+    pfm = pfm.copy()
+    pfm["_file_col"] = pfm["file_path"].apply(
+        lambda p: os.path.splitext(os.path.basename(str(p)))[0] if p else "unknown"
+    )
+
+    _DATA_SHEET_METRICS = [
+        "peak_height",
+        "peak_area",
+        "rt_peak",
+        "rt_centroid",
+        "mz_peak",
+        "mz_centroid",
+    ]
+    _INDEX_COLS = [
+        "compound_index",
+        "compound_name", 
+        "inchi_key", 
+        "adduct"
+    ]
+    for metric in _DATA_SHEET_METRICS:
+        if metric not in pfm.columns:
+            logger.warning("Metric '%s' not found in per_file_metrics_df — skipping.", metric)
+            continue
+        csv_path = out_dir / f"{metric}.csv"
+        if not overwrite and csv_path.exists():
+            logger.info("Skipping existing data sheet: %s", csv_path)
+            continue
+
+        wide = (
+            pfm[_INDEX_COLS + ["_file_col", metric]]
+            .pivot_table(
+                index=_INDEX_COLS,
+                columns="_file_col",
+                values=metric,
+                aggfunc="first",
+            )
+            .reset_index()
+        )
+        wide.columns.name = None
+        wide.to_csv(csv_path, index=False)
+        logger.info(
+            "Exported %s data sheet (%d compounds × %d files) → %s",
+            metric, len(wide), len(wide.columns) - len(_INDEX_COLS), csv_path,
+        )
+
+    logger.info("Data sheets written to %s", out_dir)
+
+
+def make_peak_height_filtered_csv(
+    summary_obj: "AnalysisSummary",
+    output_loc: Optional[Path] = None,
+    overwrite: bool = True,
+    control_fold_threshold: float = 3.0,
+) -> pd.DataFrame:
+    """Filter and process the ``peak_height`` data sheet.
+
+    Applies the following steps in order:
+
+    1. **Control filter** — removes compounds where the maximum non-control
+       peak height is below ``control_fold_threshold`` × the maximum control
+       peak height.  Control files are identified by the presence of any of
+       ``"ExCtrl"``, ``"TxCtrl"``, or ``"InjBL"`` in the column name.
+       Compounds with no matching control columns are kept.
+       Compounds not detected in any non-control sample (all NaN) are removed.
+    2. **Row deduplication** — drops the ``adduct``, ``compound_name``, and
+       ``compound_index`` columns, then merges rows sharing the same
+       ``inchi_key`` by taking the column-wise maximum.
+    3. **Column shortening & deduplication** — drops the last two
+       ``_``-separated tokens from each data column name (e.g.
+       ``…_MS1_POS`` → ``…``), then merges any resulting duplicate column
+       names by taking the row-wise maximum.
+    4. **Missing-value imputation** — fills remaining NaN cells with the
+       global minimum measured value in the final matrix.
+    5. **Export** — writes ``peak_height_filtered.csv`` into the same
+       ``data_sheets`` sub-directory as ``peak_height.csv``.
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured :class:`AnalysisSummary` object (used only for the default
+        output location).
+    output_loc:
+        Base output directory (same value passed to :func:`make_data_sheets`).
+    overwrite:
+        When *False* raises :exc:`FileExistsError` if the output already exists.
+    control_fold_threshold:
+        Fold-change required to retain a compound (default ``3.0``).
+
+    Returns
+    -------
+    pd.DataFrame
+        The filtered, processed table (empty on error).
+    """
+    if output_loc is None:
+        raise ValueError("output_loc must be provided.")
+    out_dir = Path(output_loc) / "data_sheets"
+    source_csv = out_dir / "peak_height.csv"
+    output_csv = out_dir / "peak_height_filtered.csv"
+
+    if not source_csv.exists():
+        logger.error(
+            "peak_height.csv not found at %s — run make_data_sheets first.",
+            source_csv,
+        )
+        return pd.DataFrame()
+
+    if not overwrite and output_csv.exists():
+        raise FileExistsError(
+            f"Output file already exists and overwrite=False: {output_csv}"
+        )
+
+    df = pd.read_csv(source_csv)
+
+    _META_COLS = {"compound_index", "compound_name", "inchi_key", "adduct"}
+    data_cols = [c for c in df.columns if c not in _META_COLS]
+
+    # ── 1. Control-signal filter ───────────────────────────────────────────────
+    _CTRL_PATTERNS = ("ExCtrl", "TxCtrl", "InjBL")
+    ctrl_cols = [c for c in data_cols if any(p in c for p in _CTRL_PATTERNS)]
+    non_ctrl_cols = [c for c in data_cols if c not in ctrl_cols]
+
+    logger.info(
+        "Control filter: %d control columns, %d non-control columns.",
+        len(ctrl_cols), len(non_ctrl_cols),
+    )
+
+    n_before = len(df)
+    if not ctrl_cols:
+        logger.info("No control columns found — skipping control filter.")
+    else:
+        max_ctrl = df[ctrl_cols].max(axis=1)         # NaN → not detected in any control
+        max_non_ctrl = df[non_ctrl_cols].max(axis=1)  # NaN → not detected in any sample
+        keep = (
+            max_non_ctrl.notna() &
+            (max_ctrl.isna() | (max_non_ctrl >= control_fold_threshold * max_ctrl.fillna(0)))
+        )
+        df = df[keep].reset_index(drop=True)
+
+    logger.info("Control filter: %d → %d compounds.", n_before, len(df))
+
+    if df.empty:
+        logger.warning("All compounds removed by control filter — no output written.")
+        return df
+
+    # ── 2. Drop extra metadata; merge identical inchi_key rows by max ──────────
+    drop_cols = [c for c in ("compound_index", "compound_name", "adduct") if c in df.columns]
+    df = df.drop(columns=drop_cols)
+
+    n_before = len(df)
+    df = df.groupby("inchi_key", sort=False).max().reset_index()
+    logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df))
+
+    # ── 3. Shorten column names; merge duplicate columns by row-wise max ────────
+    def _shorten(col: str) -> str:
+        parts = col.split("_")
+        return "_".join(parts[:-2]) if len(parts) > 2 else col
+
+    df.columns = [c if c == "inchi_key" else _shorten(c) for c in df.columns]
+
+    if df.columns.duplicated().any():
+        data_df = df[[c for c in df.columns if c != "inchi_key"]]
+        # Transpose so column names become the index, then groupby merges duplicates
+        data_merged = data_df.T.groupby(level=0).max().T.reset_index(drop=True)
+        df = pd.concat(
+            [df[["inchi_key"]].reset_index(drop=True), data_merged], axis=1
+        )
+        logger.info(
+            "Merged duplicate columns after shortening; %d data columns remain.",
+            len(data_merged.columns),
+        )
+
+    # ── 4. Impute NaN cells with the global matrix minimum ────────────────────
+    data_cols_final = [c for c in df.columns if c != "inchi_key"]
+    global_min = float(df[data_cols_final].min().min()) if data_cols_final else np.nan
+    if not np.isnan(global_min):
+        n_nan = int(df[data_cols_final].isna().sum().sum())
+        df[data_cols_final] = df[data_cols_final].fillna(global_min)
+        logger.info("Imputed %d NaN cells with global minimum: %g", n_nan, global_min)
+    else:
+        logger.warning("Global minimum is NaN — no imputation performed.")
+
+    # ── 5. Export ──────────────────────────────────────────────────────────────
+    df.to_csv(output_csv, index=False)
+    logger.info(
+        "Exported filtered peak height (%d compounds × %d files) → %s",
+        len(df), len(df.columns) - 1, output_csv,
+    )
+    return df
+
+
 def run_all_summaries(
     summary_obj: "AnalysisSummary",
     overwrite: bool = False,
-    skip_outputs: Optional[List[str]] = None
 ) -> None:
     """Run all summary outputs for one analysis.
 
@@ -2196,6 +2378,11 @@ def run_all_summaries(
         Passed through to all sub-functions.
     """
     output_loc = summary_obj.paths.get("analysis_output_dir", None)
+    if summary_obj.override_parameters.get("skip_outputs") is not None:
+        skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
+    else:
+        skip_outputs = summary_obj.config.get("skip_outputs", [])
+    
     if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
         logger.error("No manual curation entries found - aborting run_all_summaries.")
         return
@@ -2223,6 +2410,14 @@ def run_all_summaries(
     if "best_ms2_hits_csv" not in (skip_outputs or []):
         logger.info("Making best MS2 hit fragment ions CSV...")
         make_best_ms2_hit_fragment_ions_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    if "data_sheets" not in (skip_outputs or []):
+        logger.info("Making quantitative data sheets...")
+        make_data_sheets(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
+    if "peak_height_filtered_csv" not in (skip_outputs or []):
+        logger.info("Making filtered peak height CSV...")
+        make_peak_height_filtered_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
     logger.info("Exporting pre-curation atlas data CSV...")
     summary_obj.pre_curation_atlas_obj.to_dataframe().to_csv(

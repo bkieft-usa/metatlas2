@@ -6,38 +6,15 @@ from dash import dcc, html, ctx, Input, Output, State
 import dash_bootstrap_components as dbc
 from dash_extensions import EventListener
 import traceback
+import json
 
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger("analysis_gui")
 
-MS2_OPTIONS = [
-    "no selection",
-    "-1.0, poor match, should remove",
-    "0.0, no match or no MSMS collected",
-    "0.5, partial or putative match of fragments",
-    "1.0, good match",
-    "0.5, co-isolated precursor, partial match",
-    "1.0, co-isolated precursor, good match",
-    "0.5, single ion match, no evidence",
-    "1.0, single ion match, ISTD/ref evidence",
-]
-MS1_OPTIONS = [
-    "keep", 
-    "remove", 
-    "unresolvable isomers", 
-    "poor peak shape"
-]
-OTHER_OPTIONS = [
-    "no selection",
-    "potential rt shifting",
-    "high ppm diff",
-    "noisy or high background",
-    "needs review"
-]
 
-MS2_HOTKEYS = {
-    "no selection": "q",
+# Default note options and hotkeys
+DEFAULT_MS2_HOTKEYS = {
     "-1.0, poor match, should remove": "w",
     "0.0, no match or no MSMS collected": "e",
     "0.5, partial or putative match of fragments": "r",
@@ -47,23 +24,54 @@ MS2_HOTKEYS = {
     "0.5, single ion match, no evidence": "i",
     "1.0, single ion match, ISTD/ref evidence": "o",
 }
-MS1_HOTKEYS = {
-    "keep": "1",
-    "remove": "2",
-    "unresolvable isomers": "3",
-    "poor peak shape": "4",
+DEFAULT_MS1_HOTKEYS = {
+    "keep": "p",
+    "remove": "q",
 }
-OTHER_HOTKEYS = {
-    "no selection": "5",
-    "potential rt shifting":  "6",
-    "high ppm diff": "7",
-    "noisy or high background": "8",
-    "needs review": "9",
+DEFAULT_OTHER_HOTKEYS = {
+    "unresolvable isomers": "1",
+    "poor peak shape": "2",
+    "potential rt shifting":  "3",
+    "high ppm diff": "4",
+    "noisy or high background": "5",
+    "needs review": "6",
 }
 
-MS2_KEY_TO_LABEL = {v: k for k, v in MS2_HOTKEYS.items()}
-MS1_KEY_TO_LABEL = {v: k for k, v in MS1_HOTKEYS.items()}
-OTHER_KEY_TO_LABEL = {v: k for k, v in OTHER_HOTKEYS.items()}
+def get_note_options_and_hotkeys(override_dict, default_hotkeys):
+    if isinstance(override_dict, dict) and len(override_dict) > 0:
+        # Use analyst-supplied dictionary (text: hotkey)
+        hotkeys = dict(override_dict)
+    else:
+        hotkeys = dict(default_hotkeys)
+    options = list(hotkeys.keys())
+    return options, hotkeys
+
+def _validate_override_parameters(override_parameters):
+    if not isinstance(override_parameters, dict):
+        raise ValueError("analysis_gui_obj.override_parameters must be a dict")
+    if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
+        raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
+    if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
+        raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
+    if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
+        raise ValueError("override_parameters['ms1_min_peak_intensity'] must be a number or None")
+    if not isinstance(override_parameters["ms1_min_num_points"], (type(None), int)):
+        raise ValueError("override_parameters['ms1_min_num_points'] must be an integer or None")
+    if not isinstance(override_parameters["ms2_min_score"], (type(None), (int, float))):
+        raise ValueError("override_parameters['ms2_min_score'] must be a number or None")
+    if not isinstance(override_parameters["ms2_min_matching_frags"], (type(None), int)):
+        raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
+    if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
+        raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
+    if isinstance(override_parameters["note_options_overrides"], dict):
+        for note_type, options in override_parameters["note_options_overrides"].items():
+            if note_type not in ["ms1_notes", "ms2_notes", "other_notes"]:
+                raise ValueError(f"Invalid note type in note_options_overrides: {note_type} (must be 'ms1_notes', 'ms2_notes', or 'other_notes')")
+            if not isinstance(options, dict):
+                raise ValueError(f"Options for {note_type} in note_options_overrides must be a dict mapping option text to hotkeys")
+            for opt_text, hotkey in options.items():
+                if not isinstance(opt_text, str) or not isinstance(hotkey, str):
+                    raise ValueError(f"Invalid option in note_options_overrides for {note_type}: {opt_text}: {hotkey} (both must be strings)")
 
 def build_dash_app(
     analysis_gui_obj,
@@ -80,9 +88,28 @@ def build_dash_app(
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
-        {"label": f"{i+1}: {row['compound_name']}", "value": i+1}
+        {"label": f"{i}: {row['compound_name']}", "value": i}
         for i, row in manual_curation_df.reset_index().iterrows()
     ]
+
+    # Allow override of note options/hotkeys from override_parameters
+    _validate_override_parameters(analysis_gui_obj.override_parameters)
+    ms1_options, ms1_hotkeys = get_note_options_and_hotkeys(
+        analysis_gui_obj.override_parameters["note_options_overrides"].get("ms1_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
+        DEFAULT_MS1_HOTKEYS,
+    )
+    ms2_options, ms2_hotkeys = get_note_options_and_hotkeys(
+        analysis_gui_obj.override_parameters["note_options_overrides"].get("ms2_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
+        DEFAULT_MS2_HOTKEYS,
+    )
+    other_options, other_hotkeys = get_note_options_and_hotkeys(
+        analysis_gui_obj.override_parameters["note_options_overrides"].get("other_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
+        DEFAULT_OTHER_HOTKEYS,
+    )
+
+    ms1_key_to_label = {v: k for k, v in ms1_hotkeys.items()}
+    ms2_key_to_label = {v: k for k, v in ms2_hotkeys.items()}
+    other_key_to_label = {v: k for k, v in other_hotkeys.items()}
 
     # Create the app
     try:
@@ -113,14 +140,22 @@ def build_dash_app(
     def _load_state(compound_idx, ms2_idx=0, session_id=None, edit_seq=0):
         row = _compound_row(compound_idx)
         rt_min, rt_max = _rt_bounds_from_row(row)
-        ms2_stored = row.get("ms2_notes") or ""
-        ms2_note = ms2_stored if ms2_stored else "no selection"
-        ms1_note = row.get("ms1_notes") or "keep"
-        if ms1_note not in MS1_OPTIONS:
-            ms1_note = "keep"
-        other_note = row.get("other_notes") or "no selection"
-        if other_note not in OTHER_OPTIONS:
-            other_note = "no selection"
+        ms2_note = row.get("ms2_notes") or ""
+        ms1_note = row.get("ms1_notes") or ms1_options[0]
+        other_notes_raw = row.get("other_notes")
+        if other_notes_raw is None or other_notes_raw == "" or (isinstance(other_notes_raw, float) and np.isnan(other_notes_raw)):
+            other_note = []
+        else:
+            try:
+                if isinstance(other_notes_raw, str) and other_notes_raw.startswith("["):
+                    other_note = json.loads(other_notes_raw)
+                elif isinstance(other_notes_raw, str):
+                    other_note = [v.strip() for v in other_notes_raw.split(" // ") if v.strip()]
+                else:
+                    other_note = list(other_notes_raw)
+            except Exception:
+                other_note = [other_notes_raw] if other_notes_raw else []
+        other_note = [v for v in other_note if v in other_options]
         
         return {
             "session_id": session_id or str(uuid.uuid4()),
@@ -169,82 +204,91 @@ def build_dash_app(
                             dbc.Row(
                                 [
                                     dbc.Col(
-                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=1, clearable=False, style={"width": "100%"}),
+                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=0, clearable=False, style={"width": "100%", "fontSize": "1.5rem"}),
                                         width=12, className="mb-3",
                                     ),
                                 ],
                             ),
-                            dbc.Row(
-                                [
-                                    dbc.Col(dbc.Button("◀ Prev ID [j,<]", id="prev-btn", color="primary", className="me-2"), width="auto"),
-                                    dbc.Col(html.Div(id="compound-counter", className="fw-bold")),
-                                    dbc.Col(dbc.Button("Next ID ▶  [k,>, ]", id="next-btn", color="primary", className="ms-2"), width="auto"),
-                                ],
-                                className="my-2 align-items-center",
-                            ),
-                            dbc.Button("Accept Suggestions  [n]", id="accept-suggestions", color="success", className="my-2 w-100"),
-                            dbc.Button("Snap to Isomer  [m]", id="snap-to-isomer", color="warning", className="my-2 w-100"),
                             dbc.Textarea(id="analyst-notes", placeholder="Analyst notes …", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
-                            dbc.Textarea(id="id-notes", placeholder="Identification notes …", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
-                            html.Div(
-                                [
-                                    html.Label("EIC y-axis scale:", className="fw-bold"),
-                                    dcc.RadioItems(
-                                        id="yaxis-scale-radio",
-                                        options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
-                                        value="linear",
-                                        labelStyle={"display": "inline-block", "margin-right": "12px"},
-                                    ),
-                                ],
-                                className="my-3",
+                            dbc.FormText(
+                                id="id-notes",
+                                style={
+                                    "width": "100%",
+                                    "height": "40px",
+                                    "whiteSpace": "pre-line",
+                                    "display": "block",
+                                    "backgroundColor": "#f8f9fa",
+                                    "border": "1px solid #ced4da",
+                                    "borderRadius": "0.25rem",
+                                    "padding": "0.375rem 0.75rem",
+                                    "fontSize": "1rem"
+                                },
+                                className="my-2",
+                                children="No identification notes"
                             ),
                             html.Div(
                                 [
-                                    html.Label("MS1 quality:", className="fw-bold"),
+                                    html.Label("MS1 quality:", className="fw-bold", style={"fontSize": "1.5rem"}),
                                     dcc.RadioItems(
                                         id="ms1-radio",
-                                        options=[{"label": f"[{MS1_HOTKEYS[lbl]}] {lbl}", "value": lbl} for lbl in MS1_OPTIONS],
-                                        value="keep",
-                                        labelStyle={"display": "block", "margin-bottom": "6px"},
+                                        options=[{"label": f"[{ms1_hotkeys[lbl]}] {lbl}", "value": lbl} for lbl in ms1_options],
+                                        value="keep" if "keep" in ms1_options else ms1_options[0],
+                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
+                                        inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
                                     ),
                                 ],
                                 className="my-3",
                             ),
-                            dbc.Row(
-                                [
-                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev", className="me-2"), width="auto"),
-                                    dbc.Col(html.Div(id="ms2-counter", className="fw-bold")),
-                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next", className="ms-2"), width="auto"),
-                                ],
-                                className="my-2 align-items-center",
-                            ),
                             html.Div(
                                 [
-                                    html.Label("MS2 quality:", className="fw-bold"),
+                                    html.Label("MS2 quality:", className="fw-bold", style={"fontSize": "1.5rem"}),
                                     dcc.RadioItems(
                                         id="ms2-radio",
-                                        options=[{"label": f"[{MS2_HOTKEYS[val]}] {val}", "value": val} for val in MS2_OPTIONS],
-                                        value="no selection",
-                                        labelStyle={"display": "block", "margin-bottom": "6px"},
+                                        options=[{"label": f"[{ms2_hotkeys[val]}] {val}", "value": val} for val in ms2_options],
+                                        value="",
+                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
+                                        inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
                                     ),
                                 ],
                                 className="my-3",
                             ),
                             html.Div(
                                 [
-                                    html.Label("Other notes:", className="fw-bold"),
-                                    dcc.RadioItems(
-                                        id="other-radio",
-                                        options=[{"label": f"[{OTHER_HOTKEYS[val]}] {val}", "value": val} for val in OTHER_OPTIONS],
-                                        value="no selection",
-                                        labelStyle={"display": "block", "margin-bottom": "6px"},
+                                    html.Label("Other notes:", className="fw-bold", style={"fontSize": "1.5rem"}),
+                                    dcc.Checklist(
+                                        id="other-checklist",
+                                        options=[{"label": f"[{other_hotkeys[val]}] {val}", "value": val} for val in other_options],
+                                        value=[],
+                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
+                                        inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
                                     ),
                                 ],
                                 className="my-3",
                             ),
-                            html.Div(id="status-current", className="my-2"),
-                            html.Div(id="status-previous", className="my-2"),
-                            html.Div(id="error-banner", className="my-2"),
+                            html.Div(id="status-current", className="my-2", style={"fontSize": "1rem"}),
+                            html.Div(id="status-previous", className="my-2", style={"fontSize": "1rem"}),
+                            html.Div(id="error-banner", className="my-2", style={"fontSize": "1rem"}),
+                            dbc.Row(
+                                [
+                                    dbc.Col(
+                                        dbc.Button(
+                                            "Save and Exit",
+                                            id="save-exit-btn",
+                                            color="danger",
+                                            size="sm",
+                                            style={"marginTop": "0.5rem"},
+                                        ),
+                                        width="auto",
+                                        className="d-flex justify-content-start",
+                                    ),
+                                    dbc.Col(
+                                        html.Div(id="save-exit-status", className="text-muted fst-italic text-end w-100"),
+                                        className="d-flex align-items-center justify-content-end",
+                                    ),
+                                ],
+                                className="mt-3 mb-1",
+                                align="center",
+                            ),
                         ],
                         width=3,
                         style={"fontSize": "1rem"},
@@ -254,37 +298,89 @@ def build_dash_app(
                             dcc.Graph(
                                 id="ms1-graph",
                                 config={"displayModeBar": True, "edits": {"shapePosition": True, "titleText": False}},
-                                style={"height": "475px"},
+                                style={"height": "550px"},
                             ),
-                            dcc.Graph(id="ms2-graph", config={"displayModeBar": True}, style={"height": "475px"}),
                             dbc.Row(
                                 [
                                     dbc.Col(
-                                        html.Div(id="save-exit-status", className="text-muted fst-italic"),
-                                        className="d-flex align-items-center",
-                                    ),
+                                        dbc.Button(
+                                            "◀ Prev ID [j,<]", 
+                                            id="prev-btn", 
+                                            color="primary", 
+                                            className="me-2 w-100", 
+                                            style={"fontSize": "1rem"}), 
+                                            width=2),
+                                    dbc.Col(
+                                        html.Div(
+                                            id="compound-counter", 
+                                            className="fw-bold text-center", 
+                                            style={"fontSize": "1rem"}), 
+                                            width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Save and Exit",
-                                            id="save-exit-btn",
-                                            color="danger",
-                                            size="sm",
+                                            "Next ID ▶  [k,>, ]", 
+                                            id="next-btn", 
+                                            color="primary", 
+                                            className="ms-2 w-100", 
+                                            style={"fontSize": "1rem"}), 
+                                            width=2),
+                                    dbc.Col(
+                                        dbc.Button(
+                                            "Accept Suggestions  [n]", 
+                                            id="accept-suggestions", 
+                                            color="warning", 
+                                            className="w-100", 
+                                            style={"fontSize": "1rem"}), 
+                                            width=2),
+                                    dbc.Col(
+                                        dbc.Button(
+                                            "Snap to Isomer  [m]", 
+                                            id="snap-to-isomer", 
+                                            color="secondary",
+                                            className="w-100", 
+                                            style={"fontSize": "1rem"}), 
+                                            width=2),
+                                    dbc.Col(
+                                        dcc.RadioItems(
+                                            id="yaxis-scale-radio",
+                                            options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
+                                            value="linear",
+                                            labelStyle={"display": "inline-block", "margin-right": "12px", "fontSize": "1rem"},
+                                            inputStyle={"margin-right": "6px", "transform": "scale(1.3)"},
+                                            className="w-100",
                                         ),
-                                        width="auto",
+                                        width=1,
+                                        className="d-flex align-items-center",
                                     ),
                                 ],
-                                className="mt-2 mb-1",
-                                justify="end",
-                                align="center",
+                                className="my-2 align-items-center",
+                                style={"width": "100%"},
+                                justify="start",
+                            ),
+                            dcc.Graph(
+                                id="ms2-graph", 
+                                config={"displayModeBar": True}, 
+                                style={"height": "550px"}
+                            ),
+                            dbc.Row(
+                                [
+                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(html.Div(id="ms2-counter", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                ],
+                                className="my-2 align-items-center",
+                                style={"width": "100%"},
+                                justify="start",
                             ),
                         ],
                         width=9,
                     ),
                 ],
-                className="mt-3",
+                className="mt-1",
             ),
         ],
         fluid=True,
+        style={"paddingTop": "0.5rem"},
     )
 
     logger.debug("Layout constructed successfully")
@@ -292,8 +388,17 @@ def build_dash_app(
     def _parse_isomers(isomers_val):
         if isinstance(isomers_val, list):
             return isomers_val
-        else:
-            raise ValueError(f"Unexpected isomers format (not an empty list or list of dicts): {isomers_val!r}")
+        # Accept JSON string representation of a list
+        if isinstance(isomers_val, str):
+            try:
+                parsed = json.loads(isomers_val)
+                if isinstance(parsed, list):
+                    return parsed
+                else:
+                    raise ValueError(f"Isomers string did not decode to a list: {isomers_val!r}")
+            except Exception as exc:
+                raise ValueError(f"Isomers string could not be parsed as JSON list: {isomers_val!r} ({exc})")
+        raise ValueError(f"Unexpected isomers format (not an empty list or list of dicts): {isomers_val!r}")
 
     def _get_sorted_isomer_rt_bounds(row):
         """Return list of (rt_min, rt_max) for isomers, sorted by rt_min."""
@@ -367,21 +472,22 @@ def build_dash_app(
     def _flush_to_db(state):
         sid = state.get("session_id", "unknown")
         seq = int(state.get("edit_seq", 0))
+        flush_key = (sid, state.get("compound_idx"))
 
         with flush_lock:
-            latest_seq = latest_flushed_seq_by_session.get(sid, -1)
+            latest_seq = latest_flushed_seq_by_session.get(flush_key, -1)
             if seq <= latest_seq:
                 return state
-            latest_flushed_seq_by_session[sid] = seq
+            latest_flushed_seq_by_session[flush_key] = seq
 
         row = _compound_row(state["compound_idx"])
         updates = {
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
             "rt_peak": (state["rt_min"] + state["rt_max"]) / 2,
-            "ms2_notes": state["ms2_note"],
+            "ms2_notes": state.get("ms2_note") or "",
             "ms1_notes": state["ms1_note"],
-            "other_notes": state["other_note"],
+            "other_notes": " // ".join(state["other_note"]) if state.get("other_note") else "",
             "analyst_notes": state["analyst_notes"],
             "identification_notes": state["id_notes"],
         }
@@ -416,10 +522,6 @@ def build_dash_app(
 
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
-            if not isinstance(lcmsruns_color_map, dict):
-                raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings")
-            if not all(isinstance(k, str) and isinstance(v, str) for k, v in lcmsruns_color_map.items()):
-                raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping strings to strings (LCMS run identifiers to color strings)")
         else:
             lcmsruns_color_map = {
                 'ISTD': 'blue', 
@@ -495,9 +597,17 @@ def build_dash_app(
                 if resolved_isomers:
                     def _window_overlaps(a_min, a_max, b_min, b_max):
                         return (a_min <= b_max) and (b_min <= a_max)
-                    
+
+                    # The current compound's RT window
+                    current_rt_min = state["rt_min"]
+                    current_rt_max = state["rt_max"]
+
                     for i, iso in enumerate(resolved_isomers):
                         overlaps = False
+                        # Check overlap with current compound window (skip self if this is the current compound)
+                        if _window_overlaps(iso["rt_min"], iso["rt_max"], current_rt_min, current_rt_max):
+                            overlaps = True
+                        # Check overlap with other isomers
                         for j, other in enumerate(resolved_isomers):
                             if i == j:
                                 continue
@@ -535,7 +645,7 @@ def build_dash_app(
                             f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
                             f"RT: {rt_str}  |  m/z: {mz_str}"
                         )
-                    isomer_str = "<br>".join(isomer_lines) if resolved_isomers else "No Isomers Found"
+                    isomer_str = " // ".join(isomer_lines) if resolved_isomers else "No Isomers Found"
                 else:
                     isomer_str = "No Isomers Found"
             else:
@@ -618,13 +728,25 @@ def build_dash_app(
         )
 
         fig.update_layout(
-            title=dict(text=ms1_title_text, x=0.5, xanchor="center", font=dict(size=12)),
-            xaxis_title="RT (min)", yaxis_title="Intensity",
+            title=dict(text=ms1_title_text, x=0.5, xanchor="center", font=dict(size=18)),
+            xaxis_title="RT",
+            yaxis_title="Intensity",
             hovermode="closest", showlegend=False,
             margin=dict(l=50, r=20, t=125, b=40), dragmode="pan",
             plot_bgcolor="white",
-            xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=False, zeroline=False, type=yaxis_scale),
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                title_font=dict(size=18),
+                tickfont=dict(size=15),
+            ),
+            yaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                type=yaxis_scale,
+                title_font=dict(size=18),
+                tickfont=dict(size=15),
+            ),
         )
 
         return fig
@@ -751,20 +873,35 @@ def build_dash_app(
 
         fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
         ms2_title_text = (
-            f"File: {fname}<br>"
-            f"Score: {scan.get('score', 0):.4f}  |  Isomer Matches: {num_matching_fragments}/{num_ref_fragments}  |  Scan RT: {scan.get('rt', 0):.4f} min | Precursor m/z: {scan.get('precursor_MZ', 0):.4f}  |  Ref m/z: {scan.get('mz_theoretical', 0):.4f}  |  ppm Δ: {scan.get('ppm_error', 0):.2f}"
+            f"<span style='font-size:1.2em'>"
+            f"<b>Score: {scan.get('score', 0):.4f}</b>  |  "
+            f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
+            f"RT: {scan.get('rt', 0):.4f} min | "
+            f"Prec. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
+            f"Ref. m/z: {scan.get('mz_theoretical', 0):.4f}  |  "
+            f"ppm Δ: {scan.get('ppm_error', 0):.2f}"
+            f"</span><br>"
+            f"{fname}<br><br>"
         )
         fig.update_layout(
-            title=dict(text=ms2_title_text, x=0.5, xanchor="center", font=dict(size=12)),
-            xaxis_title="m/z", yaxis_title=f"Intensity (Ref scaled x{scale:.2f})",
+            title=dict(text=ms2_title_text, x=0.5, xanchor="center", font=dict(size=18)),
+            xaxis_title="m/z",
+            yaxis_title=f"Intensity (Ref scaled x{scale:.2f})",
             barmode="overlay", hovermode="closest",
             margin=dict(l=50, r=20, t=80, b=40),
             plot_bgcolor="white",
-            xaxis=dict(showgrid=False, zeroline=False),
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                title_font=dict(size=18),
+                tickfont=dict(size=15),
+            ),
             yaxis=dict(
                 showgrid=False,
                 zeroline=False,
                 range=[y_min - y_pad, y_max + y_pad],
+                title_font=dict(size=18),
+                tickfont=dict(size=15),
             ),
         )
 
@@ -794,9 +931,7 @@ def build_dash_app(
         if compound_idx is None:
             raise dash.exceptions.PreventUpdate
 
-
-        # Convert 1-based user input to 0-based index for internal use
-        compound_idx = int(compound_idx) - 1
+        compound_idx = int(compound_idx)
 
         if old_state is not None and int(old_state.get("compound_idx", -1)) == compound_idx:
             raise dash.exceptions.PreventUpdate
@@ -820,6 +955,20 @@ def build_dash_app(
         new_state["flush_error"] = flush_error
         return new_state
 
+    def _get_force_eval_and_ms2_warning(state, delta):
+        """Return (force_eval, ms2_warning) for navigation logic."""
+        force_eval = analysis_gui_obj.workflow_params.get("gui_require_all_evaluated", False)
+        if analysis_gui_obj.override_parameters["gui_require_all_evaluated"] is not None:
+            force_eval = analysis_gui_obj.override_parameters["gui_require_all_evaluated"]
+        ms2_warning = None
+        if (
+            delta == 1
+            and force_eval
+            and not state.get("ms2_note")
+        ):
+            ms2_warning = "Please select MS2 quality note before proceeding"
+        return force_eval, ms2_warning
+
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
         Output("compound-dd", "value", allow_duplicate=True),
@@ -840,13 +989,14 @@ def build_dash_app(
         if trigger not in ("prev-btn", "next-btn") or state is None:
             raise dash.exceptions.PreventUpdate
 
-
         delta = -1 if trigger == "prev-btn" else 1
         new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
         if new_idx == int(state["compound_idx"]):
             raise dash.exceptions.PreventUpdate
 
         flush_error = None
+        force_eval, ms2_warning = _get_force_eval_and_ms2_warning(state, delta)
+
         try:
             state = _flush_to_db(state)
         except Exception as exc:
@@ -863,8 +1013,11 @@ def build_dash_app(
         new_state["last_saved"] = state.get("last_saved")
         new_state["flush_error"] = flush_error
         new_state["_nav_programmatic"] = True
-        # Return 1-based index for dropdown value
-        return new_state, new_idx + 1
+        if ms2_warning:
+            new_state["ms2_warning"] = ms2_warning
+        else:
+            new_state.pop("ms2_warning", None)
+        return new_state, new_idx
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -940,42 +1093,29 @@ def build_dash_app(
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
-        Input("other-radio", "value"),
+        Input("other-checklist", "value"),
         State("session-store", "data"),
         prevent_initial_call=True,
     )
-    def set_other_note(val, state):
-        if state is None or val == state.get("other_note"):
+    def set_other_note(vals, state):
+        if state is None:
             raise dash.exceptions.PreventUpdate
-        return _patch_with_seq(state, other_note=val)
+        filtered_vals = [v for v in vals if v in other_options] if vals else []
+        if filtered_vals == state.get("other_note"):
+            raise dash.exceptions.PreventUpdate
+        return _patch_with_seq(state, other_note=filtered_vals)
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
         Input("analyst-notes", "value"),
         State("session-store", "data"),
-        State("controls-compound-idx", "data"),
         prevent_initial_call=True,
     )
-    def set_analyst_notes(txt, state, controls_idx):
+    def set_analyst_notes(txt, state):
         if state is None or txt is None or txt == state.get("analyst_notes"):
-            raise dash.exceptions.PreventUpdate
-        if controls_idx is not None and int(controls_idx) != int(state.get("compound_idx", -1)):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, analyst_notes=txt)
 
-    @app.callback(
-        Output("session-store", "data", allow_duplicate=True),
-        Input("id-notes", "value"),
-        State("session-store", "data"),
-        State("controls-compound-idx", "data"),
-        prevent_initial_call=True,
-    )
-    def set_id_notes(txt, state, controls_idx):
-        if state is None or txt is None or txt == state.get("id_notes"):
-            raise dash.exceptions.PreventUpdate
-        if controls_idx is not None and int(controls_idx) != int(state.get("compound_idx", -1)):
-            raise dash.exceptions.PreventUpdate
-        return _patch_with_seq(state, id_notes=txt)
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -1030,11 +1170,12 @@ def build_dash_app(
         if not key:
             raise dash.exceptions.PreventUpdate
 
+
         ALL_HOTKEYS = (
-            set(MS2_KEY_TO_LABEL)
-            | set(MS1_KEY_TO_LABEL)
-            | set(OTHER_KEY_TO_LABEL)
-            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", " ", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
+            set(ms2_key_to_label)
+            | set(ms1_key_to_label)
+            | set(other_key_to_label)
+            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
         )
 
         if key not in ALL_HOTKEYS:
@@ -1102,8 +1243,8 @@ def build_dash_app(
             new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
             return new_state, dash.no_update
 
-        if key in ("j", "k", " ", "ArrowLeft", "ArrowRight"):
-            if key == " " or key == "k" or key == "ArrowRight":
+        if key in ("j", "k", "ArrowLeft", "ArrowRight"):
+            if key == "k" or key == "ArrowRight":
                 delta = 1
             elif key == "j" or key == "ArrowLeft":
                 delta = -1
@@ -1111,6 +1252,15 @@ def build_dash_app(
             if new_idx == int(state["compound_idx"]):
                 raise dash.exceptions.PreventUpdate
             flush_error = None
+            force_eval, ms2_warning = _get_force_eval_and_ms2_warning(state, delta)
+            if (
+                delta == 1
+                and ms2_warning is not None
+            ):
+                # Show warning, do not proceed
+                new_state = dict(state)
+                new_state["ms2_warning"] = ms2_warning
+                return new_state, dash.no_update
             try:
                 state = _flush_to_db(state)
             except Exception as exc:
@@ -1126,15 +1276,26 @@ def build_dash_app(
             new_state["last_saved"] = state.get("last_saved")
             new_state["flush_error"] = flush_error
             new_state["_nav_programmatic"] = True
-            # Return 1-based index for dropdown value
-            return new_state, new_idx + 1
+            if ms2_warning:
+                new_state["ms2_warning"] = ms2_warning
+            else:
+                new_state.pop("ms2_warning", None)
+            return new_state, new_idx
 
-        if key in MS2_KEY_TO_LABEL:
-            return _patch_with_seq(state, ms2_note=MS2_KEY_TO_LABEL[key]), dash.no_update
-        if key in MS1_KEY_TO_LABEL:
-            return _patch_with_seq(state, ms1_note=MS1_KEY_TO_LABEL[key]), dash.no_update
-        if key in OTHER_KEY_TO_LABEL:
-            return _patch_with_seq(state, other_note=OTHER_KEY_TO_LABEL[key]), dash.no_update
+        if key in ms2_key_to_label:
+            return _patch_with_seq(state, ms2_note=ms2_key_to_label[key]), dash.no_update
+        if key in ms1_key_to_label:
+            return _patch_with_seq(state, ms1_note=ms1_key_to_label[key]), dash.no_update
+        if key in other_key_to_label:
+            current = state.get("other_note")
+            if not isinstance(current, list):
+                current = []
+            label = other_key_to_label[key]
+            if label in current:
+                current = [v for v in current if v != label]
+            else:
+                current = current + [label]
+            return _patch_with_seq(state, other_note=current), dash.no_update
 
         raise dash.exceptions.PreventUpdate
 
@@ -1150,16 +1311,22 @@ def build_dash_app(
         if state is None:
             raise dash.exceptions.PreventUpdate
         flush_err = state.get("flush_error")
+        ms2_warning = state.get("ms2_warning")
         try:
             ms1_fig = _make_ms1_figure(state, yaxis_scale)
             ms2_fig = _make_ms2_figure(state)
+            banners = []
             if flush_err:
-                banner = html.Span(
+                banners.append(html.Div(
                     f"⚠ {flush_err}",
-                    style={"color": "red", "fontSize": "11px", "fontWeight": "bold"},
-                )
-            else:
-                banner = ""
+                    style={"color": "red", "fontSize": "14px", "fontWeight": "bold", "marginBottom": "8px"},
+                ))
+            if ms2_warning:
+                banners.append(html.Div(
+                    ms2_warning,
+                    style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
+                ))
+            banner = banners if banners else ""
             return ms1_fig, ms2_fig, banner
         except Exception as exc:
             traceback.print_exc()
@@ -1210,21 +1377,25 @@ def build_dash_app(
 
     @app.callback(
         Output("analyst-notes", "value"),
-        Output("id-notes", "value"),
+        Output("id-notes", "children"),
         Output("ms1-radio", "value"),
         Output("ms2-radio", "value"),
-        Output("other-radio", "value"),
+        Output("other-checklist", "value"),
         Output("controls-compound-idx", "data"),
         Input("session-store", "data"),
-        prevent_initial_call=True,
+        prevent_initial_call=False,  # Always fire, including on initial load
     )
     def sync_controls(state):
         if state is None:
-            raise dash.exceptions.PreventUpdate
-        ms2_val = state["ms2_note"] if state["ms2_note"] in MS2_OPTIONS else "no selection"
-        ms1_val = state["ms1_note"] if state["ms1_note"] in MS1_OPTIONS else "keep"
-        other_val = state["other_note"] if state["other_note"] in OTHER_OPTIONS else "no selection"
-        return state["analyst_notes"], state["id_notes"], ms1_val, ms2_val, other_val, state["compound_idx"] + 1
+            # Return default values if state is missing
+            return "", "No identification notes", ("keep" if "keep" in ms1_options else ms1_options[0]), "", [], 0
+        ms2_val = state["ms2_note"] if state["ms2_note"] in ms2_options else ""
+        ms1_val = state["ms1_note"] if state["ms1_note"] in ms1_options else ("keep" if "keep" in ms1_options else ms1_options[0])
+        other_val = [v for v in state["other_note"] if v in other_options] if isinstance(state["other_note"], list) else []
+        analyst_notes = state.get("analyst_notes", "")
+        id_notes = state.get("id_notes", "No identification notes")
+        compound_idx = state.get("compound_idx", 0)
+        return analyst_notes, id_notes, ms1_val, ms2_val, other_val, compound_idx
 
     @app.callback(
         Output("save-exit-status", "children"),
@@ -1240,7 +1411,7 @@ def build_dash_app(
         try:
             _flush_to_db(state)
             logger.debug(f"Save and Exit.")
-            msg = "Analysis saved and GUI closed. You may return to the notebook to run the curation summary."
+            msg = "Analysis saved and app port closed."
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"Save and Exit: flush failed for compound {state.get('compound_idx')}: {exc}")

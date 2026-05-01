@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 RCLONE_PATH = "/global/cfs/cdirs/m342/USA/shared-envs/rclone/bin/rclone"
 
+RCLONE_UPLOAD_EXCLUDES = [
+    "*.yaml",
+    "*.ipynb",
+    "atl-*csv",
+    "manually_curated_compound_data.csv",
+    "curated_atlases.csv",
+    "auto_ided_atlases.csv",
+]
+
 # ------------------------------------------------------------------ #
 #  Low-level rclone helpers                                           #
 # ------------------------------------------------------------------ #
@@ -56,6 +65,8 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
     """
     dest = f"{drive}:{dest_path}"
     cmd = [RCLONE_PATH, "copy", str(source), dest, "--progress"]
+    for pattern in RCLONE_UPLOAD_EXCLUDES:
+        cmd.extend(["--exclude", pattern])
     if overwrite:
         cmd.append("--overwrite")
     try:
@@ -129,6 +140,10 @@ def copy_outputs_to_google_drive(summary_obj: "AnalysisSummary", overwrite: bool
     overwrite:
         If True, overwrite existing files on Google Drive.
     """
+    if summary_obj.override_parameters.get("upload_to_gdrive", True) is False:
+        logger.info("upload_to_gdrive parameter is False — skipping upload.")
+        return
+
     output_dir = Path(summary_obj.paths.get("analysis_output_dir"))
     gdrive_subfolder = summary_obj.config.get('WORKFLOWS').get('PATHS').get('gdrive_subfolder', None)
 
@@ -158,18 +173,12 @@ def copy_outputs_to_google_drive(summary_obj: "AnalysisSummary", overwrite: bool
     folder_name = "_".join(final_parts) + f"_{date_str}"
     dest_path = Path("Analysis_uploads") / folder_name
 
-    logger.info("Uploading '%s' to %s:%s", output_dir, drive, dest_path)
+    path_string = f"{drive}:{dest_path}"
+    display(HTML(f"Uploading targeted analysis to Google Drive at {path_string}"))
+
     _rclone_copy(output_dir, drive, dest_path, overwrite=overwrite)
-    logger.info("Upload complete.")
 
     url = _drive_path_to_url(drive, dest_path)
-    path_string = f"{drive}:{dest_path}"
     if url:
-        display(HTML(
-            f'Data is now on Google Drive at <a href="{url}">{path_string}</a>'
-        ))
-    else:
-        logger.warning(
-            "Upload succeeded but could not resolve Google Drive URL for '%s'.", path_string
-        )
-        display(HTML(f"Data is now on Google Drive at {path_string}"))
+        display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
+    logger.info("Upload complete.")

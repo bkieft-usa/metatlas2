@@ -155,32 +155,25 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                 for analysis_name, analysis_config in pol_config.items():
                     if 'ATLAS' not in analysis_config:
                         raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS section")
-                    
                     if 'uid' not in analysis_config['ATLAS']:
                         raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS uid field")
-                    
                     uid = analysis_config['ATLAS']['uid']
                     analysis_config['ATLAS']['uid'] = str(uid) if uid else None
-                    
                     if 'PARAMS' in analysis_config:
                         params = analysis_config['PARAMS']
-
                         params['do_alignment'] = bool(params.get('do_alignment', True))
                         params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
+                        params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
                         params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
                         params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
-
                         params['ppm_error'] = float(params.get('ppm_error', 5.0))
                         params['extra_time'] = float(params.get('extra_time', 0.0))
                         params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
                         params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
-
                         params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
                         params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
                         params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
-
                         params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
-
                         excl = params.get('exclude_lcmsruns')
                         if excl is None:
                             params['exclude_lcmsruns'] = {}
@@ -196,12 +189,25 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                                 f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name}: "
                                 f"exclude_lcmsruns must be a dict or list"
                             )
-
                         params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
                         params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 20))
                         gui_colors = params.get('gui_lcmsruns_colors')
                         params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
-    
+
+                        # Handle note_options_overrides: allow blank, None, or 'default' to mean use GUI defaults
+                        note_overrides = params.get('note_options_overrides')
+                        if not isinstance(note_overrides, dict):
+                            params['note_options_overrides'] = {}
+                        else:
+                            clean_overrides = {}
+                            for note_type in ['ms1_notes', 'ms2_notes', 'other_notes']:
+                                val = note_overrides.get(note_type, None)
+                                if val is None:
+                                    continue  # No override for this note type
+                                if isinstance(val, dict):
+                                    clean_overrides[note_type] = {str(k): str(v) for k, v in val.items()}
+                                    continue
+                            params['note_options_overrides'] = clean_overrides
     return config
 
 def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:

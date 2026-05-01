@@ -2522,8 +2522,6 @@ def write_gui_updates_to_db(
         params = [to_python_type(v) for v in updated_fields.values()] + [curation_uid]
         with get_db_connection(project_db_path) as conn:
             conn.execute(f"UPDATE manual_curation SET {set_clause} WHERE curation_uid = ?", params)
-        
-        #logger.info(f"Updated manual curation entry {curation_uid} with fields {list(updated_fields.keys())}")
     except Exception as e:
         logger.error(f"Error updating manual curation entry {curation_uid}: {e}")
         raise ValueError(f"Failed to update manual curation entry {curation_uid}. See logs for details.")
