@@ -651,8 +651,8 @@ def main():
     parser.add_argument(
         '--max-workers',
         type=int,
-        default=4,
-        help='Maximum number of parallel workers (default: 4)'
+        default=8,
+        help='Maximum number of parallel workers (default: 8)'
     )
     parser.add_argument(
         '--dry-run',
