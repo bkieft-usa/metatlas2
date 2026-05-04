@@ -72,6 +72,15 @@ def load_msms_refs_file(file_path: Path) -> dict[str, list[Spectrum]]:
             continue
 
         precursor_mz = row.precursor_mz
+        if not np.isnan(precursor_mz):
+            mask = mz < precursor_mz + 2.5
+            mz = mz[mask]
+            intensities = intensities[mask]
+
+        if len(mz) == 0 or len(intensities) == 0:
+            n_skipped += 1
+            continue
+
         spec = Spectrum(
             mz=mz,
             intensities=intensities,

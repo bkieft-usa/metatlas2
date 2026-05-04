@@ -388,11 +388,14 @@ def run_analysis_summary(
     
     logger.info(f"Setting override parameters for analysis summary...")
     summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
-    
+
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
     summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(
         summary_obj=summary_obj
     )
+
+    logger.info("Loading analysis data scoped to post-manual-curation atlas...")
+    summary_obj.load_data()
 
     logger.info("Saving post-manual-curation Atlas data to CSV...")
     ldt.save_atlas_data_to_csv(

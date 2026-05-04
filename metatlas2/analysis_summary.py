@@ -986,17 +986,9 @@ def make_final_id_sheet(
                     abs(single_ion - mz_theoretical) / mz_theoretical * 1e6 <= ppm_tol
                     if (not np.isnan(single_ion) and mz_theoretical > 0) else False
                 )
-                note_tag = " (single matching fragment is the precursor)" if precursor_match else ""
+                note_tag = " (single matching fragment is the precursor)" if precursor_match else "(single matching fragment is NOT the precursor)"
                 if "1.0, single ion match" in ms2_notes or "0.5, single ion match" in ms2_notes:
                     ms2_notes = ms2_notes + note_tag
-                else:
-                    ms2_notes = (
-                        "Unannotated single ion match, needs review. "
-                        "Setting MSMS quality to 0.5. "
-                        f"Original annotation: {ms2_notes}"
-                    )
-                    msms_q = 0.5
-                    total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
 
         rows.append({
             # --- COMPOUND ANNOTATION ---
@@ -2219,15 +2211,17 @@ def make_peak_height_filtered_csv(
 
     Applies the following steps in order:
 
-    1. **Control filter** — removes compounds where the maximum non-control
-       peak height is below ``control_fold_threshold`` × the maximum control
-       peak height.  Control files are identified by the presence of any of
-       ``"ExCtrl"``, ``"TxCtrl"``, or ``"InjBL"`` in the column name.
-       Compounds with no matching control columns are kept.
-       Compounds not detected in any non-control sample (all NaN) are removed.
-    2. **Row deduplication** — drops the ``adduct``, ``compound_name``, and
-       ``compound_index`` columns, then merges rows sharing the same
-       ``inchi_key`` by taking the column-wise maximum.
+    1. **Control labeling** — adds a ``control_filter`` column (``"keep"`` or
+       ``"remove"``) based on whether the maximum non-control peak height is at
+       least ``control_fold_threshold`` × the maximum control peak height.
+       Control files are identified by the presence of any of ``"ExCtrl"``,
+       ``"TxCtrl"``, or ``"InjBL"`` in the column name.  All rows are retained
+       regardless of this label.
+       Compounds not detected in any non-control sample (all NaN) are labeled
+       ``"remove"``.
+    2. **Row deduplication** — drops the ``adduct`` and ``compound_index``
+       columns, then merges rows sharing the same ``inchi_key`` /
+       ``compound_name`` / ``control_filter`` by taking the column-wise maximum.
     3. **Column shortening & deduplication** — drops the last two
        ``_``-separated tokens from each data column name (e.g.
        ``…_MS1_POS`` → ``…``), then merges any resulting duplicate column
@@ -2235,7 +2229,9 @@ def make_peak_height_filtered_csv(
     4. **Missing-value imputation** — fills remaining NaN cells with the
        global minimum measured value in the final matrix.
     5. **Export** — writes ``peak_height_filtered.csv`` into the same
-       ``data_sheets`` sub-directory as ``peak_height.csv``.
+       ``data_sheets`` sub-directory as ``peak_height.csv``.  Output columns
+       are ordered: ``control_filter``, ``compound_name``, ``inchi_key``,
+       followed by the data columns.
 
     Parameters
     ----------
@@ -2287,30 +2283,31 @@ def make_peak_height_filtered_csv(
         len(ctrl_cols), len(non_ctrl_cols),
     )
 
-    n_before = len(df)
     if not ctrl_cols:
-        logger.info("No control columns found — skipping control filter.")
+        logger.info("No control columns found — marking all rows as 'keep'.")
+        df["control_filter"] = "keep"
     else:
         max_ctrl = df[ctrl_cols].max(axis=1)         # NaN → not detected in any control
         max_non_ctrl = df[non_ctrl_cols].max(axis=1)  # NaN → not detected in any sample
-        keep = (
+        keep_mask = (
             max_non_ctrl.notna() &
             (max_ctrl.isna() | (max_non_ctrl >= control_fold_threshold * max_ctrl.fillna(0)))
         )
-        df = df[keep].reset_index(drop=True)
+        df["control_filter"] = keep_mask.map({True: "keep", False: "remove"})
 
-    logger.info("Control filter: %d → %d compounds.", n_before, len(df))
+    n_keep = (df["control_filter"] == "keep").sum()
+    logger.info("Control filter: %d keep, %d remove (of %d total).", n_keep, len(df) - n_keep, len(df))
 
     if df.empty:
-        logger.warning("All compounds removed by control filter — no output written.")
+        logger.warning("No compounds found — no output written.")
         return df
 
     # ── 2. Drop extra metadata; merge identical inchi_key rows by max ──────────
-    drop_cols = [c for c in ("compound_index", "compound_name", "adduct") if c in df.columns]
+    drop_cols = [c for c in ("compound_index", "adduct") if c in df.columns]
     df = df.drop(columns=drop_cols)
 
     n_before = len(df)
-    df = df.groupby("inchi_key", sort=False).max().reset_index()
+    df = df.groupby(["inchi_key", "compound_name", "control_filter"], sort=False).max().reset_index()
     logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df))
 
     # ── 3. Shorten column names; merge duplicate columns by row-wise max ────────
@@ -2318,14 +2315,15 @@ def make_peak_height_filtered_csv(
         parts = col.split("_")
         return "_".join(parts[:-2]) if len(parts) > 2 else col
 
-    df.columns = [c if c == "inchi_key" else _shorten(c) for c in df.columns]
+    _META_FIXED = {"inchi_key", "compound_name", "control_filter"}
+    df.columns = [c if c in _META_FIXED else _shorten(c) for c in df.columns]
 
     if df.columns.duplicated().any():
-        data_df = df[[c for c in df.columns if c != "inchi_key"]]
+        data_df = df[[c for c in df.columns if c not in _META_FIXED]]
         # Transpose so column names become the index, then groupby merges duplicates
         data_merged = data_df.T.groupby(level=0).max().T.reset_index(drop=True)
         df = pd.concat(
-            [df[["inchi_key"]].reset_index(drop=True), data_merged], axis=1
+            [df[list(_META_FIXED)].reset_index(drop=True), data_merged], axis=1
         )
         logger.info(
             "Merged duplicate columns after shortening; %d data columns remain.",
@@ -2333,7 +2331,7 @@ def make_peak_height_filtered_csv(
         )
 
     # ── 4. Impute NaN cells with the global matrix minimum ────────────────────
-    data_cols_final = [c for c in df.columns if c != "inchi_key"]
+    data_cols_final = [c for c in df.columns if c not in _META_FIXED]
     global_min = float(df[data_cols_final].min().min()) if data_cols_final else np.nan
     if not np.isnan(global_min):
         n_nan = int(df[data_cols_final].isna().sum().sum())
@@ -2342,11 +2340,15 @@ def make_peak_height_filtered_csv(
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
-    # ── 5. Export ──────────────────────────────────────────────────────────────
+    # ── 5. Reorder columns: control_filter first, then compound_name, inchi_key, data ──
+    other_cols = [c for c in df.columns if c not in _META_FIXED]
+    df = df[["control_filter", "compound_name", "inchi_key"] + other_cols]
+
+    # ── 6. Export ──────────────────────────────────────────────────────────────
     df.to_csv(output_csv, index=False)
     logger.info(
         "Exported filtered peak height (%d compounds × %d files) → %s",
-        len(df), len(df.columns) - 1, output_csv,
+        len(df), len(df.columns) - len(_META_FIXED), output_csv,
     )
     return df
 

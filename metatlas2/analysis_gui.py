@@ -965,6 +965,7 @@ def build_dash_app(
             delta == 1
             and force_eval
             and not state.get("ms2_note")
+            and state.get("ms1_note") != "remove"
         ):
             ms2_warning = "Please select MS2 quality note before proceeding"
         return force_eval, ms2_warning

@@ -1791,6 +1791,93 @@ def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> Non
     else:
         logger.info(f"No existing AutoIdentification results found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}. Proceeding.")
 
+def filter_analysis_dataframes(
+    manual_curation_df: pd.DataFrame,
+    ms1_df: pd.DataFrame,
+    ms2_raw_df: pd.DataFrame,
+    ms2_hits_df: pd.DataFrame,
+    ms1_min_pts: int = None,
+    ms1_min_int: float = None,
+    ms2_min_score: float = None,
+    ms2_min_frags: int = None,
+    remove_flagged: bool = False,
+) -> tuple:
+    """Apply quality filters to analysis DataFrames and return filtered copies.
+
+    Parameters
+    ----------
+    manual_curation_df, ms1_df, ms2_raw_df, ms2_hits_df:
+        The four DataFrames to filter (not modified in place).
+    ms1_min_pts:
+        Minimum number of data points required in an MS1 spectrum.
+    ms1_min_int:
+        Minimum peak intensity required in an MS1 spectrum.
+    ms2_min_score:
+        Minimum MS2 hit score to retain.
+    ms2_min_frags:
+        Minimum number of matching fragment ions to retain an MS2 hit.
+    remove_flagged:
+        When True, also remove compounds whose ``ms1_notes`` is ``'remove'``.
+        Set True for summary output; False for the curation GUI (analyst must
+        be able to see and set that flag).
+
+    Returns
+    -------
+    tuple of (manual_curation_df, ms1_df, ms2_raw_df, ms2_hits_df, n_removed)
+        Filtered DataFrames and the count of compounds removed.
+    """
+    if ms1_min_pts is not None or ms1_min_int is not None:
+        def _ms1_row_passes(r):
+            try:
+                rt_arr, int_arr = json.loads(r["raw_spectrum"])
+                int_arr = [0 if isinstance(v, float) and np.isnan(v) else v for v in int_arr]
+                if ms1_min_pts is not None and len(rt_arr) < ms1_min_pts:
+                    return False
+                if ms1_min_int is not None and (not int_arr or max(int_arr) < ms1_min_int):
+                    return False
+                return True
+            except Exception:
+                return False
+        ms1_df = ms1_df[ms1_df.apply(_ms1_row_passes, axis=1)].reset_index(drop=True)
+
+    if ms2_min_score is not None:
+        ms2_hits_df = ms2_hits_df[ms2_hits_df["score"] >= ms2_min_score]
+    if ms2_min_frags is not None:
+        ms2_hits_df = ms2_hits_df[ms2_hits_df["num_matches"] >= ms2_min_frags]
+    ms2_hits_df = ms2_hits_df.reset_index(drop=True)
+
+    if ms2_min_score is not None or ms2_min_frags is not None:
+        hit_keys = ms2_hits_df[["inchi_key", "adduct", "file_path", "rt"]].drop_duplicates()
+        ms2_raw_df = ms2_raw_df.merge(
+            hit_keys, on=["inchi_key", "adduct", "file_path", "rt"], how="inner"
+        ).reset_index(drop=True)
+
+    passing_pairs_ms1 = (
+        set(zip(ms1_df["inchi_key"], ms1_df["adduct"]))
+        if (ms1_min_pts is not None or ms1_min_int is not None) else None
+    )
+    passing_pairs_ms2 = (
+        set(zip(ms2_hits_df["inchi_key"], ms2_hits_df["adduct"]))
+        if (ms2_min_score is not None or ms2_min_frags is not None) else None
+    )
+
+    def _compound_passes(row):
+        pair = (row["inchi_key"], row["adduct"])
+        if passing_pairs_ms1 is not None and pair not in passing_pairs_ms1:
+            return False
+        if passing_pairs_ms2 is not None and pair not in passing_pairs_ms2:
+            return False
+        if remove_flagged and str(row.get("ms1_notes", "")).strip().lower() == "remove":
+            return False
+        return True
+
+    keep_mask = manual_curation_df.apply(_compound_passes, axis=1)
+    n_removed = int((~keep_mask).sum())
+    manual_curation_df = manual_curation_df[keep_mask].reset_index(drop=True)
+
+    return manual_curation_df, ms1_df, ms2_raw_df, ms2_hits_df, n_removed
+
+
 def load_and_filter_gui_inputs(
         analysis_gui_obj,
         override_parameters: dict = None
@@ -1812,72 +1899,14 @@ def load_and_filter_gui_inputs(
     )
     atlas_compounds = manual_curation_atlas_df[["inchi_key", "adduct"]]
 
-    # Load manual curation entries and MS1/MS2 data for compounds in this analysis (based on input atlas)
+    # Load manual curation entries and MS1/MS2 data for compounds in this analysis (based on input atlas).
+    # All quantitative filters (ms1_min_peak_intensity, ms1_min_num_points, ms2_min_score,
+    # ms2_min_matching_frags) were already applied when the pre-curation atlas was created during
+    # auto-identification.  No additional filtering is needed here.
     manual_curation_df = get_manual_curation_entries(project_path, rt_alignment, analysis_num, remove_unidentified_compounds, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
     ms1_df  = get_ms1_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
     ms2_df  = get_ms2_data_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
     ms2_hits_df = get_ms2_hits_for_compound(project_path, None, None, rt_alignment, analysis_num, atlas_compounds=atlas_compounds, analysis_type=analysis_type)
-
-    # Check if filtering is necessary
-    ms1_min_pts   = override_parameters.get("ms1_min_num_points")
-    ms1_min_int   = override_parameters.get("ms1_min_peak_intensity")
-    ms2_min_score = override_parameters.get("ms2_min_score")
-    ms2_min_frags = override_parameters.get("ms2_min_matching_frags")
-    if ms1_min_pts is not None or ms1_min_int is not None or ms2_min_score is not None or ms2_min_frags is not None:
-        logger.info("Applying filters to ms1_df, ms2_df, and ms2_hits_df based on override_parameters...")
-    else:
-        logger.info("No filters applied to ms1_df, ms2_df, or ms2_hits_df since no default analysis parameters were overridden.")
-        analysis_gui_obj.manual_curation_df = manual_curation_df
-        analysis_gui_obj.ms1_df = ms1_df
-        analysis_gui_obj.ms2_df = ms2_df
-        analysis_gui_obj.ms2_hits_df = ms2_hits_df
-        analysis_gui_obj.override_parameters = override_parameters
-        return
-    
-    # Filter ms1_df rows that fail the spectrum-level criteria
-    if ms1_min_pts is not None or ms1_min_int is not None:
-        def _ms1_row_passes(r):
-            try:
-                rt_arr, int_arr = json.loads(r["raw_spectrum"])
-                int_arr = [0 if isinstance(v, float) and np.isnan(v) else v for v in int_arr]
-                if ms1_min_pts is not None and len(rt_arr) < ms1_min_pts:
-                    return False
-                if ms1_min_int is not None and (not int_arr or max(int_arr) < ms1_min_int):
-                    return False
-                return True
-            except Exception:
-                return False
-        ms1_df = ms1_df[ms1_df.apply(_ms1_row_passes, axis=1)].reset_index(drop=True)
-
-    # Filter ms2_hits_df rows that fail the score/fragment criteria
-    if ms2_min_score is not None:
-        ms2_hits_df = ms2_hits_df[ms2_hits_df["score"] >= ms2_min_score]
-    if ms2_min_frags is not None:
-        ms2_hits_df = ms2_hits_df[ms2_hits_df["num_matches"] >= ms2_min_frags]
-    ms2_hits_df = ms2_hits_df.reset_index(drop=True)
-
-    # Filter ms2_df to only retain scans that have a passing hit
-    if ms2_min_score is not None or ms2_min_frags is not None:
-        hit_keys = ms2_hits_df[["inchi_key", "adduct", "file_path", "rt"]].drop_duplicates()
-        ms2_df = ms2_df.merge(hit_keys, on=["inchi_key", "adduct", "file_path", "rt"], how="inner").reset_index(drop=True)
-
-    # Filter manual_curation_df to only keep compounds with passing data in the filtered dataframes
-    passing_pairs_ms1 = set(zip(ms1_df["inchi_key"], ms1_df["adduct"])) if (ms1_min_pts is not None or ms1_min_int is not None) else None
-    passing_pairs_ms2 = set(zip(ms2_hits_df["inchi_key"], ms2_hits_df["adduct"])) if (ms2_min_score is not None or ms2_min_frags is not None) else None
-
-    def _compound_passes(row):
-        pair = (row["inchi_key"], row["adduct"])
-        if passing_pairs_ms1 is not None and pair not in passing_pairs_ms1:
-            return False
-        if passing_pairs_ms2 is not None and pair not in passing_pairs_ms2:
-            return False
-        return True
-
-    keep_mask = manual_curation_df.apply(_compound_passes, axis=1)
-    n_removed = (~keep_mask).sum()
-    if n_removed > 0:
-        logger.info("Pre-filter removed %d compound(s) based on override_parameters filters", n_removed)
-    manual_curation_df = manual_curation_df[keep_mask].reset_index(drop=True)
 
     analysis_gui_obj.manual_curation_df = manual_curation_df
     analysis_gui_obj.ms1_df = ms1_df
@@ -2163,30 +2192,51 @@ def create_new_atlas_after_manual_curation(
     prov = get_provenance()
     source_atlas = summary_obj.pre_curation_atlas_obj
 
+    # Read curation decisions directly from the DB — no dependency on summary_obj.manual_curation_df.
+    atlas_compounds_df = get_atlas_compounds_table(
+        summary_obj.paths['project_db_path'],
+        source_atlas.atlas_uid,
+        summary_obj.paths['main_db_path'],
+    )
+    atlas_compounds = atlas_compounds_df[['inchi_key', 'adduct']]
+    curation_df = get_manual_curation_entries(
+        summary_obj.paths['project_db_path'],
+        summary_obj.rt_alignment_number,
+        summary_obj.analysis_number,
+        remove_unidentified_compounds=False,  # don't double-filter; atlas already excludes non-IDed compounds
+        atlas_compounds=atlas_compounds,
+        analysis_type=source_atlas.analysis_type,
+    )
+    # Index by (inchi_key, adduct) for O(1) lookup
+    curation_lookup = {
+        (row['inchi_key'], row['adduct']): row
+        for _, row in curation_df.iterrows()
+    }
+
     # Deep-copy every CompoundMZRT and apply curation updates
     new_compound_mzrts = {}
     for dict_key, cmzrt in source_atlas.compound_mzrts.items():
         new_cmzrt = copy.deepcopy(cmzrt)
-        curation_row = summary_obj.manual_curation_df[(summary_obj.manual_curation_df['inchi_key'] == cmzrt.inchi_key) & (summary_obj.manual_curation_df['adduct'] == cmzrt.adduct)]
+        curation_row = curation_lookup.get((cmzrt.inchi_key, cmzrt.adduct))
         # Check if curation_row has ms2_notes still as 'no selection' and error out and print message to address it
-        if summary_obj.workflow_params.get('gui_require_all_evaluated', True) and not curation_row.empty and str(curation_row.iloc[0].get('ms2_notes', '')).lower() == 'no selection':
+        if summary_obj.workflow_params.get('gui_require_all_evaluated', True) and curation_row is not None and str(curation_row.get('ms2_notes', '')).lower() == 'no selection':
             raise ValueError(
                 f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) has ms2_notes as 'no selection' in manual curation. "
                 "Please update ms2_notes to either 'keep' or 'remove' and re-run manual curation before creating the post-curation atlas."
             )
         # Remove compounds from original atlas if the ms1 note has 'remove' in it
-        if summary_obj.workflow_params.get('remove_flagged_compounds', True) and not curation_row.empty and 'remove' in str(curation_row.iloc[0].get('ms1_notes', '')).lower():
+        if summary_obj.workflow_params.get('remove_flagged_compounds', True) and curation_row is not None and 'remove' in str(curation_row.get('ms1_notes', '')).lower():
             logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because ms1_notes contains 'remove' and 'remove_flagged_compounds' is set to True in config.")
             continue
-        if not curation_row.empty:
-            new_cmzrt.rt_peak = float(curation_row.iloc[0].get('rt_peak', cmzrt.rt_peak))
-            new_cmzrt.rt_min  = float(curation_row.iloc[0].get('rt_min',  cmzrt.rt_min))
-            new_cmzrt.rt_max  = float(curation_row.iloc[0].get('rt_max',  cmzrt.rt_max))
-            new_cmzrt.ms1_notes = str(curation_row.iloc[0].get('ms1_notes', cmzrt.ms1_notes))
-            new_cmzrt.ms2_notes = str(curation_row.iloc[0].get('ms2_notes', cmzrt.ms2_notes))
-            new_cmzrt.other_notes = str(curation_row.iloc[0].get('other_notes', 'no selection'))
-            new_cmzrt.analyst_notes = str(curation_row.iloc[0].get('analyst_notes', cmzrt.analyst_notes))
-            new_cmzrt.identification_notes = str(curation_row.iloc[0].get('identification_notes', cmzrt.identification_notes))
+        if curation_row is not None:
+            new_cmzrt.rt_peak = float(curation_row.get('rt_peak', cmzrt.rt_peak))
+            new_cmzrt.rt_min  = float(curation_row.get('rt_min',  cmzrt.rt_min))
+            new_cmzrt.rt_max  = float(curation_row.get('rt_max',  cmzrt.rt_max))
+            new_cmzrt.ms1_notes = str(curation_row.get('ms1_notes', cmzrt.ms1_notes))
+            new_cmzrt.ms2_notes = str(curation_row.get('ms2_notes', cmzrt.ms2_notes))
+            new_cmzrt.other_notes = str(curation_row.get('other_notes', 'no selection'))
+            new_cmzrt.analyst_notes = str(curation_row.get('analyst_notes', cmzrt.analyst_notes))
+            new_cmzrt.identification_notes = str(curation_row.get('identification_notes', cmzrt.identification_notes))
         else:
             logger.warning(
                 f"No manual curation entry found for {cmzrt.inchi_key} / {cmzrt.adduct}, "
@@ -2237,6 +2287,35 @@ def create_new_atlas_after_auto_id(
     for mc in auto_id_obj.experimental_data.manual_curation:
         curation_lookup[(mc.inchi_key, mc.adduct)] = mc.data.iloc[0]
 
+    # Build set of (inchi_key, adduct) pairs that have at least one MS2 hit passing config thresholds
+    ms2_min_score = auto_id_obj.workflow_params.get('ms2_min_score')
+    ms2_min_frags = auto_id_obj.workflow_params.get('ms2_min_matching_frags')
+    filter_by_ms2 = ms2_min_score is not None or ms2_min_frags is not None
+    passing_ms2_pairs = set()
+    if filter_by_ms2:
+        for hit_obj in auto_id_obj.experimental_data.ms2_hits:
+            if hit_obj.data.empty:
+                continue
+            hits = hit_obj.data
+            if ms2_min_score is not None:
+                hits = hits[hits['score'] >= ms2_min_score]
+            if ms2_min_frags is not None:
+                hits = hits[hits['num_matches'] >= ms2_min_frags]
+            if not hits.empty:
+                passing_ms2_pairs.add((hit_obj.inchi_key, hit_obj.adduct))
+
+    # Build per-compound max MS1 data-point count for ms1_min_num_points filter
+    ms1_min_pts = auto_id_obj.workflow_params.get('ms1_min_num_points')
+    ms1_min_int = auto_id_obj.workflow_params.get('ms1_min_peak_intensity')
+    ms1_max_pts_by_compound = {}
+    if ms1_min_pts is not None:
+        for ms1_obj in auto_id_obj.experimental_data.ms1_data:
+            if ms1_obj.data is not None and not ms1_obj.data.empty:
+                key = (ms1_obj.inchi_key, ms1_obj.adduct)
+                ms1_max_pts_by_compound[key] = max(
+                    ms1_max_pts_by_compound.get(key, 0), len(ms1_obj.data)
+                )
+
     # Deep-copy every CompoundMZRT and apply curation updates
     new_compound_mzrts = {}
     for dict_key, cmzrt in tqdm(source_atlas.compound_mzrts.items(), desc="Creating new Atlas from curated compounds"):
@@ -2246,6 +2325,21 @@ def create_new_atlas_after_auto_id(
         if auto_id_obj.workflow_params.get('remove_unided_compounds', True) and curation_row is not None and not curation_row.get('auto_ided', False):
             logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it was not auto-identified and remove_unided_compounds is set to True in config.")
             continue
+        # Remove compounds with no MS2 hits passing the score/fragment thresholds from config
+        if filter_by_ms2 and (cmzrt.inchi_key, cmzrt.adduct) not in passing_ms2_pairs:
+            logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because it has no MS2 hits passing ms2_min_score={ms2_min_score} / ms2_min_matching_frags={ms2_min_frags}.")
+            continue
+        # Remove compounds failing MS1 quantitative thresholds from config
+        if ms1_min_int is not None and curation_row is not None:
+            best_int = float(curation_row.get('best_ms1_intensity', 0.0))
+            if best_int < ms1_min_int:
+                logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because best_ms1_intensity {best_int:.0f} < ms1_min_peak_intensity {ms1_min_int}.")
+                continue
+        if ms1_min_pts is not None:
+            max_pts = ms1_max_pts_by_compound.get((cmzrt.inchi_key, cmzrt.adduct), 0)
+            if max_pts < ms1_min_pts:
+                logger.info(f"Removing compound {cmzrt.compound_uid} ({cmzrt.compound_name} / {cmzrt.inchi_key} / {cmzrt.adduct}) from atlas because max MS1 num_points {max_pts} < ms1_min_num_points {ms1_min_pts}.")
+                continue
         new_compound_mzrts[dict_key] = new_cmzrt
 
     # Generate a new atlas UID
