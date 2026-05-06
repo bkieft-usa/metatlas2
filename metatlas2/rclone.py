@@ -59,32 +59,54 @@ def _get_drive_name_for_id(folder_id: str) -> Optional[str]:
 
 def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = False) -> None:
     """
-    Copy *source* directory to *drive*:*dest_path* with a tqdm progress bar.
-    Raises subprocess.CalledProcessError on rclone failure.
-    Logs and returns silently if rclone binary is not found.
+    Copy *source* directory to *drive*:*dest_path*
     """
     dest = f"{drive}:{dest_path}"
-    cmd = [RCLONE_PATH, "copy", str(source), dest, "--progress"]
+    cmd = [
+        RCLONE_PATH, "copy", str(source), dest,
+        "--progress",
+        "--transfers", "4",  # Parallel transfers for better performance
+        "--checkers", "8",   # Parallel file checks
+        "--drive-chunk-size", "16M",  # Larger chunks for Google Drive
+        "--stats", "1s",     # Update stats every second
+        "--stats-one-line",  # Single line stats output
+    ]
     for pattern in RCLONE_UPLOAD_EXCLUDES:
         cmd.extend(["--exclude", pattern])
     if overwrite:
-        cmd.append("--overwrite")
+        cmd.append("--ignore-times")
+    
     try:
+        logger.info("Starting rclone upload: %s -> %s", source, dest)
         with tqdm(total=100, desc="Uploading to Google Drive", unit="%") as pbar:
+            last_percent = 0
             with Popen(cmd, stdout=PIPE, stderr=PIPE, bufsize=1, universal_newlines=True) as proc:
                 # rclone --progress writes to stderr
                 for line in proc.stderr or []:
                     line = line.strip()
+                    # Look for percentage in format like "Transferred: 123 MiB / 456 MiB, 27%"
                     if "Transferred:" in line and "%" in line:
                         try:
-                            percent = float(line.split("%")[0].split()[-1])
-                            pbar.n = percent
-                            pbar.refresh()
+                            # Extract percentage from patterns like "27%" or ", 27%, "
+                            parts = line.split(",")
+                            for part in parts:
+                                if "%" in part:
+                                    percent_str = part.strip().rstrip("%").strip()
+                                    percent = float(percent_str.split()[-1])
+                                    if 0 <= percent <= 100 and percent != last_percent:
+                                        pbar.update(percent - last_percent)
+                                        last_percent = percent
+                                    break
                         except (ValueError, IndexError):
                             pass
                 proc.wait()
                 if proc.returncode != 0:
+                    stderr_output = proc.stderr.read() if proc.stderr else ""
+                    logger.error("rclone failed with exit code %d: %s", proc.returncode, stderr_output)
                     raise subprocess.CalledProcessError(proc.returncode, cmd)
+                # Ensure progress bar reaches 100%
+                if last_percent < 100:
+                    pbar.update(100 - last_percent)
     except subprocess.CalledProcessError as err:
         logger.exception("rclone copy failed: %s", err)
         raise
