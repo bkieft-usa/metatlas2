@@ -35,6 +35,7 @@ DEFAULT_OTHER_HOTKEYS = {
     "high ppm diff": "4",
     "noisy or high background": "5",
     "needs review": "6",
+    "contains refstd files": "7",
 }
 
 def get_note_options_and_hotkeys(override_dict, default_hotkeys):
@@ -61,6 +62,14 @@ def _validate_override_parameters(override_parameters):
         raise ValueError("override_parameters['ms2_min_score'] must be a number or None")
     if not isinstance(override_parameters["ms2_min_matching_frags"], (type(None), int)):
         raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
+    if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
+        raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
+    if not isinstance(override_parameters.get("apply_istd_to_ema"), (type(None), bool)):
+        raise ValueError("override_parameters['apply_istd_to_ema'] must be a boolean or None")
+    if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
+        raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
+    if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
+        raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
     if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
         raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
     if isinstance(override_parameters["note_options_overrides"], dict):
@@ -83,8 +92,17 @@ def build_dash_app(
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.manual_curation_df
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
+    if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
+        top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
 
     logger.info(f"Analysis starting with {len(manual_curation_df)} compounds:")
+
+    # Extract metadata for display
+    chrom = analysis_gui_obj.post_autoid_atlas_obj.chromatography
+    pol = analysis_gui_obj.post_autoid_atlas_obj.polarity
+    analysis_type = analysis_gui_obj.post_autoid_atlas_obj.analysis_type
+    rta = analysis_gui_obj.rt_alignment_number
+    tga = analysis_gui_obj.analysis_number
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
@@ -185,6 +203,37 @@ def build_dash_app(
         rt_max = max(rt_min, new_max)
         return _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4))
 
+    def _find_starting_compound_idx():
+        """Find the next compound to curate after the last curated one.
+        
+        Finds compounds where ms2_notes has an actual value (not NaN and not empty string),
+        then starts at the next compound after the latest-eluting curated one. This allows
+        analysts to resume where they left off.
+        
+        Returns the index (0-based position in the dataframe) of the next compound to curate.
+        Falls back to 0 if no compounds have been curated yet.
+        """
+
+        curated_mask = manual_curation_df["ms2_notes"].notna() & (manual_curation_df["ms2_notes"] != "")
+        curated_compounds = manual_curation_df[curated_mask]
+        
+        if len(curated_compounds) == 0:
+            return 0
+        
+        # Find the compound with the highest atlas_rt_peak among curated ones
+        latest_eluting_idx = curated_compounds["atlas_rt_peak"].idxmax()
+        position = manual_curation_df.index.get_loc(latest_eluting_idx)
+        next_position = (position + 1) % len(manual_curation_df)
+        
+        return next_position
+
+    starting_compound_idx = _find_starting_compound_idx()
+    if starting_compound_idx > 0:
+        logger.info(f"Resuming analysis at compound {starting_compound_idx}: "
+                   f"{manual_curation_df.iloc[starting_compound_idx]['compound_name']}")
+    else:
+        logger.info(f"Starting new analysis at compound 0")
+
     keyboard_listener = EventListener(
         id="keyboard",
         events=[{"event": "keydown", "props": ["key", "timeStamp", "target.tagName"]}],
@@ -193,18 +242,22 @@ def build_dash_app(
     # format of the app itself
     app.layout = dbc.Container(
         [
-            dcc.Store(id="session-store", storage_type="memory", data=_load_state(0)),
-            dcc.Store(id="controls-compound-idx", storage_type="memory", data=0),
+            dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
+            dcc.Store(id="controls-compound-idx", storage_type="memory", data=starting_compound_idx),
             dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
             keyboard_listener,
             dbc.Row(
                 [
                     dbc.Col(
                         [
+                            html.Div(
+                                f"{chrom}  |  {pol}  |  {analysis_type}  |  RTA{rta}  |  TGA{tga}",
+                                style={"fontSize": "1rem", "fontWeight": "bold", "marginBottom": "0.5rem", "color": "#333"}
+                            ),
                             dbc.Row(
                                 [
                                     dbc.Col(
-                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=0, clearable=False, style={"width": "100%", "fontSize": "1.5rem"}),
+                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=starting_compound_idx, clearable=False, style={"width": "100%", "fontSize": "1.5rem"}),
                                         width=12, className="mb-3",
                                     ),
                                 ],

@@ -1,3 +1,5 @@
+import itertools
+import shutil
 from typing import Optional, List, Tuple, Dict
 from pathlib import Path
 import json
@@ -6,7 +8,7 @@ import statistics
 import textwrap
 import warnings
 from tqdm.auto import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -72,7 +74,7 @@ def _get_compound_info_batch(
         return {}
     placeholders = ",".join("?" * len(inchi_keys))
     try:
-        with dbi.get_db_connection(main_db_path) as conn:
+        with dbi.get_db_connection(main_db_path, read_only=True) as conn:
             rows = conn.execute(
                 f"""SELECT inchi_key, formula, smiles, inchi,
                            pubchem_cid, mono_isotopic_molecular_weight
@@ -155,6 +157,29 @@ def _plot_mirror(
                 prev_x = x_txt
 
             ax.margins(y=0.20)
+
+    # Add vertical text labels on the left side
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    x_text_pos = xlim[0] - (xlim[1] - xlim[0]) * 0.02  # Slightly left of the left edge
+    
+    # "Experimental" label for top half (y>0)
+    if ylim[1] > 0:
+        y_exp_pos = ylim[1] * 0.5  # Middle of positive y region
+        ax.text(
+            x_text_pos, y_exp_pos, "Experimental",
+            fontsize=12, weight="bold", ha="right", va="center",
+            rotation=90, color="black",
+        )
+    
+    # "Reference" label for bottom half (y<0)
+    if ylim[0] < 0:
+        y_ref_pos = ylim[0] * 0.5  # Middle of negative y region
+        ax.text(
+            x_text_pos, y_ref_pos, "Reference",
+            fontsize=12, weight="bold", ha="right", va="center",
+            rotation=90, color="black",
+        )
 
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
     ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=14, weight="bold")
@@ -527,14 +552,8 @@ def _plot_ms2(
         ref_mz, ref_int = _parse_spectrum(hit.get("ref_spectrum"))
 
         raw_colors = hit.get("aligned_fragment_colors")
-        frag_colors = None
-        try:
-            if raw_colors and pd.notnull(raw_colors):
-                parsed = json.loads(raw_colors)
-                if len(parsed) == len(qry_mz):
-                    frag_colors = parsed
-        except Exception:
-            pass
+        parsed = json.loads(raw_colors)
+        frag_colors = parsed
 
         if qry_mz and ref_mz:
             _plot_mirror(
@@ -579,9 +598,6 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ms1_df = kwargs["ms1_df"]
     ms2_raw_df = kwargs["ms2_raw_df"]
     ms2_hits_df = kwargs["ms2_hits_df"]
-
-    if not kwargs["overwrite"] and fig_path.exists():
-        return compound_name
 
     top3 = (
         ms2_hits_df
@@ -640,17 +656,22 @@ def make_identification_figure(
 ) -> None:
     main_db_path = summary_obj.paths.get("main_db_path")
 
+    output_dir = Path(output_loc) / "identification_figures"
+    if overwrite and output_dir.exists():
+        logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
+        shutil.rmtree(output_dir)
+    elif not overwrite and output_dir.exists():
+        logger.info("Overwriting disabled: existing directory %s will be used (existing PDFs will be preserved).", output_dir)
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Exporting identification figures to %s", output_dir)
+
     color_map = None
     if hasattr(summary_obj, "override_parameters") and summary_obj.override_parameters.get("gui_lcmsruns_colors"):
         color_map = summary_obj.override_parameters["gui_lcmsruns_colors"]
     elif hasattr(summary_obj, "workflow_params") and summary_obj.workflow_params.get("gui_lcmsruns_colors"):
         color_map = summary_obj.workflow_params["gui_lcmsruns_colors"]
-
-    if output_loc is None:
-        raise ValueError("output_loc must be provided as a Path or string")
-    output_loc = Path(output_loc, "identification_figures")
-    output_loc.mkdir(parents=True, exist_ok=True)
-    logger.info("Exporting identification figures to %s", output_loc)
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -689,11 +710,7 @@ def make_identification_figure(
         adduct = mc_row.get("adduct", "")
 
         safe_name = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
-        fig_path = output_loc / f"{safe_name}.pdf"
-
-        if not overwrite and fig_path.exists():
-            logger.debug("Skipping %s (already exists).", fig_path)
-            continue
+        fig_path = output_dir / f"{safe_name}.pdf"
 
         info = batch_info.get(inchi_key, (None, None, None, None, None))
         formula, smiles, inchi = info[0], info[1], info[2]
@@ -709,7 +726,6 @@ def make_identification_figure(
             "inchi_key":    inchi_key,
             "compound_idx": cmp_idx,
             "fig_path":     str(fig_path),
-            "overwrite":    overwrite,
             "color_map":    color_map,
             "ms1_df":       ms1_groups.get(key, empty_df),
             "ms2_raw_df":   ms2_raw_groups.get(key, empty_df),
@@ -725,7 +741,7 @@ def make_identification_figure(
 
     pbar = tqdm(total=len(tasks), desc="Generating ID figures", unit="compound")
 
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
             executor.submit(_identification_figure_worker, task): task["compound_name"]
             for task in tasks
@@ -743,7 +759,7 @@ def make_identification_figure(
 
     pbar.close()
 
-    logger.info("Identification figure export complete → %s", output_loc)
+    logger.info("Identification figure export complete → %s", output_dir)
 
 def _mz_quality(ppm_error: float, mz_delta: float) -> float:
     """Return 0/0.5/1 mz quality score from ppm and absolute mass error."""
@@ -854,21 +870,19 @@ def make_final_id_sheet(
     output_loc: Optional[Path] = None,
     output_filename: str = "Final_Identifications.xlsx",
     overwrite: bool = True,
-) -> pd.DataFrame:
+) -> None:
 
-    chromatography = summary_obj.chromatography
-
-    if output_loc is None:
-        raise ValueError("output_loc must be provided as a Path or string")
     output_loc = Path(output_loc)
-    output_loc.mkdir(parents=True, exist_ok=True)
-
+    chromatography = summary_obj.chromatography
     analysis_info = f"{summary_obj.post_curation_atlas_obj.chromatography}-{summary_obj.post_curation_atlas_obj.polarity}-{summary_obj.post_curation_atlas_obj.analysis_type}"
     run_info = f"RTA{summary_obj.rt_alignment_number}-TGA{summary_obj.analysis_number}"
     output_filename = f"{summary_obj.project_name}_{analysis_info}-{run_info}_{output_filename}"
     if not output_filename.endswith(".xlsx"):
         output_filename += ".xlsx"
     excel_path = output_loc / output_filename
+    if not overwrite and excel_path.exists():
+        logger.info("Overwriting disabled: existing file %s will be used.", excel_path)
+        return
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -877,7 +891,7 @@ def make_final_id_sheet(
 
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - nothing to export.")
-        return pd.DataFrame()
+        return
 
     manual_curation_df = manual_curation_df.reset_index(drop=True)
     db_path = summary_obj.paths.get("main_db_path")
@@ -1042,11 +1056,6 @@ def make_final_id_sheet(
 
     final_df = pd.DataFrame(rows)
     logger.info("Assembled final ID table with %d rows.", len(final_df))
-
-    if not overwrite and excel_path.exists():
-        raise FileExistsError(
-            f"Output file already exists and overwrite=False: {excel_path}"
-        )
 
     # ------------------------------------------------------------------ #
     #  Excel formatting                                                    #
@@ -1328,11 +1337,7 @@ def make_final_id_sheet(
             )
 
     logger.info("Exported final ID table to %s", excel_path)
-    return final_df
-
-_GRID_COLS = 5
-_GRID_ROWS = 5
-_PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
+    return
 
 def _short_fname(file_path: str) -> str:
     """Return an abbreviated filename label (12th and 15th ``_``-separated parts)."""
@@ -1425,6 +1430,10 @@ def _write_compound_eic_pdf(
     total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
     title_base = f"[{compound_idx:04d}] {_strip_non_chars(compound_name)} | {_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
 
+    _GRID_COLS = 5
+    _GRID_ROWS = 5
+    _PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
+
     with PdfPages(pdf_path) as pdf:
         for page_idx in range(total_pages):
             start = page_idx * _PLOTS_PER_PAGE
@@ -1435,8 +1444,8 @@ def _write_compound_eic_pdf(
             fig, axes = plt.subplots(
                 _GRID_ROWS, _GRID_COLS,
                 figsize=(20, 16),
-                constrained_layout=True,
             )
+            fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.06, hspace=0.45, wspace=0.3)
             axes_flat = axes.flatten()
 
             for slot_idx, item in enumerate(page_items):
@@ -1467,31 +1476,90 @@ def _write_compound_eic_pdf(
             plt.close(fig)
 
 def _compound_pdf_worker(kwargs: dict) -> str:
-    """Worker: write shared-y and independent-y PDFs for one compound."""
-    import matplotlib
-    matplotlib.use("Agg") 
+    """Worker: write shared-y and independent-y PDFs for one compound in a single page-loop.
 
-    mc_row = pd.Series(kwargs["mc_row_dict"])
+    Both PDFs are produced from the same figure per page: the independent-scale
+    version is saved first, then y-limits are adjusted to the global maximum and
+    the shared-scale version is saved, halving the number of figures created.
+    """
+
+    _GRID_COLS = 5
+    _GRID_ROWS = 5
+    _PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
+
+    import matplotlib
+    matplotlib.use("Agg")
+
     path_shared = Path(kwargs["path_shared"])
     path_indep = Path(kwargs["path_indep"])
-    overwrite = kwargs["overwrite"]
 
-    if overwrite or not path_shared.exists():
-        _write_compound_eic_pdf(
-            path_shared,
-            kwargs["compound_name"], kwargs["adduct"],
-            kwargs["rt_alignment_num"], kwargs["analysis_num"],
-            mc_row, kwargs["file_items"], shared_y=True,
-            compound_idx=kwargs["compound_idx"],
-        )
-    if overwrite or not path_indep.exists():
-        _write_compound_eic_pdf(
-            path_indep,
-            kwargs["compound_name"], kwargs["adduct"],
-            kwargs["rt_alignment_num"], kwargs["analysis_num"],
-            mc_row, kwargs["file_items"], shared_y=False,
-            compound_idx=kwargs["compound_idx"],
-        )
+    mc_row = pd.Series(kwargs["mc_row_dict"])
+    file_items = kwargs["file_items"]
+    compound_name = kwargs["compound_name"]
+    adduct = kwargs["adduct"]
+    rt_alignment_num = kwargs["rt_alignment_num"]
+    analysis_num = kwargs["analysis_num"]
+    compound_idx = kwargs["compound_idx"]
+
+    rt_min = mc_row.get("rt_min", np.nan)
+    rt_max_val = mc_row.get("rt_max", np.nan)
+    rt_peak = mc_row.get("atlas_rt_peak", np.nan)
+
+    all_intensities = [v for item in file_items for v in item["i_arr"] if v is not None]
+    y_max_global = float(max(all_intensities)) if all_intensities else None
+
+    total_files = len(file_items)
+    total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
+    title_base = (
+        f"[{compound_idx:04d}] {_strip_non_chars(compound_name)} | "
+        f"{_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
+    )
+
+    pdf_shared = PdfPages(path_shared)
+    pdf_indep = PdfPages(path_indep)
+    try:
+        for page_idx in range(total_pages):
+            start = page_idx * _PLOTS_PER_PAGE
+            end = min(start + _PLOTS_PER_PAGE, total_files)
+            page_items = file_items[start:end]
+            n_on_page = len(page_items)
+            page_label = f"({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
+
+            fig, axes = plt.subplots(_GRID_ROWS, _GRID_COLS, figsize=(20, 16))
+            fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.06, hspace=0.45, wspace=0.3)
+            axes_flat = axes.flatten()
+
+            active_axes = []
+            for slot_idx, item in enumerate(page_items):
+                ax = axes_flat[slot_idx]
+                fname_s = _strip_non_chars(_short_fname(item["file_path"]))
+                y_max_indep = float(max(item["i_arr"])) if item["i_arr"] else None
+                _render_eic_thumbnail(
+                    ax, item["rt_arr"], item["i_arr"],
+                    rt_min, rt_peak, rt_max_val, fname_s, y_max_indep,
+                )
+                active_axes.append(ax)
+
+            for slot_idx in range(n_on_page, _PLOTS_PER_PAGE):
+                axes_flat[slot_idx].set_visible(False)
+
+            fig.suptitle(f"{title_base}  {page_label}\n", fontsize=12, y=1.005)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=r"Glyph \d+ .* missing from font", category=UserWarning)
+                if pdf_indep is not None:
+                    pdf_indep.savefig(fig, bbox_inches="tight")
+                if pdf_shared is not None:
+                    if y_max_global is not None and y_max_global > 0:
+                        for ax in active_axes:
+                            ax.set_ylim(bottom=0, top=y_max_global * 1.05)
+                    pdf_shared.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+    finally:
+        if pdf_shared is not None:
+            pdf_shared.close()
+        if pdf_indep is not None:
+            pdf_indep.close()
+
     return kwargs["compound_name"]
 
 def make_eic_thumbnails(
@@ -1505,13 +1573,18 @@ def make_eic_thumbnails(
     rt_alignment_num = summary_obj.rt_alignment_number
     analysis_num = summary_obj.analysis_number
 
-    if output_loc is None:
-        raise ValueError("output_loc must be provided as a Path or string")
     base_dir = Path(output_loc)
     dir_shared = base_dir / "eic_thumbnails_shared_y"
     dir_indep = base_dir / "eic_thumbnails_independent_y"
-    dir_shared.mkdir(parents=True, exist_ok=True)
-    dir_indep.mkdir(parents=True, exist_ok=True)
+    for dir in (dir_shared, dir_indep):
+        if overwrite and dir.exists():
+            logger.info("Overwriting enabled: clearing existing contents of %s", dir)
+            shutil.rmtree(dir)
+        elif not overwrite and dir.exists():
+            logger.info("Overwriting disabled: existing directory %s will be used (existing PDFs will be preserved).", dir)
+            return
+        logger.info("Creating directory %s", dir)
+        dir.mkdir(parents=True, exist_ok=True)
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -1541,13 +1614,9 @@ def make_eic_thumbnails(
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
 
-        safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+        safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
         path_shared = dir_shared / f"{safe_stem}.pdf"
         path_indep = dir_indep  / f"{safe_stem}.pdf"
-
-        if not overwrite and path_shared.exists() and path_indep.exists():
-            logger.debug("Skipping %s (both PDFs exist).", safe_stem)
-            continue
 
         ms1_cmp = ms1_groups.get((inchi_key, adduct))
         if ms1_cmp is None or ms1_cmp.empty:
@@ -1573,7 +1642,6 @@ def make_eic_thumbnails(
             "path_shared": str(path_shared),
             "path_indep": str(path_indep),
             "file_items": file_items,
-            "overwrite": overwrite,
         })
 
     if not tasks:
@@ -1588,7 +1656,7 @@ def make_eic_thumbnails(
 
     pbar = tqdm(total=len(tasks), desc="Generating EIC thumbnails", unit="compound")
 
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
             executor.submit(_compound_pdf_worker, task): task["compound_name"]
             for task in tasks
@@ -1738,12 +1806,13 @@ def _plot_compound_boxplot(
     data_per_group: List[List[float]] = []
     valid_groups: List[str] = []
     for g in groups:
-        vals = compound_metrics.loc[compound_metrics["file_group"] == g, metric].dropna().tolist()
+        group_rows = compound_metrics.loc[compound_metrics["file_group"] == g]
+        vals = group_rows[metric].dropna().tolist()
         if log_scale:
             vals = [np.log10(v) for v in vals if isinstance(v, (int, float)) and v > 0]
-        if vals:
-            data_per_group.append(vals)
-            valid_groups.append(g)
+        n_files = len(group_rows)
+        data_per_group.append(vals if vals else [0.0] * max(n_files, 1))
+        valid_groups.append(g)
 
     if not data_per_group:
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
@@ -1800,9 +1869,9 @@ def _plot_compound_boxplot(
         ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
     
 
-    # For linear scales, remove scientific notation multiplier
+    # For linear scales, remove scientific notation multiplier and offset
     if not log_scale:
-        ax.ticklabel_format(style="plain", axis="y")
+        ax.ticklabel_format(style="plain", axis="y", useOffset=False)
 
     for spine in ax.spines.values():
         spine.set_linewidth(0.5)
@@ -1816,22 +1885,19 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
     cmp_idx = kwargs["compound_idx"]
-    overwrite = kwargs["overwrite"]
     atlas_ref_dict = kwargs["atlas_ref_dict"]
     metric_configs = kwargs["metric_configs"]
     cmp_metrics = kwargs["cmp_metrics"]
 
-    safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+    safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
 
     for metric, log_scale, ylabel, atlas_attr, metric_dir_str in metric_configs:
         pdf_path = Path(metric_dir_str) / f"{safe_stem}.pdf"
 
-        if not overwrite and pdf_path.exists():
-            continue
-
         atlas_ref = atlas_ref_dict.get(atlas_attr) if atlas_attr else None
 
-        fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        fig.subplots_adjust(bottom=0.2, left=0.12, right=0.97, top=0.88)
         try:
             _plot_compound_boxplot(
                 ax, cmp_metrics, metric, log_scale,
@@ -1853,10 +1919,16 @@ def make_boxplots(
     max_workers: Optional[int] = None,
 ) -> None:
 
-    if output_loc is None:
-        raise ValueError("output_loc must be provided for boxplot output.")
-    output_loc = Path(output_loc, "boxplots")
-    output_loc.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_loc) / "boxplots"
+    if overwrite and output_dir.exists():
+        logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
+        shutil.rmtree(output_dir)
+    elif not overwrite and output_dir.exists():
+        logger.info("Overwriting disabled: existing directory %s will be used (existing PDFs will be preserved).", output_dir)
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Exporting identification figures to %s", output_dir)
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -1885,7 +1957,7 @@ def make_boxplots(
     ]
     metric_configs_with_dirs: list[tuple] = []
     for metric, log_scale, ylabel, atlas_attr in _METRIC_CONFIGS:
-        metric_dir = output_loc / f"{metric}_{'log' if log_scale else 'linear'}"
+        metric_dir = output_dir / f"{metric}_{'log' if log_scale else 'linear'}"
         metric_dir.mkdir(parents=True, exist_ok=True)
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
@@ -1907,20 +1979,11 @@ def make_boxplots(
         inchi_key = mc_row.get("inchi_key", "")
         key = (inchi_key, adduct)
 
-        safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
-        if not overwrite and all(
-            (Path(mdir) / f"{safe_stem}.pdf").exists()
-            for *_, mdir in metric_configs_with_dirs
-        ):
-            logger.debug("Skipping %s (all metric PDFs exist).", safe_stem)
-            continue
-
         tasks.append({
             "compound_name": compound_name,
             "adduct": adduct,
             "inchi_key": inchi_key,
             "compound_idx": cmp_idx,
-            "overwrite": overwrite,
             "atlas_ref_dict": atlas_lookup.get(key, {}),
             "metric_configs": metric_configs_with_dirs,
             "cmp_metrics": pf_groups.get(key, empty_df),
@@ -1938,7 +2001,7 @@ def make_boxplots(
 
     pbar = tqdm(total=len(tasks), desc="Generating boxplots", unit="compound")
 
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
             executor.submit(_boxplot_compound_worker, task): task["compound_name"]
             for task in tasks
@@ -1956,14 +2019,14 @@ def make_boxplots(
 
     pbar.close()
 
-    logger.info("Boxplot PDFs complete → %s", output_loc)
+    logger.info("Boxplot PDFs complete → %s", output_dir)
 
 def make_manual_curation_csv(
     summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     output_filename: str = "manually_curated_compound_data.csv",
     overwrite: bool = True,
-) -> pd.DataFrame:
+) -> None:
     """Write the ``manual_curation`` table to a CSV file (one row per compound).
 
     Parameters
@@ -1977,8 +2040,7 @@ def make_manual_curation_csv(
     output_filename:
         CSV filename (the ``.csv`` extension is appended automatically if absent).
     overwrite:
-        When *False*, raises :exc:`FileExistsError` if the output file already
-        exists.
+        When *False*, skips writing if the output file already exists.
 
     Returns
     -------
@@ -1986,20 +2048,14 @@ def make_manual_curation_csv(
         The exported DataFrame (empty on error).
     """
 
-    if output_loc is None:
-        raise ValueError("output_loc must be provided for manual curation CSV output.")
-    else:
-        output_loc = Path(output_loc)
-    output_loc.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_loc) / "data_sheets"
+    output_file = output_dir / output_filename
+    if not overwrite and output_file.exists():
+        logger.info("Overwriting disabled: existing file %s will be used.", output_file)
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not output_filename.endswith(".csv"):
-        output_filename += ".csv"
-    csv_path = output_loc / output_filename
-
-    if not overwrite and csv_path.exists():
-        raise FileExistsError(
-            f"Output file already exists and overwrite=False: {csv_path}"
-        )
+    logger.info("Exporting manual curation CSV to %s", output_file)
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -2007,11 +2063,11 @@ def make_manual_curation_csv(
 
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - CSV not written.")
-        return pd.DataFrame()
+        return
 
-    manual_curation_df.to_csv(csv_path, index=False)
-    logger.info("Exported manual curation CSV to %s", csv_path)
-    return manual_curation_df
+    manual_curation_df.to_csv(output_file, index=False)
+    logger.info("Exported manual curation CSV")
+    return
 
 def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
@@ -2019,21 +2075,16 @@ def make_best_ms2_hit_fragment_ions_csv(
     output_filename: str = "best_ms2_hit_fragment_ions.csv",
     overwrite: bool = True,
     min_fragment_intensity: Optional[float] = 1e4,
-) -> pd.DataFrame:
+) -> None:
 
-    if output_loc is None:
-        raise ValueError("output_loc must be provided for best MS2 hit CSV output.")
-    output_loc = Path(output_loc) / "additional_data"
-    output_loc.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_loc) / "data_sheets"
+    output_file = output_dir / output_filename
+    if not overwrite and output_file.exists():
+        logger.info("Overwriting disabled: existing file %s will be used.", output_file)
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not output_filename.endswith(".csv"):
-        output_filename += ".csv"
-    csv_path = output_loc / output_filename
-
-    if not overwrite and csv_path.exists():
-        raise FileExistsError(
-            f"Output file already exists and overwrite=False: {csv_path}"
-        )
+    logger.info("Exporting best MS2 hit fragment ions CSV to %s", output_file)
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -2042,7 +2093,7 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - best MS2 hit CSV not written.")
-        return pd.DataFrame()
+        return
 
     # Pre-compute best hit per (inchi_key, adduct)
     if ms2_hits_all_df is not None and not ms2_hits_all_df.empty:
@@ -2091,14 +2142,14 @@ def make_best_ms2_hit_fragment_ions_csv(
     result_df = pd.DataFrame(rows)
     if result_df.empty:
         logger.warning("No MS2 hits found for any compound - best MS2 hit CSV not written.")
-        return result_df
+        return
 
-    result_df.to_csv(csv_path, index=False)
+    result_df.to_csv(output_file, index=False)
     logger.info(
         "Exported best MS2 hit fragment ions CSV (%d compounds) → %s",
-        len(result_df), csv_path,
+        len(result_df), output_file,
     )
-    return result_df
+    return
 
 def make_data_sheets(
     summary_obj: "AnalysisSummary",
@@ -2128,10 +2179,16 @@ def make_data_sheets(
     overwrite:
         When *False*, existing CSVs are skipped rather than overwritten.
     """
-    if output_loc is None:
-        raise ValueError("output_loc must be provided for data sheet export.")
-    out_dir = Path(output_loc) / "data_sheets"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_loc) / "data_sheets"
+    if overwrite and output_dir.exists():
+        logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
+        shutil.rmtree(output_dir)
+    elif not overwrite and output_dir.exists():
+        logger.info("Overwriting disabled: existing directory %s will be used (existing PDFs will be preserved).", output_dir)
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Exporting data sheets to %s", output_dir)
 
     if summary_obj.manual_curation_df is None:
         summary_obj.load_data()
@@ -2176,10 +2233,8 @@ def make_data_sheets(
         if metric not in pfm.columns:
             logger.warning("Metric '%s' not found in per_file_metrics_df — skipping.", metric)
             continue
-        csv_path = out_dir / f"{metric}.csv"
-        if not overwrite and csv_path.exists():
-            logger.info("Skipping existing data sheet: %s", csv_path)
-            continue
+
+        csv_path = output_dir / f"{metric}.csv"
 
         wide = (
             pfm[_INDEX_COLS + ["_file_col", metric]]
@@ -2198,15 +2253,14 @@ def make_data_sheets(
             metric, len(wide), len(wide.columns) - len(_INDEX_COLS), csv_path,
         )
 
-    logger.info("Data sheets written to %s", out_dir)
+    logger.info("Data sheets written to %s", output_dir)
 
 
 def make_peak_height_filtered_csv(
-    summary_obj: "AnalysisSummary",
     output_loc: Optional[Path] = None,
     overwrite: bool = True,
     control_fold_threshold: float = 3.0,
-) -> pd.DataFrame:
+) -> None:
     """Filter and process the ``peak_height`` data sheet.
 
     Applies the following steps in order:
@@ -2241,32 +2295,27 @@ def make_peak_height_filtered_csv(
     output_loc:
         Base output directory (same value passed to :func:`make_data_sheets`).
     overwrite:
-        When *False* raises :exc:`FileExistsError` if the output already exists.
+        When *False*, skips writing if the output file already exists.
     control_fold_threshold:
         Fold-change required to retain a compound (default ``3.0``).
 
     Returns
     -------
-    pd.DataFrame
+    None
         The filtered, processed table (empty on error).
     """
-    if output_loc is None:
-        raise ValueError("output_loc must be provided.")
+
     out_dir = Path(output_loc) / "data_sheets"
     source_csv = out_dir / "peak_height.csv"
     output_csv = out_dir / "peak_height_filtered.csv"
-
     if not source_csv.exists():
-        logger.error(
-            "peak_height.csv not found at %s — run make_data_sheets first.",
-            source_csv,
-        )
-        return pd.DataFrame()
-
+        logger.error("peak_height.csv not found at %s — run make_data_sheets first.", source_csv)
+        return
     if not overwrite and output_csv.exists():
-        raise FileExistsError(
-            f"Output file already exists and overwrite=False: {output_csv}"
-        )
+        logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
+        return
+
+    logger.info("Creating filtered peak height CSV at %s", output_csv)
 
     df = pd.read_csv(source_csv)
 
@@ -2300,7 +2349,7 @@ def make_peak_height_filtered_csv(
 
     if df.empty:
         logger.warning("No compounds found — no output written.")
-        return df
+        return
 
     # ── 2. Drop extra metadata; merge identical inchi_key rows by max ──────────
     drop_cols = [c for c in ("compound_index", "adduct") if c in df.columns]
@@ -2350,7 +2399,216 @@ def make_peak_height_filtered_csv(
         "Exported filtered peak height (%d compounds × %d files) → %s",
         len(df), len(df.columns) - len(_META_FIXED), output_csv,
     )
-    return df
+    return
+
+def make_metabomap(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = True,
+) -> None:
+    """Merge pos/neg filtered peak-height tables and compute pairwise log2 fold-changes.
+
+    Checks whether the sibling-polarity ``peak_height_filtered.csv`` (same analysis
+    type, opposite polarity) exists alongside the current one.  When found, the two
+    tables are merged on ``inchi_key``; for compounds shared between polarities the
+    higher peak-height value is kept per matched replicate column.  QC and ISTD
+    sample groups are excluded.  Two output CSVs are written to
+    ``<analysis_output_dir>/metabomaps/``:
+
+    ``merged_peak_heights.csv``
+        One row per unique ``inchi_key``; columns are the sample-group name (index 12
+        of the underscore-split column name, e.g. ``M-HighS-HighL-12h-HeatStr``).
+        Replicate columns share the same group name.  Values are the element-wise
+        maximum across the two polarities (positional matching after sorting within
+        each group alphabetically).
+
+    ``log_fold_changes.csv``
+        One row per ``inchi_key``; columns are ``group1_vs_group2`` for every
+        pairwise combination of unique sample groups.  LFC is
+        ``log2(mean(group1_replicates) / mean(group2_replicates))``.  Rows or
+        pairs where either mean is zero or NaN are set to ``NaN``.
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
+    overwrite:
+        When *False*, skips writing if both output files already exist.
+    """
+    analysis_output_dir = Path(summary_obj.paths.get("analysis_output_dir"))
+    current_polarity = summary_obj.post_autoid_atlas_obj.polarity   # e.g. "POS"
+    analysis_type    = summary_obj.post_autoid_atlas_obj.analysis_type  # e.g. "EMA"
+
+    if current_polarity.upper() == "POS":
+        sibling_polarity = "NEG"
+    elif current_polarity.upper() == "NEG":
+        sibling_polarity = "POS"
+    else:
+        logger.error(
+            "Unrecognised polarity '%s' — cannot determine sibling polarity for metabomap.",
+            current_polarity,
+        )
+        return
+
+    current_csv = (
+        analysis_output_dir / f"{current_polarity}-{analysis_type}"
+        / "data_sheets" / "peak_height_filtered.csv"
+    )
+    sibling_csv = (
+        analysis_output_dir / f"{sibling_polarity}-{analysis_type}"
+        / "data_sheets" / "peak_height_filtered.csv"
+    )
+
+    metabomaps_dir = analysis_output_dir / "metabomaps"
+    merged_csv     = metabomaps_dir / "merged_peak_heights.csv"
+    lfc_csv        = metabomaps_dir / "log_fold_changes.csv"
+
+    if not overwrite and merged_csv.exists() and lfc_csv.exists():
+        logger.info(
+            "Overwriting disabled: metabomap files already exist in %s", metabomaps_dir
+        )
+        return
+
+    if not current_csv.exists():
+        logger.error("Current polarity filtered peak-height CSV not found: %s", current_csv)
+        return
+
+    if not sibling_csv.exists():
+        logger.info(
+            "Sibling polarity (%s-%s) peak_height_filtered.csv not yet available"
+            " — skipping metabomap.",
+            sibling_polarity, analysis_type,
+        )
+        return
+
+    metabomaps_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Building metabomap from:\n  %s\n  %s", current_csv, sibling_csv)
+
+    # ── Constants ──────────────────────────────────────────────────────────────
+    _META_COLS_SET      = {"control_filter", "compound_name", "inchi_key"}
+    _EXCLUDE_PATTERNS   = ("QC", "ISTD")
+
+    def _col_group(col: str) -> Optional[str]:
+        """Return sample-group label (underscore-split index 12) or None to drop."""
+        parts = col.split("_")
+        if len(parts) <= 12:
+            return None
+        grp = parts[12]
+        if any(p in grp for p in _EXCLUDE_PATTERNS):
+            return None
+        return grp
+
+    def _load_filtered(csv_path: Path) -> pd.DataFrame:
+        df = pd.read_csv(csv_path)
+        keep = [c for c in df.columns if c in _META_COLS_SET or _col_group(c) is not None]
+        return df[keep].copy()
+
+    cur_df = _load_filtered(current_csv)
+    sib_df = _load_filtered(sibling_csv)
+
+    # ── Build sorted data column lists (for positional replicate matching) ────
+    cur_data_cols = [c for c in cur_df.columns if c not in _META_COLS_SET]
+    sib_data_cols = [c for c in sib_df.columns if c not in _META_COLS_SET]
+
+    # Sort by (group_name, full_col_name) so replicates are consistently ordered
+    cur_sorted = sorted(cur_data_cols, key=lambda c: (_col_group(c), c))
+    sib_sorted = sorted(sib_data_cols, key=lambda c: (_col_group(c), c))
+
+    cur_groups = [_col_group(c) for c in cur_sorted]
+    sib_groups = [_col_group(c) for c in sib_sorted]
+
+    # ── Index both frames by inchi_key ────────────────────────────────────────
+    cur_indexed = cur_df.set_index("inchi_key")
+    sib_indexed = sib_df.set_index("inchi_key")
+    all_inchi_keys = cur_indexed.index.union(sib_indexed.index)
+
+    cur_matrix = cur_indexed[cur_sorted].reindex(all_inchi_keys)
+    sib_matrix = sib_indexed[sib_sorted].reindex(all_inchi_keys)
+
+    # ── Merge: element-wise max when groups match; group-max fallback ─────────
+    if cur_groups == sib_groups:
+        logger.info(
+            "Column groups match between polarities (%d replicates) "
+            "— using element-wise maximum.",
+            len(cur_groups),
+        )
+        merged_vals = np.fmax(cur_matrix.values, sib_matrix.values)
+        merged_data_df = pd.DataFrame(
+            merged_vals,
+            index=all_inchi_keys,
+            columns=cur_groups,  # rename to group names
+        )
+    else:
+        logger.warning(
+            "Column groups differ between polarities (%d cur vs %d sib) "
+            "— using per-group maximum (per-replicate resolution not available).",
+            len(cur_groups), len(sib_groups),
+        )
+        all_groups_ordered = list(dict.fromkeys(cur_groups + sib_groups))
+        merged_data_df = pd.DataFrame(index=all_inchi_keys)
+        for grp in all_groups_ordered:
+            cur_grp_cols = [c for c in cur_sorted if _col_group(c) == grp]
+            sib_grp_cols = [c for c in sib_sorted if _col_group(c) == grp]
+            grp_vals = pd.concat(
+                [cur_matrix[cur_grp_cols], sib_matrix[sib_grp_cols]], axis=1
+            )
+            merged_data_df[grp] = grp_vals.max(axis=1)
+
+    merged_data_df.index.name = "inchi_key"
+    merged_data_df = merged_data_df.reset_index()
+
+    # Restore compound_name (prefer current polarity, fall back to sibling)
+    compound_names = (
+        cur_indexed["compound_name"].combine_first(sib_indexed["compound_name"])
+        if "compound_name" in cur_indexed.columns and "compound_name" in sib_indexed.columns
+        else cur_indexed.get("compound_name", sib_indexed.get("compound_name", pd.Series(dtype=str)))
+    )
+    merged_data_df.insert(1, "compound_name", merged_data_df["inchi_key"].map(compound_names))
+
+    logger.info(
+        "Merged %d (cur) + %d (sib) → %d unique inchi_keys, %d sample columns",
+        len(cur_df), len(sib_df), len(merged_data_df),
+        len(merged_data_df.columns) - 2,
+    )
+
+    merged_data_df.to_csv(merged_csv, index=False)
+    logger.info("Saved merged peak heights → %s", merged_csv)
+
+    # ── Pairwise log2 fold-change table ───────────────────────────────────────
+    lfc_meta = {"inchi_key", "compound_name"}
+    data_cols_renamed = [c for c in merged_data_df.columns if c not in lfc_meta]
+    unique_groups = list(dict.fromkeys(data_cols_renamed))
+
+    if len(unique_groups) < 2:
+        logger.warning(
+            "Fewer than 2 unique sample groups found — pairwise LFC table not created."
+        )
+        return
+
+    # Compute per-group mean across all replicate columns (duplicate column names)
+    group_means: dict[str, np.ndarray] = {}
+    for grp in unique_groups:
+        grp_data = merged_data_df.loc[:, merged_data_df.columns == grp]
+        group_means[grp] = grp_data.mean(axis=1).to_numpy(dtype=float)
+
+    lfc_records: dict[str, np.ndarray] = {
+        "inchi_key":     merged_data_df["inchi_key"].to_numpy(),
+        "compound_name": merged_data_df["compound_name"].to_numpy(),
+    }
+    for grp1, grp2 in itertools.combinations(unique_groups, 2):
+        m1 = group_means[grp1]
+        m2 = group_means[grp2]
+        valid = (m1 > 0) & (m2 > 0) & ~np.isnan(m1) & ~np.isnan(m2)
+        lfc = np.full(len(m1), np.nan)
+        lfc[valid] = np.log2(m1[valid] / m2[valid])
+        lfc_records[f"{grp1}_vs_{grp2}"] = lfc
+
+    lfc_df = pd.DataFrame(lfc_records)
+    lfc_df.to_csv(lfc_csv, index=False)
+    logger.info(
+        "Saved pairwise LFC table (%d compounds × %d group pairs) → %s",
+        len(lfc_df), len(lfc_df.columns) - 2, lfc_csv,
+    )
+    return
 
 
 def run_all_summaries(
@@ -2379,7 +2637,8 @@ def run_all_summaries(
     overwrite:
         Passed through to all sub-functions.
     """
-    output_loc = summary_obj.paths.get("analysis_output_dir", None)
+    output_loc = Path(summary_obj.paths.get("analysis_output_dir", None)) / f"{summary_obj.post_autoid_atlas_obj.polarity}-{summary_obj.post_autoid_atlas_obj.analysis_type}"
+    os.makedirs(output_loc, exist_ok=True)
     if summary_obj.override_parameters.get("skip_outputs") is not None:
         skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
     else:
@@ -2405,6 +2664,10 @@ def run_all_summaries(
         logger.info("Making Boxplots...")
         make_boxplots(summary_obj, output_loc=output_loc, overwrite=overwrite, max_workers=8)
 
+    if "data_sheets" not in (skip_outputs or []):
+        logger.info("Making quantitative data sheets...")
+        make_data_sheets(summary_obj, output_loc=output_loc, overwrite=overwrite)
+
     if "manual_curation_csv" not in (skip_outputs or []):
         logger.info("Making Manual curation CSV...")
         make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
@@ -2413,17 +2676,17 @@ def run_all_summaries(
         logger.info("Making best MS2 hit fragment ions CSV...")
         make_best_ms2_hit_fragment_ions_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
 
-    if "data_sheets" not in (skip_outputs or []):
-        logger.info("Making quantitative data sheets...")
-        make_data_sheets(summary_obj, output_loc=output_loc, overwrite=overwrite)
-
     if "peak_height_filtered_csv" not in (skip_outputs or []):
         logger.info("Making filtered peak height CSV...")
-        make_peak_height_filtered_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+        make_peak_height_filtered_csv(output_loc=output_loc, overwrite=overwrite)
 
-    logger.info("Exporting pre-curation atlas data CSV...")
-    summary_obj.pre_curation_atlas_obj.to_dataframe().to_csv(
-        f"{summary_obj.paths['analysis_output_dir']}/{summary_obj.pre_curation_atlas_obj.atlas_uid}.csv", index=False
+    if "metabomap" not in (skip_outputs or []):
+        logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
+        make_metabomap(summary_obj, overwrite=overwrite)
+
+    logger.info("Exporting post-auto-ID atlas data CSV...")
+    summary_obj.post_autoid_atlas_obj.to_dataframe().to_csv(
+        f"{summary_obj.paths['analysis_output_dir']}/{summary_obj.post_autoid_atlas_obj.atlas_uid}.csv", index=False
     )
 
     logger.info("Exporting post-curation atlas data CSV...")
