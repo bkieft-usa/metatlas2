@@ -104,7 +104,6 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
                     stderr_output = proc.stderr.read() if proc.stderr else ""
                     logger.error("rclone failed with exit code %d: %s", proc.returncode, stderr_output)
                     raise subprocess.CalledProcessError(proc.returncode, cmd)
-                # Ensure progress bar reaches 100%
                 if last_percent < 100:
                     pbar.update(100 - last_percent)
     except subprocess.CalledProcessError as err:

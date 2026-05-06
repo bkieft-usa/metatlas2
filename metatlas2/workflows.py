@@ -256,7 +256,12 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-        logger.info("Passing finalized AutoIdentification object to database saver...")
+        logger.info("Applying quality filters to ExperimentalData (funnel architecture)...")
+        auto_id_obj.experimental_data = dbi.apply_auto_id_filters(
+            auto_id_obj=auto_id_obj
+        )
+
+        logger.info("Passing filtered AutoIdentification object to database saver...")
         dbi.save_auto_identification_results_to_db(
             auto_id_obj=auto_id_obj
         )
@@ -266,7 +271,7 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-        logger.info("Passing AutoIdentification object to new Atlas generator...")
+        logger.info("Creating post-auto-ID Atlas from filtered data...")
         auto_id_obj.post_autoid_atlas_obj = dbi.create_new_atlas_after_auto_id(
             auto_id_obj=auto_id_obj
         )
@@ -388,9 +393,28 @@ def run_analysis_summary(
     
     logger.info(f"Setting override parameters for analysis summary...")
     summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
-
-    logger.info("Applying override filter thresholds to post-auto-ID atlas (in-memory only — re-runnable at any threshold)...")
-    dbi.apply_override_filter_to_post_autoid_atlas(summary_obj, override_parameters)
+    
+    if override_parameters:
+        # Check if any override parameters actually differ from workflow params
+        params_differ = False
+        for param in ["ms1_min_peak_intensity", "ms1_min_num_points", 
+                      "ms2_min_score", "ms2_min_matching_frags", "remove_unided_compounds"]:
+            override_val = override_parameters.get(param)
+            workflow_val = summary_obj.workflow_params.get(param)
+            if override_val is not None and override_val != workflow_val:
+                params_differ = True
+                break
+        
+        if params_differ:
+            logger.info(
+                "Override parameters differ from saved workflow parameters. "
+                "Second-stage filtering will be applied when loading data for summary."
+            )
+        else:
+            logger.info(
+                "Override parameters provided but match saved workflow parameters. "
+                "No additional filtering will be applied."
+            )
 
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
     summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(

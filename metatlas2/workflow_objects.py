@@ -11,7 +11,7 @@ import metatlas2.pubchem_retrieval as pcr
 import metatlas2.lcmsruns_tools as lrt
 import metatlas2.analysis_summary as asm
 import metatlas2.logging_config as lcf
-import metatlas2.run_targeted_analysis as rta
+import metatlas2.run_targeted_analysis as rtg
 logger = lcf.get_logger('workflow_objects')
 
 @dataclass
@@ -100,7 +100,7 @@ class Compound:
     ) -> None:
         """Create and save Compounds and CompoundMZRTs from a config file."""
         config = ldt.load_compound_config(config_path)
-        paths = rta.set_up_paths(config=config)
+        paths = rtg.set_up_paths(config=config)
         main_db_path = paths.get("main_db_path", None)
         pubchem_cache_path = paths.get("pubchem_cache_path", None)
 
@@ -378,7 +378,7 @@ class Atlas:
     ) -> None:
         """Create and save Atlas objects from a config file."""
         config = ldt.load_atlas_config(config_path)
-        paths = rta.set_up_paths(config=config)
+        paths = rtg.set_up_paths(config=config)
         main_db_path = paths.get("main_db_path", None)
         
         atlases = []
@@ -704,7 +704,7 @@ class AnalysisGUI:
         self.config_path = config_path
         self.project_name = project_name
         self.config = ldt.load_metatlas2_config(config_path)
-        self.paths = rta.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
+        self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
 
 @dataclass
 class AnalysisSummary:
@@ -751,7 +751,7 @@ class AnalysisSummary:
         self.config = ldt.load_metatlas2_config(config_path)
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.project_name = project_name
-        self.paths = rta.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
+        self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
 
     def load_data(self) -> None:
         """Load all analysis data tables from the project database and cache them as attributes.

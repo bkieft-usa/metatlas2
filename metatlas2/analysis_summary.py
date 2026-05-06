@@ -413,6 +413,7 @@ def _plot_hit_info_table(
     ax,
     top3: pd.DataFrame,
     mc_row: pd.Series,
+    ms2_hits_df: pd.DataFrame,
 ) -> None:
     """Render the best MS2 hit as a vertical Theoretical/Measured/Difference table on *ax*."""
     ax.axis("off")
@@ -523,6 +524,28 @@ def _plot_hit_info_table(
     ax.text(col_x[3], frag_text_top, score_str, fontsize=15,
             ha="left", va="top", transform=ax.transAxes)
 
+    # Add 2nd best, 3rd best, and total files with database matches
+    additional_info_y = frag_center - frag_row_h / 2 - 0.04
+    line_spacing = 0.025
+    
+    # 2nd best hit file
+    if len(top3) >= 2:
+        second_best_file = os.path.basename(str(top3.iloc[1]["file_path"]))
+        ax.text(0, additional_info_y, f"2nd best: {second_best_file}", 
+                fontsize=13, ha="left", va="top", transform=ax.transAxes)
+    
+    # 3rd best hit file
+    if len(top3) >= 3:
+        third_best_file = os.path.basename(str(top3.iloc[2]["file_path"]))
+        ax.text(0, additional_info_y - line_spacing, f"3rd best: {third_best_file}", 
+                fontsize=13, ha="left", va="top", transform=ax.transAxes)
+    
+    # Total files with database matches
+    total_files = ms2_hits_df["file_path"].nunique() if not ms2_hits_df.empty else 0
+    y_offset = line_spacing * 2 if len(top3) >= 3 else (line_spacing if len(top3) >= 2 else 0)
+    ax.text(0, additional_info_y - y_offset, f"Total files with database matches: {total_files}", 
+            fontsize=13, ha="left", va="top", transform=ax.transAxes)
+
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
@@ -630,7 +653,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ax_eic_log.set_title("EIC (log₁₀ scale)", fontsize=18)
 
     _plot_compound_info_table(fig.add_subplot(gs[1, 2:4]), mc_row)
-    _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), top3, mc_row)
+    _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), top3, mc_row, ms2_hits_df)
 
     fig.suptitle(
         f"[{cmp_idx:04d}] |  {_strip_non_chars(adduct)}  |  {inchi_key}\n{_strip_non_chars(compound_name)}\n",

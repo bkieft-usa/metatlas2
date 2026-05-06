@@ -1872,130 +1872,101 @@ def apply_istd_curation_to_ema(
     return df, n_transferred
 
 
-def apply_override_filter_to_post_autoid_atlas(
-        workflow_obj,
-        override_parameters: dict = None,
-        remove_unidentified_compounds: bool = False,
-) -> tuple:
-    """Load the post-auto-ID data as an ExperimentalData object, apply quantitative
-    override filter thresholds in-memory only (no DB writes), trim the atlas
-    ``compound_mzrts`` to match, and return both the ExperimentalData and the
-    four equivalent flat DataFrames.
-
-    Filtering is delegated to :func:`filter_experimental_data`—the same function
-    used by :func:`create_new_atlas_after_auto_id`—so both stages share a single
-    implementation.  The flat DataFrames are produced by
-    :func:`experimental_data_to_dataframes` and are identical in column layout to
-    the individual ``get_*`` DB query helpers, preserving backward-compatibility
-    with all GUI and summary consumers.
-
-    Resolves effective thresholds by preferring ``override_parameters`` values
-    over the workflow config params.  Callers can re-run with different thresholds
-    freely: because no rows are deleted from the DB, incrementing the analysis
-    number is not needed to restore compounds that were previously filtered out.
-
-    Returns
-    -------
-    tuple of (experimental_data, manual_curation_df, ms1_df, ms2_df, ms2_hits_df)
-    """
-    project_path = workflow_obj.paths["project_db_path"]
-    rt_alignment = workflow_obj.rt_alignment_number
-    analysis_num = workflow_obj.analysis_number
-    atlas_obj = workflow_obj.post_autoid_atlas_obj
-    analysis_type = atlas_obj.analysis_type
-
-    # Scope DB queries to the current in-memory atlas
-    atlas_compounds = pd.DataFrame([
-        {"inchi_key": c.inchi_key, "adduct": c.adduct}
-        for c in atlas_obj.compound_mzrts.values()
-    ])
-
-    # re-creates the ExperimentalData object and all its nested workflow objects
-    exp_data = load_experimental_data_from_db(
-        project_path, rt_alignment, analysis_num,
-        atlas_compounds=atlas_compounds,
-        analysis_type=analysis_type,
-        remove_unidentified_compounds=remove_unidentified_compounds,
-    )
-
-    # Only apply filtering if analyst has explicitly provided at least one override parameter
-    # (AutoID workflow already applied config-based filters, so no need to re-filter)
-    _overrides = override_parameters or {}
-    has_overrides = any(
-        _overrides.get(k) is not None 
-        for k in ["ms1_min_peak_intensity", "ms1_min_num_points", "ms2_min_score", "ms2_min_matching_frags"]
-    )
-
-    if has_overrides:
-        # Resolve effective thresholds: override values take precedence, fall back to config
-        ms1_min_int = (
-            _overrides["ms1_min_peak_intensity"]
-            if _overrides.get("ms1_min_peak_intensity") is not None
-            else workflow_obj.workflow_params.get("ms1_min_peak_intensity")
-        )
-        ms1_min_pts = (
-            _overrides["ms1_min_num_points"]
-            if _overrides.get("ms1_min_num_points") is not None
-            else workflow_obj.workflow_params.get("ms1_min_num_points")
-        )
-        ms2_min_score = (
-            _overrides["ms2_min_score"]
-            if _overrides.get("ms2_min_score") is not None
-            else workflow_obj.workflow_params.get("ms2_min_score")
-        )
-        ms2_min_frags = (
-            _overrides["ms2_min_matching_frags"]
-            if _overrides.get("ms2_min_matching_frags") is not None
-            else workflow_obj.workflow_params.get("ms2_min_matching_frags")
-        )
-
-        exp_data, n_removed = filter_experimental_data(
-            exp_data,
-            ms1_min_pts=ms1_min_pts,
-            ms1_min_int=ms1_min_int,
-            ms2_min_score=ms2_min_score,
-            ms2_min_frags=ms2_min_frags,
-        )
-        logger.info(f"Override filter removed {n_removed} compounds from post-auto-ID atlas.")
-
-        surviving_pairs = {(mc.inchi_key, mc.adduct) for mc in exp_data.manual_curation}
-        keys_to_remove = [
-            k for k, cmzrt in atlas_obj.compound_mzrts.items()
-            if (cmzrt.inchi_key, cmzrt.adduct) not in surviving_pairs
-        ]
-        for k in keys_to_remove:
-            del atlas_obj.compound_mzrts[k]
-        logger.info(
-            f"Trimmed post-auto-ID atlas to {len(atlas_obj.compound_mzrts)} compounds "
-            f"({len(keys_to_remove)} removed by override filter thresholds)."
-        )
-
-    mc_df, ms1_df, ms2_df, ms2_hits_df = experimental_data_to_dataframes(exp_data)
-    return exp_data, mc_df, ms1_df, ms2_df, ms2_hits_df
-
-
 def load_and_filter_gui_inputs(
         analysis_gui_obj,
         override_parameters: dict = None
 ):
+    """
+    Load GUI inputs from database and optionally apply second-stage filtering.
+    
+    In the two-stage funnel architecture:
+    1. Auto-ID applies first-stage filters and saves to database
+    2. GUI can apply stricter second-stage filters via override_parameters
+    
+    If override_parameters are provided and differ from the original workflow_params,
+    a second round of filtering is applied to narrow the funnel further. This allows
+    analysts to iteratively refine their data based on visual inspection in the GUI.
+    
+    Second-stage filtering is applied in-memory only and does not modify the database.
+    To permanently save these stricter filters, the analyst should update the config
+    and run a new analysis with incremented analysis_number.
+    """
     _overrides = override_parameters or {}
-    remove_unidentified_compounds = (
-        _overrides["remove_unided_compounds"]
-        if _overrides.get("remove_unided_compounds") is not None
-        else analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)
-    )
+    
     apply_istd_to_ema = (
-        _overrides["apply_istd_to_ema"]
+        _overrides.get("apply_istd_to_ema")
         if _overrides.get("apply_istd_to_ema") is not None
         else analysis_gui_obj.workflow_params.get("apply_istd_to_ema", True)
     )
 
-    # Load ExperimentalData from DB, apply any override filters, and derive flat DFs.
-    # This also trims analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts in-memory.
-    exp_data, manual_curation_df, ms1_df, ms2_df, ms2_hits_df = apply_override_filter_to_post_autoid_atlas(
-        analysis_gui_obj, override_parameters,
-        remove_unidentified_compounds=remove_unidentified_compounds,
+    # Load pre-filtered data from database (first-stage filtering already applied)
+    exp_data = load_experimental_data_from_db(
+        project_db_path=analysis_gui_obj.paths["project_db_path"],
+        rt_alignment_number=analysis_gui_obj.rt_alignment_number,
+        analysis_number=analysis_gui_obj.analysis_number,
+        analysis_type=analysis_gui_obj.post_autoid_atlas_obj.analysis_type,
+        remove_unidentified_compounds=False,  # Already filtered during auto-ID
     )
+    
+    # Apply second-stage filtering if override parameters differ from workflow params
+    if override_parameters:
+        # Check if any override parameters actually differ
+        params_differ = False
+        override_values = {}
+        
+        for param in ["ms1_min_peak_intensity", "ms1_min_num_points", 
+                      "ms2_min_score", "ms2_min_matching_frags", "remove_unided_compounds"]:
+            override_val = _overrides.get(param)
+            workflow_val = analysis_gui_obj.workflow_params.get(param)
+            if override_val is not None and override_val != workflow_val:
+                params_differ = True
+                override_values[param] = override_val
+        
+        if params_differ:
+            logger.info(
+                "Override parameters differ from saved workflow parameters. "
+                "Applying second-stage filtering (in-memory only). "
+                f"Modified parameters: {override_values}"
+            )
+            
+            # Apply second-stage filter with override parameters
+            exp_data, n_removed = filter_experimental_data(
+                exp_data,
+                ms1_min_pts=_overrides.get("ms1_min_num_points", 
+                                          analysis_gui_obj.workflow_params.get("ms1_min_num_points")),
+                ms1_min_int=_overrides.get("ms1_min_peak_intensity",
+                                          analysis_gui_obj.workflow_params.get("ms1_min_peak_intensity")),
+                ms2_min_score=_overrides.get("ms2_min_score",
+                                            analysis_gui_obj.workflow_params.get("ms2_min_score")),
+                ms2_min_frags=_overrides.get("ms2_min_matching_frags",
+                                            analysis_gui_obj.workflow_params.get("ms2_min_matching_frags")),
+                remove_unided=_overrides.get("remove_unided_compounds",
+                                            analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)),
+            )
+            
+            if n_removed > 0:
+                logger.info(
+                    f"Second-stage filtering removed {n_removed} additional compound(s). "
+                    f"GUI will display {len(exp_data.manual_curation)} compounds."
+                )
+            
+            # Trim the atlas to match the filtered data
+            surviving_pairs = {(mc.inchi_key, mc.adduct) for mc in exp_data.manual_curation}
+            keys_to_remove = [
+                k for k, cmzrt in analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.items()
+                if (cmzrt.inchi_key, cmzrt.adduct) not in surviving_pairs
+            ]
+            for k in keys_to_remove:
+                del analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts[k]
+            
+            if keys_to_remove:
+                logger.info(
+                    f"Trimmed post-auto-ID atlas to {len(analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts)} compounds "
+                    f"({len(keys_to_remove)} removed by second-stage filtering)."
+                )
+    
+    # Convert to flat DataFrames for GUI
+    manual_curation_df, ms1_df, ms2_df, ms2_hits_df = experimental_data_to_dataframes(exp_data)
 
     if analysis_gui_obj.post_autoid_atlas_obj.analysis_type == "EMA":
         if apply_istd_to_ema:
@@ -2408,12 +2379,14 @@ def filter_experimental_data(
 ) -> tuple:
     """Filter an ExperimentalData object by quality thresholds and return a filtered copy.
 
-    This is the single consolidated filter function used by both the AutoID atlas
-    creation step (:func:`create_new_atlas_after_auto_id`) and the Analysis GUI
-    loading step (:func:`apply_override_filter_to_post_autoid_atlas`).  Both
-    previously maintained separate, parallel implementations; this function
-    replaces them.
-
+    This is the core filtering function used in the two-stage funnel architecture:
+    
+    - **Stage 1 (Auto-ID)**: Called by :func:`apply_auto_id_filters` to permanently
+      filter data before saving to the database.
+    
+    - **Stage 2 (GUI)**: Called by :func:`load_and_filter_gui_inputs` to apply
+      optional stricter thresholds via override_parameters for in-memory filtering.
+    
     A compound is *removed* when any of the following conditions holds:
 
     * ``remove_unided`` is True and the compound's ``auto_ided`` flag is False.
@@ -2443,18 +2416,29 @@ def filter_experimental_data(
 
     # ── Step 1: passing pairs by MS2 thresholds ─────────────────────────────
     passing_ms2: Optional[set] = None
-    if ms2_min_score is not None or ms2_min_frags is not None:
+    # Only enforce MS2 filtering if thresholds are meaningful (> 0).
+    # A threshold of 0 means "no filtering", not "filter with threshold of 0".
+    ms2_score_active = ms2_min_score is not None and ms2_min_score > 0
+    ms2_frags_active = ms2_min_frags is not None and ms2_min_frags > 0
+    
+    if ms2_score_active or ms2_frags_active:
         passing_ms2 = set()
+        n_ms2_hit_objs = len(exp_data.ms2_hits)
         for hit_obj in exp_data.ms2_hits:
             hits = hit_obj.data
             if hits is None or hits.empty:
                 continue
-            if ms2_min_score is not None and "score" in hits.columns:
+            if ms2_score_active and "score" in hits.columns:
                 hits = hits[hits["score"] >= ms2_min_score]
-            if ms2_min_frags is not None and "num_matches" in hits.columns:
+            if ms2_frags_active and "num_matches" in hits.columns:
                 hits = hits[hits["num_matches"] >= ms2_min_frags]
             if not hits.empty:
                 passing_ms2.add((hit_obj.inchi_key, hit_obj.adduct))
+        logger.info(
+            f"MS2 filtering: {len(passing_ms2)} compounds passed thresholds "
+            f"(ms2_min_score={ms2_min_score}, ms2_min_frags={ms2_min_frags}) "
+            f"out of {n_ms2_hit_objs} compounds with MS2 hits"
+        )
 
     # ── Step 2: passing pairs by MS1 thresholds ──────────────────────────────
     passing_ms1: Optional[set] = None
@@ -2492,33 +2476,68 @@ def filter_experimental_data(
 
         all_pairs = {(mc.inchi_key, mc.adduct) for mc in exp_data.manual_curation}
         passing_ms1 = set()
+        ms1_failure_details = {}
         for pair in all_pairs:
-            if ms1_min_pts is not None and max_pts.get(pair, 0) < ms1_min_pts:
-                continue
+            failure_reasons = []
+            if ms1_min_pts is not None:
+                actual_pts = max_pts.get(pair, 0)
+                if actual_pts < ms1_min_pts:
+                    failure_reasons.append(f"num_points={actual_pts} < {ms1_min_pts}")
             if ms1_min_int is not None:
                 eff_int = mc_best_int.get(pair, fallback_int.get(pair, 0.0))
                 if eff_int < ms1_min_int:
-                    continue
-            passing_ms1.add(pair)
+                    failure_reasons.append(f"intensity={eff_int:.1f} < {ms1_min_int:.1f}")
+            if failure_reasons:
+                ms1_failure_details[pair] = "; ".join(failure_reasons)
+            else:
+                passing_ms1.add(pair)
 
     # ── Step 3: filter ManualCuration list ───────────────────────────────────
     n_total = len(exp_data.manual_curation)
     kept_pairs: set = set()
     new_mc = []
+    removed_by_unided = 0
+    removed_by_flagged = 0
+    removed_by_ms1 = 0
+    removed_by_ms2 = 0
+    removed_compounds_details = []
     for mc in exp_data.manual_curation:
         pair = (mc.inchi_key, mc.adduct)
         row0 = mc.data.iloc[0]
+        compound_name = row0.get("compound_name", "unknown")
         if remove_unided and not bool(row0.get("auto_ided", True)):
+            removed_by_unided += 1
+            removed_compounds_details.append(f"{compound_name} ({mc.inchi_key}/{mc.adduct}): not auto-identified")
             continue
         if remove_flagged and "remove" in str(row0.get("ms1_notes", "")).strip().lower():
+            removed_by_flagged += 1
+            removed_compounds_details.append(f"{compound_name} ({mc.inchi_key}/{mc.adduct}): flagged for removal")
             continue
         if passing_ms1 is not None and pair not in passing_ms1:
+            removed_by_ms1 += 1
+            reason = ms1_failure_details.get(pair, "unknown MS1 reason")
+            removed_compounds_details.append(f"{compound_name} ({mc.inchi_key}/{mc.adduct}): failed MS1 - {reason}")
             continue
         if passing_ms2 is not None and pair not in passing_ms2:
+            removed_by_ms2 += 1
+            removed_compounds_details.append(f"{compound_name} ({mc.inchi_key}/{mc.adduct}): failed MS2 thresholds")
             continue
         new_mc.append(mc)
         kept_pairs.add(pair)
     n_removed = n_total - len(new_mc)
+    
+    # Log filtering breakdown
+    if n_removed > 0:
+        logger.info(
+            f"Filtering breakdown: {n_removed} total removed - "
+            f"unidentified: {removed_by_unided}, "
+            f"flagged: {removed_by_flagged}, "
+            f"MS1 thresholds: {removed_by_ms1}, "
+            f"MS2 thresholds: {removed_by_ms2}"
+        )
+        # Log details of each removed compound
+        for detail in removed_compounds_details:
+            logger.info(f"  Removed: {detail}")
 
     # ── Step 4: propagate to other lists ─────────────────────────────────────
     new_ms1 = [obj for obj in exp_data.ms1_data if (obj.inchi_key, obj.adduct) in kept_pairs]
@@ -2527,13 +2546,14 @@ def filter_experimental_data(
     for hit_obj in exp_data.ms2_hits:
         if (hit_obj.inchi_key, hit_obj.adduct) not in kept_pairs:
             continue
-        if ms2_min_score is not None or ms2_min_frags is not None:
+        # Only filter individual hit rows if thresholds are meaningful (> 0)
+        if ms2_score_active or ms2_frags_active:
             hits = hit_obj.data.copy()
             if hits.empty:
                 continue
-            if ms2_min_score is not None and "score" in hits.columns:
+            if ms2_score_active and "score" in hits.columns:
                 hits = hits[hits["score"] >= ms2_min_score]
-            if ms2_min_frags is not None and "num_matches" in hits.columns:
+            if ms2_frags_active and "num_matches" in hits.columns:
                 hits = hits[hits["num_matches"] >= ms2_min_frags]
             hits = hits.reset_index(drop=True)
             if not hits.empty:
@@ -2589,18 +2609,104 @@ def experimental_data_to_dataframes(
     return mc_df, ms1_df, ms2_df, ms2_hits_df
 
 
+def apply_auto_id_filters(
+    auto_id_obj: "AutoIdentification"
+) -> "ExperimentalData":
+    """
+    Apply first-stage quality filters to ExperimentalData before saving to database.
+    
+    This is the first stage in the two-stage funnel architecture:
+    
+    Stage 1 (Auto-ID): Applies configured quality thresholds and permanently saves
+                       filtered data to the database.
+    
+    Stage 2 (GUI): Optionally applies stricter thresholds via override_parameters
+                   for in-memory filtering during interactive analysis.
+    
+    Only data that passes Stage 1 filters is persisted to the database. Stage 2
+    filtering (if used) is non-destructive and can be adjusted interactively in
+    the GUI without requiring a new analysis run. To permanently apply stricter
+    filters, update the config and increment analysis_number for a new Stage 1 run.
+    
+    Parameters
+    ----------
+    auto_id_obj : AutoIdentification
+        The AutoIdentification object containing experimental_data to filter
+        and workflow_params with filter thresholds.
+    
+    Returns
+    -------
+    ExperimentalData
+        The filtered ExperimentalData object containing only compounds that
+        passed all Stage 1 quality thresholds. This is what will be saved to
+        the database.
+    """
+    source_atlas = auto_id_obj.pre_autoid_atlas_obj
+    
+    ms2_min_score = auto_id_obj.workflow_params.get('ms2_min_score')
+    ms2_min_frags = auto_id_obj.workflow_params.get('ms2_min_matching_frags')
+    ms1_min_pts   = auto_id_obj.workflow_params.get('ms1_min_num_points')
+    ms1_min_int   = auto_id_obj.workflow_params.get('ms1_min_peak_intensity')
+    remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', True)
+
+    # Log filtering parameters for debugging
+    logger.info(
+        f"Applying quality filters for {source_atlas.analysis_type}: "
+        f"ms2_min_score={ms2_min_score}, ms2_min_frags={ms2_min_frags}, "
+        f"ms1_min_pts={ms1_min_pts}, ms1_min_int={ms1_min_int}, "
+        f"remove_unided={remove_unided}"
+    )
+    
+    # Warn if MS2 filtering is disabled for non-QC/non-ISTD analyses
+    if source_atlas.analysis_type not in ["QC", "ISTD"]:
+        if ms2_min_score is None or ms2_min_score == 0:
+            logger.warning(
+                f"MS2 score filtering is disabled for {source_atlas.analysis_type} analysis "
+                f"(ms2_min_score={ms2_min_score}). Compounds without MS2 hits will NOT be filtered out."
+            )
+        if ms2_min_frags is None or ms2_min_frags == 0:
+            logger.warning(
+                f"MS2 fragment filtering is disabled for {source_atlas.analysis_type} analysis "
+                f"(ms2_min_frags={ms2_min_frags}). Compounds without sufficient MS2 fragments will NOT be filtered out."
+            )
+
+    filtered_exp, n_removed = filter_experimental_data(
+        auto_id_obj.experimental_data,
+        ms1_min_pts=ms1_min_pts,
+        ms1_min_int=ms1_min_int,
+        ms2_min_score=ms2_min_score,
+        ms2_min_frags=ms2_min_frags,
+        remove_unided=remove_unided,
+    )
+    
+    if n_removed > 0:
+        logger.info(
+            f"Quality filters removed {n_removed} compound(s). "
+            f"Only {len(filtered_exp.manual_curation)} compounds will be saved to database."
+        )
+    else:
+        logger.info(
+            f"All {len(filtered_exp.manual_curation)} compounds passed quality filters."
+        )
+    
+    return filtered_exp
+
+
 def create_new_atlas_after_manual_curation(
     summary_obj: "AnalysisSummary",
 ) -> "Atlas":
     """
-    Create a new Atlas object after manual curation
+    Create a new Atlas object after manual curation.
+    
+    In the funnel architecture, this works with data that has already been
+    filtered during auto-ID and saved to the database. It applies manual
+    curation updates (RT adjustments, removal of flagged compounds) and
+    creates a new curated atlas.
     """
     prov = get_provenance()
     source_atlas = summary_obj.post_autoid_atlas_obj
 
-    # Scope the curation query to the in-memory atlas compound_mzrts.
-    # This reflects any override-filter trimming already applied to the atlas
-    # without re-reading from the DB (which would return the unfiltered atlas).
+    # Load curation entries from database for compounds in the post-auto-ID atlas
     atlas_compounds = pd.DataFrame([
         {"inchi_key": cmzrt.inchi_key, "adduct": cmzrt.adduct}
         for cmzrt in source_atlas.compound_mzrts.values()
@@ -2698,34 +2804,15 @@ def create_new_atlas_after_auto_id(
     """
     Create a new atlas after auto-identification.
 
-    Filtering is now delegated to :func:`filter_experimental_data` — the same
-    function used by the Analysis GUI loading step — so both stages share a
-    single, consistent implementation.
+    In the funnel architecture, filtering has already been applied to
+    auto_id_obj.experimental_data before saving to the database. This function
+    simply creates the new Atlas object from the already-filtered data.
     """
     prov = get_provenance()
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
-
-    ms2_min_score = auto_id_obj.workflow_params.get('ms2_min_score')
-    ms2_min_frags = auto_id_obj.workflow_params.get('ms2_min_matching_frags')
-    ms1_min_pts   = auto_id_obj.workflow_params.get('ms1_min_num_points')
-    ms1_min_int   = auto_id_obj.workflow_params.get('ms1_min_peak_intensity')
-    remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', True)
-
-    filtered_exp, n_removed = filter_experimental_data(
-        auto_id_obj.experimental_data,
-        ms1_min_pts=ms1_min_pts,
-        ms1_min_int=ms1_min_int,
-        ms2_min_score=ms2_min_score,
-        ms2_min_frags=ms2_min_frags,
-        remove_unided=remove_unided,
-    )
-    if n_removed > 0:
-        logger.info(
-            f"filter_experimental_data removed {n_removed} compound(s) from the "
-            "pre-auto-ID atlas during post-auto-ID atlas creation."
-        )
-
-    survived_pairs = {(mc.inchi_key, mc.adduct) for mc in filtered_exp.manual_curation}
+    
+    # experimental_data has already been filtered by apply_auto_id_filters()
+    survived_pairs = {(mc.inchi_key, mc.adduct) for mc in auto_id_obj.experimental_data.manual_curation}
 
     # Deep-copy every surviving CompoundMZRT into the new atlas
     new_compound_mzrts = {}

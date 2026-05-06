@@ -150,7 +150,7 @@ def _find_hits_from_ms2_df(
     workflow_params: Dict[str, Any]
 ) -> pd.DataFrame:
     """
-    Find reference hits for all MS2 scans in a DataFrame using batch cosine scoring.
+    Find reference hits for all MS2 scans in a DataFrame using cosine scoring.
 
     Args:
         ms2_df: MS2 data DataFrame with columns: rt, mz, i, precursor_MZ, precursor_intensity
@@ -171,13 +171,12 @@ def _find_hits_from_ms2_df(
     frag_mz_tolerance = workflow_params.get('ms2_frag_mz_tolerance', 0.05)
     min_score = workflow_params.get('ms2_min_score', 0.01)
     min_frags = workflow_params.get('ms2_min_matching_frags', 1)
+    max_ppm_error = workflow_params.get('ppm_error')
 
-    # progress_bar=False suppresses the per-call "Calculating similarities:" tqdm bars
     cos = CosineHungarian(tolerance=frag_mz_tolerance)
 
-    # Build one query Spectrum per RT group
-    query_spectra = []
-    query_meta = []  # (rt, precursor_mz, precursor_intensity, frag_mz, frag_int)
+    # Build one query Spectrum per RT group, with the actual measured precursor_mz
+    query_meta = []  # (rt, precursor_mz, precursor_intensity, frag_mz, frag_int, Spectrum)
 
     for rt_val, rt_group in ms2_df.groupby('rt', sort=False):
         frag_mz = rt_group['mz'].values.astype(np.float32)
@@ -188,43 +187,44 @@ def _find_hits_from_ms2_df(
         qry = Spectrum(
             mz=frag_mz,
             intensities=frag_int,
-            metadata={'precursor_mz': np.nan}
+            metadata={'precursor_mz': precursor_mz}
         )
-        query_spectra.append(qry)
-        query_meta.append((rt_val, precursor_mz, precursor_int, frag_mz, frag_int))
+        query_meta.append((rt_val, precursor_mz, precursor_int, frag_mz, frag_int, qry))
 
-    if not query_spectra:
+    if not query_meta:
         return pd.DataFrame()
-
-    # Batch score: shape (n_queries, n_refs)
-    with _suppress_tqdm():
-        scores_matrix = cos.matrix(query_spectra, ref_spectra, array_type='numpy', is_symmetric=False)
-    score_values = scores_matrix['score'] if scores_matrix.dtype.names else scores_matrix
 
     all_hits = []
 
-    for q_idx, (rt_val, precursor_mz, precursor_int, frag_mz, frag_int) in enumerate(query_meta):
-        row_scores = score_values[q_idx]
-
-        # Apply score threshold before any alignment work
-        passing = np.where(row_scores >= min_score)[0]
-        if len(passing) == 0:
-            continue
-
-        for r_idx in passing:
-            score = float(row_scores[r_idx])
-            ref = ref_spectra[r_idx]
+    for rt_val, precursor_mz, precursor_int, frag_mz, frag_int, qry in query_meta:
+        for ref in ref_spectra:
             ref_mz = ref.mz
             ref_int = ref.intensities
             precursor_mz_ref = ref.get('precursor_mz', 0.0) or 0.0
 
-            # Alignment only for hits that pass score threshold
+            # Compute PPM error and apply precursor MZ tolerance filter
+            if precursor_mz_ref != 0:
+                ppm_error = ((precursor_mz - precursor_mz_ref) / precursor_mz_ref) * 1e6
+            else:
+                ppm_error = np.nan
+            if max_ppm_error is not None and (np.isnan(ppm_error) or abs(ppm_error) > max_ppm_error):
+                continue
+
+            # Score using pair(ref, query) — returns structured array with 'score' and 'matches'
+            with _suppress_tqdm():
+                result = cos.pair(ref, qry)
+            score = float(result['score'])
+            num_matches = int(result['matches'])
+
+            if score < min_score:
+                continue
+            if num_matches < min_frags:
+                continue
+
+            # Alignment for plotting only (not used for score/match counting)
             qry_arr = np.array([frag_mz, frag_int])
             ref_arr = np.array([ref_mz, ref_int])
             alignment_data = _align_spectra_for_plotting(qry_arr, ref_arr, frag_mz_tolerance)
-
-            if len(alignment_data.get('matched_fragments', [])) < min_frags:
-                continue
 
             all_hits.append({
                 'inchi_key': inchi_key,
@@ -232,11 +232,10 @@ def _find_hits_from_ms2_df(
                 'ref_id': ref.get('id', ''),
                 'ref_name': ref.get('name', 'Unknown'),
                 'score': score,
-                'num_matches': len(alignment_data['matched_fragments']),
+                'num_matches': num_matches,
                 'mz_theoretical': float(precursor_mz_ref),
                 'mz_measured': float(precursor_mz),
-                'ppm_error': ((precursor_mz - precursor_mz_ref) / precursor_mz_ref) * 1e6
-                             if precursor_mz_ref != 0 else np.nan,
+                'ppm_error': ppm_error,
                 'rt': float(rt_val),
                 'qry_intensity_peak': float(precursor_int),
                 'ref_frags': len(ref_mz),

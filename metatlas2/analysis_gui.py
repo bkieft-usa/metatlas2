@@ -1,6 +1,7 @@
 import functools, json, os, time, uuid, threading
 import numpy as np, pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import dash
 from dash import dcc, html, ctx, Input, Output, State
 import dash_bootstrap_components as dbc
@@ -204,28 +205,19 @@ def build_dash_app(
         return _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4))
 
     def _find_starting_compound_idx():
-        """Find the next compound to curate after the last curated one.
+        """Find the first compound with no ms2_notes set.
         
-        Finds compounds where ms2_notes has an actual value (not NaN and not empty string),
-        then starts at the next compound after the latest-eluting curated one. This allows
-        analysts to resume where they left off.
-        
-        Returns the index (0-based position in the dataframe) of the next compound to curate.
-        Falls back to 0 if no compounds have been curated yet.
+        Looks for compounds where ms2_notes is blank (empty string or NaN) and returns next index to start
         """
 
-        curated_mask = manual_curation_df["ms2_notes"].notna() & (manual_curation_df["ms2_notes"] != "")
-        curated_compounds = manual_curation_df[curated_mask]
-        
-        if len(curated_compounds) == 0:
+        blank_mask = manual_curation_df["ms2_notes"].isna() | (manual_curation_df["ms2_notes"] == "")
+        blank_positions = manual_curation_df.index[blank_mask]
+
+        if len(blank_positions) == 0:
             return 0
-        
-        # Find the compound with the highest atlas_rt_peak among curated ones
-        latest_eluting_idx = curated_compounds["atlas_rt_peak"].idxmax()
-        position = manual_curation_df.index.get_loc(latest_eluting_idx)
-        next_position = (position + 1) % len(manual_curation_df)
-        
-        return next_position
+
+        first_blank_idx = blank_positions[0]
+        return manual_curation_df.index.get_loc(first_blank_idx)
 
     starting_compound_idx = _find_starting_compound_idx()
     if starting_compound_idx > 0:
@@ -473,10 +465,10 @@ def build_dash_app(
         return sorted(bounds, key=lambda x: x[0])
 
     def _get_ms2_scans(inchi_key, adduct, rt_min=None, rt_max=None):
-        """Return the sorted, capped scans DataFrame for a compound/rt window.
+        """Return dictionary of sorted, capped scans DataFrames grouped by collision energy.
 
-        Results are cached by (inchi_key, adduct, score_cutoff, top_n_hits, rt_min, rt_max)
-        so both _count_ms2_scans and _make_ms2_figure share the same computation.
+        Returns a dict: {collision_energy: DataFrame} with top N hits from each collision energy.
+        Results are cached by (inchi_key, adduct, top_n_hits, rt_min, rt_max).
         """
         key = (inchi_key, adduct, int(top_n_hits),
                round(rt_min, 4) if rt_min is not None else None,
@@ -495,22 +487,30 @@ def build_dash_app(
         if rt_min is not None and rt_max is not None:
             hits_sub = hits_sub[(hits_sub["rt"] >= rt_min) & (hits_sub["rt"] <= rt_max)]
 
+        # Group by collision energy and get top N from each
+        scans_by_energy = {}
         if ms2_sub.empty:
-            scans = pd.DataFrame()
+            pass  # Return empty dict
         elif hits_sub.empty:
-            scans = ms2_sub.sort_values("rt").head(top_n_hits)
+            # No hits - group by collision energy and sort by RT
+            for ce, group in ms2_sub.groupby("collision_energy"):
+                scans_by_energy[ce] = group.sort_values("rt").head(top_n_hits)
         else:
+            # Merge with hits and group by collision energy
             merged = pd.merge(ms2_sub, hits_sub, on=["inchi_key", "adduct", "file_path", "rt"], how="left")
             merged["score"] = merged["score"].fillna(0)
-            scans = merged.sort_values(["score", "rt"], ascending=[False, True]).head(top_n_hits)
+            for ce, group in merged.groupby("collision_energy"):
+                scans_by_energy[ce] = group.sort_values(["score", "rt"], ascending=[False, True]).head(top_n_hits)
 
         with cache_lock:
             if key not in ms2_scans_cache:
-                ms2_scans_cache[key] = scans
+                ms2_scans_cache[key] = scans_by_energy
         return ms2_scans_cache[key]
 
     def _count_ms2_scans(row, rt_min=None, rt_max=None):
-        return len(_get_ms2_scans(row["inchi_key"], row["adduct"], rt_min, rt_max))
+        scans_by_energy = _get_ms2_scans(row["inchi_key"], row["adduct"], rt_min, rt_max)
+        # Return max count across all collision energies for navigation
+        return max((len(df) for df in scans_by_energy.values()), default=0)
 
     def _clean_spectrum(val_arr, int_arr):
         out_i = [0 if (isinstance(i, float) and np.isnan(i)) else i for i in int_arr]
@@ -706,6 +706,13 @@ def build_dash_app(
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"Isomer detection failed with {exc}")
+        # find number of isomers in isomer_str and add line breaks every 3 isomers for readability
+        if isomer_str != "No Isomers Found":
+            isomer_list = isomer_str.split(" // ")
+            if len(isomer_list) > 3:
+                isomer_str = " // <br>".join(
+                    [" // ".join(isomer_list[i:i+3]) for i in range(0, len(isomer_list), 3)]
+                )
 
         # Now add MS1 data traces (they will appear on top of isomer rectangles)
         for fp in sub["file_path"].unique():
@@ -809,9 +816,9 @@ def build_dash_app(
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min, rt_max = state["rt_min"], state["rt_max"]
 
-        scans = _get_ms2_scans(inchi, adduct, rt_min, rt_max)
+        scans_by_energy = _get_ms2_scans(inchi, adduct, rt_min, rt_max)
 
-        if len(scans) == 0:
+        if len(scans_by_energy) == 0:
             fig = go.Figure()
             fig.add_annotation(text=f"{row['compound_name']} - No MS2 data",
                                xref="paper", yref="paper", x=0.5, y=0.5,
@@ -824,138 +831,220 @@ def build_dash_app(
             )
             return fig
 
-        bars = []
-        label_points = []
-        scale = 1.0
-        ms2_idx = max(0, min(state["ms2_idx"], len(scans) - 1))
-        scan = scans.iloc[ms2_idx]
-        qry = scan.get("qry_spectrum") if "qry_spectrum" in scan.index else None
-        ref = scan.get("ref_spectrum") if "ref_spectrum" in scan.index else None
-        num_ref_fragments = 0
-        num_matching_fragments = 0
-        if pd.notnull(qry) and pd.notnull(ref):
-            mz_q, int_q = _parse_spectrum_cached(scan["qry_spectrum"])
-            mz_r, int_r = _parse_spectrum_cached(scan["ref_spectrum"])
-
-            raw_colors = scan.get("aligned_fragment_colors") if "aligned_fragment_colors" in scan.index else None
-            if pd.notnull(raw_colors) and raw_colors:
-                frag_colors = json.loads(raw_colors)
-                if len(frag_colors) != len(mz_q):
-                    raise ValueError(f"color length mismatch: {len(frag_colors)} != {len(mz_q)}")
-                num_ref_fragments = len(mz_r)
-                num_matching_fragments = sum(1 for c in frag_colors if c == "green")
-
-            scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
-            ref_y = [-i * scale for i in int_r]
-
-            bars.append(go.Bar(
-                x=mz_q, y=int_q, marker_color=frag_colors, width=0.25,
-                showlegend=False,
-                hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Query</extra>"
-            ))
-            bars.append(go.Bar(
-                x=mz_r, y=ref_y, marker_color=frag_colors, width=0.25,
-                showlegend=False,
-                hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Reference</extra>"
-            ))
-
-            label_points.extend(zip(mz_q, int_q))
-            label_points.extend(zip(mz_r, ref_y))
-        else:
-            mz, ints = _parse_spectrum_cached(scan["raw_spectrum"])
-            bars.append(go.Bar(
-                x=mz, y=ints, marker_color="red", width=0.25,
-                showlegend=False,
-                hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>MS2</extra>"
-            ))
-            label_points.extend(zip(mz, ints))
-
-        fig = go.Figure(data=bars)
-        fig.add_hline(y=0, line=dict(color="black", width=1.5))
-
-        y_vals = [y for _, y in label_points] or [0]
-        y_min, y_max = min(y_vals), max(y_vals)
-        y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
-        label_pad = y_span * 0.01
-        y_pad = y_span * 0.01
-        TEXT_HEIGHT_OFFSET = y_span * 0.01  # vertical offset per stagger level
-
-        top_label_idxs = {
-            idx
-            for idx, _ in sorted(
-                enumerate(label_points),
-                key=lambda item: abs(item[1][1]),
-                reverse=True,
-            )[:5] # top 5 fragment peaks by intensity
-        }
-
-        # Sort top labels by x-position for overlap detection
-        top_labels_sorted = sorted(
-            [(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs],
-            key=lambda item: item[1]  # sort by mz_val
-        )
-
-        MIN_MZ_GAP = 5.0  # m/z units - labels closer than this are considered overlapping
-        prev_mz = None
-        stagger_level = 0
-
-        for idx, mz_val, y_val in top_labels_sorted:
-            # Determine base y position above the bar
-            y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
-            
-            # Check for horizontal overlap with previous label
-            if prev_mz is not None and abs(mz_val - prev_mz) < MIN_MZ_GAP:
-                stagger_level += 1
+        # Convert collision energy float to string format
+        def _format_ce(ce_float):
+            """Convert collision energy float to string format like CE102040."""
+            if abs(ce_float - 23.333) < 0.01:
+                return "CE102040"
+            elif abs(ce_float - 43.333) < 0.01:
+                return "CE205060"
             else:
-                stagger_level = 0
-            
-            # Apply stagger offset
-            y_position = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
-            
-            fig.add_annotation(
-                x=mz_val,
-                y=y_position,
-                text=f"{mz_val:.4f}",
-                showarrow=False,
-                xanchor="center",
-                yanchor="bottom" if y_val >= 0 else "top",
-                font=dict(size=12, color="black"),
-                textangle=0,
-            )
-            prev_mz = mz_val
+                # Fallback: round to nearest integer
+                return f"CE{int(round(ce_float))}"
 
-        fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
-        ms2_title_text = (
-            f"<span style='font-size:1.2em'>"
-            f"<b>Score: {scan.get('score', 0):.4f}</b>  |  "
-            f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
-            f"RT: {scan.get('rt', 0):.4f} min | "
-            f"Prec. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
-            f"Ref. m/z: {scan.get('mz_theoretical', 0):.4f}  |  "
-            f"ppm Δ: {scan.get('ppm_error', 0):.2f}"
-            f"</span><br>"
-            f"{fname}<br><br>"
+        # Sort collision energies for consistent ordering
+        collision_energies = sorted(scans_by_energy.keys())
+        n_energies = len(collision_energies)
+        
+        # Create subplots (side by side) without titles (will add to x-axis instead)
+        fig = make_subplots(
+            rows=1, cols=n_energies,
+            horizontal_spacing=0.08
         )
-        fig.update_layout(
-            title=dict(text=ms2_title_text, x=0.5, xanchor="center", font=dict(size=18)),
-            xaxis_title="m/z",
-            yaxis_title=f"Intensity (Ref scaled x{scale:.2f})",
-            barmode="overlay", hovermode="closest",
-            margin=dict(l=50, r=20, t=80, b=40),
-            plot_bgcolor="white",
-            xaxis=dict(
+
+        ms2_idx = state["ms2_idx"]
+
+        # Process each collision energy subplot
+        for col_idx, ce in enumerate(collision_energies, start=1):
+            scans = scans_by_energy[ce]
+            
+            if len(scans) == 0:
+                # Plotly uses "x", "y" for first subplot, "x2", "y2", etc. for others
+                xref_coord = "x" if col_idx == 1 else f"x{col_idx}"
+                yref_coord = "y" if col_idx == 1 else f"y{col_idx}"
+                fig.add_annotation(
+                    text="No scans",
+                    xref=xref_coord, yref=yref_coord,
+                    x=0.5, y=0.5,
+                    showarrow=False,
+                    font=dict(size=12),
+                    row=1, col=col_idx
+                )
+                continue
+
+            # Clamp index to available scans
+            scan_idx = max(0, min(ms2_idx, len(scans) - 1))
+            scan = scans.iloc[scan_idx]
+
+            bars = []
+            label_points = []
+            scale = 1.0
+            
+            qry = scan.get("qry_spectrum") if "qry_spectrum" in scan.index else None
+            ref = scan.get("ref_spectrum") if "ref_spectrum" in scan.index else None
+            num_ref_fragments = 0
+            num_matching_fragments = 0
+            
+            if pd.notnull(qry) and pd.notnull(ref):
+                mz_q, int_q = _parse_spectrum_cached(scan["qry_spectrum"])
+                mz_r, int_r = _parse_spectrum_cached(scan["ref_spectrum"])
+                bar_width = (max(mz_q) - min(mz_q)) / 250
+                scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
+                ref_y = [-i * scale for i in int_r]
+
+                raw_colors = scan.get("aligned_fragment_colors") if "aligned_fragment_colors" in scan.index else None
+                frag_colors = None
+                if pd.notnull(raw_colors) and raw_colors:
+                    frag_colors = json.loads(raw_colors)
+                    if len(frag_colors) != len(mz_q):
+                        raise ValueError(f"color length mismatch: {len(frag_colors)} != {len(mz_q)}")
+                    num_ref_fragments = len(mz_r)
+                    num_matching_fragments = sum(1 for c in frag_colors if c == "green")
+
+                fig.add_trace(go.Bar(
+                    x=mz_q, y=int_q, marker_color=frag_colors, width=bar_width,
+                    showlegend=False,
+                    hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Query</extra>"
+                ), row=1, col=col_idx)
+                
+                fig.add_trace(go.Bar(
+                    x=mz_r, y=ref_y, marker_color=frag_colors, width=bar_width,
+                    showlegend=False,
+                    hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Reference</extra>"
+                ), row=1, col=col_idx)
+
+                label_points.extend(zip(mz_q, int_q))
+                label_points.extend(zip(mz_r, ref_y))
+            else:
+                mz, ints = _parse_spectrum_cached(scan["raw_spectrum"])
+                fig.add_trace(go.Bar(
+                    x=mz, y=ints, marker_color="red", width=bar_width,
+                    showlegend=False,
+                    hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>MS2</extra>"
+                ), row=1, col=col_idx)
+                label_points.extend(zip(mz, ints))
+
+            # Add horizontal line at y=0
+            fig.add_hline(y=0, line=dict(color="black", width=1.5), row=1, col=col_idx)
+
+            # Calculate y-axis range and label positions
+            y_vals = [y for _, y in label_points] or [0]
+            y_min, y_max = min(y_vals), max(y_vals)
+            y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
+            label_pad = y_span * 0.01
+            y_pad = y_span * 0.01
+            TEXT_HEIGHT_OFFSET = y_span * 0.01
+
+            # Find top 5 peaks by intensity
+            top_label_idxs = {
+                idx
+                for idx, _ in sorted(
+                    enumerate(label_points),
+                    key=lambda item: abs(item[1][1]),
+                    reverse=True,
+                )[:5]
+            }
+
+            # Sort top labels by x-position for overlap detection
+            top_labels_sorted = sorted(
+                [(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs],
+                key=lambda item: item[1]
+            )
+
+            MIN_MZ_GAP = 5.0
+            prev_mz = None
+            stagger_level = 0
+
+            for idx, mz_val, y_val in top_labels_sorted:
+                y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
+                
+                if prev_mz is not None and abs(mz_val - prev_mz) < MIN_MZ_GAP:
+                    stagger_level += 1
+                else:
+                    stagger_level = 0
+                
+                y_position = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
+                
+                # Plotly uses "x", "y" for first subplot, "x2", "y2", etc. for others
+                xref_coord = "x" if col_idx == 1 else f"x{col_idx}"
+                yref_coord = "y" if col_idx == 1 else f"y{col_idx}"
+                
+                fig.add_annotation(
+                    x=mz_val,
+                    y=y_position,
+                    text=f"{mz_val:.4f}",
+                    showarrow=False,
+                    xanchor="center",
+                    yanchor="bottom" if y_val >= 0 else "top",
+                    font=dict(size=10, color="black"),
+                    textangle=0,
+                    xref=xref_coord,
+                    yref=yref_coord,
+                    row=1, col=col_idx
+                )
+                prev_mz = mz_val
+
+            # Update axes for this subplot
+            xaxis_name = "xaxis" if col_idx == 1 else f"xaxis{col_idx}"
+            yaxis_name = "yaxis" if col_idx == 1 else f"yaxis{col_idx}"
+            
+            ce_label = _format_ce(ce)
+            fig.update_xaxes(
+                title_text=f"m/z ({ce_label})",
                 showgrid=False,
                 zeroline=False,
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
-            ),
-            yaxis=dict(
+                row=1, col=col_idx
+            )
+            fig.update_yaxes(
+                title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "",
                 showgrid=False,
                 zeroline=False,
                 range=[y_min - y_pad, y_max + y_pad],
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
-            ),
+                row=1, col=col_idx
+            )
+
+            # Add subtitle with scan info
+            fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
+            # Handle potential column name variations after merge
+            prec_mz = scan.get('precursor_MZ', scan.get('precursor_MZ_x', 0))
+            scan_info = (
+                f"<span style='font-size:1.2em'>"
+                f"<b>Score: {scan.get('score', 0):.4f}</b>  |  "
+                f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
+                f"RT: {scan.get('rt', 0):.4f} min | "
+                f"Exp. m/z: {prec_mz:.4f}  |  "
+                f"Ref. m/z: {scan.get('mz_theoretical', 0):.4f}  |  "
+                f"ppm Δ: {scan.get('ppm_error', 0):.2f}"
+                f"</span><br>"
+                f"{fname}<br><br>"
+            )
+            # Add as annotation below the subplot title
+            # Plotly uses "x domain" for first subplot, "x2 domain", "x3 domain" for others
+            xref_str = "x domain" if col_idx == 1 else f"x{col_idx} domain"
+            yref_str = "y domain" if col_idx == 1 else f"y{col_idx} domain"
+            fig.add_annotation(
+                text=scan_info,
+                xref=xref_str,
+                yref=yref_str,
+                x=0.5,
+                y=1.02,
+                showarrow=False,
+                font=dict(size=14),
+                xanchor="center",
+                yanchor="bottom",
+            )
+
+        # Overall layout
+        fig.update_layout(
+            barmode="overlay",
+            hovermode="closest",
+            margin=dict(l=50, r=20, t=120, b=40),
+            plot_bgcolor="white",
+            height=550,
         )
 
         return fig
@@ -1406,8 +1495,17 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         row = _compound_row(state["compound_idx"])
         comp_txt = f"Compound {state['compound_idx']+1} of {len(compound_options)}"
-        n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
-        ms2_txt = f"MS2 Scan {state['ms2_idx']+1} of {n_scans}" if n_scans else "No MS2 data"
+        
+        # Get scans by collision energy for detailed count
+        scans_by_energy = _get_ms2_scans(row["inchi_key"], row["adduct"], state["rt_min"], state["rt_max"])
+        if scans_by_energy:
+            ce_counts = {ce: len(df) for ce, df in scans_by_energy.items()}
+            max_scans = max(ce_counts.values())
+            ce_info = ", ".join([f"CE {ce}: {count}" for ce, count in sorted(ce_counts.items())])
+            ms2_txt = f"MS2 Scan {state['ms2_idx']+1} of {max_scans}"
+        else:
+            ms2_txt = "No MS2 data"
+        
         pending = html.Span(
             ["Unsaved (current): ", html.I(row["compound_name"]),
              f"  |  RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",

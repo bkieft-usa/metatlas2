@@ -50,6 +50,7 @@ def parse_args():
         p.add_argument("--skip-setup", action="store_true", default=False)
         p.add_argument("--skip-rt-align", action="store_true", default=False)
         p.add_argument("--skip-auto-id", action="store_true", default=False)
+        p.add_argument("--skip-curation", action="store_true", default=False)
         p.add_argument("--log-to-stdout", action="store_true", default=False, help="Write log output to stdout instead of a log file in the project directory")
 
     run_parser = subparsers.add_parser("run", help="Execute the pre-curation workflow directly")
@@ -88,6 +89,7 @@ def generate_slurm_script(args, paths) -> str:
     if args.skip_setup: extra_flags.append("--skip-setup")
     if args.skip_rt_align: extra_flags.append("--skip-rt-align")
     if args.skip_auto_id: extra_flags.append("--skip-auto-id")
+    if args.skip_curation: extra_flags.append("--skip-curation")
     if args.log_to_stdout: extra_flags.append("--log-to-stdout")
     if args.analysis_subset: extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
     extra_flags_str = " \\\n ".join(extra_flags)
@@ -147,7 +149,12 @@ def set_up_paths(
         }
 
     owner = config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
-    project_output_dir = Path(project_output_path) / f"{owner}" / project_name
+    user = os.environ.get("USER", None)
+    if owner is None:
+        raise ValueError("Owner not specified in config under WORKFLOWS.PATHS.owner")
+    if user is None:
+        raise ValueError("USER environment variable is not set")
+    project_output_dir = Path(project_output_path) / owner / user / project_name
     try:
         project_short = str(project_name.split("_")[4]) + "_RTA" + str(rt_alignment_number) + "_TGA" + str(analysis_number)
     except Exception as e:
@@ -261,6 +268,20 @@ def main():
             config_path=os.path.abspath(args.config),
             image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
         )
+
+    ### NOT WORKING YET
+    if args.skip_curation:
+        logger.info("Skipping curation step is not implemented yet.")
+    #     if not args.log_to_stdout and args.command == "run": print("========- Skipping curation step and running summary...")
+    #     logger.info("Skipping curation GUI and running summary.")
+
+    #     wfs.run_analysis_summary(
+    #         config_path=os.path.abspath(args.config),
+    #         project_name=args.project,
+    #         rt_alignment_number=args.rt_align_num,
+    #         analysis_number=args.analysis_num,
+    #         post_autoid_atlas=paths["auto_ided_atlases_store_file"],
+    #     )
 
     if not args.log_to_stdout and args.command == "run": print("========= Pre-curation workflow complete!")
     logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")

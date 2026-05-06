@@ -197,23 +197,20 @@ def _extract_ms1_from_parquet(
     """
     mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 20.0))
     rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 1.0))
-    minimum_intensity = workflow_params.get("ms1_min_peak_intensity", 0)
-    min_points = workflow_params.get("ms1_min_num_points", 1)
     
-    # Read parquet with m/z filter (uses sorted index efficiently)
+    # Read parquet with m/z and RT filters only
+    # DO NOT filter by intensity or min_points here - let the funnel architecture
+    # handle quality filtering after all data is loaded. Filtering during extraction
+    # can cause data loss and inconsistencies with other extraction methods.
     df = pq.read_table(
         parquet_file,
         filters=[
             ('mz', '>=', mz_min),
             ('mz', '<=', mz_max),
             ('rt', '>=', rt_min),
-            ('rt', '<=', rt_max),
-            ('i', '>=', minimum_intensity)
+            ('rt', '<=', rt_max)
         ]
     ).to_pandas()
-    
-    if len(df) < min_points:
-        return pd.DataFrame(columns=['rt', 'mz', 'i'])
 
     if not df.empty:
         return df[['rt', 'mz', 'i']]
