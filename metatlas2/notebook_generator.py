@@ -71,7 +71,11 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
         "ms2_min_matching_frags",
         "gui_lcmsruns_colors",
         "gui_require_all_evaluated",
+        "gui_top_n_hits",
         "note_options_overrides",
+        "remove_unided_compounds",
+        "remove_flagged_compounds",
+        "apply_istd_to_ema",
         "upload_to_gdrive",
         "skip_outputs",
     ]
@@ -129,7 +133,7 @@ def _make_gui_cell() -> nbformat.NotebookNode:
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
+        "    post_autoid_atlas=ANALYSIS_ATLAS,\n" \
         "    override_parameters=OVERRIDE_PARAMS\n" \
         ")"
     )
@@ -144,7 +148,7 @@ def _make_summary_cell() -> nbformat.NotebookNode:
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    pre_curation_atlas=ANALYSIS_ATLAS,\n"
+        "    post_autoid_atlas=ANALYSIS_ATLAS,\n"
         "    override_parameters=OVERRIDE_PARAMS,\n"
         "    overwrite=False\n"
         ")"

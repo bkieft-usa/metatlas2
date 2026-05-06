@@ -291,7 +291,7 @@ def run_analysis_gui(
     config_path: str,
     rt_alignment_number: int = None,
     analysis_number: int = None,
-    pre_curation_atlas: str = None,
+    post_autoid_atlas: str = None,
     override_parameters: Dict[str, Any] = None,
     dash_app_port: int = 8050,
 ) -> "CurationApp":
@@ -311,14 +311,14 @@ def run_analysis_gui(
         analysis_number=analysis_number,
     )
 
-    analysis_gui_obj.pre_curation_atlas_obj = Atlas.from_database(
+    analysis_gui_obj.post_autoid_atlas_obj = Atlas.from_database(
         database_path=analysis_gui_obj.paths['project_db_path'],
-        atlas_uid=pre_curation_atlas,
+        atlas_uid=post_autoid_atlas,
         main_db_path=analysis_gui_obj.paths['main_db_path']
     )
 
     logger.info("Loading workflow parameters for analysis GUI from config...")
-    analysis_gui_obj.workflow_params = analysis_gui_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][analysis_gui_obj.pre_curation_atlas_obj.chromatography][analysis_gui_obj.pre_curation_atlas_obj.polarity][analysis_gui_obj.pre_curation_atlas_obj.analysis_type]['PARAMS']
+    analysis_gui_obj.workflow_params = analysis_gui_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][analysis_gui_obj.post_autoid_atlas_obj.chromatography][analysis_gui_obj.post_autoid_atlas_obj.polarity][analysis_gui_obj.post_autoid_atlas_obj.analysis_type]['PARAMS']
 
     logger.info("Loading and filtering GUI inputs...")
     dbi.load_and_filter_gui_inputs(
@@ -354,7 +354,7 @@ def run_analysis_summary(
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
-    pre_curation_atlas: str = None,
+    post_autoid_atlas: str = None,
     override_parameters: Dict[str, Any] = None,
     overwrite: bool = False,
 ) -> None:
@@ -377,17 +377,20 @@ def run_analysis_summary(
         analysis_number=analysis_number,
     )
 
-    summary_obj.pre_curation_atlas_obj = Atlas.from_database(
+    summary_obj.post_autoid_atlas_obj = Atlas.from_database(
         database_path=summary_obj.paths['project_db_path'],
-        atlas_uid=pre_curation_atlas,
+        atlas_uid=post_autoid_atlas,
         main_db_path=summary_obj.paths['main_db_path']
     )
 
     logger.info(f"Loading workflow parameters for analysis summary from config...")
-    summary_obj.workflow_params = summary_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][summary_obj.pre_curation_atlas_obj.chromatography][summary_obj.pre_curation_atlas_obj.polarity][summary_obj.pre_curation_atlas_obj.analysis_type]['PARAMS']
+    summary_obj.workflow_params = summary_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][summary_obj.post_autoid_atlas_obj.chromatography][summary_obj.post_autoid_atlas_obj.polarity][summary_obj.post_autoid_atlas_obj.analysis_type]['PARAMS']
     
     logger.info(f"Setting override parameters for analysis summary...")
     summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
+
+    logger.info("Applying override filter thresholds to post-auto-ID atlas (in-memory only — re-runnable at any threshold)...")
+    dbi.apply_override_filter_to_post_autoid_atlas(summary_obj, override_parameters)
 
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
     summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(

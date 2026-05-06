@@ -680,10 +680,13 @@ class AnalysisGUI:
 
     # Attributes added during analysis
     workflow_params: Dict[str, Any] = field(default_factory=dict)
-    pre_curation_atlas_obj: Optional[Atlas] = None
+    post_autoid_atlas_obj: Optional[Atlas] = None
     post_curation_atlas_obj: Optional[Atlas] = None
 
-    # Dfs for in-memory GUI analysis
+    # ExperimentalData loaded from the DB (filtered by override thresholds)
+    experimental_data: Optional[Any] = None
+
+    # Dfs for in-memory GUI analysis (derived from experimental_data)
     manual_curation_df:  Optional[pd.DataFrame] = None
     ms1_df: Optional[pd.DataFrame] = None
     ms2_df: Optional[pd.DataFrame] = None
@@ -714,7 +717,7 @@ class AnalysisSummary:
     # Attributes added during analysis
     workflow_params: Dict[str, Any] = field(default_factory=dict)
     override_parameters: Dict[str, Any] = field(default_factory=dict)
-    pre_curation_atlas_obj: Optional[Atlas] = None
+    post_autoid_atlas_obj: Optional[Atlas] = None
     post_curation_atlas_obj: Optional[Atlas] = None
     summary_data: Optional[pd.DataFrame] = None
 
@@ -767,9 +770,6 @@ class AnalysisSummary:
             rt_alignment_num, analysis_num, analysis_type,
         )
 
-        # Scope to the post-curation atlas: these are exactly the compounds that survived all
-        # filters (quantitative at auto-ID time, manual 'remove' flag at curation time).
-        # No further filtering is needed here.
         atlas_compounds = None
         if self.post_curation_atlas_obj and self.post_curation_atlas_obj.compound_mzrts:
             import pandas as _pd
@@ -780,7 +780,7 @@ class AnalysisSummary:
 
         self.manual_curation_df = dbi.get_manual_curation_entries(
             project_db_path, rt_alignment_num, analysis_num,
-            remove_unidentified_compounds=False,  # atlas already excludes non-IDed compounds
+            remove_unidentified_compounds=None,
             atlas_compounds=atlas_compounds,
             analysis_type=analysis_type,
         )

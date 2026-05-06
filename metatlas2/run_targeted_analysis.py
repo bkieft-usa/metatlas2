@@ -265,8 +265,5 @@ def main():
     if not args.log_to_stdout and args.command == "run": print("========= Pre-curation workflow complete!")
     logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")
 
-    if not args.skip_auto_id and args.command == "run": print(f"\nGenerated notebook path: {nb_path}\n")
-
-
 if __name__ == "__main__":
     main()
