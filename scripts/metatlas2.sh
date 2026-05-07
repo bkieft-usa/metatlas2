@@ -6,12 +6,15 @@
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-atlases   --config_path FILE
+#   metatlas2 [--image TAG] [--standalone]
 #
 # Flags (consumed by this script, not forwarded to Python):
 #   --image TAG   Use a specific image tag instead of the default (latest).
 #                 Overrides the METATLAS2_IMAGE_TAG environment variable.
 #   --dev         Mount the local repository source over the installed package,
 #                 so edits to the working tree take effect immediately.
+#   --standalone  Launch standalone dev environment with JupyterLab notebook.
+#                 Downloads dev data if needed to ~/.metatlas2-dev/.
 #
 # Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch)
 # inside the container, so no explicit volume flags are needed for data access.
@@ -24,6 +27,7 @@ set -euo pipefail
 IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
 IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
 DEV_MODE=false
+STANDALONE_MODE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -36,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --image)        IMAGE_TAG="$2"; shift 2 ;;
         --image=*)      IMAGE_TAG="${1#*=}"; shift ;;
         --dev)          DEV_MODE=true; shift ;;
+        --standalone)   STANDALONE_MODE=true; shift ;;
         *)              PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
@@ -43,12 +48,93 @@ done
 IMAGE="docker:${IMAGE_REPO}:${IMAGE_TAG}"
 
 # ---------------------------------------------------------------------------
-# Validate required environment variables
+# Validate required environment variables (skip for standalone mode)
 # ---------------------------------------------------------------------------
-if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
-    echo "Error: METATLAS_DATA_DIR is not set." >&2
-    echo "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it." >&2
-    exit 1
+if [[ "${STANDALONE_MODE}" == "false" ]]; then
+    if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
+        echo "Error: METATLAS_DATA_DIR is not set." >&2
+        echo "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it." >&2
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Standalone mode setup
+# ---------------------------------------------------------------------------
+if [[ "${STANDALONE_MODE}" == "true" ]]; then
+    STANDALONE_DIR="${HOME}/.metatlas2-dev"
+    DATA_URL="https://github.com/bkieft-usa/metatlas2/releases/download/v1.0.0-dev/metatlas2-dev-data.tar.gz"
+    NOTEBOOK_PATH="/app/notebooks/standalone_dev_workflow.ipynb"
+    
+    echo "=========================================="
+    echo "Metatlas2 Standalone Development Mode"
+    echo "=========================================="
+    echo ""
+    
+    # Check if dev data exists
+    if [[ ! -d "${STANDALONE_DIR}" ]]; then
+        echo "Dev environment not found at ${STANDALONE_DIR}"
+        echo "Downloading dev data package..."
+        echo "  URL: ${DATA_URL}"
+        echo ""
+        
+        # Download and extract
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf '${TMPDIR}'" EXIT
+        
+        echo "Downloading (~500MB)..."
+        if ! wget -q --show-progress -O "${TMPDIR}/data.tar.gz" "${DATA_URL}"; then
+            echo "Error: Failed to download dev data" >&2
+            echo "Please manually download from: ${DATA_URL}" >&2
+            exit 1
+        fi
+        
+        echo "Extracting to ${STANDALONE_DIR}..."
+        mkdir -p "${STANDALONE_DIR}"
+        if ! tar -xzf "${TMPDIR}/data.tar.gz" -C "${STANDALONE_DIR}" --strip-components=1; then
+            echo "Error: Failed to extract dev data" >&2
+            exit 1
+        fi
+        
+        echo "✓ Dev environment setup complete"
+        echo ""
+    else
+        echo "✓ Dev environment found at ${STANDALONE_DIR}"
+        echo ""
+    fi
+    
+    # Override environment for standalone mode
+    export METATLAS_DATA_DIR="${STANDALONE_DIR}"
+    export METATLAS2_STANDALONE="true"
+    
+    # Launch JupyterLab with the standalone notebook
+    echo "Launching JupyterLab in Docker container..."
+    echo ""
+    echo "📓 Opening standalone workflow notebook:"
+    echo "   ${NOTEBOOK_PATH}"
+    echo ""
+    echo "JupyterLab will open in your browser at:"
+    echo "   http://localhost:8888"
+    echo ""
+    echo "Press Ctrl+C to stop the server"
+    echo ""
+    echo "=========================================="
+    
+    # Run JupyterLab in Docker
+    docker run --rm -it \
+        -p 8888:8888 \
+        -v "${STANDALONE_DIR}:${STANDALONE_DIR}" \
+        -v "${REPO_DIR}:/app" \
+        -e METATLAS_DATA_DIR="${STANDALONE_DIR}" \
+        -e METATLAS2_STANDALONE="true" \
+        -e PYTHONPATH="/app" \
+        -w /app \
+        "${IMAGE_REPO}:${IMAGE_TAG}" \
+        jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
+        --NotebookApp.token='' --NotebookApp.password='' \
+        "${NOTEBOOK_PATH}"
+    
+    exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -105,7 +191,6 @@ if [[ "${SUBCOMMAND}" == "submit" ]]; then
     shifter "${SHIFTER_ARGS[@]}" --entrypoint \
         "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
 
-    echo "Slurm script written to: ${TMPSCRIPT}"
     sbatch "${TMPSCRIPT}"
 
 elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" ]]; then

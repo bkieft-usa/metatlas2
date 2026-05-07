@@ -27,7 +27,24 @@
 
 ## Quick Start
 
-### First-Time Setup
+### Standalone Development Mode
+
+For local development and testing without NERSC access:
+
+```bash
+# Clone the repository
+git clone https://github.com/bkieft-usa/metatlas2.git
+cd metatlas2
+
+# Launch standalone environment (auto-downloads 1.1GB dev data)
+./scripts/metatlas2.sh --standalone
+```
+
+This opens a JupyterLab notebook that runs the complete metatlas2 pipeline using production code with a minimal dataset (28 runs, 12 compounds, ~20-30 min runtime).
+
+See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for complete details.
+
+### First-Time Setup (NERSC Production)
 
 For new users or new machines, complete the one-time setup:
 
@@ -80,10 +97,11 @@ metatlas2 run \
 | **[run_targeted_analysis.md](docs/run_targeted_analysis.md)** | Main workflow execution: project setup, RT alignment, and auto identification |
 | **[manual_curation_and_summary.md](docs/manual_curation_and_summary.md)** | Interactive GUI for manual peak curation and summary generation |
 
-### Technical Reference
+### Developer Resources
 
 | Document | Description |
 |----------|-------------|
+| **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** | Standalone development environment for testing on any Linux machine without NERSC access |
 | **[codebase_overview.md](docs/codebase_overview.md)** | Programmer-oriented reference: module structure, workflow phases, and key classes |
 | **[database_schema.md](docs/database_schema.md)** | Complete database schema documentation including table structures and relationships |
 | **[parquet_file_structure.md](docs/parquet_file_structure.md)** | Parquet file format specification for MS1/MS2 data storage |
