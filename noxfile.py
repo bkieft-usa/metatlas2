@@ -134,8 +134,9 @@ def _run_test_on_nersc(session, repo_root, fixtures_dir, config_file, test_proje
     )
     
     # Set output location for pytest validation
-    # Pipeline writes to: {METATLAS_DATA_DIR}/projects/targeted_outputs/test_owner/{project_name}/
-    output_dir = test_data_dir / "projects" / "targeted_outputs" / "test_owner" / "other" / test_project
+    # Pipeline writes to: {METATLAS_DATA_DIR}/projects/targeted_outputs/test_owner/user/{project_name}/
+    user = os.environ.get("USER", "other")
+    output_dir = test_data_dir / "projects" / "targeted_outputs" / "test_owner" / user / test_project
     os.environ["TEST_OUTPUT_DIR"] = str(output_dir)
     
     # Return temp directory path for cleanup after tests
@@ -202,7 +203,7 @@ def _run_test_with_docker(session, repo_root, fixtures_dir, config_file, test_pr
     session.run(*docker_cmd, external=True)
     
     # Set output location for pytest validation
-    # Pipeline writes to: {temp_data_dir}/projects/targeted_outputs/test_owner/{project_name}/
+    # Pipeline writes to: {temp_data_dir}/projects/targeted_outputs/test_owner/other/{project_name}/
     output_dir = Path(temp_data_dir) / "projects" / "targeted_outputs" / "test_owner" / "other" / test_project
     os.environ["TEST_OUTPUT_DIR"] = str(output_dir)
     
