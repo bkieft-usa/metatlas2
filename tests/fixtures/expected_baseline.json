@@ -25,13 +25,13 @@
       "description": "Compound-atlas associations across all atlases"
     },
     "ms1_data": {
-      "min": 25,
-      "max": 35,
+      "min": 20,
+      "max": 25,
       "description": "MS1 extracted data per compound-file combination"
     },
     "ms2_data": {
-      "min": 25,
-      "max": 35,
+      "min": 20,
+      "max": 25,
       "description": "MS2 raw data per compound-file combination"
     },
     "manual_curation": {

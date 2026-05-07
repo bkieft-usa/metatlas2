@@ -459,10 +459,6 @@ def create_database_with_compounds():
                 mzrt.polarity,
                 None,  # confidence
                 mzrt.source,
-                None,  # ms1_notes
-                None,  # ms2_notes
-                None,  # other_notes
-                None,  # analyst_notes
                 None,  # identification_notes
                 mzrt.created_by,
                 mzrt.created_date
@@ -470,7 +466,7 @@ def create_database_with_compounds():
             mzrt_records.append(record)
         
         conn.executemany("""
-            INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, mzrt_records)
         print(f"  Created {len(mzrt_records)} compound_mzrt entries")
     
