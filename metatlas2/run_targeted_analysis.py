@@ -9,7 +9,9 @@ from typing import Dict, Any
 SLURM_TEMPLATE = """\
 #!/bin/bash
 #SBATCH --job-name={project}
+#SBATCH --account={account}
 #SBATCH --qos={qos}
+#SBATCH --constraint={constraint}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={cpus}
@@ -58,7 +60,9 @@ def parse_args():
 
     submit_parser = subparsers.add_parser("submit", help="Write and immediately submit a Slurm job")
     add_shared_args(submit_parser)
+    submit_parser.add_argument("--account", "--account", default="m2650", help="NERSC account/project to charge (e.g., m1234)")
     submit_parser.add_argument("--qos", default="regular")
+    submit_parser.add_argument("--constraint", default="cpu", help="Node constraint (default: cpu for Perlmutter)")
     submit_parser.add_argument("--cpus", type=int, default=8)
     submit_parser.add_argument("--mem", default="64G")
     submit_parser.add_argument("--time", default="00:30:00")
@@ -95,7 +99,9 @@ def generate_slurm_script(args, paths) -> str:
     extra_flags_str = " \\\n ".join(extra_flags)
 
     populated = SLURM_TEMPLATE.format(
+        account = args.account,
         qos = args.qos,
+        constraint = args.constraint,
         cpus = args.cpus,
         mem = args.mem,
         time = args.time,
