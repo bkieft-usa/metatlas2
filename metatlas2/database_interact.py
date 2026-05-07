@@ -1899,11 +1899,19 @@ def load_and_filter_gui_inputs(
         else analysis_gui_obj.workflow_params.get("apply_istd_to_ema", True)
     )
 
+    # Create atlas_compounds DataFrame to scope queries to this specific atlas
+    # This prevents loading compounds from other polarities/analyses with the same analysis_type
+    atlas_compounds = pd.DataFrame([
+        {"inchi_key": cmzrt.inchi_key, "adduct": cmzrt.adduct}
+        for cmzrt in analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.values()
+    ])
+
     # Load pre-filtered data from database (first-stage filtering already applied)
     exp_data = load_experimental_data_from_db(
         project_db_path=analysis_gui_obj.paths["project_db_path"],
         rt_alignment_number=analysis_gui_obj.rt_alignment_number,
         analysis_number=analysis_gui_obj.analysis_number,
+        atlas_compounds=atlas_compounds,
         analysis_type=analysis_gui_obj.post_autoid_atlas_obj.analysis_type,
         remove_unidentified_compounds=False,  # Already filtered during auto-ID
     )
