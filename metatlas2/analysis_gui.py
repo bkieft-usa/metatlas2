@@ -884,13 +884,20 @@ def build_dash_app(
             ref = scan.get("ref_spectrum") if "ref_spectrum" in scan.index else None
             num_ref_fragments = 0
             num_matching_fragments = 0
+            bar_width = 0.5
             
             if pd.notnull(qry) and pd.notnull(ref):
                 mz_q, int_q = _parse_spectrum_cached(scan["qry_spectrum"])
                 mz_r, int_r = _parse_spectrum_cached(scan["ref_spectrum"])
                 scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
                 ref_y = [-i * scale for i in int_r]
-                bar_width = 0.5
+                # Scale bar width based on range of m/z values, with a minimum width to ensure visibility
+                if mz_q and mz_r:
+                    mz_min = min(min(mz_q), min(mz_r))
+                    mz_max = max(max(mz_q), max(mz_r))
+                    mz_range = mz_max - mz_min
+                    if mz_range > 0:
+                        bar_width = max(0.5, mz_range * 0.005)
 
                 raw_colors = scan.get("aligned_fragment_colors") if "aligned_fragment_colors" in scan.index else None
                 frag_colors = None

@@ -2545,7 +2545,7 @@ def filter_experimental_data(
         )
         # Log details of each removed compound
         for detail in removed_compounds_details:
-            logger.info(f"  Removed: {detail}")
+            logger.debug(f"  Removed: {detail}")
 
     # ── Step 4: propagate to other lists ─────────────────────────────────────
     new_ms1 = [obj for obj in exp_data.ms1_data if (obj.inchi_key, obj.adduct) in kept_pairs]
