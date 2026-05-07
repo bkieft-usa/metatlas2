@@ -61,7 +61,7 @@ def parse_args():
     submit_parser.add_argument("--qos", default="regular")
     submit_parser.add_argument("--cpus", type=int, default=8)
     submit_parser.add_argument("--mem", default="64G")
-    submit_parser.add_argument("--time", default="03:00:00")
+    submit_parser.add_argument("--time", default="00:30:00")
     submit_parser.add_argument("--output", default=None, help="Override output path for the .sh script")
     submit_parser.add_argument(
         "--image",
@@ -149,7 +149,7 @@ def set_up_paths(
         }
 
     owner = config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
-    user = os.environ.get("USER", None)
+    user = os.environ.get("USER", "other")
     if owner is None:
         raise ValueError("Owner not specified in config under WORKFLOWS.PATHS.owner")
     if user is None:
