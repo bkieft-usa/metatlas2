@@ -61,6 +61,7 @@ dependencies = [
     "tables==3.10.2",
     "tqdm==4.67.1",
     "xlsxwriter>=3.2.9",
+    "zenodo-get>=3.0.0",
 ]
 
 [project.optional-dependencies]
