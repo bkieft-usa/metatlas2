@@ -223,11 +223,13 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Launch JupyterLab with the standalone notebook
     echo "Launching JupyterLab in Docker container..."
     echo ""
-    echo "Opening standalone workflow notebook:"
+    echo "Workflow notebook available at:"
     echo "   ${STANDALONE_DIR}/standalone_dev_workflow.ipynb"
     echo ""
     echo "JupyterLab will open in your browser at:"
     echo "   http://localhost:8888"
+    echo ""
+    echo "Navigate to standalone_dev_workflow.ipynb in the file browser"
     echo ""
     echo "Press Ctrl+C to stop the server"
     echo ""
@@ -252,7 +254,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         -e PYTHONPATH="/repo:/app" \
         -w "${STANDALONE_DIR}" \
         "${IMAGE_REPO}:${IMAGE_TAG}" \
-        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' ./standalone_dev_workflow.ipynb"
+        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password=''"
     
     exit 0
 fi
