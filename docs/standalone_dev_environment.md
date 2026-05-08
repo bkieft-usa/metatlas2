@@ -20,17 +20,24 @@ The standalone development environment allows you to run metatlas2 on any Linux 
 
 ### Prerequisites
 
-- Linux machine with Docker installed (supports both Intel/AMD and Mac Silicon)
-- ~1GB free disk space in home directory
-- Internet connection (for first-time setup)
-- **GitHub authentication** (if container image is private):
-  - **Option 1 (Recommended)**: Set `GITHUB_TOKEN` environment variable for automatic login
+**Required:**
+- **Container runtime** (one of the following):
+  - **Docker Desktop** (macOS/Windows/Linux) - https://www.docker.com/products/docker-desktop
+  - **Colima** (macOS, free/open-source alternative): `brew install colima docker && colima start`
+  - **OrbStack** (macOS, fast alternative): `brew install orbstack`
+  - **Docker Engine** (Linux only, free): Standard Docker installation
+- ~1GB free disk space in `~/.metatlas2-dev/`
+- Internet connection (for first-time data download)
+
+**Optional (if container image is private):**
+- **GitHub authentication** for container registry access:
+  - **Option 1 (Recommended)**: Set environment variable for automatic login
     1. Create token at https://github.com/settings/tokens/new?scopes=read:packages
-    2. Add to `~/.bashrc`: `export GITHUB_TOKEN='ghp_xxxxxxxxxxxx'`
+    2. Add to `~/.bashrc` (or `~/.zshrc` on macOS): `export GITHUB_TOKEN='ghp_xxxxxxxxxxxx'`
     3. Reload shell: `source ~/.bashrc`
-  - **Option 2**: Interactive login - you'll be prompted for credentials when needed
+  - **Option 2**: Interactive login when prompted
     - Username: your GitHub username
-    - Password: your GitHub Personal Access Token (not your GitHub password!)
+    - Password: your GitHub Personal Access Token (not your password!)
 
 ### Launch Standalone Mode
 

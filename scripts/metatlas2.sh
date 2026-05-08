@@ -161,57 +161,32 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     
     # Authenticate with GitHub Container Registry if needed
     echo "Checking container image authentication..."
-    GHCR_TOKEN="${GHCR_TOKEN:-${GHCR_TOKEN:-}}"
     
-    if [[ -n "${GHCR_TOKEN}" ]]; then
-        echo "  Using GHCR_TOKEN for automatic authentication..."
-        if echo "${GHCR_TOKEN}" | docker login ghcr.io -u "$(whoami)" --password-stdin >/dev/null 2>&1; then
-            echo "  Successfully authenticated"
-        else
-            echo "  Warning: Authentication failed, trying interactive login..." >&2
-            docker login ghcr.io
-        fi
+    # Try pulling first to see if already authenticated
+    if docker pull "${IMAGE_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+        echo "  Image accessible (already authenticated or public)"
     else
-        # No token - try pulling to see if image is public or user is already logged in
-        echo "  No GHCR_TOKEN found, checking if already authenticated..."
-        if docker pull "${IMAGE_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
-            echo "  Image accessible"
-        else
-            echo "" >&2
-            echo "Container image requires authentication." >&2
-            echo "" >&2
-            echo "Option 1: Interactive login (enter credentials now)" >&2
-            echo "Option 2: Set GHCR_TOKEN env variable for automatic login" >&2
-            echo "" >&2
-            echo "Attempting interactive login..." >&2
-            echo "" >&2
-            
-            if ! docker login ghcr.io; then
-                echo "" >&2
-                echo "========================================" >&2
-                echo "Authentication failed" >&2
-                echo "========================================" >&2
-                echo "" >&2
-                echo "To create a GitHub Personal Access Token:" >&2
-                echo "  1. Visit: https://github.com/settings/tokens/new?scopes=read:packages" >&2
-                echo "  2. Generate token with 'read:packages' permission" >&2
-                echo "  3. Use token as password when prompted by 'docker login'" >&2
-                echo "" >&2
-                echo "Or set GHCR_TOKEN in ~/.bashrc for automatic authentication:" >&2
-                echo "  export GHCR_TOKEN='ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'" >&2
-                echo "" >&2
-                exit 1
+        GHCR_TOKEN="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}"
+        
+        if [[ -n "${GHCR_TOKEN}" ]]; then
+            echo "  Using token for automatic authentication..."
+            if echo "${GHCR_TOKEN}" | docker login ghcr.io -u "$(whoami)" --password-stdin >/dev/null 2>&1; then
+                echo "  Successfully authenticated"
+            else
+                echo "  Warning: Automatic authentication failed, but continuing..." >&2
+                echo "  (Image may already be accessible)" >&2
             fi
-            
-            echo "" >&2
-            echo "  Authentication successful" >&2
+        else
+            echo "  Warning: No authentication token found, but continuing..." >&2
+            echo "  (Image may be public or you're already authenticated)" >&2
         fi
     fi
+    echo ""
     
-    # Pull the latest image to ensure we have updates
+    # Pull the latest image to ensure we have updates (skip if just pulled above)
     echo "Pulling latest container image..."
-    if ! docker pull "${IMAGE_REPO}:${IMAGE_TAG}"; then
-        echo "Warning: Failed to pull latest image, using cached version" >&2
+    if ! docker pull "${IMAGE_REPO}:${IMAGE_TAG}" 2>&1 | grep -q "up to date"; then
+        echo "  Image updated"
     fi
     echo ""
     
