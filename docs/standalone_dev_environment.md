@@ -21,7 +21,7 @@ The standalone development environment allows you to run metatlas2 on any Linux 
 ### Prerequisites
 
 - Linux machine with Docker installed
-- ~5GB free disk space in home directory (1.1GB download + extracted data)
+- ~1GB free disk space in home directory
 - Internet connection (for first-time setup)
 
 ### Launch Standalone Mode
@@ -133,10 +133,12 @@ rm -rf ~/.metatlas2-dev
 
 ## Data Package Details
 
-The dev data package is hosted on GitHub Releases:
-- **URL**: https://github.com/bkieft-usa/metatlas2/releases/tag/v1.0.0-dev
+The dev data package is hosted on Zenodo:
+- **DOI**: https://doi.org/10.5281/zenodo.20075571
 - **Size**: 1.1GB compressed, ~3GB extracted
 - **Contents**: 130 pre-converted parquet files + configs + compound definitions
+
+Zenodo provides permanent, citable storage with unlimited bandwidth for research data.
 
 ### Source Data
 
@@ -170,9 +172,14 @@ See `scripts/prepare_dev_package.sh` for the complete list of InChI keys and run
 If the automated download fails, manually download and extract:
 
 ```bash
-wget https://github.com/bkieft-usa/metatlas2/releases/download/v1.0.0-dev/metatlas2-dev-data.tar.gz
+# Using zenodo_get (recommended)
+pip install zenodo-get
+zenodo_get -d https://doi.org/10.5281/zenodo.20075571
 mkdir -p ~/.metatlas2-dev
 tar -xzf metatlas2-dev-data.tar.gz -C ~/.metatlas2-dev --strip-components=1
+
+# Or download directly from browser
+# Visit https://doi.org/10.5281/zenodo.20075571 and download the tarball
 ```
 
 ### JupyterLab won't start

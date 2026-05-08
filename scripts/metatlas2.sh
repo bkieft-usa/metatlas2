@@ -63,7 +63,8 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    DATA_URL="https://github.com/bkieft-usa/metatlas2/releases/download/v1.0.0-dev/metatlas2-dev-data.tar.gz"
+    ZENODO_DOI="https://doi.org/10.5281/zenodo.20075571"
+    TARBALL_NAME="metatlas2-dev-data.tar.gz"
     NOTEBOOK_PATH="/app/notebooks/standalone_dev_workflow.ipynb"
     
     echo "=========================================="
@@ -74,24 +75,34 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Check if dev data exists
     if [[ ! -d "${STANDALONE_DIR}" ]]; then
         echo "Dev environment not found at ${STANDALONE_DIR}"
-        echo "Downloading dev data package..."
-        echo "  URL: ${DATA_URL}"
+        echo "Downloading dev data package from Zenodo..."
+        echo "  DOI: ${ZENODO_DOI}"
         echo ""
         
         # Download and extract
         TMPDIR=$(mktemp -d)
         trap "rm -rf '${TMPDIR}'" EXIT
         
-        echo "Downloading (~500MB)..."
-        if ! wget -q --show-progress -O "${TMPDIR}/data.tar.gz" "${DATA_URL}"; then
-            echo "Error: Failed to download dev data" >&2
-            echo "Please manually download from: ${DATA_URL}" >&2
+        echo "Downloading (~1.1GB, this may take a few minutes)..."
+        cd "${TMPDIR}"
+        if ! uvx zenodo_get -d "${ZENODO_DOI}"; then
+            echo "Error: Failed to download dev data from Zenodo" >&2
+            echo "Please manually download from: ${ZENODO_DOI}" >&2
+            echo "Or install zenodo_get and try again: pip install zenodo-get" >&2
+            exit 1
+        fi
+        
+        # Find the downloaded tarball (zenodo_get downloads with original filename)
+        if [[ ! -f "${TMPDIR}/${TARBALL_NAME}" ]]; then
+            echo "Error: Expected file ${TARBALL_NAME} not found after download" >&2
+            echo "Available files:" >&2
+            ls -lh "${TMPDIR}" >&2
             exit 1
         fi
         
         echo "Extracting to ${STANDALONE_DIR}..."
         mkdir -p "${STANDALONE_DIR}"
-        if ! tar -xzf "${TMPDIR}/data.tar.gz" -C "${STANDALONE_DIR}" --strip-components=1; then
+        if ! tar -xzf "${TMPDIR}/${TARBALL_NAME}" -C "${STANDALONE_DIR}" --strip-components=1; then
             echo "Error: Failed to extract dev data" >&2
             exit 1
         fi

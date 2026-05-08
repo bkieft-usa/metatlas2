@@ -9,7 +9,7 @@
 #   ./scripts/prepare_dev_package.sh [output_dir]
 #
 # Output:
-#   Creates metatlas2-dev-data.tar.gz ready for GitHub Releases
+#   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
 
 set -euo pipefail
 
@@ -325,36 +325,6 @@ echo "   Created configs/compounds_config.yaml"
 echo "   Created configs/atlases_config.yaml"
 echo "   Created configs/analysis_config.yaml"
 
-# Create environment configuration
-cat > dev_environment.yaml << EOF
-# Standalone development environment configuration
-
-version: "1.0.0"
-data_url: "https://github.com/bkieft-usa/metatlas2/releases/download/v1.0.0-dev/${PACKAGE_NAME}.tar.gz"
-data_dir: "~/.metatlas2-dev"
-db_name: "metatlas_dev.duckdb"
-
-# Source information
-source_project: "${SOURCE_PROJECT}"
-created_date: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-# File counts
-file_counts:
-  istd: 6
-  qc: 6
-  experimental: 6
-  control: 4
-  total: 22
-
-# Compound counts
-compounds:
-  positive_polarity: 6
-  negative_polarity: 6
-  total: 12
-EOF
-
-echo "   Created dev_environment.yaml"
-
 echo ""
 echo "Step 5: Creating README..."
 echo "--------------------------"
@@ -410,7 +380,7 @@ This will launch a Jupyter notebook with all workflow stages ready to execute.
 Extracted from production project: `20230223_JGI_MC_508469_AlgaHeatChlUWO241_final_EXP120B_HILICZ_USHXG02066`
 EOF
 
-echo "   Created README.md"
+echo "Created README.md"
 
 echo ""
 echo "Step 6: Creating tarball..."
@@ -425,24 +395,3 @@ EXTRACTED_SIZE=$(du -sh "${PACKAGE_NAME}" | cut -f1)
 echo "   Created ${PACKAGE_NAME}.tar.gz"
 echo "    Compressed size: ${TARBALL_SIZE}"
 echo "    Extracted size: ${EXTRACTED_SIZE}"
-
-echo ""
-echo "========================================"
-echo "SUCCESS!"
-echo "========================================"
-echo ""
-echo "Package location: ${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz"
-echo ""
-echo "Next steps:"
-echo "1. Test the package locally:"
-echo "   tar -xzf ${PACKAGE_NAME}.tar.gz"
-echo "   ls ${PACKAGE_NAME}/"
-echo ""
-echo "2. Create a GitHub release:"
-echo "   - Go to https://github.com/bkieft-usa/metatlas2/releases/new"
-echo "   - Tag: v1.0.0-dev"
-echo "   - Title: 'Development Environment Data v1.0.0'"
-echo "   - Upload ${PACKAGE_NAME}.tar.gz as release asset"
-echo ""
-echo "3. Update the URL in configs/dev_environment.yaml if needed"
-echo ""
