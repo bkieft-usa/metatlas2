@@ -20,7 +20,7 @@ The standalone development environment allows you to run metatlas2 on any Linux 
 
 ### Prerequisites
 
-- Linux machine with Docker installed
+- Linux machine with Docker installed (supports both Intel/AMD and Mac Silicon)
 - ~1GB free disk space in home directory
 - Internet connection (for first-time setup)
 - **GitHub authentication** (if container image is private):

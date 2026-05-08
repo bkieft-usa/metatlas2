@@ -161,8 +161,22 @@ Update `configs/system_test_analysis.yaml` with the correct atlas UIDs from fixt
 Pull the latest image or build locally:
 ```bash
 docker pull ghcr.io/bkieft-usa/metatlas2:latest
-# OR
+# OR build locally (single architecture for your platform)
 docker build -t ghcr.io/bkieft-usa/metatlas2:latest .
+```
+
+**To build and push multi-architecture image (amd64 + arm64):**
+```bash
+# One-time setup (if not already done)
+docker buildx create --name multiarch --driver docker-container --use
+
+# Build and push for both amd64 (NERSC/Linux) and arm64 (Mac Silicon)
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --tag ghcr.io/bkieft-usa/metatlas2:latest \
+  --build-arg IMAGE_TAG=latest \
+  --push \
+  .
 ```
 
 ### Different results at NERSC vs GitHub Actions

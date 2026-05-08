@@ -31,9 +31,9 @@ STANDALONE_MODE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# ---------------------------------------------------------------------------
+
 # Parse wrapper-specific flags; pass everything else through to Python
-# ---------------------------------------------------------------------------
+
 PASSTHROUGH_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,9 +47,8 @@ done
 
 IMAGE="docker:${IMAGE_REPO}:${IMAGE_TAG}"
 
-# ---------------------------------------------------------------------------
+
 # Validate required environment variables (skip for standalone mode)
-# ---------------------------------------------------------------------------
 if [[ "${STANDALONE_MODE}" == "false" ]]; then
     if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
         echo "Error: METATLAS_DATA_DIR is not set." >&2
@@ -58,9 +57,8 @@ if [[ "${STANDALONE_MODE}" == "false" ]]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
+
 # Standalone mode setup
-# ---------------------------------------------------------------------------
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
     ZENODO_DOI="https://doi.org/10.5281/zenodo.20075571"
@@ -107,10 +105,10 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
             exit 1
         fi
         
-        echo "✓ Dev environment setup complete"
+        echo "Dev environment setup complete"
         echo ""
     else
-        echo "✓ Dev environment found at ${STANDALONE_DIR}"
+        echo "Dev environment found at ${STANDALONE_DIR}"
         echo ""
     fi
     
@@ -125,7 +123,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     if [[ -n "${GHCR_TOKEN}" ]]; then
         echo "  Using GHCR_TOKEN for automatic authentication..."
         if echo "${GHCR_TOKEN}" | docker login ghcr.io -u "$(whoami)" --password-stdin >/dev/null 2>&1; then
-            echo "  ✓ Successfully authenticated"
+            echo "  Successfully authenticated"
         else
             echo "  Warning: Authentication failed, trying interactive login..." >&2
             docker login ghcr.io
@@ -134,7 +132,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         # No token - try pulling to see if image is public or user is already logged in
         echo "  No GHCR_TOKEN found, checking if already authenticated..."
         if docker pull "${IMAGE_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
-            echo "  ✓ Image accessible"
+            echo "  Image accessible"
         else
             echo "" >&2
             echo "Container image requires authentication." >&2
@@ -163,7 +161,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
             fi
             
             echo "" >&2
-            echo "  ✓ Authentication successful" >&2
+            echo "  Authentication successful" >&2
         fi
     fi
     echo ""
@@ -171,7 +169,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Launch JupyterLab with the standalone notebook
     echo "Launching JupyterLab in Docker container..."
     echo ""
-    echo "📓 Opening standalone workflow notebook:"
+    echo "Opening standalone workflow notebook:"
     echo "   ${NOTEBOOK_PATH}"
     echo ""
     echo "JupyterLab will open in your browser at:"
@@ -198,10 +196,9 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
+
 # Common shifter flags.
 # GPFS paths (home, CFS, scratch) are auto-mounted by shifter -- no -v needed.
-# ---------------------------------------------------------------------------
 SHIFTER_ARGS=(
     "--image=${IMAGE}"
     "--env=METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
@@ -222,13 +219,12 @@ if [[ "${DEV_MODE}" == "true" ]]; then
     SHIFTER_ARGS+=("--env=PYTHONPATH=${REPO_DIR}:/app")
 fi
 
-# ---------------------------------------------------------------------------
+
 # Auto-install a Jupyter kernel spec for pinned image tags.
 # The two default kernels (metatlas2, metatlas2-dev) reference :latest and
 # stay valid across image updates -- they only need to be installed once.
 # Pinned tags are registered on first use so the analyst never has to
 # run install_kernels.sh --tag manually.
-# ---------------------------------------------------------------------------
 if [[ "${IMAGE_TAG}" != "latest" ]]; then
     KERNEL_DIR="${HOME}/.local/share/jupyter/kernels/metatlas2-${IMAGE_TAG}"
     if [[ ! -d "${KERNEL_DIR}" ]]; then
@@ -237,9 +233,9 @@ if [[ "${IMAGE_TAG}" != "latest" ]]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
+
 # Subcommand dispatch
-# ---------------------------------------------------------------------------
+
 SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
 
 if [[ "${SUBCOMMAND}" == "submit" ]]; then
