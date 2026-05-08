@@ -65,7 +65,7 @@ fi
 # Standalone mode setup
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    ZENODO_DOI="https://doi.org/10.5281/zenodo.20090018"
+    ZENODO_DOI="https://doi.org/10.5281/zenodo.20090323"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
     NOTEBOOK_PATH="/repo/notebooks/standalone_dev_workflow.ipynb"
     VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
@@ -150,6 +150,15 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     export METATLAS_DATA_DIR="${STANDALONE_DIR}"
     export METATLAS2_STANDALONE="true"
     
+    # Clean up any existing outputs from previous runs
+    PROJECTS_DIR="${STANDALONE_DIR}/projects/targeted_outputs"
+    if [[ -d "${PROJECTS_DIR}" ]]; then
+        echo "Cleaning up previous workflow outputs..."
+        rm -rf "${PROJECTS_DIR}"
+        echo "  Removed: ${PROJECTS_DIR}"
+        echo ""
+    fi
+    
     # Authenticate with GitHub Container Registry if needed
     echo "Checking container image authentication..."
     GHCR_TOKEN="${GHCR_TOKEN:-${GHCR_TOKEN:-}}"
@@ -223,6 +232,8 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Mount local repo to /repo (not /app) to avoid shadowing the venv in /app/.venv
     # Use PYTHONPATH to prioritize local repo code over installed package
     # Set JUPYTERHUB_SERVICE_PREFIX="/" for local JupyterLab proxy URLs
+    # Set working directory to STANDALONE_DIR so relative paths in configs resolve correctly
+    # Set USER env var for output path construction
     docker run --rm -it \
         --entrypoint /bin/bash \
         -p 8888:8888 \
@@ -231,8 +242,9 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         -e METATLAS_DATA_DIR="${STANDALONE_DIR}" \
         -e METATLAS2_STANDALONE="true" \
         -e JUPYTERHUB_SERVICE_PREFIX="/" \
+        -e USER="standalone" \
         -e PYTHONPATH="/repo:/app" \
-        -w /repo \
+        -w "${STANDALONE_DIR}" \
         "${IMAGE_REPO}:${IMAGE_TAG}" \
         -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' /repo/notebooks/standalone_dev_workflow.ipynb"
     

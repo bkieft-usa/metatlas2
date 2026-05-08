@@ -82,8 +82,16 @@ if [[ -d "${OUTPUT_DIR}/${PACKAGE_NAME}" ]]; then
     rm -rf "${OUTPUT_DIR:?}/${PACKAGE_NAME}"
 fi
 
-# Create output structure
-mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}"/{parquet,configs}
+# Create output structure matching expected paths:
+# - lcmsruns/dev/{project_name}/parquet/
+# - databases/main_db/
+# - configs/
+# - projects/targeted_outputs/ (will be created by workflow)
+STANDALONE_PROJECT="20260101_JGI_XX_000000_STANDALONE-DEV_test_EXP000_HILICZ_TESTXXXX"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/lcmsruns/dev/${STANDALONE_PROJECT}/parquet"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/main_db"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/configs"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/projects/targeted_outputs"
 cd "${OUTPUT_DIR}/${PACKAGE_NAME}"
 
 echo "Step 1: Collecting parquet files..."
@@ -117,7 +125,7 @@ for run in "${ALL_RUNS[@]}"; do
         
         local_count=0
         for pfile in "${run_files[@]}"; do
-            cp "$pfile" parquet/ && local_count=$((local_count + 1))
+            cp "$pfile" "lcmsruns/dev/${STANDALONE_PROJECT}/parquet/" && local_count=$((local_count + 1))
         done
         
         echo "OK (${local_count} files)"
@@ -138,7 +146,7 @@ if [[ ${MISSING} -gt 0 ]]; then
 fi
 
 # Count total parquet files copied
-TOTAL_PARQUET=$(find parquet/ -name "*.parquet" 2>/dev/null | wc -l)
+TOTAL_PARQUET=$(find "lcmsruns/dev/${STANDALONE_PROJECT}/parquet/" -name "*.parquet" 2>/dev/null | wc -l)
 echo ""
 echo "Total parquet files copied: ${TOTAL_PARQUET}"
 
