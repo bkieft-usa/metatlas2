@@ -61,7 +61,7 @@ fi
 # Standalone mode setup
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    ZENODO_DOI="https://doi.org/10.5281/zenodo.20075571"
+    ZENODO_DOI="https://doi.org/10.5281/zenodo.20090018"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
     NOTEBOOK_PATH="/repo/notebooks/standalone_dev_workflow.ipynb"
     

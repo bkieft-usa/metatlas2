@@ -6,7 +6,10 @@
 #
 # Usage:
 #   cd /global/homes/b/bkieft/metatlas2
-#   ./scripts/prepare_dev_package.sh [output_dir]
+#   ./scripts/prepare_dev_package.sh [output_dir] [--keep-existing]
+#
+# Options:
+#   --keep-existing  Skip package creation and only upload existing tarball to Zenodo
 #
 # Output:
 #   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
@@ -15,7 +18,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-OUTPUT_DIR="${1:-${METATLAS_DATA_DIR}/databases/standalone_dev_data}"
+
+# Parse arguments
+KEEP_EXISTING=false
+OUTPUT_DIR=""
+
+for arg in "$@"; do
+    if [[ "$arg" == "--keep-existing" ]]; then
+        KEEP_EXISTING=true
+    elif [[ -z "$OUTPUT_DIR" ]]; then
+        OUTPUT_DIR="$arg"
+    fi
+done
+
+# Set default output directory if not provided
+OUTPUT_DIR="${OUTPUT_DIR:-${METATLAS_DATA_DIR}/databases/standalone_dev_data}"
 PACKAGE_NAME="metatlas2-dev-data"
 
 # Source project with representative ISTD data
@@ -36,19 +53,38 @@ if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
     exit 1
 fi
 
-# Validate source directory exists
-if [[ ! -d "${SOURCE_BASE}/parquet" ]]; then
-    echo "Error: Source parquet directory not found: ${SOURCE_BASE}/parquet" >&2
-    echo "Please verify the project name and path." >&2
-    exit 1
+# Check if we should skip package creation
+if [[ "$KEEP_EXISTING" == true ]]; then
+    echo "Using existing package (--keep-existing flag set)"
+    echo ""
+    
+    # Validate tarball exists
+    if [[ ! -f "${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" ]]; then
+        echo "Error: Tarball not found: ${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" >&2
+        echo "Remove --keep-existing flag to create a new package." >&2
+        exit 1
+    fi
+    
+    TARBALL_SIZE=$(du -h "${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" | cut -f1)
+    echo "Found existing tarball: ${PACKAGE_NAME}.tar.gz (${TARBALL_SIZE})"
+    echo "Skipping to Zenodo upload..."
+else
+    # Validate source directory exists
+    if [[ ! -d "${SOURCE_BASE}/parquet" ]]; then
+        echo "Error: Source parquet directory not found: ${SOURCE_BASE}/parquet" >&2
+        echo "Please verify the project name and path." >&2
+        exit 1
+    fi
+
+# Remove existing output if it exists
+if [[ -d "${OUTPUT_DIR}/${PACKAGE_NAME}" ]]; then
+    echo "Warning: Output directory already exists. Removing: ${OUTPUT_DIR}/${PACKAGE_NAME}"
+    rm -rf "${OUTPUT_DIR:?}/${PACKAGE_NAME}"
 fi
 
 # Create output structure
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}"/{parquet,configs}
 cd "${OUTPUT_DIR}/${PACKAGE_NAME}"
-
-# Remove raw/ directory if it exists from previous runs
-rm -rf raw/
 
 echo "Step 1: Collecting parquet files..."
 echo "------------------------------------"
@@ -351,7 +387,7 @@ This package contains a minimal dataset for running metatlas2 in standalone mode
   - `compounds_config.yaml` - Compound paths configuration
   - `atlases_config.yaml` - Atlas definitions
   - `analysis_config.yaml` - Workflow and analysis parameters
-  
+
 ## Setup
 
 Extract this archive to `~/.metatlas2-dev/` (or custom location):
@@ -394,3 +430,193 @@ EXTRACTED_SIZE=$(du -sh "${PACKAGE_NAME}" | cut -f1)
 echo "   Created ${PACKAGE_NAME}.tar.gz"
 echo "    Compressed size: ${TARBALL_SIZE}"
 echo "    Extracted size: ${EXTRACTED_SIZE}"
+
+fi  # End of package creation (skip if --keep-existing)
+
+# Ensure we have the tarball size for upload step
+if [[ -z "${TARBALL_SIZE:-}" ]]; then
+    TARBALL_SIZE=$(du -h "${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" | cut -f1)
+fi
+
+echo ""
+if [[ "$KEEP_EXISTING" == true ]]; then
+    echo "Step 1: Uploading to Zenodo..."
+else
+    echo "Step 7: Uploading to Zenodo..."
+fi
+echo "-------------------------------"
+
+# Check for Zenodo access token
+if [[ -z "${ZENODO_ACCESS_TOKEN:-}" ]]; then
+    echo "Warning: ZENODO_ACCESS_TOKEN not set. Skipping Zenodo upload."
+    echo "Package location: ${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz"
+    exit 0
+fi
+
+ZENODO_RECORD_ID="20075571"
+VERSION_TAG="v$(date +%Y%m%d)"
+TARBALL_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz"
+
+echo "   Retrieving latest version of record ${ZENODO_RECORD_ID}..."
+
+# First, get the published record to find the latest version's deposition ID
+RECORD_RESPONSE=$(curl -s "https://zenodo.org/api/records/${ZENODO_RECORD_ID}" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}")
+
+# Extract the record_id (this is the deposition ID we need)
+LATEST_DEPOSITION_ID=$(echo "$RECORD_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))" 2>/dev/null)
+
+if [[ -z "$LATEST_DEPOSITION_ID" ]]; then
+    echo "Error: Could not retrieve record. Response:"
+    echo "$RECORD_RESPONSE"
+    exit 1
+fi
+
+echo "   Latest deposition ID: ${LATEST_DEPOSITION_ID}"
+
+# Check for any existing unpublished drafts by querying the deposition directly
+echo "   Checking for existing drafts..."
+DEPOSITION_CHECK=$(curl -s "https://zenodo.org/api/deposit/depositions/${LATEST_DEPOSITION_ID}" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}")
+
+# If the deposition has a 'newversion' link, there's no draft. If not, there might be a draft already.
+HAS_NEWVERSION=$(echo "$DEPOSITION_CHECK" | python3 -c "import sys, json; d=json.load(sys.stdin); print('yes' if 'newversion' in d.get('links', {}) else 'no')" 2>/dev/null)
+
+if [[ "$HAS_NEWVERSION" == "no" ]]; then
+    # No newversion link means a draft already exists - need to find and delete it
+    echo "   Found existing draft version, searching for it..."
+    
+    # Get all versions of this record
+    CONCEPT_RECORD=$(curl -s "https://zenodo.org/api/records/${ZENODO_RECORD_ID}/versions" \
+        -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}")
+    
+    # Find the draft deposition ID
+    DRAFT_DEPOSITION_ID=$(echo "$CONCEPT_RECORD" | python3 -c "
+import sys, json
+hits = json.load(sys.stdin).get('hits', {}).get('hits', [])
+for hit in hits:
+    if hit.get('links', {}).get('self', '').startswith('https://zenodo.org/api/deposit/'):
+        print(hit.get('id', ''))
+        break
+" 2>/dev/null)
+    
+    if [[ -n "$DRAFT_DEPOSITION_ID" ]] && [[ "$DRAFT_DEPOSITION_ID" != "$LATEST_DEPOSITION_ID" ]]; then
+        echo "   Deleting draft deposition ${DRAFT_DEPOSITION_ID}..."
+        curl -s -X DELETE "https://zenodo.org/api/deposit/depositions/${DRAFT_DEPOSITION_ID}" \
+            -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" > /dev/null
+        sleep 2
+    fi
+fi
+
+echo "   Creating new version..."
+
+# Create new version using the correct deposition ID
+NEW_VERSION_RESPONSE=$(curl -s -X POST \
+    "https://zenodo.org/api/deposit/depositions/${LATEST_DEPOSITION_ID}/actions/newversion" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}")
+
+# Extract the latest_draft URL
+LATEST_DRAFT_URL=$(echo "$NEW_VERSION_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin)['links']['latest_draft'])" 2>/dev/null)
+
+if [[ -z "$LATEST_DRAFT_URL" ]]; then
+    echo "Error: Failed to create new version. Response:"
+    echo "$NEW_VERSION_RESPONSE"
+    exit 1
+fi
+
+echo "   New draft created: $LATEST_DRAFT_URL"
+
+# Get the new deposition details
+NEW_DEPOSITION=$(curl -s "$LATEST_DRAFT_URL" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}")
+
+NEW_DEPOSITION_ID=$(echo "$NEW_DEPOSITION" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+BUCKET_URL=$(echo "$NEW_DEPOSITION" | python3 -c "import sys, json; print(json.load(sys.stdin)['links']['bucket'])")
+
+echo "   New deposition ID: ${NEW_DEPOSITION_ID}"
+
+# Delete old files from the new version
+echo "   Removing old files from draft..."
+OLD_FILES=$(echo "$NEW_DEPOSITION" | python3 -c "import sys, json; [print(f['id']) for f in json.load(sys.stdin)['files']]")
+
+for file_id in $OLD_FILES; do
+    curl -s -X DELETE \
+        "https://zenodo.org/api/deposit/depositions/${NEW_DEPOSITION_ID}/files/${file_id}" \
+        -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" > /dev/null
+done
+
+# Upload new tarball
+echo "   Uploading ${PACKAGE_NAME}.tar.gz (${TARBALL_SIZE})..."
+UPLOAD_RESPONSE=$(curl -s \
+    -X PUT "${BUCKET_URL}/${PACKAGE_NAME}.tar.gz" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@${TARBALL_PATH}")
+
+UPLOAD_KEY=$(echo "$UPLOAD_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('key', 'ERROR'))" 2>/dev/null)
+
+if [[ "$UPLOAD_KEY" == "ERROR" ]] || [[ -z "$UPLOAD_KEY" ]]; then
+    echo "Error: Upload failed. Response:"
+    echo "$UPLOAD_RESPONSE"
+    exit 1
+fi
+
+echo "   Upload successful: ${UPLOAD_KEY}"
+
+# Update metadata with all required fields
+echo "   Updating metadata with version ${VERSION_TAG}..."
+METADATA_UPDATE=$(cat <<EOF
+{
+    "metadata": {
+        "title": "Metatlas2 Development Environment Data",
+        "upload_type": "dataset",
+        "description": "This dataset contains all required files for testing the local standalone instance of the metatlas2 software.",
+        "creators": [
+            {
+                "name": "Kieft, Benjamin",
+                "orcid": "0000-0003-2458-9844"
+            }
+        ],
+        "version": "${VERSION_TAG}",
+        "publication_date": "$(date +%Y-%m-%d)",
+        "related_identifiers": [
+            {
+                "identifier": "https://github.com/bkieft-usa/metatlas2",
+                "relation": "isSupplementTo",
+                "resource_type": "software"
+            }
+        ]
+    }
+}
+EOF
+)
+
+curl -s -X PUT \
+    "https://zenodo.org/api/deposit/depositions/${NEW_DEPOSITION_ID}" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$METADATA_UPDATE" > /dev/null
+
+# Publish the new version
+echo "   Publishing new version..."
+PUBLISH_RESPONSE=$(curl -s -X POST \
+    "https://zenodo.org/api/deposit/depositions/${NEW_DEPOSITION_ID}/actions/publish" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}")
+
+NEW_DOI=$(echo "$PUBLISH_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('doi', 'ERROR'))" 2>/dev/null)
+
+if [[ "$NEW_DOI" == "ERROR" ]] || [[ -z "$NEW_DOI" ]]; then
+    echo "Error: Publish failed. Response:"
+    echo "$PUBLISH_RESPONSE"
+    exit 1
+fi
+
+echo ""
+echo "========================================" 
+echo "SUCCESS!"
+echo "========================================"
+echo "New version published: ${VERSION_TAG}"
+echo "DOI: ${NEW_DOI}"
+echo "Local package: ${TARBALL_PATH}"
+echo "Make sure to update the ZENODO_DOI variable in the metatlas.sh script!"
+echo ""
