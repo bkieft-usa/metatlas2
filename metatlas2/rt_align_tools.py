@@ -3,7 +3,7 @@ import numpy as np
 import sys
 from pathlib import Path
 from typing import Dict, Tuple, List
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression

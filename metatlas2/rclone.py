@@ -11,7 +11,7 @@ from subprocess import PIPE, Popen
 from typing import List, Optional, Tuple
 
 from IPython.display import HTML, display
-from tqdm.notebook import tqdm
+from tqdm.auto import tqdm
 
 logger = logging.getLogger(__name__)
 

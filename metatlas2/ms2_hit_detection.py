@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from contextlib import contextmanager
 import tqdm as tqdm_module
 

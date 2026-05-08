@@ -5,7 +5,7 @@ import getpass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import pubchempy as pcp
 

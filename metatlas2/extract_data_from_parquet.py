@@ -2,7 +2,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from pathlib import Path
 from typing import Dict, Any
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed

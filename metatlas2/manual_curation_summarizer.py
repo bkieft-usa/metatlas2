@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List, Any
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from scipy.interpolate import interp1d
 from scipy.signal import find_peaks, peak_widths, peak_prominences

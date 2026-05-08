@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import metatlas2.rt_align_tools as rat
 import metatlas2.pubchem_retrieval as pcr
