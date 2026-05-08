@@ -44,9 +44,13 @@ git pull
 ```
 
 This will:
-1. Download dev data to `~/.metatlas2-dev/` (if not already present)
-2. Launch JupyterLab in a Docker container
-3. Open the standalone workflow notebook in your browser at http://localhost:8888
+1. Download dev data to `~/.metatlas2-dev/` (if not already present or outdated)
+2. Clean up any previous workflow outputs
+3. Copy the workflow notebook to `~/.metatlas2-dev/` (keeps repo clean)
+4. Launch JupyterLab in a Docker container
+5. Open the standalone workflow notebook in your browser at http://localhost:8888
+
+**Note**: The notebook is copied from the repo to `~/.metatlas2-dev/standalone_dev_workflow.ipynb` so your local repo stays clean. You can safely `git pull` updates without conflicts.
 
 ### Using the Notebook
 
