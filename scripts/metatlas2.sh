@@ -209,19 +209,19 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Set JUPYTERHUB_SERVICE_PREFIX="/" for local JupyterLab proxy URLs
     # Set working directory to STANDALONE_DIR so relative paths in configs resolve correctly
     # Set USER env var for output path construction
-    docker run --rm -it \
-        --entrypoint /bin/bash \
-        -p 8888:8888 \
-        -v "${STANDALONE_DIR}:${STANDALONE_DIR}" \
-        -v "${REPO_DIR}:/repo" \
-        -e METATLAS_DATA_DIR="${STANDALONE_DIR}" \
-        -e METATLAS2_STANDALONE="true" \
-        -e JUPYTERHUB_SERVICE_PREFIX="/" \
-        -e USER="standalone" \
-        -e PYTHONPATH="/repo:/app" \
-        -w "${STANDALONE_DIR}" \
-        "${IMAGE_REPO}:${IMAGE_TAG}" \
-        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''
+docker run --rm -it \
+    --entrypoint /bin/bash \
+    -p 8888:8888 \
+    -v "${STANDALONE_DIR}:${STANDALONE_DIR}" \
+    -v "${REPO_DIR}:/repo" \
+    -e METATLAS_DATA_DIR="${STANDALONE_DIR}" \
+    -e METATLAS2_STANDALONE="true" \
+    -e JUPYTERHUB_SERVICE_PREFIX="/" \
+    -e USER="standalone" \
+    -e PYTHONPATH="/repo:/app" \
+    -w "${STANDALONE_DIR}" \
+    "${IMAGE_REPO}:${IMAGE_TAG}" \
+    -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''"
     exit 0
 fi
 
