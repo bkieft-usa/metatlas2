@@ -164,6 +164,12 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
             echo "  Authentication successful" >&2
         fi
     fi
+    
+    # Pull the latest image to ensure we have updates
+    echo "Pulling latest container image..."
+    if ! docker pull "${IMAGE_REPO}:${IMAGE_TAG}"; then
+        echo "Warning: Failed to pull latest image, using cached version" >&2
+    fi
     echo ""
     
     # Launch JupyterLab with the standalone notebook
