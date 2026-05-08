@@ -6,7 +6,7 @@
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-atlases   --config_path FILE
-#   metatlas2 [--image TAG] [--standalone]
+#   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):
 #   --image TAG   Use a specific image tag instead of the default (latest).
@@ -15,6 +15,8 @@
 #                 so edits to the working tree take effect immediately.
 #   --standalone  Launch standalone dev environment with JupyterLab notebook.
 #                 Downloads dev data if needed to ~/.metatlas2-dev/.
+#   --update-data Force re-download of dev data (use with --standalone).
+#                 Useful when new Zenodo versions are published.
 #
 # Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch)
 # inside the container, so no explicit volume flags are needed for data access.
@@ -35,12 +37,14 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Parse wrapper-specific flags; pass everything else through to Python
 
 PASSTHROUGH_ARGS=()
+UPDATE_DATA=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --image)        IMAGE_TAG="$2"; shift 2 ;;
         --image=*)      IMAGE_TAG="${1#*=}"; shift ;;
         --dev)          DEV_MODE=true; shift ;;
         --standalone)   STANDALONE_MODE=true; shift ;;
+        --update-data)  UPDATE_DATA=true; shift ;;
         *)              PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
@@ -64,18 +68,46 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     ZENODO_DOI="https://doi.org/10.5281/zenodo.20090018"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
     NOTEBOOK_PATH="/repo/notebooks/standalone_dev_workflow.ipynb"
+    VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
     
     echo "=========================================="
     echo "Metatlas2 Standalone Development Mode"
     echo "=========================================="
     echo ""
     
-    # Check if dev data exists
+    # Check if dev data exists and is current version
+    NEEDS_DOWNLOAD=false
     if [[ ! -d "${STANDALONE_DIR}" ]]; then
         echo "Dev environment not found at ${STANDALONE_DIR}"
+        NEEDS_DOWNLOAD=true
+    elif [[ "${UPDATE_DATA}" == "true" ]]; then
+        echo "Force update requested (--update-data)"
+        NEEDS_DOWNLOAD=true
+    elif [[ ! -f "${VERSION_FILE}" ]]; then
+        echo "Version file not found, data may be outdated"
+        NEEDS_DOWNLOAD=true
+    else
+        CURRENT_VERSION=$(cat "${VERSION_FILE}" 2>/dev/null || echo "unknown")
+        if [[ "${CURRENT_VERSION}" != "${ZENODO_DOI}" ]]; then
+            echo "Data version mismatch:"
+            echo "  Current: ${CURRENT_VERSION}"
+            echo "  Expected: ${ZENODO_DOI}"
+            NEEDS_DOWNLOAD=true
+        else
+            echo "Dev environment found at ${STANDALONE_DIR} (up to date)"
+        fi
+    fi
+    
+    if [[ "${NEEDS_DOWNLOAD}" == "true" ]]; then
         echo "Downloading dev data package from Zenodo..."
         echo "  DOI: ${ZENODO_DOI}"
         echo ""
+        
+        # Remove old data if it exists
+        if [[ -d "${STANDALONE_DIR}" ]]; then
+            echo "Removing old data..."
+            rm -rf "${STANDALONE_DIR}"
+        fi
         
         # Download and extract
         TMPDIR=$(mktemp -d)
@@ -105,10 +137,12 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
             exit 1
         fi
         
+        # Save version file
+        echo "${ZENODO_DOI}" > "${VERSION_FILE}"
+        
         echo "Dev environment setup complete"
         echo ""
     else
-        echo "Dev environment found at ${STANDALONE_DIR}"
         echo ""
     fi
     
