@@ -67,6 +67,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
     ZENODO_DOI="https://doi.org/10.5281/zenodo.20090323"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
+    NOTEBOOK_PATH="/repo/notebooks/standalone_dev_workflow.ipynb"
     VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
     
     echo "=========================================="
@@ -214,23 +215,11 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     fi
     echo ""
     
-    # Copy notebook from repo to standalone directory to avoid modifying repo
-    echo "Preparing standalone workflow notebook..."
-    cp "${REPO_DIR}/notebooks/standalone_dev_workflow.ipynb" "${STANDALONE_DIR}/standalone_dev_workflow.ipynb"
-    echo "  Copied to: ${STANDALONE_DIR}/standalone_dev_workflow.ipynb"
-    echo ""
-    
-    # Verify the copy succeeded
-    if [[ ! -f "${STANDALONE_DIR}/standalone_dev_workflow.ipynb" ]]; then
-        echo "Error: Failed to copy notebook" >&2
-        exit 1
-    fi
-    echo ""
-    
     # Launch JupyterLab with the standalone notebook
     echo "Launching JupyterLab in Docker container..."
     echo ""
-    echo "Opening standalone workflow notebook (copied from repo)"
+    echo "Opening standalone workflow notebook:"
+    echo "   ${NOTEBOOK_PATH}"
     echo ""
     echo "JupyterLab will open in your browser at:"
     echo "   http://localhost:8888"
@@ -245,7 +234,6 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Set JUPYTERHUB_SERVICE_PREFIX="/" for local JupyterLab proxy URLs
     # Set working directory to STANDALONE_DIR so relative paths in configs resolve correctly
     # Set USER env var for output path construction
-    # Open the copied notebook from STANDALONE_DIR (not /repo) to avoid modifying repo
     docker run --rm -it \
         --entrypoint /bin/bash \
         -p 8888:8888 \
@@ -258,7 +246,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         -e PYTHONPATH="/repo:/app" \
         -w "${STANDALONE_DIR}" \
         "${IMAGE_REPO}:${IMAGE_TAG}" \
-        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' '${STANDALONE_DIR}/standalone_dev_workflow.ipynb'"
+        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' /repo/notebooks/standalone_dev_workflow.ipynb"
     
     exit 0
 fi
