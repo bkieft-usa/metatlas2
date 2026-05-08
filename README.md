@@ -50,7 +50,7 @@ For new users or new machines, complete the one-time setup:
 
 ```bash
 # Set environment variables (ideally in .bashrc)
-export METATLAS_DATA_DIR="/global/cfs/cdirs/metatlas/"
+export METATLAS_DATA_DIR="/global/cfs/cdirs/metatlas"
 export PATH="/global/cfs/cdirs/metatlas/tools/metatlas2/scripts:${PATH}"
 
 # Install Jupyter kernel specs

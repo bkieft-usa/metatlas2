@@ -9,7 +9,7 @@ Complete these steps **once** on any new machine or user account before running 
 ### 1. Set `METATLAS_DATA_DIR` and add `scripts/` to your PATH
 
 ```bash
-echo 'export METATLAS_DATA_DIR="/global/cfs/cdirs/metatlas/"' >> ~/.bashrc
+echo 'export METATLAS_DATA_DIR="/global/cfs/cdirs/metatlas"' >> ~/.bashrc
 echo 'export PATH="/global/cfs/cdirs/metatlas/tools/metatlas2/scripts:${PATH}"' >> ~/.bashrc
 source ~/.bashrc
 ```
