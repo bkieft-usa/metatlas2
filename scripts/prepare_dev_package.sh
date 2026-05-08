@@ -177,10 +177,10 @@ COMPOUNDS:
     HILICZ:
       POS:
         PATHS:
-          - /data/compounds_pos.tsv
+          - compounds_pos.tsv
       NEG:
         PATHS:
-          - /data/compounds_neg.tsv
+          - compounds_neg.tsv
 EOF
 
 # Create atlases configuration
@@ -189,12 +189,12 @@ ATLASES:
   HILICZ:
     POS:
       ISTD:
-        path: /data/compounds_pos.tsv
+        path: compounds_pos.tsv
         name: Dev HILICZ ISTD Atlas Positive
         desc: Development internal standard compounds for positive mode
     NEG:
       ISTD:
-        path: /data/compounds_neg.tsv
+        path: compounds_neg.tsv
         name: Dev HILICZ ISTD Atlas Negative
         desc: Development internal standard compounds for negative mode
 EOF
@@ -204,7 +204,7 @@ cat > configs/analysis_config.yaml << 'EOF'
 WORKFLOWS:
   PATHS:
     owner: dev
-    msms_refs_path: /data/ms2_references.tsv
+    msms_refs_path: ms2_references.tsv
     gdrive_subfolder: 
   RT_ALIGNMENT:
     HILICZ:
@@ -351,8 +351,7 @@ This package contains a minimal dataset for running metatlas2 in standalone mode
   - `compounds_config.yaml` - Compound paths configuration
   - `atlases_config.yaml` - Atlas definitions
   - `analysis_config.yaml` - Workflow and analysis parameters
-- `dev_environment.yaml` - Environment metadata
-
+  
 ## Setup
 
 Extract this archive to `~/.metatlas2-dev/` (or custom location):

@@ -63,7 +63,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
     ZENODO_DOI="https://doi.org/10.5281/zenodo.20075571"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
-    NOTEBOOK_PATH="/app/notebooks/standalone_dev_workflow.ipynb"
+    NOTEBOOK_PATH="/repo/notebooks/standalone_dev_workflow.ipynb"
     
     echo "=========================================="
     echo "Metatlas2 Standalone Development Mode"
@@ -180,18 +180,21 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     echo "=========================================="
     
     # Run JupyterLab in Docker
+    # Mount local repo to /repo (not /app) to avoid shadowing the venv in /app/.venv
+    # Use PYTHONPATH to prioritize local repo code over installed package
+    # Set JUPYTERHUB_SERVICE_PREFIX="/" for local JupyterLab proxy URLs
     docker run --rm -it \
+        --entrypoint /bin/bash \
         -p 8888:8888 \
         -v "${STANDALONE_DIR}:${STANDALONE_DIR}" \
-        -v "${REPO_DIR}:/app" \
+        -v "${REPO_DIR}:/repo" \
         -e METATLAS_DATA_DIR="${STANDALONE_DIR}" \
         -e METATLAS2_STANDALONE="true" \
-        -e PYTHONPATH="/app" \
-        -w /app \
+        -e JUPYTERHUB_SERVICE_PREFIX="/" \
+        -e PYTHONPATH="/repo:/app" \
+        -w /repo \
         "${IMAGE_REPO}:${IMAGE_TAG}" \
-        jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
-        --NotebookApp.token='' --NotebookApp.password='' \
-        "${NOTEBOOK_PATH}"
+        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' /repo/notebooks/standalone_dev_workflow.ipynb"
     
     exit 0
 fi

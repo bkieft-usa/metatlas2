@@ -111,11 +111,15 @@ After setup, the standalone environment lives at `~/.metatlas2-dev/`:
 
 ### Testing Code Changes
 
-1. Edit source code in `~/metatlas2/metatlas2/`
-2. Restart JupyterLab: `Ctrl+C` then re-run `./scripts/metatlas2.sh --standalone`
+The standalone container mounts your local repository source code, so changes are immediately visible without restarting the container:
+
+1. Edit source code in `~/metatlas2/metatlas2/` (your local repository)
+2. In JupyterLab: **Kernel → Restart Kernel** (or **Kernel → Restart Kernel and Clear Outputs**)
 3. Re-run relevant notebook cells to test changes
-4. All cells use production functions, so changes are immediately tested
-5. Iterate quickly with minimal dataset
+4. Changes are immediately picked up because the source is mounted into the container
+5. Iterate quickly - no need to restart the entire container!
+
+**Note**: Leave the container running (`./scripts/metatlas2.sh --standalone`) and just restart the kernel. Only stop and restart if you need to change container settings or update the image.
 
 ### Resetting Environment
 
@@ -173,60 +177,6 @@ Extracted from production project at NERSC:
 
 See `scripts/prepare_dev_package.sh` for the complete list of InChI keys and run numbers.
 
-## Troubleshooting
-
-### Download fails
-
-If the automated download fails, manually download and extract:
-
-```bash
-# Using zenodo_get (recommended)
-pip install zenodo-get
-zenodo_get -d https://doi.org/10.5281/zenodo.20075571
-mkdir -p ~/.metatlas2-dev
-tar -xzf metatlas2-dev-data.tar.gz -C ~/.metatlas2-dev --strip-components=1
-
-# Or download directly from browser
-# Visit https://doi.org/10.5281/zenodo.20075571 and download the tarball
-```
-
-### JupyterLab won't start
-
-Check Docker is running:
-```bash
-docker ps
-```
-
-Check port 8888 is available:
-```bash
-lsof -i :8888
-```
-
-### Missing parquet files
-
-Verify the package was extracted correctly:
-```bash
-ls ~/.metatlas2-dev/parquet/*.parquet | wc -l  # Should show 130
-```
-
-### Import errors in notebook
-
-Verify PYTHONPATH is set correctly - should point to `/app` in container.
-
-## Differences from Production
-
-The standalone environment differs from production NERSC runs:
-
-| Feature | Standalone | Production |
-|---------|-----------|------------|
-| Container runtime | Docker | Shifter |
-| Data location | `~/.metatlas2-dev/` | `$METATLAS_DATA_DIR` |
-| Database | `metatlas.duckdb` | `metatlas.duckdb` |
-| Dataset size | 28 runs (130 parquet files) | Hundreds to thousands of runs |
-| Runtime | ~20-30 min | Hours to days |
-| Execution | Jupyter notebook | SLURM jobs |
-| Functions | Same production code | Same production code |
-
 ## Creating New Dev Packages
 
 To create an updated dev package (must be run at NERSC):
@@ -236,21 +186,5 @@ cd ~/metatlas2
 ./scripts/prepare_dev_package.sh
 
 # Output: /global/cfs/cdirs/metatlas/databases/standalone_dev_data/metatlas2-dev-data.tar.gz
-# Upload to GitHub Releases at:
-# https://github.com/bkieft-usa/metatlas2/releases/new
+# Upload to the Zenodo page and get new/updated DOI to put into metatlas.sh
 ```
-
-The script:
-1. Copies 130 parquet files for 28 specific runs using wildcard matching
-2. Creates compound definition files (6 POS + 6 NEG)
-3. Creates MS2 reference file (17 spectra)
-4. Generates YAML config files for compounds, atlases, and analysis
-5. Creates tarball (~1.1GB compressed)
-
-See `scripts/prepare_dev_package.sh` for details on run selection and file copying.
-
-## See Also
-
-- [Development and Testing](development_and_testing.md) - General development guide
-- [Run Targeted Analysis](run_targeted_analysis.md) - Production workflow documentation
-- [Database Schema](database_schema.md) - Database structure reference
