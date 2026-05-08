@@ -23,6 +23,14 @@ The standalone development environment allows you to run metatlas2 on any Linux 
 - Linux machine with Docker installed
 - ~1GB free disk space in home directory
 - Internet connection (for first-time setup)
+- **GitHub authentication** (if container image is private):
+  - **Option 1 (Recommended)**: Set `GITHUB_TOKEN` environment variable for automatic login
+    1. Create token at https://github.com/settings/tokens/new?scopes=read:packages
+    2. Add to `~/.bashrc`: `export GITHUB_TOKEN='ghp_xxxxxxxxxxxx'`
+    3. Reload shell: `source ~/.bashrc`
+  - **Option 2**: Interactive login - you'll be prompted for credentials when needed
+    - Username: your GitHub username
+    - Password: your GitHub Personal Access Token (not your GitHub password!)
 
 ### Launch Standalone Mode
 

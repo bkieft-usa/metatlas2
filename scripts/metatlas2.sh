@@ -83,7 +83,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         TMPDIR=$(mktemp -d)
         trap "rm -rf '${TMPDIR}'" EXIT
         
-        echo "Downloading (~1.1GB, this may take a few minutes)..."
+        echo "Downloading (~500MB, this may take a few minutes)..."
         cd "${TMPDIR}"
         if ! uvx zenodo_get -d "${ZENODO_DOI}"; then
             echo "Error: Failed to download dev data from Zenodo" >&2
@@ -117,6 +117,56 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     # Override environment for standalone mode
     export METATLAS_DATA_DIR="${STANDALONE_DIR}"
     export METATLAS2_STANDALONE="true"
+    
+    # Authenticate with GitHub Container Registry if needed
+    echo "Checking container image authentication..."
+    GHCR_TOKEN="${GHCR_TOKEN:-${GHCR_TOKEN:-}}"
+    
+    if [[ -n "${GHCR_TOKEN}" ]]; then
+        echo "  Using GHCR_TOKEN for automatic authentication..."
+        if echo "${GHCR_TOKEN}" | docker login ghcr.io -u "$(whoami)" --password-stdin >/dev/null 2>&1; then
+            echo "  ✓ Successfully authenticated"
+        else
+            echo "  Warning: Authentication failed, trying interactive login..." >&2
+            docker login ghcr.io
+        fi
+    else
+        # No token - try pulling to see if image is public or user is already logged in
+        echo "  No GHCR_TOKEN found, checking if already authenticated..."
+        if docker pull "${IMAGE_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "  ✓ Image accessible"
+        else
+            echo "" >&2
+            echo "Container image requires authentication." >&2
+            echo "" >&2
+            echo "Option 1: Interactive login (enter credentials now)" >&2
+            echo "Option 2: Set GHCR_TOKEN env variable for automatic login" >&2
+            echo "" >&2
+            echo "Attempting interactive login..." >&2
+            echo "" >&2
+            
+            if ! docker login ghcr.io; then
+                echo "" >&2
+                echo "========================================" >&2
+                echo "Authentication failed" >&2
+                echo "========================================" >&2
+                echo "" >&2
+                echo "To create a GitHub Personal Access Token:" >&2
+                echo "  1. Visit: https://github.com/settings/tokens/new?scopes=read:packages" >&2
+                echo "  2. Generate token with 'read:packages' permission" >&2
+                echo "  3. Use token as password when prompted by 'docker login'" >&2
+                echo "" >&2
+                echo "Or set GHCR_TOKEN in ~/.bashrc for automatic authentication:" >&2
+                echo "  export GHCR_TOKEN='ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'" >&2
+                echo "" >&2
+                exit 1
+            fi
+            
+            echo "" >&2
+            echo "  ✓ Authentication successful" >&2
+        fi
+    fi
+    echo ""
     
     # Launch JupyterLab with the standalone notebook
     echo "Launching JupyterLab in Docker container..."
