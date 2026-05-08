@@ -252,7 +252,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         -e PYTHONPATH="/repo:/app" \
         -w "${STANDALONE_DIR}" \
         "${IMAGE_REPO}:${IMAGE_TAG}" \
-        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' ${STANDALONE_DIR}/standalone_dev_workflow.ipynb"
+        -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' ./standalone_dev_workflow.ipynb"
     
     exit 0
 fi
