@@ -67,164 +67,114 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
     ZENODO_DOI="https://doi.org/10.5281/zenodo.20090323"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
-    NOTEBOOK_PATH="/repo/notebooks/standalone_dev_workflow.ipynb"
     VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
-    
+
     echo "=========================================="
     echo "Metatlas2 Standalone Development Mode"
     echo "=========================================="
     echo ""
-    
-    # Check if dev data exists and is current version
+
+    # Check for docker and docker compose
+    if ! command -v docker &>/dev/null; then
+        echo "Error: 'docker' is required but not found on PATH." >&2
+        echo "Install Docker Desktop: https://docs.docker.com/get-docker/" >&2
+        exit 1
+    fi
+    if ! docker compose version &>/dev/null; then
+        echo "Error: 'docker compose' (v2) is required." >&2
+        echo "Update Docker Desktop or install the compose plugin." >&2
+        exit 1
+    fi
+
+    # ── Data download (unchanged from your original) ───────────────────────────
     NEEDS_DOWNLOAD=false
     if [[ ! -d "${STANDALONE_DIR}" ]]; then
-        echo "Dev environment not found at ${STANDALONE_DIR}"
         NEEDS_DOWNLOAD=true
     elif [[ "${UPDATE_DATA}" == "true" ]]; then
-        echo "Force update requested (--update-data)"
         NEEDS_DOWNLOAD=true
     elif [[ ! -f "${VERSION_FILE}" ]]; then
-        echo "Version file not found, data may be outdated"
         NEEDS_DOWNLOAD=true
     else
         CURRENT_VERSION=$(cat "${VERSION_FILE}" 2>/dev/null || echo "unknown")
-        if [[ "${CURRENT_VERSION}" != "${ZENODO_DOI}" ]]; then
-            echo "Data version mismatch:"
-            echo "  Current: ${CURRENT_VERSION}"
-            echo "  Expected: ${ZENODO_DOI}"
-            NEEDS_DOWNLOAD=true
-        else
-            echo "Dev environment found at ${STANDALONE_DIR} (up to date)"
-        fi
+        [[ "${CURRENT_VERSION}" != "${ZENODO_DOI}" ]] && NEEDS_DOWNLOAD=true
     fi
-    
+
     if [[ "${NEEDS_DOWNLOAD}" == "true" ]]; then
-        echo "Downloading dev data package from Zenodo..."
-        echo "  DOI: ${ZENODO_DOI}"
-        echo ""
-        
-        # Remove old data if it exists
-        if [[ -d "${STANDALONE_DIR}" ]]; then
-            echo "Removing old data..."
-            rm -rf "${STANDALONE_DIR}"
+            echo "Downloading dev data from Zenodo..."
+            if [[ -d "${STANDALONE_DIR}" ]]; then
+                rm -rf "${STANDALONE_DIR}"
+            fi
+            mkdir -p "${STANDALONE_DIR}"
+
+            docker run --rm \
+                -v "${STANDALONE_DIR}:/data" \
+                -w /data \
+                "${IMAGE_REPO}:${IMAGE_TAG}" \
+                /bin/bash -c "/app/.venv/bin/zenodo_get -d '${ZENODO_DOI}' && \
+                            tar -xzf '${TARBALL_NAME}' --strip-components=1 && \
+                            rm '${TARBALL_NAME}'"
+
+            echo "${ZENODO_DOI}" > "${VERSION_FILE}"
+            echo "Dev data setup complete"
+            echo ""
         fi
-        
-        # Download and extract
-        TMPDIR=$(mktemp -d)
-        trap "rm -rf '${TMPDIR}'" EXIT
-        
-        echo "Downloading (~500MB, this may take a few minutes)..."
-        cd "${TMPDIR}"
-        if ! uvx zenodo_get -d "${ZENODO_DOI}"; then
-            echo "Error: Failed to download dev data from Zenodo" >&2
-            echo "Please manually download from: ${ZENODO_DOI}" >&2
-            echo "Or install zenodo_get and try again: pip install zenodo-get" >&2
-            exit 1
-        fi
-        
-        # Find the downloaded tarball (zenodo_get downloads with original filename)
-        if [[ ! -f "${TMPDIR}/${TARBALL_NAME}" ]]; then
-            echo "Error: Expected file ${TARBALL_NAME} not found after download" >&2
-            echo "Available files:" >&2
-            ls -lh "${TMPDIR}" >&2
-            exit 1
-        fi
-        
-        echo "Extracting to ${STANDALONE_DIR}..."
-        mkdir -p "${STANDALONE_DIR}"
-        if ! tar -xzf "${TMPDIR}/${TARBALL_NAME}" -C "${STANDALONE_DIR}" --strip-components=1; then
-            echo "Error: Failed to extract dev data" >&2
-            exit 1
-        fi
-        
-        # Save version file
-        echo "${ZENODO_DOI}" > "${VERSION_FILE}"
-        
-        echo "Dev environment setup complete"
-        echo ""
-    else
-        echo ""
-    fi
-    
-    # Override environment for standalone mode
-    export METATLAS_DATA_DIR="${STANDALONE_DIR}"
-    export METATLAS2_STANDALONE="true"
-    
-    # Clean up any existing outputs from previous runs
+
+    # ── Clean previous outputs ─────────────────────────────────────────────────
     PROJECTS_DIR="${STANDALONE_DIR}/projects/targeted_outputs"
     if [[ -d "${PROJECTS_DIR}" ]]; then
         echo "Cleaning up previous workflow outputs..."
         rm -rf "${PROJECTS_DIR}"
-        echo "  Removed: ${PROJECTS_DIR}"
         echo ""
     fi
-    
-    # Authenticate with GitHub Container Registry if needed
-    echo "Checking container image authentication..."
-    
-    # Try pulling first to see if already authenticated
-    if docker pull "${IMAGE_REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
-        echo "  Image accessible (already authenticated or public)"
-    else
-        GHCR_TOKEN="${GHCR_TOKEN:-${GITHUB_TOKEN:-}}"
-        
-        if [[ -n "${GHCR_TOKEN}" ]]; then
-            echo "  Using token for automatic authentication..."
-            if echo "${GHCR_TOKEN}" | docker login ghcr.io -u "$(whoami)" --password-stdin >/dev/null 2>&1; then
-                echo "  Successfully authenticated"
-            else
-                echo "  Warning: Automatic authentication failed, but continuing..." >&2
-                echo "  (Image may already be accessible)" >&2
-            fi
-        else
-            echo "  Warning: No authentication token found, but continuing..." >&2
-            echo "  (Image may be public or you're already authenticated)" >&2
-        fi
-    fi
+
+    echo "Copying fresh notebook to ${STANDALONE_DIR}..."
+    cp "${REPO_DIR}/local/standalone_dev_workflow.ipynb" "${STANDALONE_DIR}/standalone_dev_workflow.ipynb"
     echo ""
-    
-    # Pull the latest image to ensure we have updates (skip if just pulled above)
+
+    # ── Pull latest image ──────────────────────────────────────────────────────
     echo "Pulling latest container image..."
-    if ! docker pull "${IMAGE_REPO}:${IMAGE_TAG}" 2>&1 | grep -q "up to date"; then
-        echo "  Image updated"
-    fi
+    docker pull "${IMAGE_REPO}:${IMAGE_TAG}"
     echo ""
-    
-    # Launch JupyterLab with the standalone notebook
-    echo "Launching JupyterLab in Docker container..."
-    echo ""
-    echo "Opening standalone workflow notebook:"
-    echo "   ${NOTEBOOK_PATH}"
-    echo ""
-    echo "JupyterLab will open in your browser at:"
-    echo "   http://localhost:8888"
-    echo ""
-    echo "Press Ctrl+C to stop the server"
-    echo ""
+
+    # ── Write a fresh Jupyter config inside a temp dir ────────────────────────
+    # This is baked into the container at runtime via JUPYTER_CONFIG_DIR,
+    # guaranteeing nothing inside the image can override the bind address.
+    JUPYTER_CONFIG_TMPDIR=$(mktemp -d)
+    trap "rm -rf '${JUPYTER_CONFIG_TMPDIR}'" EXIT
+    cat > "${JUPYTER_CONFIG_TMPDIR}/jupyter_server_config.py" <<'EOF'
+c.ServerApp.ip = '0.0.0.0'
+c.ServerApp.port = 8889
+c.IdentityProvider.token = ''
+c.ServerApp.password = ''
+c.ServerApp.open_browser = False
+c.ServerApp.allow_root = True
+EOF
+
+    # ── Launch via Docker Compose ──────────────────────────────────────────────
     echo "=========================================="
-    
-    # Run JupyterLab in Docker
-    # Mount local repo to /repo (not /app) to avoid shadowing the venv in /app/.venv
-    # Use PYTHONPATH to prioritize local repo code over installed package
-    # Set JUPYTERHUB_SERVICE_PREFIX="/" for local JupyterLab proxy URLs
-    # Set working directory to STANDALONE_DIR so relative paths in configs resolve correctly
-    # Set USER env var for output path construction
-docker run --rm -it \
-    --entrypoint /bin/bash \
-    -p 8888:8888 \
-    -v "${STANDALONE_DIR}:${STANDALONE_DIR}" \
-    -v "${REPO_DIR}:/repo" \
-    -e METATLAS_DATA_DIR="${STANDALONE_DIR}" \
-    -e METATLAS2_STANDALONE="true" \
-    -e JUPYTERHUB_SERVICE_PREFIX="/" \
-    -e USER="standalone" \
-    -e PYTHONPATH="/repo:/app" \
-    -w "${STANDALONE_DIR}" \
-    "${IMAGE_REPO}:${IMAGE_TAG}" \
-    -c "/app/.venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''"
+    echo "Launching JupyterLab..."
+    echo ""
+    echo "Data dir: ${STANDALONE_DIR}"
+    echo "Repo dir: ${REPO_DIR} (live edits enabled)"
+    echo ""
+    echo "Open your browser at:"
+    echo "   http://localhost:${STANDALONE_PORT:-8889}/lab"
+    echo ""
+    echo "Press Ctrl+C to stop"
+    echo "=========================================="
+    echo ""
+
+    REPO_DIR="${REPO_DIR}" \
+    STANDALONE_DIR="${STANDALONE_DIR}" \
+    JUPYTER_CONFIG_TMPDIR="${JUPYTER_CONFIG_TMPDIR}" \
+    METATLAS2_IMAGE_TAG="${IMAGE_TAG}" \
+    STANDALONE_PORT="${STANDALONE_PORT:-8889}" \
+        docker compose \
+            -f "${REPO_DIR}/local/docker-compose.standalone.yml" \
+            up --remove-orphans
+
     exit 0
 fi
-
 
 # Common shifter flags.
 # GPFS paths (home, CFS, scratch) are auto-mounted by shifter -- no -v needed.

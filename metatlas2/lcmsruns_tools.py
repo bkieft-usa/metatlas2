@@ -97,42 +97,25 @@ def _get_project_files(project_raw_files_path: str) -> dict:
         raise ValueError(f"Please address the .failed files before proceeding. Found {len(failed_conversion_files)} .failed files in {project_path}.")
     
     # Check on directories and files
-    raw_dir = project_path / "raw"
     parquet_dir = project_path / "parquet"
-    mzML_dir = project_path / "mzML"
-    if not raw_dir.exists():
-        raise FileNotFoundError(f"raw/ directory does not exist in {project_path}")
     if not parquet_dir.exists():
         raise FileNotFoundError(f"parquet/ directory does not exist in {project_path}")
-    if not mzML_dir.exists():
-        raise FileNotFoundError(f"mzML/ directory does not exist in {project_path}")
-    raw_files = list(raw_dir.glob("*.raw"))
     parquet_files = list(parquet_dir.glob("*.parquet"))
-    mzML_files = list(mzML_dir.glob("*.mzML"))
-    if not parquet_files or not raw_files or not mzML_files:
-        raise ValueError(f"Missing .parquet, .raw, or .mzML files for {project_path}")
-    
+    if not parquet_files:
+        raise ValueError(f"Missing .parquet files for {project_path}")
     logger.info(f"Found {len(parquet_files)} .parquet files in {project_path}")
-    logger.info(f"Found {len(raw_files)} .raw files in {project_path}")
-    logger.info(f"Found {len(mzML_files)} .mzML files in {project_path}")
     
-    # Initialize nested dictionary
-    files_by_group = {'raw': {}, 'parquet': {}, 'mzML': {}}
-    
-    # Organize each file type
-    _organize_files(parquet_files, 'parquet', files_by_group['parquet'])
-    _organize_files(raw_files, 'raw', files_by_group['raw'])
-    _organize_files(mzML_files, 'mzML', files_by_group['mzML'])
+    files_by_group = {'parquet': {}}
+    _organize_files(parquet_files, files_by_group['parquet'])
     
     return files_by_group
 
-def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None:
+def _organize_files(files: List[Path], files_dict: dict) -> None:
     """
     Helper function to organize files by chromatography/polarity/ms_level/analysis_type.
     
     Args:
         files: List of file paths to organize
-        file_type: Type of file ('parquet', 'raw', 'mzML')
         files_dict: Dictionary to populate with organized files
     """
     for file_path in files:
@@ -147,33 +130,17 @@ def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None
             chromatography = 'Unknown'
         
         # Infer MS level and polarity from filename
-        if file_type == 'parquet':
-            filename_lower = filename.lower()
-            if filename_lower.endswith('_ms1_pos.parquet'):
-                ms_level, polarity = 1, 'positive'
-            elif filename_lower.endswith('_ms2_pos.parquet'):
-                ms_level, polarity = 2, 'positive'
-            elif filename_lower.endswith('_ms1_neg.parquet'):
-                ms_level, polarity = 1, 'negative'
-            elif filename_lower.endswith('_ms2_neg.parquet'):
-                ms_level, polarity = 2, 'negative'
-            else:
-                ms_level, polarity = 'unknown', 'unknown'
-        else:  # raw or mzML
-            if any(x in filename.upper() for x in ['_POS_', '_POSITIVE_']):
-                polarity = 'positive'
-            elif any(x in filename.upper() for x in ['_NEG_', '_NEGATIVE_']):
-                polarity = 'negative'
-            elif any(x in filename.upper() for x in ['_FPS_']):
-                polarity = 'fps'
-            else:
-                polarity = 'Unknown'
-            if any(x in filename.upper() for x in ['_MS1_']):
-                ms_level = 1
-            elif any(x in filename.upper() for x in ['_MS2_', '_MSMS_']):
-                ms_level = 2
-            else:
-                ms_level = 'Unknown'
+        filename_lower = filename.lower()
+        if filename_lower.endswith('_ms1_pos.parquet'):
+            ms_level, polarity = 1, 'positive'
+        elif filename_lower.endswith('_ms2_pos.parquet'):
+            ms_level, polarity = 2, 'positive'
+        elif filename_lower.endswith('_ms1_neg.parquet'):
+            ms_level, polarity = 1, 'negative'
+        elif filename_lower.endswith('_ms2_neg.parquet'):
+            ms_level, polarity = 2, 'negative'
+        else:
+            ms_level, polarity = 'unknown', 'unknown'
 
         # Infer analysis type from filename
         if any(x in filename.upper() for x in ['-QC']):

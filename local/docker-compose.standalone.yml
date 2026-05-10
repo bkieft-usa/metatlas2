@@ -1,0 +1,39 @@
+services:
+  jupyterlab:
+    image: ghcr.io/bkieft-usa/metatlas2:${METATLAS2_IMAGE_TAG:-latest}
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "/app/.venv/bin/python -m ipykernel install
+      --name metatlas2-standalone
+      --display-name 'Metatlas2 (standalone)'
+      --sys-prefix
+      &&
+      /app/.venv/bin/jupyter lab
+      --ip=0.0.0.0
+      --port=8888
+      --no-browser
+      --allow-root
+      --IdentityProvider.token=''
+      --ServerApp.password=''
+      --ServerApp.root_dir=/data"
+    ports:
+      - "127.0.0.1:${STANDALONE_PORT:-8889}:8889"
+    volumes:
+      - ${REPO_DIR}:/repo:ro
+      - ${STANDALONE_DIR}:/data
+      - ${JUPYTER_CONFIG_TMPDIR}:/tmp/jupyter_config
+    environment:
+      METATLAS_DATA_DIR: /data
+      METATLAS2_STANDALONE: "true"
+      JUPYTERHUB_SERVICE_PREFIX: "/"
+      USER: standalone
+      # Repo code takes priority over installed package
+      PYTHONPATH: "/repo:/app"
+      # Force Jupyter to use a clean config with no overrides
+      JUPYTER_CONFIG_DIR: /tmp/jupyter_config
+      JUPYTER_CONFIG_PATH: /tmp/jupyter_config
+    # Tells Docker to use host networking mode on Linux,
+    # which sidesteps bridge networking issues entirely
+    # On Mac, host networking isn't supported so we fall back to port mapping above
+    network_mode: ${NETWORK_MODE:-bridge}
+    restart: "no"
