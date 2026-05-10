@@ -116,7 +116,7 @@ echo ""
 for run in "${ALL_RUNS[@]}"; do
     # Find all parquet files for this run
     shopt -s nullglob
-    run_files=("${SOURCE_BASE}/parquet/"*"${run}"*.parquet)
+    run_files=("${SOURCE_BASE}/parquet/"*"${run}"*pos.parquet)
     shopt -u nullglob
     
     if [[ ${#run_files[@]} -gt 0 ]]; then
