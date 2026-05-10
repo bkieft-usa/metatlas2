@@ -65,7 +65,7 @@ fi
 # Standalone mode setup
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    ZENODO_DOI="https://doi.org/10.5281/zenodo.20090323"
+    ZENODO_DOI="https://doi.org/10.5281/zenodo.20103299"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
     VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
 
@@ -107,12 +107,13 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
             mkdir -p "${STANDALONE_DIR}"
 
             docker run --rm \
+                --entrypoint /bin/bash \
                 -v "${STANDALONE_DIR}:/data" \
                 -w /data \
                 "${IMAGE_REPO}:${IMAGE_TAG}" \
-                /bin/bash -c "/app/.venv/bin/zenodo_get -d '${ZENODO_DOI}' && \
-                            tar -xzf '${TARBALL_NAME}' --strip-components=1 && \
-                            rm '${TARBALL_NAME}'"
+                -c "/app/.venv/bin/zenodo_get -d '${ZENODO_DOI}' && \
+                    tar -xzf '${TARBALL_NAME}' --strip-components=1 && \
+                    rm '${TARBALL_NAME}'"
 
             echo "${ZENODO_DOI}" > "${VERSION_FILE}"
             echo "Dev data setup complete"

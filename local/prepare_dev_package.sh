@@ -6,10 +6,11 @@
 #
 # Usage:
 #   cd /global/homes/b/bkieft/metatlas2
-#   ./scripts/prepare_dev_package.sh [output_dir] [--keep-existing]
+#   ./scripts/prepare_dev_package.sh [output_dir] [--keep-existing] [--no-parquet-subset]
 #
 # Options:
 #   --keep-existing  Skip package creation and only upload existing tarball to Zenodo
+#   --no-parquet-subset  Skip filtering copied parquet rows (filtering is on by default)
 #
 # Output:
 #   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
@@ -21,11 +22,14 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Parse arguments
 KEEP_EXISTING=false
+SUBSET_PARQUET=true
 OUTPUT_DIR=""
 
 for arg in "$@"; do
     if [[ "$arg" == "--keep-existing" ]]; then
         KEEP_EXISTING=true
+    elif [[ "$arg" == "--no-parquet-subset" ]]; then
+        SUBSET_PARQUET=false
     elif [[ -z "$OUTPUT_DIR" ]]; then
         OUTPUT_DIR="$arg"
     fi
@@ -153,7 +157,7 @@ echo "-----------------------------------------"
 
 cat > qc_compounds_pos.tsv << 'EOF'
 label	adduct	mz	rt_peak	rt_min	rt_max	inchi	inchi_key	mz_tolerance	polarity
-ABMBA (unlabeled)	[M+H]+	229.9811	1.09380632	0.79380632	1.39380632  LCMZECCEEOQWLQ-UHFFFAOYSA-N	5	positive
+ABMBA (unlabeled)	[M+H]+	229.9811	1.09380632	0.79380632	1.39380632	LCMZECCEEOQWLQ-UHFFFAOYSA-N	5	positive
 adenine (U - 15N)	[M+H]+	141.04694	2.677602	2.377602	2.977602	GFFGJBXGBJISGV-CIKZIQIKSA-N	5	positive
 guanine (U - 15N)	[M+H]+	157.04186	6.26535999	5.96535999	6.56535999	UYTPUPDQBNUYGX-CIKZIQIKSA-N	5	positive
 phenylalanine (U - 13C, 15N)	[M+H]+	176.11348	8.9793057	8.6793057	9.2793057	COLNVLDHVKWLRT-CMLFETTRSA-N	5	positive
@@ -260,6 +264,138 @@ cat > ms2_references.tsv << 'EOF'
 EOF
 
 echo "   Created ms2_references.tsv (72 spectra)"
+
+if [[ "$SUBSET_PARQUET" == true ]]; then
+    echo ""
+    echo "Subsetting copied parquet files..."
+    echo "----------------------------------"
+
+    # Use conservative defaults so rows needed by both RT alignment and targeted analysis are retained.
+    # Override via env vars when you want tighter filtering:
+    #   SUBSET_PPM_MS1, SUBSET_PPM_MS2, SUBSET_EXTRA_TIME
+    SUBSET_PPM_MS1="${SUBSET_PPM_MS1:-20.0}"
+    SUBSET_PPM_MS2="${SUBSET_PPM_MS2:-20.0}"
+    SUBSET_EXTRA_TIME="${SUBSET_EXTRA_TIME:-2.0}"
+
+    PARQUET_DIR="lcmsruns/dev/${STANDALONE_PROJECT}/parquet"
+
+    python3 - <<PY
+import csv
+import sys
+from pathlib import Path
+
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+
+def parse_float(value: str):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_windows(tsv_path: Path):
+    windows = []
+    if not tsv_path.exists():
+        return windows
+    with tsv_path.open("r", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            mz = parse_float(row.get("mz"))
+            rt_min = parse_float(row.get("rt_min"))
+            rt_max = parse_float(row.get("rt_max"))
+            if mz is None or rt_min is None or rt_max is None:
+                continue
+            windows.append((mz, rt_min, rt_max))
+    return windows
+
+
+def ppm_bounds(mz: float, ppm: float):
+    delta = mz * ppm / 1e6
+    return mz - delta, mz + delta
+
+
+def filter_table(table, windows, mz_column: str, ppm: float, extra_time: float):
+    if table.num_rows == 0 or not windows:
+        return table.slice(0, 0)
+
+    mz_values = table[mz_column]
+    rt_values = table["rt"]
+    keep_mask = None
+
+    for mz, rt_min, rt_max in windows:
+        mz_min, mz_max = ppm_bounds(mz, ppm)
+        rt_lo = rt_min - extra_time
+        rt_hi = rt_max + extra_time
+
+        mz_ok = pc.and_(pc.greater_equal(mz_values, mz_min), pc.less_equal(mz_values, mz_max))
+        rt_ok = pc.and_(pc.greater_equal(rt_values, rt_lo), pc.less_equal(rt_values, rt_hi))
+        this_mask = pc.and_(mz_ok, rt_ok)
+        keep_mask = this_mask if keep_mask is None else pc.or_(keep_mask, this_mask)
+
+    return table.filter(keep_mask)
+
+
+root = Path(".")
+parquet_dir = root / Path("${PARQUET_DIR}")
+ppm_ms1 = float("${SUBSET_PPM_MS1}")
+ppm_ms2 = float("${SUBSET_PPM_MS2}")
+extra_time = float("${SUBSET_EXTRA_TIME}")
+
+windows = []
+windows.extend(parse_windows(root / "qc_compounds_pos.tsv"))
+windows.extend(parse_windows(root / "ema_compounds_pos.tsv"))
+
+if not windows:
+    print("No compound windows found; skipping parquet subsetting.")
+    sys.exit(0)
+
+files = sorted(parquet_dir.glob("*.parquet"))
+if not files:
+    print("No parquet files found; skipping parquet subsetting.")
+    sys.exit(0)
+
+total_before = 0
+total_after = 0
+updated = 0
+
+for pfile in files:
+    name = pfile.name
+    is_ms1 = name.endswith("_ms1_pos.parquet") or name.endswith("_ms1_neg.parquet")
+    is_ms2 = name.endswith("_ms2_pos.parquet") or name.endswith("_ms2_neg.parquet")
+    if not (is_ms1 or is_ms2):
+        continue
+
+    table = pq.read_table(pfile)
+    before_rows = table.num_rows
+    total_before += before_rows
+
+    if is_ms1:
+        filtered = filter_table(table, windows, "mz", ppm_ms1, extra_time)
+    else:
+        filtered = filter_table(table, windows, "precursor_MZ", ppm_ms2, extra_time)
+
+    after_rows = filtered.num_rows
+    total_after += after_rows
+
+    if after_rows != before_rows:
+        pq.write_table(filtered, pfile, compression="snappy")
+        updated += 1
+
+    print(f"  {name}: {before_rows} -> {after_rows} rows")
+
+print(f"Subset summary: {len(files)} files scanned, {updated} rewritten")
+print(f"Rows retained: {total_after}/{total_before} ({(100.0 * total_after / total_before) if total_before else 0:.2f}%)")
+PY
+
+    echo "   Parquet subsetting complete"
+fi
 
 echo ""
 echo "Creating configuration files..."
