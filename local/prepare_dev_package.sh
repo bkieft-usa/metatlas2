@@ -163,7 +163,7 @@ asparagine (U - 13C, 15N)	[M+H]+	139.06825	14.3680889	14.0680889	14.6680889	DCXY
 lysine (U - 13C, 15N)	[M+H]+	155.127	17.0113104	16.7113104	17.3113104	KDXKERNSBIXSRK-JMKXWGMHSA-N	5	positive
 EOF
 
-echo "   Created qc_compounds_pos.tsv (6 compounds)"
+echo "   Created qc_compounds_pos.tsv (8 compounds)"
 
 cat > ema_compounds_pos.tsv << 'EOF'
 label	rt_peak	rt_min	rt_max	mz	mz_tolerance	polarity	inchi_key	adduct
@@ -176,7 +176,7 @@ histidine	14.85703388	14.10703388	15.60703388	156.07675	20	positive	HNDVDQJCIGZP
 lysine	17.01131041	16.26131041	17.76131041	147.1128	20	positive	KDXKERNSBIXSRK-YFKPBYRVSA-N	[M+H]+
 EOF
 
-echo "   Created ema_compounds_pos.tsv"
+echo "   Created ema_compounds_pos.tsv (7 compounds)"
 
 echo ""
 echo "Creating MS2 references..."
@@ -259,7 +259,7 @@ cat > ms2_references.tsv << 'EOF'
 216042	metatlas	nldm2ca21f71af7043208be2439314d0fdb4	trehalose	[[50.50660, 50.85320, 56.17120, 58.08490, 58.48840, 87.78730, 90.77790, 91.27700, 110.82840, 111.61930, 185.04210, 203.05270, 244.07940, 269.73670, 273.70440, 308.44390, 316.68740, 332.42830, 365.04450, 365.10570, 366.10920], [35356.01950, 36014.56250, 31388.19920, 39570.50000, 40028.58590, 39710.49610, 36821.71480, 67906.66410, 38105.61720, 42565.35550, 2331435.50000, 4767659.50000, 71216.98440, 46830.70700, 37988.40620, 38973.69530, 36572.48830, 41194.63670, 134732.87500, 18752552.00000, 198359.26560]]	4.0	365.1054	positive	[M+Na]+	HCD	ramp-102040	EXP120B	Orbitrap	C12H22O11	342.1162	HDTRYLNUVZCQOY-LIZSDCNHSA-N	InChI=1S/C12H22O11/c13-1-3-5(15)7(17)9(19)11(21-3)23-12-10(20)8(18)6(16)4(2-14)22-12/h3-20H,1-2H2/t3-,4-,5-,6-,7+,8+,9-,10-,11-,12-/m1/s1	OC[C@H]1O[C@H](O[C@H]2O[C@H](CO)[C@@H](O)[C@H](O)[C@H]2O)[C@H](O)[C@@H](O)[C@@H]1O
 EOF
 
-echo "   Created ms2_references.tsv (17 spectra)"
+echo "   Created ms2_references.tsv (72 spectra)"
 
 echo ""
 echo "Creating configuration files..."
