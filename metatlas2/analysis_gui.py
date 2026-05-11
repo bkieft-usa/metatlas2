@@ -13,31 +13,71 @@ import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger("analysis_gui")
 
+def _get_notes_opts(owner: str = "jgi") -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
 
-# Default note options and hotkeys
-DEFAULT_MS2_HOTKEYS = {
-    "-1.0, poor match, should remove": "w",
-    "0.0, no match or no MSMS collected": "e",
-    "0.5, partial or putative match of fragments": "r",
-    "1.0, good match": "t",
-    "0.5, co-isolated precursor, partial match": "y",
-    "1.0, co-isolated precursor, good match": "u",
-    "0.5, single ion match, no evidence": "i",
-    "1.0, single ion match, ISTD/ref evidence": "o",
-}
-DEFAULT_MS1_HOTKEYS = {
-    "keep": "p",
-    "remove": "q",
-}
-DEFAULT_OTHER_HOTKEYS = {
-    "unresolvable isomers": "1",
-    "poor peak shape": "2",
-    "potential rt shifting":  "3",
-    "high ppm diff": "4",
-    "noisy or high background": "5",
-    "needs review": "6",
-    "contains refstd files": "7",
-}
+    JGI_DEFAULT_MS2_HOTKEYS = {
+        "-1.0, poor match, should remove": "w",
+        "0.0, no match or no MSMS collected": "e",
+        "0.5, partial or putative match of fragments": "r",
+        "1.0, good match": "t",
+        "0.5, co-isolated precursor, partial match": "y",
+        "1.0, co-isolated precursor, good match": "u",
+        "0.5, single ion match, no evidence": "i",
+        "1.0, single ion match, ISTD/ref evidence": "o",
+    }
+    JGI_DEFAULT_MS1_HOTKEYS = {
+        "keep": "p",
+        "remove": "q",
+    }
+    JGI_DEFAULT_OTHER_HOTKEYS = {
+        "unresolvable isomers": "1",
+        "poor peak shape": "2",
+        "potential rt shifting":  "3",
+        "high ppm diff": "4",
+        "noisy or high background": "5",
+        "needs review": "6",
+        "contains refstd files": "7",
+    }
+    EGSB_DEFAULT_MS2_HOTKEYS = {
+        "-1.0, poor match, should remove": "w",
+        "0.0, no match or no MSMS collected": "e",
+        "0.5, partial or putative match of fragments": "r",
+        "1.0, good match": "t",
+        "0.5, co-isolated precursor, partial match": "y",
+        "1.0, co-isolated precursor, good match": "u",
+        "0.5, single ion match, no evidence": "i",
+        "1.0, single ion match, ISTD/ref evidence": "o",
+    }
+    EGSB_DEFAULT_MS1_HOTKEYS = {
+        "no selection": "1",
+        "OK - single peak at correct RT": "2",
+        "OK - single peak at shifted RT": "3",
+        "OK - multiple peaks, unresolvable": "4",
+        "OK - multiple peaks, resolvable": "5",
+        "Remove - background level/noise": "6",
+        "Remove - signal in ExCtrl >= sample": "7",
+        "Remove - bad MSMS": "8",
+        "Remove - ND": "9",
+        "Remove - Not Evaluated": "0",
+        "Remove - duplicate": "-",
+        "Remove - evidence of contamination or incorrect ID": "=",
+    }
+    EGSB_DEFAULT_OTHER_HOTKEYS = {
+        "unresolvable isomers": "z",
+        "poor peak shape": "x",
+        "potential rt shifting":  "c",
+        "high ppm diff": "v",
+        "noisy or high background": "b",
+        "needs review": "g",
+        "contains refstd files": "h",
+    }
+
+    if owner.lower() == "jgi":
+        return JGI_DEFAULT_MS2_HOTKEYS, JGI_DEFAULT_MS1_HOTKEYS, JGI_DEFAULT_OTHER_HOTKEYS
+    elif owner.lower() == "egsb":
+        return EGSB_DEFAULT_MS2_HOTKEYS, EGSB_DEFAULT_MS1_HOTKEYS, EGSB_DEFAULT_OTHER_HOTKEYS
+    else:
+        raise ValueError(f"Unknown owner for default hotkeys: {owner} (expected 'jgi' or 'egsb')")
 
 def get_note_options_and_hotkeys(override_dict, default_hotkeys):
     if isinstance(override_dict, dict) and len(override_dict) > 0:
@@ -112,18 +152,20 @@ def build_dash_app(
     ]
 
     # Allow override of note options/hotkeys from override_parameters
+    owner = analysis_gui_obj.config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
+    ms1_note_opts, ms2_notes_opts, other_notes_opts = _get_notes_opts(owner = owner)
     _validate_override_parameters(analysis_gui_obj.override_parameters)
     ms1_options, ms1_hotkeys = get_note_options_and_hotkeys(
         analysis_gui_obj.override_parameters["note_options_overrides"].get("ms1_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        DEFAULT_MS1_HOTKEYS,
+        ms1_note_opts,
     )
     ms2_options, ms2_hotkeys = get_note_options_and_hotkeys(
         analysis_gui_obj.override_parameters["note_options_overrides"].get("ms2_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        DEFAULT_MS2_HOTKEYS,
+        ms2_notes_opts,
     )
     other_options, other_hotkeys = get_note_options_and_hotkeys(
         analysis_gui_obj.override_parameters["note_options_overrides"].get("other_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        DEFAULT_OTHER_HOTKEYS,
+        other_notes_opts,
     )
 
     ms1_key_to_label = {v: k for k, v in ms1_hotkeys.items()}
