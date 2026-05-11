@@ -256,7 +256,7 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-        logger.info("Applying quality filters to ExperimentalData (funnel architecture)...")
+        logger.info("Applying quality filters to ExperimentalData...")
         auto_id_obj.experimental_data = dbi.apply_auto_id_filters(
             auto_id_obj=auto_id_obj
         )
@@ -349,9 +349,12 @@ def run_analysis_gui(
     t.start()
     time.sleep(1)
 
-    service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')
-    url = f"{service_prefix}proxy/{dash_app_port}/"
-    
+    if os.getenv('METATLAS2_STANDALONE') == 'true':
+        url = f"http://localhost:{dash_app_port}/"
+    else:
+        service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')
+        url = f"{service_prefix}proxy/{dash_app_port}/"
+
     return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
 
 def run_analysis_summary(

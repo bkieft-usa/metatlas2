@@ -18,6 +18,8 @@ services:
       --ServerApp.root_dir=/data"
     ports:
       - "127.0.0.1:${STANDALONE_PORT:-8889}:8889"
+      # Expose Dash app port range (workflows._find_free_port tries 8050-8069)
+      - "127.0.0.1:8050-8069:8050-8069"
     volumes:
       - ${REPO_DIR}:/repo:ro
       - ${STANDALONE_DIR}:/data

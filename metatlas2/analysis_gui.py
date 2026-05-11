@@ -132,10 +132,14 @@ def build_dash_app(
 
     # Create the app
     try:
+        if os.getenv('METATLAS2_STANDALONE') == 'true':
+            requests_prefix = "/"
+        else:
+            requests_prefix = f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/"
         app = dash.Dash(
             __name__,
             external_stylesheets=[dbc.themes.BOOTSTRAP],
-            requests_pathname_prefix=f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/",
+            requests_pathname_prefix=requests_prefix,
             suppress_callback_exceptions=True,
         )
         logger.debug("App built successfully")
