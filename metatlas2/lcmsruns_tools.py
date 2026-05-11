@@ -47,6 +47,10 @@ def filter_lcmsruns_list(
         filtered_runs = [run for run in filtered_runs if getattr(run, 'ms_level', None) == ms_level]
 
     logger.info(f"Filtered to {len(filtered_runs)} out of {len(lcmsruns)} total files.")
+    if len(filtered_runs) == 0:
+        logger.warning("No LCMS runs matched the filter criteria. Please check your parameters.")
+        raise ValueError("No LCMS runs matched the filter criteria. Please check your parameters.")
+
     return filtered_runs
 
 def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list:
@@ -143,7 +147,7 @@ def _organize_files(files: List[Path], files_dict: dict) -> None:
             ms_level, polarity = 'unknown', 'unknown'
 
         # Infer analysis type from filename
-        if any(x in filename.upper() for x in ['-QC']):
+        if any(x in filename.upper() for x in ['-QC', 'QC-']):
             analysis_type = 'qc'
         elif any(x in filename.upper() for x in ['-ISTD']):
             analysis_type = 'istd'
