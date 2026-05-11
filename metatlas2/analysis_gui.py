@@ -71,13 +71,11 @@ def _get_notes_opts(owner: str = "jgi") -> tuple[dict[str, str], dict[str, str],
         "needs review": "g",
         "contains refstd files": "h",
     }
-
-    if owner.lower() == "jgi":
-        return JGI_DEFAULT_MS2_HOTKEYS, JGI_DEFAULT_MS1_HOTKEYS, JGI_DEFAULT_OTHER_HOTKEYS
-    elif owner.lower() == "egsb":
+        
+    if owner.lower() == "egsb":
         return EGSB_DEFAULT_MS2_HOTKEYS, EGSB_DEFAULT_MS1_HOTKEYS, EGSB_DEFAULT_OTHER_HOTKEYS
     else:
-        raise ValueError(f"Unknown owner for default hotkeys: {owner} (expected 'jgi' or 'egsb')")
+        return JGI_DEFAULT_MS2_HOTKEYS, JGI_DEFAULT_MS1_HOTKEYS, JGI_DEFAULT_OTHER_HOTKEYS
 
 def get_note_options_and_hotkeys(override_dict, default_hotkeys):
     if isinstance(override_dict, dict) and len(override_dict) > 0:
