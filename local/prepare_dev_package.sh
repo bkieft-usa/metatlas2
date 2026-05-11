@@ -6,12 +6,12 @@
 #
 # Usage:
 #   cd /global/homes/b/bkieft/metatlas2
-#   ./scripts/prepare_dev_package.sh [output_dir] [--keep-existing] [--no-parquet-subset]
+#   ./scripts/prepare_dev_package.sh [output_dir] [--keep-existing-archive] [--no-parquet-subset] [--skip-zenodo-upload]
 #
 # Options:
-#   --keep-existing  Skip package creation and only upload existing tarball to Zenodo
+#   --keep-existing-archive  Skip package creation and only upload existing tarball to Zenodo
 #   --no-parquet-subset  Skip filtering copied parquet rows (filtering is on by default)
-#
+#   --skip-zenodo-upload  Skip upload to Zenodo (useful for testing)
 # Output:
 #   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
 
@@ -23,13 +23,16 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Parse arguments
 KEEP_EXISTING=false
 SUBSET_PARQUET=true
+SKIP_ZENODO_UPLOAD=false
 OUTPUT_DIR=""
 
 for arg in "$@"; do
-    if [[ "$arg" == "--keep-existing" ]]; then
+    if [[ "$arg" == "--keep-existing-archive" ]]; then
         KEEP_EXISTING=true
     elif [[ "$arg" == "--no-parquet-subset" ]]; then
         SUBSET_PARQUET=false
+    elif [[ "$arg" == "--skip-zenodo-upload" ]]; then
+        SKIP_ZENODO_UPLOAD=true
     elif [[ -z "$OUTPUT_DIR" ]]; then
         OUTPUT_DIR="$arg"
     fi
@@ -59,13 +62,13 @@ fi
 
 # Check if we should skip package creation
 if [[ "$KEEP_EXISTING" == true ]]; then
-    echo "Using existing package (--keep-existing flag set)"
+    echo "Using existing package (--keep-existing-archive flag set)"
     echo ""
     
     # Validate tarball exists
     if [[ ! -f "${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" ]]; then
         echo "Error: Tarball not found: ${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" >&2
-        echo "Remove --keep-existing flag to create a new package." >&2
+        echo "Remove --keep-existing-archive flag to create a new package." >&2
         exit 1
     fi
     
@@ -102,8 +105,8 @@ echo "Collecting parquet files..."
 echo "------------------------------------"
 
 # Copy all parquet files for specific run types
-QC_RUNS=("Run57" "Run195")
-EXPERIMENTAL_RUNS=("Run154" "Run187" "Run16" "Run55" "Run80" "Run117")
+QC_RUNS=("Run57" "Run103" "Run149" "Run195")
+EXPERIMENTAL_RUNS=("Run40" "Run40" "Run49" "Run49" "Run16" "Run16" "Run22" "Run22" "Run31" "Run31" "Run55" "Run55" "Run25" "Run25" "Run43" "Run43" "Run37" "Run37" "Run46" "Run46" "Run52" "Run52" "Run19" "Run19")
 
 ALL_RUNS=("${QC_RUNS[@]}" "${EXPERIMENTAL_RUNS[@]}")
 
@@ -116,7 +119,7 @@ echo ""
 for run in "${ALL_RUNS[@]}"; do
     # Find all parquet files for this run
     shopt -s nullglob
-    run_files=("${SOURCE_BASE}/parquet/"*"${run}"*pos.parquet)
+    run_files=("${SOURCE_BASE}/parquet/"*"_${run}_"*pos.parquet)
     shopt -u nullglob
     
     if [[ ${#run_files[@]} -gt 0 ]]; then
@@ -271,11 +274,9 @@ if [[ "$SUBSET_PARQUET" == true ]]; then
     echo "----------------------------------"
 
     # Use conservative defaults so rows needed by both RT alignment and targeted analysis are retained.
-    # Override via env vars when you want tighter filtering:
-    #   SUBSET_PPM_MS1, SUBSET_PPM_MS2, SUBSET_EXTRA_TIME
-    SUBSET_PPM_MS1="${SUBSET_PPM_MS1:-20.0}"
-    SUBSET_PPM_MS2="${SUBSET_PPM_MS2:-20.0}"
-    SUBSET_EXTRA_TIME="${SUBSET_EXTRA_TIME:-2.0}"
+    SUBSET_PPM_MS1=20.0
+    SUBSET_PPM_MS2=20.0
+    SUBSET_EXTRA_TIME=2.0
 
     PARQUET_DIR="lcmsruns/dev/${STANDALONE_PROJECT}/parquet"
 
@@ -284,7 +285,7 @@ import csv
 import sys
 from pathlib import Path
 
-import pyarrow.compute as pc
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 
@@ -321,25 +322,36 @@ def ppm_bounds(mz: float, ppm: float):
     return mz - delta, mz + delta
 
 
-def filter_table(table, windows, mz_column: str, ppm: float, extra_time: float):
-    if table.num_rows == 0 or not windows:
-        return table.slice(0, 0)
+def filter_parquet_file(parquet_file: Path, windows, mz_column: str, ppm: float, extra_time: float):
+    parquet = pq.ParquetFile(parquet_file)
+    if parquet.metadata.num_rows == 0 or not windows:
+        return pa.Table.from_batches([], schema=parquet.schema_arrow)
 
-    mz_values = table[mz_column]
-    rt_values = table["rt"]
-    keep_mask = None
-
+    filtered_tables = []
     for mz, rt_min, rt_max in windows:
         mz_min, mz_max = ppm_bounds(mz, ppm)
         rt_lo = rt_min - extra_time
         rt_hi = rt_max + extra_time
 
-        mz_ok = pc.and_(pc.greater_equal(mz_values, mz_min), pc.less_equal(mz_values, mz_max))
-        rt_ok = pc.and_(pc.greater_equal(rt_values, rt_lo), pc.less_equal(rt_values, rt_hi))
-        this_mask = pc.and_(mz_ok, rt_ok)
-        keep_mask = this_mask if keep_mask is None else pc.or_(keep_mask, this_mask)
+        filtered = pq.read_table(
+            parquet_file,
+            filters=[
+                (mz_column, '>=', mz_min),
+                (mz_column, '<=', mz_max),
+                ('rt', '>=', rt_lo),
+                ('rt', '<=', rt_hi),
+            ],
+        )
+        if filtered.num_rows:
+            filtered_tables.append(filtered)
 
-    return table.filter(keep_mask)
+    if not filtered_tables:
+        return pa.Table.from_batches([], schema=parquet.schema_arrow)
+    if len(filtered_tables) == 1:
+        return filtered_tables[0]
+
+    combined = pa.concat_tables(filtered_tables).combine_chunks()
+    return pa.Table.from_pandas(combined.to_pandas().drop_duplicates(), preserve_index=False)
 
 
 root = Path(".")
@@ -372,14 +384,14 @@ for pfile in files:
     if not (is_ms1 or is_ms2):
         continue
 
-    table = pq.read_table(pfile)
-    before_rows = table.num_rows
+    parquet = pq.ParquetFile(pfile)
+    before_rows = parquet.metadata.num_rows
     total_before += before_rows
 
     if is_ms1:
-        filtered = filter_table(table, windows, "mz", ppm_ms1, extra_time)
+        filtered = filter_parquet_file(pfile, windows, "mz", ppm_ms1, extra_time)
     else:
-        filtered = filter_table(table, windows, "precursor_MZ", ppm_ms2, extra_time)
+        filtered = filter_parquet_file(pfile, windows, "precursor_MZ", ppm_ms2, extra_time)
 
     after_rows = filtered.num_rows
     total_after += after_rows
@@ -514,11 +526,18 @@ echo "   Created ${PACKAGE_NAME}.tar.gz"
 echo "    Compressed size: ${TARBALL_SIZE}"
 echo "    Extracted size: ${EXTRACTED_SIZE}"
 
-fi  # End of package creation (skip if --keep-existing)
+fi  # End of package creation (skip if --keep-existing-archive)
 
 # Ensure we have the tarball size for upload step
 if [[ -z "${TARBALL_SIZE:-}" ]]; then
     TARBALL_SIZE=$(du -h "${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz" | cut -f1)
+fi
+
+echo ""
+if [[ "$SKIP_ZENODO_UPLOAD" == true ]]; then
+    echo "Skipping Zenodo upload as requested."
+    echo "Package location: ${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz (size: ${TARBALL_SIZE})"
+    exit 0
 fi
 
 echo ""
