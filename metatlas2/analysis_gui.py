@@ -151,11 +151,11 @@ def build_dash_app(
 
     # Allow override of note options/hotkeys from override_parameters
     owner = analysis_gui_obj.config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
-    ms1_note_opts, ms2_notes_opts, other_notes_opts = _get_notes_opts(owner = owner)
+    ms2_notes_opts, ms1_notes_opts, other_notes_opts = _get_notes_opts(owner = owner)
     _validate_override_parameters(analysis_gui_obj.override_parameters)
     ms1_options, ms1_hotkeys = get_note_options_and_hotkeys(
         analysis_gui_obj.override_parameters["note_options_overrides"].get("ms1_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        ms1_note_opts,
+        ms1_notes_opts,
     )
     ms2_options, ms2_hotkeys = get_note_options_and_hotkeys(
         analysis_gui_obj.override_parameters["note_options_overrides"].get("ms2_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
