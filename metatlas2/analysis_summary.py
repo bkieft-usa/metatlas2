@@ -2665,7 +2665,7 @@ def run_all_summaries(
     if summary_obj.override_parameters.get("skip_outputs") is not None:
         skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
     else:
-        skip_outputs = summary_obj.config.get("skip_outputs", [])
+        skip_outputs = summary_obj.workflow_parameters.get("skip_outputs", [])
     
     if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
         logger.error("No manual curation entries found - aborting run_all_summaries.")
@@ -2722,5 +2722,6 @@ def run_all_summaries(
         with open(summary_obj.config_path, "r") as original:
             f.write(original.read())
 
-    logger.info("Uploading outputs to Google Drive...")
-    rcl.copy_outputs_to_google_drive(summary_obj, overwrite=overwrite)
+    if summary_obj.workflow_parameters.get("upload_to_gdrive", False) or summary_obj.override_parameters.get("upload_to_gdrive", False):
+        logger.info("Uploading outputs to Google Drive...")
+        rcl.copy_outputs_to_google_drive(summary_obj, overwrite=overwrite)
