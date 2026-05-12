@@ -240,23 +240,45 @@ def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
                 raise ValueError(f"Invalid polarity configuration for {chromatography}/{polarity}")
             
             for atlas_type, atlas_info in pol_config.items():
-                if not isinstance(atlas_info, dict):
+                if isinstance(atlas_info, dict):
+                    atlas_entries = [atlas_info]
+                elif isinstance(atlas_info, list):
+                    atlas_entries = atlas_info
+                else:
                     raise ValueError(f"Invalid atlas configuration for {chromatography}/{polarity}/{atlas_type}")
-                
-                # Check for required atlas fields (path, name, desc) but allow None/empty
-                required_atlas_fields = ['path', 'name', 'desc']
-                for field in required_atlas_fields:
-                    if field not in atlas_info:
-                        raise ValueError(f"Missing required field '{field}' in {chromatography}/{polarity}/{atlas_type}")
-                
-                # Convert to strings and handle None/empty values
-                atlas_info['path'] = str(atlas_info['path']) if atlas_info['path'] else None
-                atlas_info['name'] = str(atlas_info['name']) if atlas_info['name'] else None
-                atlas_info['desc'] = str(atlas_info['desc']) if atlas_info['desc'] else None
-                
-                # Only check file existence if path is not None
-                if atlas_info['path'] and not Path(atlas_info['path']).exists():
-                    raise FileNotFoundError(f"Atlas file not found: {atlas_info['path']} for {chromatography}/{polarity}/{atlas_type}")
+
+                normalized_entries = []
+                for atlas_entry in atlas_entries:
+                    if not isinstance(atlas_entry, dict):
+                        raise ValueError(f"Invalid atlas entry for {chromatography}/{polarity}/{atlas_type}")
+
+                    # Check for required atlas fields (path, name, desc) but allow None/empty
+                    required_atlas_fields = ['path', 'name', 'desc']
+                    for field in required_atlas_fields:
+                        if field not in atlas_entry:
+                            raise ValueError(
+                                f"Missing required field '{field}' in {chromatography}/{polarity}/{atlas_type}"
+                            )
+
+                    # Convert to strings and handle None/empty values
+                    atlas_entry['path'] = str(atlas_entry['path']) if atlas_entry['path'] else None
+                    atlas_entry['name'] = str(atlas_entry['name']) if atlas_entry['name'] else None
+                    atlas_entry['desc'] = str(atlas_entry['desc']) if atlas_entry['desc'] else None
+
+                    # Optional label for logging or downstream filtering
+                    if 'label' in atlas_entry and atlas_entry['label']:
+                        atlas_entry['label'] = str(atlas_entry['label'])
+
+                    # Only check file existence if path is not None
+                    if atlas_entry['path'] and not Path(atlas_entry['path']).exists():
+                        raise FileNotFoundError(
+                            f"Atlas file not found: {atlas_entry['path']} for {chromatography}/{polarity}/{atlas_type}"
+                        )
+
+                    normalized_entries.append(atlas_entry)
+
+                atlas_info = normalized_entries if len(normalized_entries) > 1 else normalized_entries[0]
+                pol_config[atlas_type] = atlas_info
 
     logger.info(f"Loaded atlas configuration from {atlas_config_path}")
     

@@ -248,12 +248,13 @@ def create_new_atlas_from_dataframe(
             continue
         # required fields
         compound_uid = compound_lookup[inchi_key]
-        compound_name = str(row.get('compound_name', 'Unknown Compound'))
+        compound_name = str(row.get('compound_name', row.get('label', 'Unknown Compound')))
         rt_peak = row.get('rt_peak', None)
         rt_min = row.get('rt_min', rt_peak - 0.5)
         rt_max = row.get('rt_max', rt_peak + 0.5)
         mz = row.get('mz', None)
         mz_tolerance = row.get('mz_tolerance', 5.0)
+        rt_space = row.get('rt_space', 'HF')
         if rt_peak is None or mz is None or adduct is None:
             raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference.")
         # extra fields
@@ -277,6 +278,7 @@ def create_new_atlas_from_dataframe(
             compound_name=compound_name,
             inchi_key=inchi_key,
             adduct=adduct,
+            rt_space=rt_space,
             rt_peak=rt_peak,
             rt_min=rt_min,
             rt_max=rt_max,
@@ -463,6 +465,8 @@ def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
 
     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
         _create_database_tables(conn, db_type="main")
+
+    db_path.chmod(0o660)
 
     logger.info(f"Main metatlas database created at {db_path}")
 
@@ -687,7 +691,7 @@ def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path
             # Batch insert filtered references
             if filtered_reference_records:
                 conn.executemany("""
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, filtered_reference_records)
         
         # Get final counts
@@ -836,7 +840,8 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
             reference_data.get('compound_uid'),
             reference_data.get('compound_name'),
             reference_data.get('inchi_key'),
-            reference_data.get('adduct', ''),
+            reference_data.get('adduct'),
+            reference_data.get('rt_space'),
             float(reference_data.get('rt_peak')),
             float(reference_data.get('rt_min')),
             float(reference_data.get('rt_max')),
@@ -1123,7 +1128,7 @@ def batch_save_compounds_and_mzrts(
             if reference_records:
                 logger.info(f"Creating {len(reference_records)} new references...")
                 conn.executemany("""
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, reference_records)
     
     # Log summary
@@ -1219,6 +1224,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 compound_name TEXT,
                 inchi_key TEXT,
                 adduct TEXT,
+                rt_space TEXT,
                 rt_peak REAL,
                 rt_min REAL,
                 rt_max REAL,
@@ -1335,6 +1341,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 compound_name TEXT,
                 inchi_key TEXT,
                 adduct TEXT,
+                rt_space TEXT,
                 rt_peak REAL,
                 rt_min REAL,
                 rt_max REAL,
@@ -1543,13 +1550,14 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
                         compound_mzrt.compound_name,
                         compound_mzrt.inchi_key,
                         compound_mzrt.adduct,
+                        compound_mzrt.rt_space,
                         compound_mzrt.rt_peak,
                         compound_mzrt.rt_min,
                         compound_mzrt.rt_max,
@@ -1627,13 +1635,14 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 # Create new reference if it doesn't exist
                 if not existing_check:
                     conn.execute("""
-                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
                         compound_mzrt.compound_name,
                         compound_mzrt.inchi_key,
                         compound_mzrt.adduct,
+                        compound_mzrt.rt_space,
                         compound_mzrt.rt_peak,
                         compound_mzrt.rt_min,
                         compound_mzrt.rt_max,

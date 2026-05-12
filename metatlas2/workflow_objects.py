@@ -153,6 +153,7 @@ class CompoundMZRT:
     adduct: str = ""
 
     # RT data
+    rt_space: str = "HF"
     rt_peak: float = 0.0
     rt_min: float = 0.0
     rt_max: float = 0.0
@@ -185,6 +186,7 @@ class CompoundMZRT:
             compound_name=row.get('compound_name', ''),
             inchi_key=row.get('inchi_key', ''),
             adduct=row.get('adduct', ''),
+            rt_space=row.get('rt_space', 'HF'),
             rt_peak=row.get('rt_peak', 0.0),
             rt_min=row.get('rt_min', 0.0),
             rt_max=row.get('rt_max', 0.0),
@@ -211,6 +213,7 @@ class CompoundMZRT:
             'compound_name': self.compound_name,
             'inchi_key': self.inchi_key,
             'adduct': self.adduct,
+            'rt_space': self.rt_space,
             'rt_peak': self.rt_peak,
             'rt_min': self.rt_min,
             'rt_max': self.rt_max,
@@ -386,31 +389,36 @@ class Atlas:
         for chrom, pol_dict in config['ATLASES'].items():
             for pol, pol_config in pol_dict.items():
                 for analysis_type, atlas_info in pol_config.items():
-                    if not atlas_info.get('path'):
-                        logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
-                        continue
-                    try:
-                        atlas_compounds_df = ldt.load_atlas_input(atlas_info['path'])
-                        atlas_obj = dbi.create_new_atlas_from_dataframe(
-                            atlas_df=atlas_compounds_df,
-                            atlas_name=atlas_info.get('name', 'Unnamed Atlas'),
-                            atlas_description=atlas_info.get('desc', 'No Description'),
-                            analysis_type=analysis_type,
-                            chromatography=chrom,
-                            polarity=pol,
-                            atlas_file_path=atlas_info.get('path', 'No File Origin Provided'),
-                            main_db_path=main_db_path
-                        )
-                        dbi.save_atlas_to_database(atlas_obj, main_db_path)
-                        logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
-                        atlases.append(atlas_obj)
-                        summary.append({
-                            'atlas_uid': atlas_obj.atlas_uid,
-                            'atlas_name': atlas_obj.atlas_name,
-                            'compound_count': len(atlas_obj.compound_mzrts)
-                        })
-                    except Exception as e:
-                        logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
+                    atlas_entries = atlas_info if isinstance(atlas_info, list) else [atlas_info]
+                    for entry_index, atlas_entry in enumerate(atlas_entries, start=1):
+                        if not atlas_entry.get('path'):
+                            logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
+                            continue
+                        try:
+                            atlas_compounds_df = ldt.load_atlas_input(atlas_entry['path'])
+                            atlas_name = atlas_entry.get('name', 'Unnamed Atlas')
+                            if len(atlas_entries) > 1 and not atlas_name:
+                                atlas_name = f"{analysis_type} {chrom} {pol} #{entry_index}"
+                            atlas_obj = dbi.create_new_atlas_from_dataframe(
+                                atlas_df=atlas_compounds_df,
+                                atlas_name=atlas_name,
+                                atlas_description=atlas_entry.get('desc', 'No Description'),
+                                analysis_type=analysis_type,
+                                chromatography=chrom,
+                                polarity=pol,
+                                atlas_file_path=atlas_entry.get('path', 'No File Origin Provided'),
+                                main_db_path=main_db_path
+                            )
+                            dbi.save_atlas_to_database(atlas_obj, main_db_path)
+                            logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
+                            atlases.append(atlas_obj)
+                            summary.append({
+                                'atlas_uid': atlas_obj.atlas_uid,
+                                'atlas_name': atlas_obj.atlas_name,
+                                'compound_count': len(atlas_obj.compound_mzrts)
+                            })
+                        except Exception as e:
+                            logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol} entry {entry_index}: {e}")
 
         logger.info("Summary of new atlases.")
         logger.info("**Make sure to add these to your analysis config to use as project reference atlases:**")
