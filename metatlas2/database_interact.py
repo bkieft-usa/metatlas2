@@ -235,6 +235,11 @@ def create_new_atlas_from_dataframe(
     if not polarity:
         polarity = ldt.detect_atlas_input_polarity(atlas_df)        
 
+    required_cols = ['inchi_key', 'adduct', 'rt_peak', 'mz']
+    missing_cols = [col for col in required_cols if col not in atlas_df.columns]
+    if missing_cols:
+        raise ValueError(f"Atlas input dataframe is missing required columns: {missing_cols}. Found columns: {atlas_df.columns.tolist()}")
+
     inchi_keys = atlas_df['inchi_key'].dropna().unique().tolist()
     compound_lookup = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
 
@@ -257,7 +262,6 @@ def create_new_atlas_from_dataframe(
         rt_space = row.get('rt_space', 'HF')
         if rt_peak is None or mz is None or adduct is None:
             raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference.")
-        # extra fields
         confidence_level = row.get('confidence_level', None)
         identification_notes = row.get('identification_notes', '')
 

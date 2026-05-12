@@ -359,8 +359,7 @@ def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
     """Detect chromatography type from atlas input data."""
     if 'chromatography' in df.columns:
         chrom_values = df['chromatography'].dropna().unique()
-        if len(chrom_values) > 0:
-            return str(chrom_values[0])
+        return str(chrom_values[0])
     
     return 'Unknown'
 

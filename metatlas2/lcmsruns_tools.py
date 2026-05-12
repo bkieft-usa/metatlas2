@@ -128,7 +128,7 @@ def _organize_files(files: List[Path], files_dict: dict) -> None:
         # Infer chromatography from filename
         if any(x in filename.upper() for x in ['HILIC', 'HILICZ']):
             chromatography = 'HILIC'
-        elif any(x in filename.upper() for x in ['C18', 'RP']):
+        elif any(x in filename.upper() for x in ['C18']):
             chromatography = 'C18'
         else:
             chromatography = 'Unknown'
