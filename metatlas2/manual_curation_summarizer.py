@@ -3,8 +3,8 @@ import numpy as np
 from typing import Dict, Optional, List, Any
 from tqdm.auto import tqdm
 
-from scipy.interpolate import interp1d
-from scipy.signal import find_peaks, peak_widths, peak_prominences
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks, peak_widths
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('curation_creator')
@@ -243,174 +243,126 @@ def _suggest_rt_bounds_from_ms1(
     atlas_rt_max: float
 ) -> Optional[Dict[str, float]]:
     """
-    Compute RT bounds from the *average* extracted-ion chromatogram (ms1)
-    of many LC-MS/MS files.
+    Compute RT bounds from the highest-intensity ms1 trace.
+    This matches the legacy suggest_rt_bounds() mechanism.
     """
-    import warnings
-    
     if not ms1_data:
         return None
 
-    # Select top 50 files by intensity
-    sorted_files = sorted(
-        ms1_data.items(),
-        key=lambda kv: np.max(kv[1].get("i_vals", [0])) if len(kv[1].get("i_vals", [])) > 0 else 0,
-        reverse=True,
-    )
-    selected = sorted_files[:50]
-
-    # Check ms1s for bad data
-    rt_lists: List[np.ndarray] = []
-    int_lists: List[np.ndarray] = []
-    weights: List[float] = []
-
-    for fname, trace in selected:
-        rt_raw = trace.get("rt_vals", [])
-        i_raw  = trace.get("i_vals", [])
-
-        rt_arr = np.asarray(rt_raw, dtype=np.float64)
-        i_arr  = np.asarray(i_raw,  dtype=np.float64)
-
-        valid = (~np.isnan(rt_arr)) & (~np.isnan(i_arr)) & (i_arr >= 0)
-        rt_arr = rt_arr[valid]
-        i_arr  = i_arr[valid]
-
-        if rt_arr.size < 5:
+    # Select the single file with highest ms1 intensity.
+    best_trace: Optional[Dict[str, Any]] = None
+    best_max_intensity = -np.inf
+    for trace in ms1_data.values():
+        i_vals = np.asarray(trace.get("i_vals", []), dtype=np.float64)
+        if i_vals.size == 0:
             continue
+        i_vals = i_vals[~np.isnan(i_vals)]
+        if i_vals.size == 0:
+            continue
+        max_i = float(np.max(i_vals))
+        if max_i > best_max_intensity:
+            best_max_intensity = max_i
+            best_trace = trace
 
-        rt_lists.append(rt_arr)
-        int_lists.append(i_arr)
-
-        w = float(np.max(i_arr)) if i_arr.size > 0 else 1.0
-        if np.isnan(w) or w <= 0:
-            w = 1.0
-        weights.append(w)
-
-    if not rt_lists:
+    if best_trace is None:
         return None
 
-    weights = np.asarray(weights, dtype=np.float64)
-    weights /= weights.sum()
+    rt = np.asarray(best_trace.get("rt_vals", []), dtype=np.float64)
+    intensity = np.asarray(best_trace.get("i_vals", []), dtype=np.float64)
 
-    # Combine samples
-    global_min = min(rt.min() for rt in rt_lists)
-    global_max = max(rt.max() for rt in rt_lists)
+    # Match legacy filtering: keep positive intensities and finite values.
+    valid_mask = (intensity > 0) & (~np.isnan(rt)) & (~np.isnan(intensity))
+    if not np.any(valid_mask):
+        return None
+    rt = rt[valid_mask]
+    intensity = intensity[valid_mask]
 
-    # Choose a step size
-    all_spacings = np.concatenate(
-        [np.diff(rt) for rt in rt_lists if rt.size > 1]
-    )
-    step = np.median(all_spacings) if all_spacings.size else 0.01
-
-    # Guard against a zero step
-    if step <= 0:
-        step = 0.01
-
-    common_rt = np.arange(global_min, global_max + step, step)
-
-    # Make a common grid by interpolating
-    interpolated = []
-    for rt, intensity in zip(rt_lists, int_lists):
-        if np.array_equal(rt, common_rt):
-            interp_i = intensity
-        else:
-            f = interp1d(rt, intensity, kind="linear",
-                         bounds_error=False, fill_value=0.0)
-            interp_i = f(common_rt)
-        interpolated.append(interp_i)
-
-    intensity_matrix = np.vstack(interpolated)
-
-    # Average ms1s
-    weighted_avg = np.average(intensity_matrix, axis=0, weights=weights)
-    ma_window = 5
-    smoothed = _moving_average(weighted_avg, window=ma_window)
-    if ma_window > 1:
-        pad = (ma_window - 1) // 2
-        smoothed = np.pad(smoothed, (pad, pad), mode="edge")
-        smoothed = smoothed[:common_rt.size]
-
-    # Peak detection
-    if np.max(smoothed) <= 0:
+    if rt.size < 5:
         return None
 
-    # Use a modest height / prominence threshold
-    max_int = np.max(smoothed)
-    min_height = max_int * 0.10
-    min_prom   = max_int * 0.05
+    theoretical_rt = atlas_rt_peak
 
-    peaks, _ = find_peaks(
-        smoothed,
+    smoothed_intensity = gaussian_filter1d(intensity, sigma=0.8)
+    max_intensity = float(np.max(smoothed_intensity))
+    min_height = max_intensity * 0.10
+    min_prominence = max_intensity * 0.05
+
+    peaks, properties = find_peaks(
+        smoothed_intensity,
         height=min_height,
-        prominence=min_prom,
-        distance=5
+        prominence=min_prominence,
+        distance=3,
     )
 
     if peaks.size == 0:
-        peaks = np.array([np.argmax(smoothed)])
+        peaks = np.array([int(np.argmax(smoothed_intensity))])
+        properties = {
+            "prominences": np.array([max_intensity * 0.5]),
+            "widths": np.array([10.0]),
+            "left_bases": np.array([max(0, peaks[0] - 5)]),
+            "right_bases": np.array([min(len(rt) - 1, peaks[0] + 5)]),
+        }
 
-    # Choose best peak
-    best_idx = np.argmax(smoothed[peaks])
-    best_peak = peaks[best_idx]
-    best_rt = common_rt[best_peak]
-    best_int = smoothed[best_peak]
+    # Match legacy selection: choose detected peak closest to expected RT.
+    peak_rts = rt[peaks]
+    closest_peak_idx = int(np.argmin(np.abs(peak_rts - theoretical_rt)))
+    main_peak_idx = int(peaks[closest_peak_idx])
+    peak_rt = float(rt[main_peak_idx])
 
-    # Calculate peak bounds
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        prominences = peak_prominences(smoothed, [best_peak])[0]
-    
-    if len(prominences) == 0 or prominences[0] == 0.0:
-        left_ips = [0]
-        right_ips = [len(smoothed) - 1]
-        widths = [right_ips[0] - left_ips[0]]
-    else:
-        widths, _, left_ips, right_ips = peak_widths(
-            smoothed,
-            [best_peak],
-            rel_height=0.5
+    try:
+        _, _, left_ips, right_ips = peak_widths(
+            smoothed_intensity,
+            [main_peak_idx],
+            rel_height=0.5,
         )
-    
-    # Convert from index space to RT space
-    left_idx  = int(np.floor(left_ips[0]))
-    right_idx = int(np.ceil(right_ips[0]))
-    left_idx  = max(0, left_idx)
-    right_idx = min(len(common_rt) - 1, right_idx)
+        left_idx = int(np.floor(left_ips[0]))
+        right_idx = int(np.ceil(right_ips[0]))
+        left_idx = max(0, left_idx)
+        right_idx = min(len(rt) - 1, right_idx)
+    except Exception:
+        left_idx = int(properties["left_bases"][closest_peak_idx])
+        right_idx = int(properties["right_bases"][closest_peak_idx])
 
-    rt_left  = common_rt[left_idx]
-    rt_right = common_rt[right_idx]
-
-    # Add padding
+    rt_left = float(rt[left_idx])
+    rt_right = float(rt[right_idx])
     width_rt = rt_right - rt_left
     pad = max(0.05, width_rt * 0.05)
-    rt_min = rt_left - pad
-    rt_max = rt_right + pad
+    rt_min_suggested = rt_left - pad
+    rt_max_suggested = rt_right + pad
 
-    # Intensity score
-    intensity_score = min(1.0, best_int / max(max_int, 1e3))
+    # Match legacy bound constraints.
+    rt_min_suggested = max(rt_min_suggested, float(rt[0]))
+    rt_max_suggested = min(rt_max_suggested, float(rt[-1]))
 
-    # Prominence score
-    if len(prominences) == 0 or prominences[0] == 0.0:
-        prominence_score = 0.0
-    else:
-        prominence_score = min(1.0, prominences[0] / max(best_int * 0.5, 1e3))
+    final_width = rt_max_suggested - rt_min_suggested
+    if final_width < 0.08:
+        rt_min_suggested = peak_rt - 0.04
+        rt_max_suggested = peak_rt + 0.04
+    elif final_width > 0.6:
+        rt_min_suggested = peak_rt - 0.3
+        rt_max_suggested = peak_rt + 0.3
 
-    # Width score
-    optimal_width_pts = 20
-    width_score = 1.0 - min(1.0, abs(widths[0] - optimal_width_pts) / optimal_width_pts)
+    prominence = float(properties["prominences"][closest_peak_idx])
+    peak_intensity = float(smoothed_intensity[main_peak_idx])
 
-    # RT proximity score
-    max_expected_dev = max(abs(atlas_rt_max - atlas_rt_min), 1.0)
-    rt_dev = abs(best_rt - atlas_rt_peak)
+    intensity_score = min(1.0, peak_intensity / max(max_intensity, 1e3))
+    prominence_score = min(1.0, prominence / max(peak_intensity * 0.5, 1e3))
+
+    optimal_width = 0.3
+    width_score = 1.0 - min(1.0, abs(final_width - optimal_width) / optimal_width)
+
+    max_expected_dev = max(abs(atlas_rt_max - atlas_rt_min), 0.5)
+    rt_dev = abs(peak_rt - theoretical_rt)
     rt_score = max(0.0, 1.0 - (rt_dev / max_expected_dev))
 
-    # Shape symmetry score
-    left_tail  = best_peak - left_idx
-    right_tail = right_idx - best_peak
-    asym = abs(left_tail - right_tail) / max(left_tail + right_tail, 1)
-    shape_score = max(0.0, 1.0 - asym)
+    left_tail = main_peak_idx - left_idx
+    right_tail = right_idx - main_peak_idx
+    if left_tail + right_tail > 0:
+        asym = abs(left_tail - right_tail) / (left_tail + right_tail)
+        shape_score = max(0.0, 1.0 - asym)
+    else:
+        shape_score = 0.5
 
-    # Weight scores
     confidence = (
         0.30 * intensity_score +
         0.20 * prominence_score +
@@ -420,24 +372,16 @@ def _suggest_rt_bounds_from_ms1(
     )
     confidence = float(np.clip(confidence, 0.0, 1.0))
 
-    # Apply penalties
     if confidence < 0.1:
         return None
-    if width_rt > (atlas_rt_max - atlas_rt_min) * 2:
+    if final_width > (atlas_rt_max - atlas_rt_min) * 1.5:
+        confidence *= 0.6
+    if rt_dev > max_expected_dev * 1.5:
         confidence *= 0.5
-    if rt_dev > max_expected_dev * 2:
-        confidence *= 0.3
 
     return {
-        "rt_min": float(rt_min),
-        "rt_max": float(rt_max),
-        "rt_peak": float(best_rt),
+        "rt_min": float(rt_min_suggested),
+        "rt_max": float(rt_max_suggested),
+        "rt_peak": float(peak_rt),
         "confidence": float(confidence),
     }
-
-def _moving_average(x: np.ndarray, window: int = 3) -> np.ndarray:
-    """Simple moving‑average.  window=1 returns the original array."""
-    if window <= 1:
-        return x
-    cumsum = np.cumsum(np.insert(x, 0, 0.0))
-    return (cumsum[window:] - cumsum[:-window]) / float(window)
