@@ -15,6 +15,16 @@
 # Output:
 #   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
 
+# If .venv is not available, run uv sync to build it
+if [[ ! -d "/global/cfs/cdirs/metatlas/tools/metatlas2/.venv" ]]; then
+    echo "Virtual environment not found. Running uv sync to create it..."
+    uv sync
+    exit 1
+fi
+
+# activate env with 'source /global/cfs/cdirs/metatlas/tools/metatlas2/.venv/bin/activate'
+source /global/cfs/cdirs/metatlas/tools/metatlas2/.venv/bin/activate
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
