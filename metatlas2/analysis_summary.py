@@ -526,7 +526,7 @@ def _plot_hit_info_table(
 
     # Add 2nd best, 3rd best, and total files with database matches
     additional_info_y = frag_center - frag_row_h / 2 - 0.04
-    line_spacing = 0.025
+    line_spacing = 0.05
     
     # 2nd best hit file
     if len(top3) >= 2:
