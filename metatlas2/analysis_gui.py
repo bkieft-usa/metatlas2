@@ -200,6 +200,25 @@ def build_dash_app(
     def _rt_bounds_from_row(row):
         return float(row["rt_min"]), float(row["rt_max"])
 
+    def _default_plot_bounds_from_row(row, pad=2.0):
+        atlas_rt_min = row.get("atlas_rt_min")
+        atlas_rt_max = row.get("atlas_rt_max")
+
+        if pd.notnull(atlas_rt_min) and pd.notnull(atlas_rt_max):
+            base_min = float(atlas_rt_min)
+            base_max = float(atlas_rt_max)
+        else:
+            base_min, base_max = _rt_bounds_from_row(row)
+
+        if base_max < base_min:
+            base_min, base_max = base_max, base_min
+
+        window_min = max(0.0, base_min - pad)
+        window_max = base_max + pad
+        if window_max <= window_min:
+            window_max = window_min + 1.0
+        return window_min, window_max
+
     def _load_state(compound_idx, ms2_idx=0, session_id=None, edit_seq=0):
         row = _compound_row(compound_idx)
         rt_min, rt_max = _rt_bounds_from_row(row)
@@ -631,6 +650,7 @@ def build_dash_app(
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min, rt_max = state["rt_min"], state["rt_max"]
+        x_window_min, x_window_max = _default_plot_bounds_from_row(row)
 
         sub = analysis_gui_obj.ms1_df[(analysis_gui_obj.ms1_df["inchi_key"] == inchi) & (analysis_gui_obj.ms1_df["adduct"] == adduct)]
 
@@ -810,7 +830,7 @@ def build_dash_app(
         fig.add_shape(
             type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
             xref="x", yref="paper",
-            line=dict(color="purple", width=5),
+            line=dict(color="purple", width=7),
             name="RT min", editable=True,
         )
 
@@ -818,7 +838,7 @@ def build_dash_app(
         fig.add_shape(
             type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
             xref="x", yref="paper",
-            line=dict(color="purple", width=5, dash="dash"),
+            line=dict(color="purple", width=7, dash="dash"),
             name="RT max", editable=True,
         )
 
@@ -841,6 +861,7 @@ def build_dash_app(
             xaxis=dict(
                 showgrid=False,
                 zeroline=False,
+                range=[x_window_min, x_window_max],
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
             ),
