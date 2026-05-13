@@ -46,6 +46,7 @@ def extract_eic_and_ms2_from_parquet(
 
     project_files_list = [run.file_path for run in lcmsruns]
     logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_list)} project files...")
+    logger.info(f"Extra time set to {workflow_params.get('extra_time', 10.0)}")
 
     if max_workers is None:
         max_workers = min(mp.cpu_count(), len(project_files_list), 8)
@@ -198,10 +199,6 @@ def _extract_ms1_from_parquet(
     mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 20.0))
     rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 10.0))
     
-    # Read parquet with m/z and RT filters only
-    # DO NOT filter by intensity or min_points here - let the funnel architecture
-    # handle quality filtering after all data is loaded. Filtering during extraction
-    # can cause data loss and inconsistencies with other extraction methods.
     df = pq.read_table(
         parquet_file,
         filters=[

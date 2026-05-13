@@ -197,6 +197,7 @@ SHIFTER_ARGS=(
 # Also keep /app as fallback so other metatlas2 subpackages still resolve.
 if [[ "${DEV_MODE}" == "true" ]]; then
     SHIFTER_ARGS+=("--env=PYTHONPATH=${REPO_DIR}:/app")
+    echo "Dev mode enabled: using local repo scripts at ${REPO_DIR}/scripts"
 fi
 
 

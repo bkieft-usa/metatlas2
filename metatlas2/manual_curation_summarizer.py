@@ -2,9 +2,11 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List, Any
 from tqdm.auto import tqdm
+import warnings
 
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, peak_widths
+from scipy.signal._peak_finding_utils import PeakPropertyWarning
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('curation_creator')
@@ -310,11 +312,13 @@ def _suggest_rt_bounds_from_ms1(
     peak_rt = float(rt[main_peak_idx])
 
     try:
-        _, _, left_ips, right_ips = peak_widths(
-            smoothed_intensity,
-            [main_peak_idx],
-            rel_height=0.5,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", PeakPropertyWarning)
+            _, _, left_ips, right_ips = peak_widths(
+                smoothed_intensity,
+                [main_peak_idx],
+                rel_height=0.5,
+            )
         left_idx = int(np.floor(left_ips[0]))
         right_idx = int(np.ceil(right_ips[0]))
         left_idx = max(0, left_idx)

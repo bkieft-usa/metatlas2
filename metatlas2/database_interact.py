@@ -1045,7 +1045,7 @@ def batch_save_compounds_and_mzrts(
     compounds_skipped_existing = 0
     
     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
-        # Step 1: Get ALL existing compounds (inchi_key -> compound_uid mapping)
+        # Get ALL existing compounds (inchi_key -> compound_uid mapping)
         existing_compounds = {}  # inchi_key -> compound_uid
         existing_result = conn.execute("SELECT inchi_key, compound_uid FROM compounds").fetchall()
         for row in existing_result:
@@ -1053,7 +1053,7 @@ def batch_save_compounds_and_mzrts(
         
         logger.info(f"Found {len(existing_compounds)} existing compounds in database")
         
-        # Step 2: Process compound data and build inchi_key -> compound_uid mapping
+        # Process compound data and build inchi_key -> compound_uid mapping
         compound_records = []
         inchi_to_compound_uid = {}  # This will contain both existing and new compound mappings
         
@@ -1083,14 +1083,14 @@ def batch_save_compounds_and_mzrts(
                     compounds_created += 1
                     logger.debug(f"New compound prepared: {inchi_key} -> {new_compound_uid}")
         
-        # Step 3: Batch insert new compounds
+        # Batch insert new compounds
         if compound_records:
             logger.info(f"Creating {len(compound_records)} new compounds...")
             conn.executemany("""
                 INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, compound_records)
         
-        # Step 4: Process reference data - match to compounds and check for duplicates
+        # Process reference data - match to compounds and check for duplicates
         if mzrts_data:
             logger.info(f"Processing {len(mzrts_data)} reference entries...")
             reference_records = []
@@ -1128,7 +1128,7 @@ def batch_save_compounds_and_mzrts(
                     mzrts_created += 1
                     logger.debug(f"New reference prepared for compound {compound_uid}")
             
-            # Step 5: Batch insert new references
+            # Batch insert new references
             if reference_records:
                 logger.info(f"Creating {len(reference_records)} new references...")
                 conn.executemany("""
@@ -2435,16 +2435,13 @@ def filter_experimental_data(
     """
     from metatlas2.workflow_objects import ExperimentalData
 
-    # ── Step 1: passing pairs by MS2 thresholds ─────────────────────────────
+    # passing pairs by MS2 thresholds ────
     passing_ms2: Optional[set] = None
-    # Only enforce MS2 filtering if thresholds are meaningful (> 0).
-    # A threshold of 0 means "no filtering", not "filter with threshold of 0".
     ms2_score_active = ms2_min_score is not None and ms2_min_score > 0
     ms2_frags_active = ms2_min_frags is not None and ms2_min_frags > 0
     
     if ms2_score_active or ms2_frags_active:
         passing_ms2 = set()
-        n_ms2_hit_objs = len(exp_data.ms2_hits)
         for hit_obj in exp_data.ms2_hits:
             hits = hit_obj.data
             if hits is None or hits.empty:
@@ -2455,13 +2452,8 @@ def filter_experimental_data(
                 hits = hits[hits["num_matches"] >= ms2_min_frags]
             if not hits.empty:
                 passing_ms2.add((hit_obj.inchi_key, hit_obj.adduct))
-        logger.info(
-            f"MS2 filtering: {len(passing_ms2)} compounds passed thresholds "
-            f"(ms2_min_score={ms2_min_score}, ms2_min_frags={ms2_min_frags}) "
-            f"out of {n_ms2_hit_objs} compounds with MS2 hits"
-        )
 
-    # ── Step 2: passing pairs by MS1 thresholds ──────────────────────────────
+    # passing pairs by MS1 thresholds
     passing_ms1: Optional[set] = None
     if ms1_min_pts is not None or ms1_min_int is not None:
         mc_best_int = {
@@ -2513,7 +2505,7 @@ def filter_experimental_data(
             else:
                 passing_ms1.add(pair)
 
-    # ── Step 3: filter ManualCuration list ───────────────────────────────────
+    # filter ManualCuration list
     n_total = len(exp_data.manual_curation)
     kept_pairs: set = set()
     new_mc = []
@@ -2551,8 +2543,8 @@ def filter_experimental_data(
     if n_removed > 0:
         logger.info(
             f"Filtering breakdown: {n_removed} total removed - "
-            f"unidentified: {removed_by_unided}, "
-            f"flagged: {removed_by_flagged}, "
+            f"unidentified by AutoID: {removed_by_unided}, "
+            f"flagged as 'remove': {removed_by_flagged}, "
             f"MS1 thresholds: {removed_by_ms1}, "
             f"MS2 thresholds: {removed_by_ms2}"
         )
@@ -2560,7 +2552,7 @@ def filter_experimental_data(
         for detail in removed_compounds_details:
             logger.debug(f"  Removed: {detail}")
 
-    # ── Step 4: propagate to other lists ─────────────────────────────────────
+    # propagate to other lists──
     new_ms1 = [obj for obj in exp_data.ms1_data if (obj.inchi_key, obj.adduct) in kept_pairs]
     new_ms2 = [obj for obj in exp_data.ms2_data if (obj.inchi_key, obj.adduct) in kept_pairs]
     new_hits = []

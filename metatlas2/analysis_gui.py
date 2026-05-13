@@ -781,7 +781,7 @@ def build_dash_app(
             x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
             y=[y_bottom, y_max_data],
             mode="lines",
-            line=dict(color="black", width=2),
+            line=dict(color="black", width=2.5),
             showlegend=False,
             hoverinfo="skip",
         ))
@@ -792,7 +792,7 @@ def build_dash_app(
                 x=[row["suggested_rt_min"], row["suggested_rt_min"]],
                 y=[y_bottom, y_max_data],
                 mode="lines",
-                line=dict(color="orange", width=1.5),
+                line=dict(color="orange", width=2.5),
                 showlegend=False,
                 hoverinfo="skip",
             ))
@@ -801,7 +801,7 @@ def build_dash_app(
                 x=[row["suggested_rt_max"], row["suggested_rt_max"]],
                 y=[y_bottom, y_max_data],
                 mode="lines",
-                line=dict(color="orange", width=1.5, dash="dash"),
+                line=dict(color="orange", width=2.5, dash="dash"),
                 showlegend=False,
                 hoverinfo="skip",
             ))
@@ -810,7 +810,7 @@ def build_dash_app(
         fig.add_shape(
             type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
             xref="x", yref="paper",
-            line=dict(color="purple", width=2.5),
+            line=dict(color="purple", width=5),
             name="RT min", editable=True,
         )
 
@@ -818,7 +818,7 @@ def build_dash_app(
         fig.add_shape(
             type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
             xref="x", yref="paper",
-            line=dict(color="purple", width=2.5, dash="dash"),
+            line=dict(color="purple", width=5, dash="dash"),
             name="RT max", editable=True,
         )
 
