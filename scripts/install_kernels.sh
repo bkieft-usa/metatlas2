@@ -3,8 +3,7 @@
 set -euo pipefail
 
 IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="/global/cfs/cdirs/metatlas/tools/metatlas2"
 EXTRA_TAG=""
 
 while [[ $# -gt 0 ]]; do
