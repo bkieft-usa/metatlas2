@@ -3,6 +3,7 @@
 import configparser
 import json
 import logging
+import re
 import subprocess
 
 from datetime import datetime
@@ -76,34 +77,42 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
     if overwrite:
         cmd.append("--ignore-times")
     
+    percent_pattern = re.compile(r"(\d+(?:\.\d+)?)%")
+
     try:
         logger.info("Starting rclone upload: %s -> %s", source, dest)
         with tqdm(total=100, desc="Uploading to Google Drive", unit="%") as pbar:
             last_percent = 0
+            stderr_chunks = []
             with Popen(cmd, stdout=PIPE, stderr=PIPE, bufsize=1, universal_newlines=True) as proc:
-                # rclone --progress writes to stderr
-                for line in proc.stderr or []:
-                    line = line.strip()
-                    # Look for percentage in format like "Transferred: 123 MiB / 456 MiB, 27%"
-                    if "Transferred:" in line and "%" in line:
-                        try:
-                            # Extract percentage from patterns like "27%" or ", 27%, "
-                            parts = line.split(",")
-                            for part in parts:
-                                if "%" in part:
-                                    percent_str = part.strip().rstrip("%").strip()
-                                    percent = float(percent_str.split()[-1])
-                                    if 0 <= percent <= 100 and percent != last_percent:
+                # rclone progress frequently uses carriage-return updates, not newline-terminated lines.
+                buffer = ""
+                while proc.stderr is not None:
+                    chunk = proc.stderr.read(1)
+                    if chunk == "":
+                        break
+                    stderr_chunks.append(chunk)
+                    if chunk in ("\r", "\n"):
+                        line = buffer.strip()
+                        buffer = ""
+                        if "Transferred:" in line and "%" in line:
+                            matches = percent_pattern.findall(line)
+                            if matches:
+                                try:
+                                    percent = float(matches[-1])
+                                    percent = max(0.0, min(100.0, percent))
+                                    if percent > last_percent:
                                         pbar.update(percent - last_percent)
                                         last_percent = percent
-                                    break
-                        except (ValueError, IndexError):
-                            pass
+                                except ValueError:
+                                    pass
+                    else:
+                        buffer += chunk
                 proc.wait()
                 if proc.returncode != 0:
-                    stderr_output = proc.stderr.read() if proc.stderr else ""
+                    stderr_output = "".join(stderr_chunks).strip()
                     logger.error("rclone failed with exit code %d: %s", proc.returncode, stderr_output)
-                    raise subprocess.CalledProcessError(proc.returncode, cmd)
+                    raise subprocess.CalledProcessError(proc.returncode, cmd, output=stderr_output)
                 if last_percent < 100:
                     pbar.update(100 - last_percent)
     except subprocess.CalledProcessError as err:
@@ -111,6 +120,21 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
         raise
     except FileNotFoundError:
         logger.warning("rclone binary not found at %s — skipping upload.", RCLONE_PATH)
+
+
+def _has_drive_access(drive: str) -> Tuple[bool, Optional[str]]:
+    """Return whether the configured remote is accessible and an optional error message."""
+    cmd = [RCLONE_PATH, "lsjson", "--dirs-only", f"{drive}:"]
+    try:
+        subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+        return True, None
+    except FileNotFoundError:
+        return False, f"rclone binary not found at {RCLONE_PATH}."
+    except subprocess.CalledProcessError as err:
+        message = err.output.strip() if isinstance(err.output, str) else str(err)
+        if not message:
+            message = str(err)
+        return False, message
 
 
 def _get_drive_id_for_path(drive: str, dest_path: Path) -> Optional[str]:
@@ -182,6 +206,15 @@ def copy_outputs_to_google_drive(summary_obj: "AnalysisSummary", overwrite: bool
             gdrive_subfolder,
             fail_suffix,
         )
+        return
+
+    has_access, access_err = _has_drive_access(drive)
+    if not has_access:
+        msg = f"No access to Google Drive remote '{drive}' via rclone"
+        if access_err:
+            msg = f"{msg}: {access_err}"
+        logger.warning("%s — %s.", msg, fail_suffix)
+        display(HTML(f"Upload skipped: {msg}"))
         return
 
     if not output_dir.is_dir():
