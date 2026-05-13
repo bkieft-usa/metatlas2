@@ -3,6 +3,7 @@ import logging
 import subprocess
 import sys
 import os
+import re
 from pathlib import Path
 from typing import Dict, Any
 
@@ -238,7 +239,15 @@ def main():
             logger.error(f"Error submitting slurm script: {result.stderr.strip()}")
             sys.exit(result.returncode)
         else:
-            logger.info(f"Slurm submission output: {result.stdout.strip()}")
+            submission_output = result.stdout.strip()
+            logger.info(f"Slurm submission output: {submission_output}")
+
+            job_id_match = re.search(r"Submitted batch job\s+(\d+)", submission_output)
+            job_id = job_id_match.group(1) if job_id_match else "%j"
+            slurm_stdout = Path(paths["project_directory"]) / f"pre_curation_{job_id}.log"
+            slurm_stderr = Path(paths["project_directory"]) / f"pre_curation_{job_id}.err"
+            logger.info(f"Expected SLURM stdout: {slurm_stdout}")
+            logger.info(f"Expected SLURM stderr: {slurm_stderr}")
         return
 
     if not args.skip_setup:

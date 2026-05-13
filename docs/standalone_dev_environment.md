@@ -25,8 +25,12 @@ The standalone development environment allows you to run metatlas2 on any machin
 - **GitHub authentication** for container registry access:
   - **Option 1 (Recommended)**: Set environment variable for automatic login
     1. Create token at https://github.com/settings/tokens/new?scopes=read:packages
-    2. Add to `~/.bashrc` (or `~/.zshrc` on macOS): `export GITHUB_TOKEN='ghp_xxxxxxxxxxxx'`
-    3. Reload shell: `source ~/.bashrc`
+    2. Add to `~/.bashrc` (or `~/.zshrc` on macOS):
+      `export GITHUB_TOKEN='ghp_xxxxxxxxxxxx'`
+    3. Reload shell:
+      `source ~/.bashrc`
+    4. Log into the container repository:
+      `echo $GITHUB_TOKEN | docker login ghcr.io -u GITHUB_USERNAME --password-stdin`
   - **Option 2**: Interactive login when prompted (if you don't set the token env var)
     - Username: your GitHub username
     - Password: your GitHub Personal Access Token (not your password!)
