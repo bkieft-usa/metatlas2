@@ -1,4 +1,4 @@
-import functools, json, os, time, uuid, threading
+import functools, json, os, re, time, uuid, threading
 import numpy as np, pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -254,6 +254,7 @@ def build_dash_app(
             "last_saved": None,
             "isomer_snap_idx": 0,
             "flush_error": None,
+            "highlighted_files": [],
         }
 
     def _patch_with_seq(state, **changes):
@@ -295,6 +296,8 @@ def build_dash_app(
     )
 
     # format of the app itself
+    ms1_height = "700px" if owner == "egsb" else "650px"
+    ms2_height = "700px" if owner == "egsb" else "550px"
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
@@ -405,8 +408,13 @@ def build_dash_app(
                         [
                             dcc.Graph(
                                 id="ms1-graph",
-                                config={"displayModeBar": True, "edits": {"shapePosition": True, "titleText": False}},
-                                style={"height": "550px"},
+                                config={
+                                    "displayModeBar": True,
+                                    "edits": {"shapePosition": True, "titleText": False},
+                                    "doubleClick": False,
+                                    "modeBarButtonsToRemove": ["autoScale2d", "resetScale2d"],
+                                },
+                                style={"height": ms1_height},
                             ),
                             dbc.Row(
                                 [
@@ -468,7 +476,7 @@ def build_dash_app(
                             dcc.Graph(
                                 id="ms2-graph", 
                                 config={"displayModeBar": True}, 
-                                style={"height": "550px"}
+                                style={"height": ms2_height}
                             ),
                             dbc.Row(
                                 [
@@ -654,20 +662,32 @@ def build_dash_app(
 
         sub = analysis_gui_obj.ms1_df[(analysis_gui_obj.ms1_df["inchi_key"] == inchi) & (analysis_gui_obj.ms1_df["adduct"] == adduct)]
 
-        # Collect y_max from data so static vertical traces span the full plot height
-        y_max_data = 0.0
-        # First pass: calculate y_max_data from all MS1 spectra
-        for fp in sub["file_path"].unique():
-            for _, r in sub[sub["file_path"] == fp].iterrows():
-                try:
-                    rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
-                    if intensity:
-                        y_max_data = max(y_max_data, max(intensity))
-                except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"MS1 parse error {fp}: {e}")
-        if y_max_data == 0.0:
-            y_max_data = 1.0
+        # Use the manual-curation row's best MS1 intensity as the y-axis reference max.
+        y_min_positive_data = None
+        y_max_data = float(row["best_ms1_intensity"])
+        if yaxis_scale == "log":
+            for fp in sub["file_path"].unique():
+                for _, r in sub[sub["file_path"] == fp].iterrows():
+                    try:
+                        _, intensity = _parse_spectrum_cached(r["raw_spectrum"])
+                        if intensity:
+                            positive_vals = [v for v in intensity if v > 0]
+                            if positive_vals:
+                                local_min = min(positive_vals)
+                                if y_min_positive_data is None:
+                                    y_min_positive_data = local_min
+                                else:
+                                    y_min_positive_data = min(y_min_positive_data, local_min)
+                    except Exception as e:
+                        traceback.print_exc()
+                        logger.error(f"MS1 parse error {fp}: {e}")
+        y_upper_bound = y_max_data * 1.1
+
+        if yaxis_scale == "log":
+            log_min = max((y_min_positive_data or 1e-6), 1e-12)
+            y_range = [np.log10(log_min), np.log10(y_upper_bound)]
+        else:
+            y_range = [0.0, y_upper_bound]
 
         fig = go.Figure()
         
@@ -731,7 +751,7 @@ def build_dash_app(
                             if _window_overlaps(iso["rt_min"], iso["rt_max"], other["rt_min"], other["rt_max"]):
                                 overlaps = True
                                 break
-                        fillcolor = "rgba(255,128,128,0.35)" if overlaps else "rgba(128,192,255,0.35)"  # light red if overlaps, else light blue
+                        fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"  # lighter true red if overlaps, else lighter blue
                         iso_rect_trace = go.Scatter(
                             x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
                             y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
@@ -743,19 +763,19 @@ def build_dash_app(
                             hoverinfo="skip",
                         )
                         fig.add_trace(iso_rect_trace)
-                        fig.add_annotation(
-                            x=iso["rt_min"],
-                            y=0.5,
-                            xref="x", yref="paper",
-                            text=f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})",
-                            showarrow=False,
-                            font=dict(size=8, color="dimgray"),
-                            xanchor="right", yanchor="middle",
-                            textangle=-90,
-                            bgcolor="rgba(255,255,255,0.7)",
-                            bordercolor="gray", borderwidth=1,
-                            captureevents=False,
-                        )
+                        # fig.add_annotation(
+                        #     x=iso["rt_min"],
+                        #     y=0.5,
+                        #     xref="x", yref="paper",
+                        #     text=f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})",
+                        #     showarrow=False,
+                        #     font=dict(size=8, color="dimgray"),
+                        #     xanchor="right", yanchor="middle",
+                        #     textangle=-90,
+                        #     bgcolor="rgba(255,255,255,0.7)",
+                        #     bordercolor="gray", borderwidth=1,
+                        #     captureevents=False,
+                        # )
                         rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
                         mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
                         isomer_lines.append(
@@ -779,24 +799,29 @@ def build_dash_app(
                 )
 
         # Now add MS1 data traces (they will appear on top of isomer rectangles)
+        highlighted_files = state.get("highlighted_files") or []
+        has_highlights = bool(highlighted_files)
         for fp in sub["file_path"].unique():
-            short_name = "_".join(os.path.basename(fp).split(".")[0].split("_")[11:])
+            short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fp).split(".")[0].split("_")[11:]))
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fp.lower()), "gray")
+            is_highlighted = fp in highlighted_files
+            line_width = 3.5 if is_highlighted else 1.5
+            opacity = 1.0 if (is_highlighted or not has_highlights) else 0.25
             for _, r in sub[sub["file_path"] == fp].iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
                     fig.add_trace(go.Scatter(
                         x=rt, y=intensity, mode="lines", name=short_name,
-                        line=dict(color=color, width=1.5),
+                        line=dict(color=color, width=line_width),
+                        opacity=opacity,
+                        customdata=[fp] * len(rt),
                         hovertemplate="%{x:.3f} min<br>%{y:.2e}",
                     ))
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"MS1 parse error {fp}: {e}")
 
-        # Atlas RT peak line (black, static) - rendered as a trace so it is never draggable.
-        # config.edits.shapePosition=True (needed for purple shape dragging) makes ALL shapes
-        # draggable, so static reference lines must be traces instead.
+        # Atlas RT peak line (black, static)
         fig.add_trace(go.Scatter(
             x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
             y=[y_bottom, y_max_data],
@@ -806,7 +831,7 @@ def build_dash_app(
             hoverinfo="skip",
         ))
 
-        # Suggested RT lines (orange, static) - also traces for the same reason
+        # Suggested RT lines (orange, static)
         if pd.notnull(row.get("suggested_rt_min")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_min"], row["suggested_rt_min"]],
@@ -826,18 +851,18 @@ def build_dash_app(
                 hoverinfo="skip",
             ))
 
-        # RT min (purple, solid, editable) - MUST be shape[0] to match rt_drag callback
+        # RT min (purple, solid, editable): data-anchored so it matches reference-line height.
         fig.add_shape(
-            type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
-            xref="x", yref="paper",
+            type="line", x0=rt_min, x1=rt_min, y0=y_bottom, y1=y_max_data,
+            xref="x", yref="y",
             line=dict(color="purple", width=7),
             name="RT min", editable=True,
         )
 
         # RT max (purple, dashed, editable) - MUST be shape[1] to match rt_drag callback
         fig.add_shape(
-            type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
-            xref="x", yref="paper",
+            type="line", x0=rt_max, x1=rt_max, y0=y_bottom, y1=y_max_data,
+            xref="x", yref="y",
             line=dict(color="purple", width=7, dash="dash"),
             name="RT max", editable=True,
         )
@@ -856,9 +881,11 @@ def build_dash_app(
             xaxis_title="RT",
             yaxis_title="Intensity",
             hovermode="closest", showlegend=False,
-            margin=dict(l=50, r=20, t=125, b=40), dragmode="pan",
+            margin=dict(l=50, r=20, t=125, b=40), dragmode="zoom",
             plot_bgcolor="white",
+            uirevision=f"ms1-{state['compound_idx']}-{yaxis_scale}",
             xaxis=dict(
+                rangeslider=dict(visible=True, thickness=0.1),
                 showgrid=False,
                 zeroline=False,
                 range=[x_window_min, x_window_max],
@@ -869,6 +896,8 @@ def build_dash_app(
                 showgrid=False,
                 zeroline=False,
                 type=yaxis_scale,
+                range=y_range,
+                fixedrange=True,
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
             ),
@@ -1347,7 +1376,11 @@ def build_dash_app(
         
         new_min, new_max = state["rt_min"], state["rt_max"]
         updated = False
+        y_moved = False
         for k, v in relayout.items():
+            if k.startswith("shapes[") and (k.endswith("].y0") or k.endswith("].y1")):
+                y_moved = True
+                continue
             if not (k.startswith("shapes[") and k.endswith("].x0")):
                 continue
             
@@ -1366,8 +1399,35 @@ def build_dash_app(
                 updated = True
         
         if not updated:
+            # If the user drags vertically, force a redraw with current RTs to snap lines back.
+            if y_moved:
+                return _patch_with_seq(state)
             raise dash.exceptions.PreventUpdate
         return _patch_rt_change(state, new_min, new_max)
+
+    @app.callback(
+        Output("session-store", "data", allow_duplicate=True),
+        Output("ms1-graph", "clickData", allow_duplicate=True),
+        Input("ms1-graph", "clickData"),
+        State("session-store", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_ms1_highlight(click_data, state):
+        if click_data is None or state is None:
+            raise dash.exceptions.PreventUpdate
+        points = click_data.get("points", [])
+        if not points:
+            raise dash.exceptions.PreventUpdate
+        fp = points[0].get("customdata")
+        if not fp:
+            raise dash.exceptions.PreventUpdate
+        highlighted = list(state.get("highlighted_files") or [])
+        if fp in highlighted:
+            highlighted.remove(fp)
+        else:
+            highlighted.append(fp)
+        # Clear clickData so clicking the same point again still emits an event.
+        return _patch_with_seq(state, highlighted_files=highlighted), None
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
