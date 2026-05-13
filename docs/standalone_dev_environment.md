@@ -119,7 +119,7 @@ After setup, the standalone environment lives at `~/.metatlas2-dev/`. Output dir
 │   └── targeted_outputs/   # Analysis results (generated)
 ├── qc_compounds_pos.tsv    # QC compounds used for RT alignment
 ├── ema_compounds_pos.tsv   # EMA compounds used for targeted analysis
-├── ms2_references.tsv      # MS2 reference spectra
+├── ms2_references.json      # MS2 reference spectra
 ├── configs/                # Configuration files
 │   ├── compounds_config.yaml   # Compound paths
 │   ├── atlases_config.yaml     # Atlas definitions
@@ -179,7 +179,7 @@ Extracted from production project at NERSC:
 - Two positive-mode compound tables are included:
   - `qc_compounds_pos.tsv` for RT alignment QC compounds
   - `ema_compounds_pos.tsv` for EMA targeted analysis compounds
-- MS2 reference spectra are provided in `ms2_references.tsv`
+- MS2 reference spectra are provided in `ms2_references.json`
 
 See `local/prepare_dev_package.sh` for the complete run list and compound definitions.
 

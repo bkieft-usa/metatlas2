@@ -10,99 +10,188 @@ import grp
 import subprocess
 import joblib
 from matchms import Spectrum
+from tqdm.auto import tqdm
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
 
-def load_msms_refs_file(file_path: Path) -> dict[str, list[Spectrum]]:
+import ast
+import json
+import pandas as pd
+from pathlib import Path
+
+
+def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
+    """Convert a legacy .tab msms refs file to .jsonl format."""
+    
+    input_file_path = Path(tsv_path)
+    output_file_path = Path(jsonl_path)
+
+    col_names = [
+        'ix', 'database', 'id', 'name', 'spectrum', 'decimal', 'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 
+        'collision_energy', 'instrument', 'instrument_type', 'formula', 'exact_mass', 'inchi_key', 'inchi', 'smiles'
+    ]
+    df = pd.read_csv(input_file_path, sep='\t', header=None, names=col_names, low_memory=False)
+
+    n_written = 0
+    n_skipped = 0
+
+    with output_file_path.open('w') as out:
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Converting spectra to JSONL"):
+            try:
+                spectrum_data = ast.literal_eval(row['spectrum'])
+                mz_list, int_list = spectrum_data[0], spectrum_data[1]
+                assert len(mz_list) == len(int_list)
+            except Exception:
+                n_skipped += 1
+                continue
+
+            def _float_or_none(val):
+                try:
+                    f = float(val)
+                    return None if pd.isna(f) else f
+                except (TypeError, ValueError):
+                    return None
+
+            def _str_or_none(val):
+                s = str(val).strip()
+                return None if s in ('', 'nan', 'None') else s
+            
+            def _int_or_none(val):
+                try:
+                    i = int(val)
+                    return None if pd.isna(i) else i
+                except (TypeError, ValueError):
+                    return None
+
+            rec = {
+                'ix': _int_or_none(row['ix']),
+                'database': _str_or_none(row['database']),
+                'id': _str_or_none(row['id']),
+                'name': _str_or_none(row['name']),
+                'decimal': _float_or_none(row['decimal']),
+                'inchi_key': _str_or_none(row['inchi_key']),
+                'precursor_mz': _float_or_none(row['precursor_mz']),
+                'polarity': _str_or_none(row['polarity']),
+                'adduct': _str_or_none(row['adduct']),
+                'fragmentation_method': _str_or_none(row['fragmentation_method']),
+                'collision_energy': _str_or_none(row['collision_energy']),
+                'instrument': _str_or_none(row['instrument']),
+                'instrument_type': _str_or_none(row['instrument_type']),
+                'formula': _str_or_none(row['formula']),
+                'mono_isotopic_molecular_weight': _float_or_none(row['exact_mass']),
+                'inchi': _str_or_none(row['inchi']),
+                'smiles': _str_or_none(row['smiles']),
+                'mz': [round(x, 5) for x in mz_list],
+                'intensities': [round(x, 5) for x in int_list],
+            }
+            out.write(json.dumps(rec) + '\n')
+            n_written += 1
+
+    print(f"Wrote {n_written} spectra, skipped {n_skipped}.")
+
+def load_msms_refs_file(
+    file_path: str,
+    database_filter: str | None = None,
+) -> dict[str, list[Spectrum]]:
     """
-    Load the msms_refs.tab file and return a dict mapping inchi_key -> list of matchms Spectrum objects.
-    Results are cached to a .pkl file on disk and reloaded on subsequent calls if the source file
-    has not been modified.
+    Load an msms refs file (.jsonl format) and return a dict mapping
+    inchi_key -> list of matchms Spectrum objects.
+    Results are cached to a .pkl file and reloaded on subsequent calls
+    if the source file has not been modified.
 
     Args:
-        file_path: Path to the msms_refs.tab file
+        file_path: Path to the msms_refs.jsonl file
+        database_filter: If provided, only load spectra where database == this string
 
     Returns:
         dict mapping inchi_key (str) -> list of matchms Spectrum objects
     """
     file_path = Path(file_path)
-    cache_path = file_path.with_suffix('.refs_cache.pkl')
 
-    # Return cached version if it exists and is newer than the source file (rebuild when new msms refs is defined in config)
+    # Include the filter in the cache filename so different filters get different caches
+    filter_tag = f".{database_filter}" if database_filter else ""
+    cache_path = file_path.with_suffix(f'{filter_tag}.refs_cache.pkl')
+
     if cache_path.exists() and cache_path.stat().st_mtime > file_path.stat().st_mtime:
         logger.info(f"Loading reference spectra from cache: {cache_path}")
         refs_by_inchi_key = joblib.load(cache_path)
         total = sum(len(v) for v in refs_by_inchi_key.values())
-        logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys (from cache).")
+        logger.info(
+            f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} "
+            f"unique InChI keys (from cache)."
+        )
         return refs_by_inchi_key
 
-    # Otherwise parse from the source .tab file
-    logger.info(f"Loading reference spectra from {file_path}...")
-
-    col_names = [
-        'id', 'database', 'compound_id', 'name', 'spectrum', 'collision_energy',
-        'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 'other_id',
-        'experiment', 'instrument', 'formula', 'mono_isotopic_molecular_weight',
-        'inchi_key', 'inchi', 'smiles'
-    ]
-    df = pd.read_csv(file_path, sep='\t', header=None, names=col_names, low_memory=False)
-
-    df['precursor_mz'] = pd.to_numeric(df['precursor_mz'], errors='coerce')
-    df['collision_energy'] = pd.to_numeric(df['collision_energy'], errors='coerce')
-    df['mono_isotopic_molecular_weight'] = pd.to_numeric(df['mono_isotopic_molecular_weight'], errors='coerce')
+    logger.info(
+        f"Loading reference spectra from {file_path}"
+        + (f" (database='{database_filter}')" if database_filter else "")
+        + "..."
+    )
 
     refs_by_inchi_key: dict[str, list[Spectrum]] = {}
     n_skipped = 0
 
-    for row in df.itertuples(index=False):
-        try:
-            spectrum_data = ast.literal_eval(row.spectrum)
-            if len(spectrum_data) != 2 or len(spectrum_data[0]) != len(spectrum_data[1]):
+    with file_path.open('r') as fh:
+        for line_num, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.warning(f"  Line {line_num}: JSON parse error — {e}")
                 n_skipped += 1
                 continue
-            mz = np.array(spectrum_data[0], dtype=np.float32)
-            intensities = np.array(spectrum_data[1], dtype=np.float32)
-        except Exception:
-            n_skipped += 1
-            continue
 
-        if len(mz) == 0 or len(intensities) == 0:
-            n_skipped += 1
-            continue
+            if database_filter and rec.get('database') != database_filter:
+                continue
 
-        precursor_mz = row.precursor_mz
-        if not np.isnan(precursor_mz):
-            mask = mz < precursor_mz + 2.5
-            mz = mz[mask]
-            intensities = intensities[mask]
+            mz_list = rec.get('mz')
+            int_list = rec.get('intensities')
+            if not mz_list or not int_list or len(mz_list) != len(int_list):
+                n_skipped += 1
+                continue
 
-        if len(mz) == 0 or len(intensities) == 0:
-            n_skipped += 1
-            continue
+            # Direct construction from JSON arrays — no eval, no string parsing
+            mz = np.array(mz_list, dtype=np.float32)
+            intensities = np.array(int_list, dtype=np.float32)
 
-        spec = Spectrum(
-            mz=mz,
-            intensities=intensities,
-            metadata={
-                'precursor_mz': float(precursor_mz) if not np.isnan(precursor_mz) else 0.0,
-                'database': str(row.database),
-                'id': str(row.id),
-                'name': str(row.name),
-                'inchi_key': str(row.inchi_key),
-            }
-        )
-        refs_by_inchi_key.setdefault(row.inchi_key, []).append(spec)
+            precursor_mz = rec.get('precursor_mz')
+            if precursor_mz is not None and not np.isnan(precursor_mz):
+                mask = mz < precursor_mz + 2.5
+                mz = mz[mask]
+                intensities = intensities[mask]
+
+            if len(mz) == 0:
+                n_skipped += 1
+                continue
+
+            inchi_key = rec.get('inchi_key', '')
+            spec = Spectrum(
+                mz=mz,
+                intensities=intensities,
+                metadata={
+                    'precursor_mz': float(precursor_mz) if precursor_mz is not None else 0.0,
+                    'database': str(rec.get('database', '')),
+                    'id': str(rec.get('id', '')),
+                    'name': str(rec.get('name', '')),
+                    'inchi_key': inchi_key,
+                }
+            )
+            refs_by_inchi_key.setdefault(inchi_key, []).append(spec)
 
     if not refs_by_inchi_key:
-        raise ValueError("Reference DataFrame is empty after parsing — check the input file format.")
+        raise ValueError(
+            "Reference file is empty after parsing — check the input file format."
+        )
 
     total = sum(len(v) for v in refs_by_inchi_key.values())
     logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
     if n_skipped > 0:
         logger.warning(f"  Skipped {n_skipped} rows due to unparseable or empty spectra.")
 
-    # Save cache
     logger.info(f"  Saving reference cache to {cache_path}...")
     joblib.dump(refs_by_inchi_key, cache_path, compress=0)
     logger.info(f"  Cache saved.")

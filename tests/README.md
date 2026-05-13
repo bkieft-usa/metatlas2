@@ -25,7 +25,7 @@ python tests/fixtures/generate_fixtures.py
 # This creates:
 #   tests/fixtures/data/databases/main_db/metatlas.duckdb
 #   tests/fixtures/data/lcmsruns/test_owner/20260420_JGI_BPK_000000_SYSTEM-TEST_pilot_EXPXXXX_HILICZ_XXXXXXXX/parquet/*.parquet
-#   tests/fixtures/data/ms2_references.tsv
+#   tests/fixtures/data/ms2_references.json
 
 # The script will print atlas UIDs - copy these to configs/system_test_analysis.yaml
 ```
@@ -63,7 +63,7 @@ The test automatically detects the environment and uses the appropriate containe
 - **`data/`** - Directory containing committed test fixtures (~5-10 MB)
   - `databases/main_db/metatlas.duckdb` - Main database with compounds and atlases
   - `lcmsruns/test_owner/20260420_JGI_BPK_000000_SYSTEM-TEST_pilot_EXPXXXX_HILICZ_XXXXXXXX/parquet/` - Synthetic MS1/MS2 parquet files
-  - `ms2_references.tsv` - MS2 reference library for hit detection
+  - `ms2_references.json` - MS2 reference library for hit detection
 - **`expected_baseline.json`** - Expected output metrics for validation
 
 ### Test Files

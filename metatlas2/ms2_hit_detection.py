@@ -56,7 +56,11 @@ def find_ms2_hits(auto_id_obj) -> None:
     """
     from metatlas2.workflow_objects import MS2Hit
 
-    refs_by_inchi_key = ldt.load_msms_refs_file(Path(auto_id_obj.paths['msms_refs_path']))
+    database_filter = auto_id_obj.config.get('WORKFLOWS').get('PATHS').get('msms_refs_db_filter', "metatlas")
+    refs_by_inchi_key = ldt.load_msms_refs_file(
+        Path(auto_id_obj.paths['msms_refs_path']),
+        database_filter=database_filter,
+    )
     if not refs_by_inchi_key:
         raise FileNotFoundError("No reference database found - skipping hit detection")
 

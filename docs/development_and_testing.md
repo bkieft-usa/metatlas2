@@ -84,7 +84,7 @@ tests/fixtures/data/
 │           ├── mzML/               # 10 synthetic mzML files (ISTD, QC, Sample)
 │           ├── parquet/            # Converted parquet files (MS1 + MS2)
 │           └── raw/
-└── ms2_references.tsv              # MS2 reference library
+└── ms2_references.json              # MS2 reference library
 ```
 
 ### Fixture contents
@@ -92,7 +92,7 @@ tests/fixtures/data/
 | File / Table | Description |
 |---|---|
 | `metatlas.duckdb` | Contains a QC atlas (3 amino acid compounds for RT alignment) and a target atlas (2 compounds for auto-ID) |
-| `ms2_references.tsv` | Minimal MS2 reference library matching the target compounds |
+| `ms2_references.json` | Minimal MS2 reference library matching the target compounds |
 | `mzML/` | 10 synthetic LC-MS files: 2 ISTD, 3 QC, 5 Sample — all in positive mode |
 | `parquet/` | Pre-converted parquet files for the mzML files above (MS1 and MS2 scan data with gaussian peaks) |
 
