@@ -196,7 +196,7 @@ def _extract_ms1_from_parquet(
         DataFrame with columns: [compound_name, rt, mz, i]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 20.0))
-    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 1.0))
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 10.0))
     
     # Read parquet with m/z and RT filters only
     # DO NOT filter by intensity or min_points here - let the funnel architecture
@@ -232,7 +232,7 @@ def _extract_ms2_from_parquet(
                                  precursor_intensity, collision_energy]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 5.0))
-    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 1.0))
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 10.0))
 
     # For MS2, filter by precursor m/z
     df = pq.read_table(
