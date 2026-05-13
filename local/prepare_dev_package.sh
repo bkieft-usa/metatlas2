@@ -496,7 +496,7 @@ if [[ "$SUBSET_PARQUET" == true ]]; then
     # Use conservative defaults so rows needed by both RT alignment and targeted analysis are retained.
     SUBSET_PPM_MS1=20.0
     SUBSET_PPM_MS2=20.0
-    SUBSET_EXTRA_TIME=2.0
+    SUBSET_EXTRA_TIME=5.0
 
     PARQUET_DIR="lcmsruns/dev/${STANDALONE_PROJECT}/parquet"
 
