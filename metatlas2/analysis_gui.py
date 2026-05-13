@@ -296,7 +296,7 @@ def build_dash_app(
     )
 
     # format of the app itself
-    ms1_height = "700px" if owner == "egsb" else "650px"
+    ms1_height = "700px" if owner == "egsb" else "625px"
     ms2_height = "700px" if owner == "egsb" else "550px"
     app.layout = dbc.Container(
         [

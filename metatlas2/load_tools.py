@@ -233,7 +233,7 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
             if 'PARAMS' in chrom_config:
                 params = chrom_config['PARAMS']
                 params['ppm_error'] = float(params.get('ppm_error', 20.0))
-                params['extra_time'] = float(params.get('extra_time', 10.0))
+                params['extra_time'] = float(params.get('extra_time', 5.0))
                 params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
                 params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
                 params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
@@ -265,7 +265,7 @@ def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
                         params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
                         params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
                         params['ppm_error'] = float(params.get('ppm_error', 5.0))
-                        params['extra_time'] = float(params.get('extra_time', 10.0))
+                        params['extra_time'] = float(params.get('extra_time', 5.0))
                         params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
                         params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
                         params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))

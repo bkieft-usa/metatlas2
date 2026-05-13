@@ -484,6 +484,16 @@ cat > ms2_references.json << 'EOF'
 {"ix": 216423, "database": "metatlas", "id": "istdv787a226371b63414f8d8cb27a889bcfa6", "name": "cystine", "decimal": 4.0, "inchi_key": "LEVWYRKDKASIDU-OGYFDXEDSA-N", "precursor_mz": 249.0453, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "HCD", "collision_energy": "normalized-205060", "instrument": "EXP120B", "instrument_type": "Orbitrap", "formula": "C6H12N2O4S2", "mono_isotopic_molecular_weight": 248.038047704, "inchi": "InChI=1S/C6H12N2O4S2/c7-3(5(9)10)1-13-14-2-4(8)6(11)12/h3-4H,1-2,7-8H2,(H,9,10)(H,11,12)/t3-,4-/m0/s1/i1+1,2+1,3+1,4+1,5+1,6+1,7+1,8+1", "smiles": "[15NH2][13C@@H]([13CH2]SS[13CH2][13C@H]([15NH2])[13C](=O)O)[13C](=O)O", "mz": [54.20271, 58.02792, 61.00167, 62.10111, 67.77848, 68.49538, 70.76539, 76.03849, 76.82086, 77.00964, 77.02162, 77.0274, 77.28399, 79.02534, 83.32627, 83.66439, 89.99996, 92.04633, 95.02025, 96.85841, 108.01057, 110.99709, 112.82639, 121.98009, 124.01849, 126.03414, 126.04021, 155.99057, 156.9902, 158.0063, 184.01297, 202.03651, 231.02138, 249.04527], "intensities": [2806.94385, 8765.75391, 4589.00684, 2539.46313, 2761.57544, 3067.69214, 3038.11011, 15484.30273, 2502.08447, 192661.9375, 3305.21777, 371355.375, 2507.24048, 24423.44141, 2853.75342, 2771.62354, 6338.88525, 8407.57227, 16850.98047, 2887.61963, 12165.46094, 3141.0835, 2746.44604, 2527.9502, 357763.34375, 149815.59375, 5302.00928, 280225.84375, 3338.82788, 29915.39648, 7729.2041, 39029.24609, 4448.76953, 170896.70312]}
 {"ix": 216462, "database": "metatlas", "id": "hatzenpichlerrefstdsd53e45350f80421093f5b56c205caf86", "name": "Serine", "decimal": 4.0, "inchi_key": "MTCFGRXMJLQNBG-UHFFFAOYSA-N", "precursor_mz": 106.0499, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "HCD", "collision_energy": "ramp-102040norm", "instrument": "EXP120B", "instrument_type": "Orbitrap", "formula": "C3H7NO3", "mono_isotopic_molecular_weight": 105.042593084, "inchi": "InChI=1S/C3H7NO3/c4-2(1-5)3(6)7/h2,5H,1,4H2,(H,6,7)", "smiles": "NC(CO)C(=O)O", "mz": [40.65973, 41.48451, 60.04444, 63.61077, 65.21227, 86.58987, 88.03947, 106.05009, 117.4417], "intensities": [8503.69043, 7719.24072, 98116.9375, 8025.75342, 7472.55225, 7813.15234, 23225.34375, 32792.78906, 7402.21143]}
 {"ix": 216463, "database": "metatlas", "id": "hatzenpichlerrefstdsc907d3c1cc9b4dac87d0a68693b52274", "name": "Serine", "decimal": 4.0, "inchi_key": "MTCFGRXMJLQNBG-UHFFFAOYSA-N", "precursor_mz": 106.0499, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "HCD", "collision_energy": "ramp-205060norm", "instrument": "EXP120B", "instrument_type": "Orbitrap", "formula": "C3H7NO3", "mono_isotopic_molecular_weight": 105.042593084, "inchi": "InChI=1S/C3H7NO3/c4-2(1-5)3(6)7/h2,5H,1,4H2,(H,6,7)", "smiles": "NC(CO)C(=O)O", "mz": [57.82336, 60.04446, 71.36523, 88.03928, 106.05017], "intensities": [8321.2627, 96463.38281, 7444.92676, 14036.89062, 13122.83398]}
+{"ix": 15563, "database": "mona", "id": "KO003597", "name": "Norleucine", "decimal": 3.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.0, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "10 V", "instrument": null, "instrument_type": "LC-ESI-QQ", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [49.9, 55.1, 59.3, 69.2, 71.1, 72.9, 73.2, 77.8, 82.1, 83.0, 86.2, 90.9, 97.0, 100.2, 103.8, 113.8, 115.3, 132.1], "intensities": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0, 86.0]}
+{"ix": 16120, "database": "mona", "id": "KO003601", "name": "Norleucine", "decimal": 3.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.0, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "50 V", "instrument": null, "instrument_type": "LC-ESI-QQ", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [39.3, 41.1, 43.1, 44.2, 55.0, 69.1], "intensities": [12.0, 100.0, 30.0, 12.0, 18.0, 6.0]}
+{"ix": 16884, "database": "mona", "id": "KO003599", "name": "Norleucine", "decimal": 3.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.0, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "30 V", "instrument": null, "instrument_type": "LC-ESI-QQ", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [30.3, 41.2, 43.1, 44.3, 55.2, 56.9, 59.1, 67.2, 69.1, 72.7, 79.9, 82.8, 86.2, 97.3, 100.2, 115.0], "intensities": [1.0, 5.0, 4.0, 0.0, 4.0, 0.0, 1.0, 1.0, 54.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0]}
+{"ix": 17370, "database": "mona", "id": "KO003600", "name": "Norleucine", "decimal": 3.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.0, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "40 V", "instrument": null, "instrument_type": "LC-ESI-QQ", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [30.3, 38.9, 41.2, 43.0, 44.0, 45.1, 55.1, 67.0, 69.2, 69.7, 86.0], "intensities": [13.0, 3.0, 100.0, 58.0, 19.0, 3.0, 28.0, 4.0, 68.0, 1.0, 54.0]}
+{"ix": 18055, "database": "mona", "id": "KO003598", "name": "Norleucine", "decimal": 3.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.0, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "20 V", "instrument": null, "instrument_type": "LC-ESI-QQ", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [40.9, 45.3, 55.0, 59.0, 61.3, 67.3, 69.2, 71.3, 72.2, 72.9, 79.1, 83.2, 86.2, 87.2, 97.1, 100.0, 114.2, 115.1, 132.1], "intensities": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]}
+{"ix": 28165, "database": "mona", "id": "PR100170", "name": "L-Norleucine", "decimal": 4.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.10242, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "LOW-ENERGY CID", "collision_energy": "30 V", "instrument": null, "instrument_type": "LC-ESI-QTOF", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [69.0716, 86.0972, 97.9536, 98.9638, 115.9675, 124.9671], "intensities": [20.0, 59.0, 5.0, 17.0, 14.0, 10.0]}
+{"ix": 28292, "database": "mona", "id": "PR100169", "name": "L-Norleucine", "decimal": 4.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.10242, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "LOW-ENERGY CID", "collision_energy": "Ramp 5-60 V", "instrument": null, "instrument_type": "LC-ESI-QTOF", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])([H])C([H])([H])C([H])([H])[H]", "mz": [69.0706, 86.0954, 88.0034, 99.5113, 115.9657, 132.1024], "intensities": [6.0, 100.0, 2.0, 2.0, 4.0, 5.0]}
+{"ix": 192774, "database": "metatlas", "id": "4094de90b9c945b6bba907cc54aa0e5c", "name": "L-Norleucine", "decimal": 4.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.102, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "cid", "collision_energy": null, "instrument": null, "instrument_type": null, "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": null, "mz": [63.8225, 66.7584, 69.0704, 80.7418, 82.4203, 86.0969, 102.535, 104.311, 132.103], "intensities": [55015.0, 96019.0, 826416.0, 57160.0, 72730.0, 15275600.0, 59061.0, 73775.0, 99620.0]}
+{"ix": 199514, "database": "metatlas", "id": "c18atlas20200609-M04B07", "name": "L-Norleucine", "decimal": 4.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.1019287, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "HCD", "collision_energy": "ramp-102040", "instrument": "QEHF", "instrument_type": "Orbitrap", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "CCCCC(N)C(=O)O", "mz": [55.30547, 63.35664, 66.7354, 69.0706, 86.09712, 122.01992, 131.87621, 132.10179], "intensities": [78457.0, 95160.0, 95874.0, 917521.0, 22982224.0, 163750.0, 86791.0, 196190.0]}
+{"ix": 210853, "database": "metatlas", "id": "c18atlas20200609-M04B07", "name": "L-Norleucine", "decimal": 4.0, "inchi_key": "LRQKBLKVPFOOQJ-YFKPBYRVSA-N", "precursor_mz": 132.1019287, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "HCD", "collision_energy": "ramp-205060", "instrument": "QEHF", "instrument_type": "Orbitrap", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-2-3-4-5(7)6(8)9/h5H,2-4,7H2,1H3,(H,8,9)/t5-/m0/s1", "smiles": "CCCCC(N)C(=O)O", "mz": [69.07059, 82.38114, 85.92828, 86.09707, 104.26479, 106.28657, 122.01956, 130.12952], "intensities": [1609755.0, 111145.0, 107489.0, 19635828.0, 136636.0, 97884.0, 109386.0, 94864.0]}
 EOF
 
 echo "   Created ms2_references.json"
@@ -713,7 +723,6 @@ WORKFLOWS:
             ms1_min_peak_intensity: 1000
             ms1_min_num_points: 1
             ppm_error: 20.0
-            extra_time: 0.5
             ms2_min_score: 0.1
             ms2_min_matching_frags: 1
             ms2_frag_mz_tolerance: 0.05
@@ -775,7 +784,7 @@ if [[ -z "${ZENODO_ACCESS_TOKEN:-}" ]]; then
     exit 0
 fi
 
-ZENODO_RECORD_ID="20075571"
+ZENODO_RECORD_ID="20172505"
 VERSION_TAG="v$(date +%Y%m%d)"
 TARBALL_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.tar.gz"
 
@@ -933,6 +942,25 @@ if [[ "$NEW_DOI" == "ERROR" ]] || [[ -z "$NEW_DOI" ]]; then
     exit 1
 fi
 
+# Update scripts/metatlas2.sh to use the newly published DOI for standalone downloads.
+METATLAS2_SCRIPT="${REPO_DIR}/scripts/metatlas2.sh"
+if [[ -f "${METATLAS2_SCRIPT}" ]]; then
+    DOI_URL="${NEW_DOI}"
+    if [[ "${DOI_URL}" != https://doi.org/* ]]; then
+        DOI_URL="https://doi.org/${DOI_URL}"
+    fi
+
+    DOI_PATTERN='^[[:space:]]*ZENODO_DOI="[^"]*"'
+    if grep -qE "${DOI_PATTERN}" "${METATLAS2_SCRIPT}"; then
+        sed -i -E "s|${DOI_PATTERN}|    ZENODO_DOI=\"${DOI_URL}\"|" "${METATLAS2_SCRIPT}"
+        echo "Updated scripts/metatlas2.sh with DOI: ${DOI_URL}"
+    else
+        echo "Warning: Could not find ZENODO_DOI line in scripts/metatlas2.sh" >&2
+    fi
+else
+    echo "Warning: scripts/metatlas2.sh not found at ${METATLAS2_SCRIPT}" >&2
+fi
+
 echo ""
 echo "========================================" 
 echo "SUCCESS!"
@@ -940,5 +968,4 @@ echo "========================================"
 echo "New version published: ${VERSION_TAG}"
 echo "DOI: ${NEW_DOI}"
 echo "Local package: ${TARBALL_PATH}"
-echo "Make sure to update the ZENODO_DOI variable in the metatlas.sh script!"
 echo ""

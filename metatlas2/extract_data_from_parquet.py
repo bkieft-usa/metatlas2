@@ -46,7 +46,7 @@ def extract_eic_and_ms2_from_parquet(
 
     project_files_list = [run.file_path for run in lcmsruns]
     logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_list)} project files...")
-    logger.info(f"Extra time set to {workflow_params.get('extra_time', 10.0)}")
+    logger.info(f"Extra time set to {workflow_params.get('extra_time', 5.0)}")
 
     if max_workers is None:
         max_workers = min(mp.cpu_count(), len(project_files_list), 8)
@@ -197,7 +197,7 @@ def _extract_ms1_from_parquet(
         DataFrame with columns: [compound_name, rt, mz, i]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 20.0))
-    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 10.0))
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 5.0))
     
     df = pq.read_table(
         parquet_file,
@@ -229,7 +229,7 @@ def _extract_ms2_from_parquet(
                                  precursor_intensity, collision_energy]
     """
     mz_min, mz_max = calculate_mz_bounds(mz, workflow_params.get("ppm_error", 5.0))
-    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 10.0))
+    rt_min, rt_max = calculate_rt_bounds(rt_min, rt_max, workflow_params.get("extra_time", 5.0))
 
     # For MS2, filter by precursor m/z
     df = pq.read_table(
