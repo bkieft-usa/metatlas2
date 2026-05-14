@@ -354,9 +354,9 @@ def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
                     atlas_entry['name'] = str(atlas_entry['name']) if atlas_entry['name'] else None
                     atlas_entry['desc'] = str(atlas_entry['desc']) if atlas_entry['desc'] else None
 
-                    # Optional label for logging or downstream filtering
-                    if 'label' in atlas_entry and atlas_entry['label']:
-                        atlas_entry['label'] = str(atlas_entry['label'])
+                    # # Optional label for logging or downstream filtering
+                    # if 'label' in atlas_entry and atlas_entry['label']:
+                    #     atlas_entry['label'] = str(atlas_entry['label'])
 
                     # Only check file existence if path is not None
                     if atlas_entry['path'] and not Path(atlas_entry['path']).exists():

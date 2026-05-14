@@ -873,7 +873,7 @@ def build_dash_app(
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi}</span><br>"
             f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['best_ms1_rt']:.4f}  |  RT Δ: {row['best_ms1_rt_error']:.3f}<br>"
             f"Atlas m/z: {row['atlas_mz']:.4f}  |  ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
-            f"<sub style='font-size:0.8em'>Isomers: {isomer_str}</sub>"
+            f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
         )
 
         fig.update_layout(
@@ -1086,8 +1086,8 @@ def build_dash_app(
                 prev_mz = mz_val
 
             # Update axes for this subplot
-            xaxis_name = "xaxis" if col_idx == 1 else f"xaxis{col_idx}"
-            yaxis_name = "yaxis" if col_idx == 1 else f"yaxis{col_idx}"
+            # xaxis_name = "xaxis" if col_idx == 1 else f"xaxis{col_idx}"
+            # yaxis_name = "yaxis" if col_idx == 1 else f"yaxis{col_idx}"
             
             ce_label = _format_ce(ce)
             fig.update_xaxes(
@@ -1114,14 +1114,14 @@ def build_dash_app(
             prec_mz = scan.get('precursor_MZ', scan.get('precursor_MZ_x', 0))
             scan_info = (
                 f"<span style='font-size:1.2em'>"
-                f"<b>Score: {scan.get('score', 0):.4f}</b>  |  "
-                f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
+                f"<b>CoS.: {scan.get('score', 0):.4f}</b>  |  "
+                f"Ions: {num_matching_fragments}q/{num_ref_fragments}r  |  "
                 f"RT: {scan.get('rt', 0):.4f} min | "
                 f"Exp. m/z: {prec_mz:.4f}  |  "
                 f"Ref. m/z: {scan.get('mz_theoretical', 0):.4f}  |  "
                 f"ppm Δ: {scan.get('ppm_error', 0):.2f}"
                 f"</span><br>"
-                f"{fname}<br><br>"
+                f"{scan.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
             )
             # Add as annotation below the subplot title
             # Plotly uses "x domain" for first subplot, "x2 domain", "x3 domain" for others

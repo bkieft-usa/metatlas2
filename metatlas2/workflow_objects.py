@@ -32,9 +32,9 @@ class Compound:
     formula: str = ""
     
     # Classification and metadata
-    compound_classes: str = ""
-    compound_pathways: str = ""
-    compound_tags: str = ""
+    classes: str = ""
+    pathways: str = ""
+    tags: str = ""
     
     # Physical properties
     mono_isotopic_molecular_weight: float = 0.0
@@ -59,9 +59,9 @@ class Compound:
             inchi=row.get('inchi', ''),
             smiles=row.get('smiles', ''),
             formula=row.get('formula', ''),
-            compound_classes=row.get('compound_classes', ''),
-            compound_pathways=row.get('compound_pathways', ''),
-            compound_tags=row.get('compound_tags', ''),
+            classes=row.get('classes', ''),
+            pathways=row.get('pathways', ''),
+            tags=row.get('tags', ''),
             mono_isotopic_molecular_weight=row.get('mono_isotopic_molecular_weight', 0.0),
             iupac_name=row.get('iupac_name', ''),
             pubchem_cid=row.get('pubchem_cid', ''),
@@ -80,9 +80,9 @@ class Compound:
             'inchi': self.inchi,
             'smiles': self.smiles,
             'formula': self.formula,
-            'compound_classes': self.compound_classes,
-            'compound_pathways': self.compound_pathways,
-            'compound_tags': self.compound_tags,
+            'classes': self.classes,
+            'pathways': self.pathways,
+            'tags': self.tags,
             'mono_isotopic_molecular_weight': self.mono_isotopic_molecular_weight,
             'iupac_name': self.iupac_name,
             'pubchem_cid': self.pubchem_cid,
@@ -153,7 +153,7 @@ class CompoundMZRT:
     adduct: str = ""
 
     # RT data
-    rt_space: str = "HF"
+    rt_space: str = ""
     rt_peak: float = 0.0
     rt_min: float = 0.0
     rt_max: float = 0.0
@@ -169,10 +169,6 @@ class CompoundMZRT:
     # Metadata
     confidence: str = ""
     source: str = ""
-    ms1_notes: str = ""
-    ms2_notes: str = ""
-    other_notes: str = ""
-    analyst_notes: str = ""
     identification_notes: str = ""
     created_by: str = ""
     created_date: str = ""
@@ -186,7 +182,7 @@ class CompoundMZRT:
             compound_name=row.get('compound_name', ''),
             inchi_key=row.get('inchi_key', ''),
             adduct=row.get('adduct', ''),
-            rt_space=row.get('rt_space', 'HF'),
+            rt_space=row.get('rt_space', 'HF_Aug2019'),
             rt_peak=row.get('rt_peak', 0.0),
             rt_min=row.get('rt_min', 0.0),
             rt_max=row.get('rt_max', 0.0),
@@ -196,10 +192,6 @@ class CompoundMZRT:
             polarity=row.get('polarity', ''),
             confidence=row.get('confidence', ''),
             source=row.get('source', ''),
-            ms1_notes=row.get('ms1_notes', ''),
-            ms2_notes=row.get('ms2_notes', ''),
-            other_notes=row.get('other_notes', ''),
-            analyst_notes=row.get('analyst_notes', ''),
             identification_notes=row.get('identification_notes', ''),
             created_by=row.get('created_by', ''),
             created_date=row.get('created_date', '')
@@ -223,10 +215,6 @@ class CompoundMZRT:
             'polarity': self.polarity,
             'confidence': self.confidence,
             'source': self.source,
-            'ms1_notes': self.ms1_notes,
-            'ms2_notes': self.ms2_notes,
-            'other_notes': self.other_notes,
-            'analyst_notes': self.analyst_notes,
             'identification_notes': self.identification_notes,
             'created_by': self.created_by,
             'created_date': self.created_date

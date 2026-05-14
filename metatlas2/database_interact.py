@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import duckdb
 import uuid
+import grp
 import re
 import os
 import json
@@ -259,7 +260,7 @@ def create_new_atlas_from_dataframe(
         rt_max = row.get('rt_max', rt_peak + 0.5)
         mz = row.get('mz', None)
         mz_tolerance = row.get('mz_tolerance', 5.0)
-        rt_space = row.get('rt_space', 'HF')
+        rt_space = row.get('rt_space', 'HF_Aug2019')
         if rt_peak is None or mz is None or adduct is None:
             raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference.")
         confidence_level = row.get('confidence_level', None)
@@ -471,6 +472,8 @@ def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
         _create_database_tables(conn, db_type="main")
 
     db_path.chmod(0o660)
+    metatlas_gid = grp.getgrnam("metatlas").gr_gid
+    os.chown(db_path, -1, metatlas_gid)
 
     logger.info(f"Main metatlas database created at {db_path}")
 
@@ -735,9 +738,9 @@ def _prepare_compound_record(row: pd.Series, compound_uid: str, pubchem_cache: D
         synonyms = '; '.join(map(str, synonyms_val))
     else:
         synonyms = str(synonyms_val)
-    compound_classes = str(row.get('compound_classes', '')) if pd.notna(row.get('compound_classes')) else None
-    compound_pathways = str(row.get('compound_pathways', '')) if pd.notna(row.get('compound_pathways')) else None
-    compound_tags = str(row.get('compound_tags', '')) if pd.notna(row.get('compound_tags')) else None
+    classes = str(row.get('classes', '')) if pd.notna(row.get('classes')) else None
+    pathways = str(row.get('pathways', '')) if pd.notna(row.get('pathways')) else None
+    tags = str(row.get('tags', '')) if pd.notna(row.get('tags')) else None
 
     return (
         compound_uid,
@@ -746,9 +749,9 @@ def _prepare_compound_record(row: pd.Series, compound_uid: str, pubchem_cache: D
         inchi,
         smiles,
         formula,
-        compound_classes,
-        compound_pathways,
-        compound_tags,
+        classes,
+        pathways,
+        tags,
         mono_isotopic_molecular_weight,
         iupac_name,
         pubchem_cid,
@@ -782,9 +785,9 @@ def _prepare_compound_record_from_dict(compound_data: Dict) -> Optional[Tuple]:
             compound_data.get('inchi'),
             compound_data.get('smiles'),
             compound_data.get('formula'),
-            compound_data.get('compound_classes'),
-            compound_data.get('compound_pathways'),
-            compound_data.get('compound_tags'),
+            compound_data.get('classes'),
+            compound_data.get('pathways'),
+            compound_data.get('tags'),
             compound_data.get('mono_isotopic_molecular_weight'),
             compound_data.get('iupac_name'),
             compound_data.get('pubchem_cid'),
@@ -1208,9 +1211,9 @@ def _create_database_tables(conn, db_type: str = "main"):
                 inchi TEXT,
                 smiles TEXT,
                 formula TEXT,
-                compound_classes TEXT,
-                compound_pathways TEXT,
-                compound_tags TEXT,
+                classes TEXT,
+                pathways TEXT,
+                tags TEXT,
                 mono_isotopic_molecular_weight REAL,
                 iupac_name TEXT,
                 pubchem_cid TEXT,
@@ -1325,9 +1328,9 @@ def _create_database_tables(conn, db_type: str = "main"):
                 inchi TEXT,
                 smiles TEXT,
                 formula TEXT,
-                compound_classes TEXT,
-                compound_pathways TEXT,
-                compound_tags TEXT,
+                classes TEXT,
+                pathways TEXT,
+                tags TEXT,
                 mono_isotopic_molecular_weight REAL,
                 iupac_name TEXT,
                 pubchem_cid TEXT,
