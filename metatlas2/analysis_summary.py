@@ -533,7 +533,7 @@ def _plot_hit_info_table(
     ppm_error = float(mc_row.get("mz_error", np.nan))
     atlas_rt = float(mc_row.get("atlas_rt_peak", np.nan))
     measured_rt = float(mc_row.get("rt_peak", np.nan))
-    rt_error = float()(mc_row.get("rt_error", np.nan))
+    rt_error = float(mc_row.get("rt_error", np.nan))
     score = float(best_hit.get("score", np.nan))
     num_matches = int(best_hit.get("num_matches", 0))
     ref_frags = int(best_hit.get("ref_frags", 0))
