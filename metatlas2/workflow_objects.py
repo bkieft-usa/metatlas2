@@ -579,8 +579,8 @@ class ManualCuration:
     data: pd.DataFrame = field(default=None, compare=False)
     # data columns: compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number,
     #   compound_name, auto_ided, polarity, chromatography, mz_tolerance, atlas_mz,
-    #   atlas_rt_peak, atlas_rt_min, atlas_rt_max, original_rt_peak, original_rt_min,
-    #   original_rt_max, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
+    #   atlas_rt_peak, atlas_rt_min, atlas_rt_max,
+    #   mz, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
     #   identification_notes, analyst_notes, best_ms1_file, best_ms1_rt, best_ms1_mz,
     #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, isomers,
     #   suggested_rt_min, suggested_rt_max, suggested_rt_peak, rt_suggestion_confidence

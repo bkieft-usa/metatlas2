@@ -531,8 +531,18 @@ def build_dash_app(
         val, ints = _clean_spectrum(val, ints)
         return val, ints
 
-    def _compute_rt_peak_from_window(state):
-        """Estimate RT peak as the mean of per-file max-intensity RTs in the current window."""
+    @functools.lru_cache(maxsize=None)
+    def _parse_mz_cached(raw_mz):
+        if raw_mz is None or (isinstance(raw_mz, float) and np.isnan(raw_mz)):
+            return []
+        if isinstance(raw_mz, str):
+            return json.loads(raw_mz)
+        if isinstance(raw_mz, (list, tuple, np.ndarray)):
+            return list(raw_mz)
+        return []
+
+    def _compute_window_ms1_metrics(state):
+        """Compute all window-based MS1 metrics in one pass across file spectra."""
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min = float(state["rt_min"])
@@ -540,21 +550,55 @@ def build_dash_app(
         if rt_max < rt_min:
             rt_min, rt_max = rt_max, rt_min
 
+        fallback_rt_peak = (rt_min + rt_max) / 2.0
+        fallback_mz = row.get("best_ms1_mz", np.nan)
+        if pd.isna(fallback_mz):
+            fallback_mz = row.get("atlas_mz", np.nan)
+
         sub = analysis_gui_obj.ms1_df[
             (analysis_gui_obj.ms1_df["inchi_key"] == inchi)
             & (analysis_gui_obj.ms1_df["adduct"] == adduct)
         ]
         if sub.empty:
-            return (rt_min + rt_max) / 2.0
+            return {
+                "rt_peak": fallback_rt_peak,
+                "mz": float(fallback_mz) if pd.notnull(fallback_mz) else np.nan,
+                "rt_error": float(row.get("rt_error", np.nan)),
+                "mz_error": float(row.get("mz_error", np.nan)),
+                "best_ms1_file": row.get("best_ms1_file", ""),
+                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
+                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
+                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
+                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
+                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
+            }
 
-        # Keep only one running best (intensity, rt) per file in a single pass.
+        has_file_path = "file_path" in sub.columns
+        has_mz = "mz" in sub.columns
         best_by_file = {}
-        if "file_path" in sub.columns:
-            iter_rows = sub[["file_path", "raw_spectrum"]].itertuples(index=False, name=None)
-        else:
-            iter_rows = ((None, raw) for raw in sub["raw_spectrum"])
 
-        for file_path, raw_spectrum in iter_rows:
+        cols = []
+        if has_file_path:
+            cols.append("file_path")
+        cols.append("raw_spectrum")
+        if has_mz:
+            cols.append("mz")
+        iter_rows = sub[cols].itertuples(index=False, name=None)
+
+        for row_vals in iter_rows:
+            if has_file_path and has_mz:
+                file_path, raw_spectrum, raw_mz = row_vals
+            elif has_file_path:
+                file_path, raw_spectrum = row_vals
+                raw_mz = None
+            elif has_mz:
+                raw_spectrum, raw_mz = row_vals
+                file_path = None
+            else:
+                (raw_spectrum,) = row_vals
+                file_path = None
+                raw_mz = None
+
             try:
                 rt_vals, intensities = _parse_spectrum_cached(raw_spectrum)
             except Exception:
@@ -568,6 +612,16 @@ def build_dash_app(
             n = min(rt_arr.size, int_arr.size)
             rt_arr = rt_arr[:n]
             int_arr = int_arr[:n]
+
+            mz_arr = np.asarray([], dtype=float)
+            if raw_mz is not None:
+                try:
+                    mz_vals = _parse_mz_cached(raw_mz)
+                    mz_arr = np.asarray(mz_vals, dtype=float)
+                    if mz_arr.size:
+                        mz_arr = mz_arr[:n]
+                except Exception:
+                    mz_arr = np.asarray([], dtype=float)
 
             mask = (
                 (rt_arr >= rt_min)
@@ -583,15 +637,68 @@ def build_dash_app(
             local_intensity = float(masked_int[local_idx])
             if not np.isfinite(local_intensity):
                 continue
+
             local_rt = float(rt_arr[local_idx])
+            local_mz = np.nan
+            if mz_arr.size == n and local_idx < mz_arr.size and np.isfinite(mz_arr[local_idx]):
+                local_mz = float(mz_arr[local_idx])
 
             prev = best_by_file.get(file_path)
             if prev is None or local_intensity > prev[0]:
-                best_by_file[file_path] = (local_intensity, local_rt)
+                best_by_file[file_path] = (local_intensity, local_rt, local_mz)
 
-        if best_by_file:
-            return float(np.mean([rt for _, rt in best_by_file.values()]))
-        return (rt_min + rt_max) / 2.0
+        if not best_by_file:
+            return {
+                "rt_peak": fallback_rt_peak,
+                "mz": float(fallback_mz) if pd.notnull(fallback_mz) else np.nan,
+                "rt_error": float(row.get("rt_error", np.nan)),
+                "mz_error": float(row.get("mz_error", np.nan)),
+                "best_ms1_file": row.get("best_ms1_file", ""),
+                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
+                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
+                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
+                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
+                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
+            }
+
+        rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
+        mz_vals = [mz for _, _, mz in best_by_file.values() if np.isfinite(mz)]
+        mz_mean = float(np.mean(mz_vals)) if mz_vals else (float(fallback_mz) if pd.notnull(fallback_mz) else np.nan)
+
+        best_file, best_triplet = max(best_by_file.items(), key=lambda kv: kv[1][0])
+        best_intensity, best_rt, best_mz = best_triplet
+        if not np.isfinite(best_mz):
+            best_mz = mz_mean
+
+        atlas_mz = row.get("atlas_mz", np.nan)
+        if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(best_mz):
+            best_ppm_error = (float(best_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
+        else:
+            best_ppm_error = np.nan
+
+        atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
+        if pd.notnull(atlas_rt_peak) and np.isfinite(best_rt):
+            best_rt_error = float(best_rt) - float(atlas_rt_peak)
+        else:
+            best_rt_error = np.nan
+
+        if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(best_mz):
+            mz_error = (best_mz - atlas_mz) / atlas_mz * 1e6
+        else:
+            mz_error = np.nan
+
+        return {
+            "rt_peak": rt_peak,
+            "mz": mz_mean,
+            "rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+            "mz_error": float(mz_error) if np.isfinite(mz_error) else np.nan,
+            "best_ms1_file": "" if best_file is None else str(best_file),
+            "best_ms1_rt": float(best_rt),
+            "best_ms1_mz": float(best_mz) if np.isfinite(best_mz) else np.nan,
+            "best_ms1_intensity": float(best_intensity),
+            "best_ms1_ppm_error": float(best_ppm_error) if np.isfinite(best_ppm_error) else np.nan,
+            "best_ms1_rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+        }
 
     def _flush_to_db(state):
         sid = state.get("session_id", "unknown")
@@ -605,10 +712,20 @@ def build_dash_app(
             latest_flushed_seq_by_session[flush_key] = seq
 
         row = _compound_row(state["compound_idx"])
+        window_metrics = _compute_window_ms1_metrics(state)
         updates = {
+            "mz": window_metrics["mz"],
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
-            "rt_peak": _compute_rt_peak_from_window(state),
+            "rt_peak": window_metrics["rt_peak"],
+            "rt_error": window_metrics["rt_error"],
+            "mz_error": window_metrics["mz_error"],
+            "best_ms1_file": window_metrics["best_ms1_file"],
+            "best_ms1_rt": window_metrics["best_ms1_rt"],
+            "best_ms1_mz": window_metrics["best_ms1_mz"],
+            "best_ms1_intensity": window_metrics["best_ms1_intensity"],
+            "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
+            "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
             "ms2_notes": normalize_note_value(state.get("ms2_note"), ms2_options),
             "ms1_notes": normalize_note_value(state.get("ms1_note"), ms1_options),
             "other_notes": " // ".join(state.get("other_note", [])),

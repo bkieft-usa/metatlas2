@@ -479,9 +479,6 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
             return "N/A"
         return fmt.format(val) if fmt else str(val)
 
-    rt_err = mc_row.get("best_ms1_rt_error")
-    ppm = mc_row.get("best_ms1_ppm_error")
-
     rows = [
         ("Compound", _fmt(mc_row.get("compound_name"))),
         ("Formula", _fmt(mc_row.get("formula"))),
@@ -489,13 +486,13 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("Polarity", _fmt(mc_row.get("polarity"))),
         ("Chromatography", _fmt(mc_row.get("chromatography"))),
         ("Atlas m/z", _fmt(mc_row.get("atlas_mz"), "{:.4f}")),
-        ("Measured m/z", _fmt(mc_row.get("best_ms1_mz"), "{:.4f}")),
-        ("m/z ppm Δ", _fmt(ppm, "{:.2f}")),
+        ("Measured m/z", _fmt(mc_row.get("mz"), "{:.4f}")),
+        ("m/z ppm Δ", _fmt(mc_row.get("mz_error"), "{:.1f} ppm")),
         ("Atlas RT range", f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
         ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
         ("Atlas RT peak", _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
-        ("Measured RT", f"{_fmt(mc_row.get('best_ms1_rt'), '{:.3f} min')} "),
-        ("RT Δ", _fmt(rt_err, '{:.3f}')),
+        ("Measured RT", f"{_fmt(mc_row.get('rt_peak'), '{:.3f} min')} "),
+        ("RT Δ", _fmt(mc_row.get("rt_error"), '{:.3f}')),
     ]
 
     y_start = 1.03
@@ -532,11 +529,11 @@ def _plot_hit_info_table(
 
     # Scalar values
     atlas_mz = float(mc_row.get("atlas_mz", np.nan))
-    measured_mz = float(mc_row.get("best_ms1_mz", np.nan))
-    ppm_error = float(mc_row.get("best_ms1_ppm_error", np.nan))
+    measured_mz = float(mc_row.get("mz", np.nan))
+    ppm_error = float(mc_row.get("mz_error", np.nan))
     atlas_rt = float(mc_row.get("atlas_rt_peak", np.nan))
-    measured_rt = float(mc_row.get("best_ms1_rt", np.nan))
-    rt_error = float(mc_row.get("best_ms1_rt_error", np.nan))
+    measured_rt = float(mc_row.get("rt_peak", np.nan))
+    rt_error = float()(mc_row.get("rt_error", np.nan))
     score = float(best_hit.get("score", np.nan))
     num_matches = int(best_hit.get("num_matches", 0))
     ref_frags = int(best_hit.get("ref_frags", 0))
@@ -1104,10 +1101,11 @@ def make_final_id_sheet(
 
         # --- MS1 metrics ---
         mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
-        mz_measured = float(mc_row.get("best_ms1_mz", np.nan))
-        ppm_error = float(mc_row.get("best_ms1_ppm_error", np.nan))
-        rt_error = float(mc_row.get("best_ms1_rt_error", np.nan))
-        rt_measured = float(mc_row.get("best_ms1_rt", np.nan))
+        mz_measured = float(mc_row.get("mz", np.nan))
+        ppm_error = float(mc_row.get("mz_error", np.nan))
+        rt_theoretical = float(mc_row.get("atlas_rt_peak", np.nan))
+        rt_measured = float(mc_row.get("rt_peak", np.nan))
+        rt_error = float(mc_row.get("rt_error", np.nan))
         max_intensity = float(mc_row.get("best_ms1_intensity", np.nan))
         max_int_file = mc_row.get("best_ms1_file", "")
 
