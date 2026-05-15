@@ -14,7 +14,7 @@ The script can be run directly (`run` subcommand) or submitted as a Slurm batch 
 
 Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this workflow. Additionally:
 
-- The main metatlas database contains the compounds and atlases for your project. Run `metatlas2 add-compounds` and `metatlas2 add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)).
+- The main metatlas database contains the compounds and atlases for your project. Run `metatlas2.sh add-compounds` and `metatlas2.sh add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)).
 - LCMS run data files (.parquet format, converted from .raw and .mzML) are present at the expected path.
 - Atlas UIDs referenced in the input analysis configuration file (e.g., `analysis.yaml`) exist in the main database.
 
@@ -25,7 +25,7 @@ Complete the one-time environment setup described in [initial_setup.md](initial_
 ### Run directly
 
 ```bash
-metatlas2 run \
+metatlas2.sh run \
     --config        /path/to/analysis.yaml \
     --project       MyProject \
     [--rt-align-num  0] \
@@ -314,14 +314,14 @@ LCMS run categories are inferred from filename substrings in the following prior
 
 ```bash
 # 1. Add the compounds you're trying to identify to the database, if necessary
-metatlas2 add-compounds --config_path /path/to/create_compounds.yaml
+metatlas2.sh add-compounds --config_path /path/to/create_compounds.yaml
 
 # 2. Add reference atlases to the database, if necessary
-metatlas2 add-atlases --config_path /path/to/create_atlases.yaml
+metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml
 #    → note the atlas UIDs printed in the log and add them to analysis.yaml
 
 # 3. Run the full pre-curation workflow
-metatlas2 run \
+metatlas2.sh run \
     --config  /path/to/analysis.yaml \
     --project MyProject \
     --rt-align-num 0 \
@@ -332,7 +332,7 @@ metatlas2 run \
 ### Re-running auto identification only, e.g., with new filtering parameters in the config YAML (skip setup and alignment)
 
 ```bash
-metatlas2 run \
+metatlas2.sh run \
     --config       /path/to/analysis.yaml \
     --project      MyProject \
     --rt-align-num 0 \
@@ -344,7 +344,7 @@ metatlas2 run \
 ### Running only a subset of atlases
 
 ```bash
-metatlas2 run \
+metatlas2.sh run \
     --config          /path/to/analysis.yaml \
     --project         MyProject \
     --analysis-subset POS-ISTD,POS-EMA

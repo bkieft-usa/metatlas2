@@ -16,7 +16,7 @@ Complete the one-time environment setup described in [initial_setup.md](initial_
 metatlas2.sh add-compounds --config_path /path/to/create_compounds.yaml
 ```
 
-The `metatlas2` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
+The `metatlas2.sh` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
 

@@ -13,10 +13,10 @@ Complete the one-time environment setup described in [initial_setup.md](initial_
 ## Command-line usage
 
 ```bash
-metatlas2 add-atlases --config_path /path/to/create_atlases.yaml
+metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml
 ```
 
-The `metatlas2` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
+The `metatlas2.sh` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
 
