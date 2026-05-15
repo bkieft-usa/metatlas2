@@ -4,6 +4,7 @@ from typing import Optional, List, Tuple, Dict
 from pathlib import Path
 import json
 import os
+import re
 import statistics
 import textwrap
 import warnings
@@ -22,11 +23,87 @@ from matplotlib.patches import Rectangle
 import metatlas2.database_interact as dbi
 import metatlas2.rclone as rcl
 import metatlas2.logging_config as lcf
+from metatlas2.note_options import (
+    get_note_options_and_hotkeys,
+    get_notes_opts,
+    should_require_note_selection,
+)
 logger = lcf.get_logger('analysis_summary')
 
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
     return "".join(c for c in text if ord(c) not in range(0xFDD0, 0xFDF0) and ord(c) & 0xFFFF not in (0xFFFE, 0xFFFF))
+
+
+def _display_compound_idx(compound_idx: int) -> int:
+    """Convert internal zero-based index to user-facing one-based index."""
+    return int(compound_idx) + 1
+
+
+def _resolve_summary_note_options(summary_obj: "AnalysisSummary") -> tuple[list[str], list[str]]:
+    """Resolve MS1/MS2 option lists with the same owner/override logic as the GUI."""
+    owner = (summary_obj.config.get("WORKFLOWS", {}).get("PATHS", {}).get("owner") or "jgi").lower()
+    ms2_defaults, ms1_defaults, _ = get_notes_opts(owner=owner)
+
+    overrides = getattr(summary_obj, "override_parameters", {}) or {}
+    note_overrides = overrides.get("note_options_overrides") or {}
+
+    ms1_options, _ = get_note_options_and_hotkeys(note_overrides.get("ms1_notes", {}), ms1_defaults)
+    ms2_options, _ = get_note_options_and_hotkeys(note_overrides.get("ms2_notes", {}), ms2_defaults)
+    return ms1_options, ms2_options
+
+
+def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
+    """Raise if required GUI notes remain at unresolved defaults."""
+    overrides = getattr(summary_obj, "override_parameters", {}) or {}
+    force_eval = (
+        overrides["gui_require_all_evaluated"]
+        if overrides.get("gui_require_all_evaluated") is not None
+        else summary_obj.workflow_params.get("gui_require_all_evaluated", False)
+    )
+    if not force_eval:
+        return
+
+    if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
+        return
+
+    ms1_options, ms2_options = _resolve_summary_note_options(summary_obj)
+    mc = summary_obj.manual_curation_df.reset_index(drop=True)
+
+    ms1_bad_mask = mc["ms1_notes"].apply(lambda v: should_require_note_selection(v, ms1_options))
+    ms2_bad_mask = mc["ms2_notes"].apply(lambda v: should_require_note_selection(v, ms2_options))
+
+    if not ms1_bad_mask.any() and not ms2_bad_mask.any():
+        return
+
+    details = []
+    if ms1_bad_mask.any():
+        first_default = ms1_options[0] if ms1_options else ""
+        bad_rows = mc[ms1_bad_mask].head(8)
+        examples = ", ".join(
+            f"{_display_compound_idx(i)}:{row.get('compound_name', 'unknown')}"
+            for i, row in bad_rows.iterrows()
+        )
+        details.append(
+            f"MS1 notes still at unresolved default '{first_default}' for {int(ms1_bad_mask.sum())} compound(s). Examples: {examples}"
+        )
+
+    if ms2_bad_mask.any():
+        first_default = ms2_options[0] if ms2_options else ""
+        bad_rows = mc[ms2_bad_mask].head(8)
+        examples = ", ".join(
+            f"{_display_compound_idx(i)}:{row.get('compound_name', 'unknown')}"
+            for i, row in bad_rows.iterrows()
+        )
+        details.append(
+            f"MS2 notes still at unresolved default '{first_default}' for {int(ms2_bad_mask.sum())} compound(s). Examples: {examples}"
+        )
+
+    raise ValueError(
+        "gui_require_all_evaluated is true, but unresolved default note selections were found. "
+        "Please update those compounds in the GUI before running summaries. "
+        + " | ".join(details)
+    )
 
 def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) -> str:
     """Determine color for a file based on color mapping.
@@ -39,6 +116,38 @@ def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) 
             return color
     
     return "gray"
+
+
+def _strip_mode_suffix(file_label: str) -> str:
+    """Strip LCMS parquet mode suffixes from a filename label or stem.
+
+    Removes any trailing one of:
+    - ``_ms1_pos.parquet``
+    - ``_ms2_pos.parquet``
+    - ``_ms1_neg.parquet``
+    - ``_ms2_neg.parquet``
+
+    Also supports stem-only labels ending in ``_ms1_pos``, ``_ms2_pos``,
+    ``_ms1_neg``, or ``_ms2_neg``.
+    """
+    if not file_label:
+        return ""
+
+    suffixes = (
+        "_ms1_pos.parquet",
+        "_ms2_pos.parquet",
+        "_ms1_neg.parquet",
+        "_ms2_neg.parquet",
+        "_ms1_pos",
+        "_ms2_pos",
+        "_ms1_neg",
+        "_ms2_neg",
+    )
+    lower = file_label.lower()
+    for suffix in suffixes:
+        if lower.endswith(suffix):
+            return file_label[: -len(suffix)]
+    return file_label
 
 def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
     """Parse a JSON-encoded spectrum string into (x_array, y_array) lists.
@@ -158,29 +267,6 @@ def _plot_mirror(
 
             ax.margins(y=0.20)
 
-    # Add vertical text labels on the left side
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    x_text_pos = xlim[0] - (xlim[1] - xlim[0]) * 0.02  # Slightly left of the left edge
-    
-    # "Experimental" label for top half (y>0)
-    if ylim[1] > 0:
-        y_exp_pos = ylim[1] * 0.5  # Middle of positive y region
-        ax.text(
-            x_text_pos, y_exp_pos, "Experimental",
-            fontsize=12, weight="bold", ha="right", va="center",
-            rotation=90, color="black",
-        )
-    
-    # "Reference" label for bottom half (y<0)
-    if ylim[0] < 0:
-        y_ref_pos = ylim[0] * 0.5  # Middle of negative y region
-        ax.text(
-            x_text_pos, y_ref_pos, "Reference",
-            fontsize=12, weight="bold", ha="right", va="center",
-            rotation=90, color="black",
-        )
-
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
     ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=14, weight="bold")
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
@@ -246,10 +332,24 @@ def _plot_structure(
     """Draw molecular structure using RDKit's MolToImage (requires libXrender, available in container)."""
     ax.axis("off")
 
+    def _clean_chemical_text(value: Optional[str]) -> Optional[str]:
+        """Return a usable string chemical identifier, else None."""
+        if value is None:
+            return None
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none", "null", "na"}:
+            return None
+        return text
+
     try:
         from rdkit import Chem
         from rdkit.Chem import Draw
         from PIL import Image, ImageDraw, ImageFont
+
+        smiles = _clean_chemical_text(smiles)
+        inchi = _clean_chemical_text(inchi)
 
         mol = None
         if smiles:
@@ -428,8 +528,7 @@ def _plot_hit_info_table(
 
     # Abbreviated file name used as the table title
     raw_name = os.path.basename(str(best_hit["file_path"]))
-    name_without_ext = raw_name.split(".")[0]
-    name_without_ext = name_without_ext.replace("_ms2_pos", "").replace("_ms2_neg", "")
+    name_without_ext = _strip_mode_suffix(raw_name.split(".")[0])
 
     # Scalar values
     atlas_mz = float(mc_row.get("atlas_mz", np.nan))
@@ -525,26 +624,27 @@ def _plot_hit_info_table(
             ha="left", va="top", transform=ax.transAxes)
 
     # Add 2nd best, 3rd best, and total files with database matches
+
     additional_info_y = frag_center - frag_row_h / 2 - 0.04
-    line_spacing = 0.05
-    
+    line_spacing = 0.07
+
     # 2nd best hit file
     if len(top3) >= 2:
-        second_best_file = os.path.basename(str(top3.iloc[1]["file_path"]))
+        second_best_file = _strip_mode_suffix(os.path.basename(str(top3.iloc[1]["file_path"])))
         ax.text(0, additional_info_y, f"2nd best: {second_best_file}", 
-                fontsize=13, ha="left", va="top", transform=ax.transAxes)
-    
+            fontsize=13, ha="left", va="top", transform=ax.transAxes)
+
     # 3rd best hit file
     if len(top3) >= 3:
-        third_best_file = os.path.basename(str(top3.iloc[2]["file_path"]))
+        third_best_file = _strip_mode_suffix(os.path.basename(str(top3.iloc[2]["file_path"])))
         ax.text(0, additional_info_y - line_spacing, f"3rd best: {third_best_file}", 
-                fontsize=13, ha="left", va="top", transform=ax.transAxes)
-    
+            fontsize=13, ha="left", va="top", transform=ax.transAxes)
+
     # Total files with database matches
     total_files = ms2_hits_df["file_path"].nunique() if not ms2_hits_df.empty else 0
     y_offset = line_spacing * 2 if len(top3) >= 3 else (line_spacing if len(top3) >= 2 else 0)
     ax.text(0, additional_info_y - y_offset, f"Total files with database matches: {total_files}", 
-            fontsize=13, ha="left", va="top", transform=ax.transAxes)
+        fontsize=13, ha="left", va="top", transform=ax.transAxes)
 
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -614,6 +714,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
     mc_row = pd.Series(kwargs["mc_row_dict"])
     fig_path = Path(kwargs["fig_path"])
     cmp_idx = kwargs["compound_idx"]
+    cmp_idx_display = _display_compound_idx(cmp_idx)
     compound_name = kwargs["compound_name"]
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
@@ -636,8 +737,44 @@ def _identification_figure_worker(kwargs: dict) -> str:
         height_ratios=[1.45, 1.2, 1.35],
     )
 
+
+    # Track which mirror subplots have data
+    mirror_axes = []
+    mirror_has_data = []
     for i in range(3):
-        _plot_ms2(fig.add_subplot(gs[0, i]), i, top3, ms2_raw_df)
+        ax = fig.add_subplot(gs[0, i])
+        _plot_ms2(ax, i, top3, ms2_raw_df)
+        # Heuristic: if ax has any bars or lines, it has data
+        has_data = bool(ax.patches or ax.lines)
+        mirror_axes.append(ax)
+        mirror_has_data.append(has_data)
+
+    # Add "Experimental" and "Reference" labels only to the right of the last subplot with data
+    if any(mirror_has_data):
+        last_idx = max(i for i, v in enumerate(mirror_has_data) if v)
+        ax = mirror_axes[last_idx]
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        # Place labels just outside the right border
+        x_text_pos = xlim[1] + (xlim[1] - xlim[0]) * 0.05
+        # "Experimental" label for top half (y>0)
+        if ylim[1] > 0:
+            y_exp_pos = ylim[1] * 0.5
+            ax.text(
+                x_text_pos, y_exp_pos, "Experimental",
+                fontsize=12, weight="bold", ha="left", va="center",
+                rotation=90, color="black",
+                clip_on=False,
+            )
+        # "Reference" label for bottom half (y<0)
+        if ylim[0] < 0:
+            y_ref_pos = ylim[0] * 0.5
+            ax.text(
+                x_text_pos, y_ref_pos, "Reference",
+                fontsize=12, weight="bold", ha="left", va="center",
+                rotation=90, color="black",
+                clip_on=False,
+            )
 
     _plot_structure(
         fig.add_subplot(gs[0, 3]),
@@ -656,7 +793,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
     _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), top3, mc_row, ms2_hits_df)
 
     fig.suptitle(
-        f"[{cmp_idx:04d}] |  {_strip_non_chars(adduct)}  |  {inchi_key}\n{_strip_non_chars(compound_name)}\n",
+        f"[{cmp_idx_display:04d}] |  {_strip_non_chars(adduct)}  |  {inchi_key}\n{_strip_non_chars(compound_name)}\n",
         fontsize=20, weight="bold", y=0.97,
     )
     for y_line in [0.61, 0.345]:
@@ -728,11 +865,12 @@ def make_identification_figure(
 
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
-        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx}"
+        cmp_idx_display = _display_compound_idx(cmp_idx)
+        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
 
-        safe_name = f"{cmp_idx:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
+        safe_name = f"{cmp_idx_display:04d}_{compound_name}_{adduct}".replace("/", "-").replace(" ", "_")
         fig_path = output_dir / f"{safe_name}.pdf"
 
         info = batch_info.get(inchi_key, (None, None, None, None, None))
@@ -951,7 +1089,8 @@ def make_final_id_sheet(
         total=len(manual_curation_df),
         desc="Adding compounds to final ID sheet",
     ):
-        compound_name = mc_row.get("compound_name") or f"compound_{compound_idx}"
+        compound_idx_display = _display_compound_idx(compound_idx)
+        compound_name = mc_row.get("compound_name") or f"compound_{compound_idx_display}"
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
         polarity = mc_row.get("polarity", "")
@@ -1029,7 +1168,7 @@ def make_final_id_sheet(
 
         rows.append({
             # --- COMPOUND ANNOTATION ---
-            "index": compound_idx,
+            "index": compound_idx_display,
             "identified_metabolite": identified_metabolite,
             "label": compound_name,
             "overlapping_compound": overlapping_compound,
@@ -1052,10 +1191,10 @@ def make_final_id_sheet(
             "ms2_notes": ms2_notes,
             # --- MS1 INTENSITY INFORMATION ---
             "max_intensity": max_intensity,
-            "max_intensity_file": Path(max_int_file).name if max_int_file else "",
+            "max_intensity_file": _strip_mode_suffix(Path(max_int_file).name) if max_int_file else "",
             "ms1_rt_peak": rt_measured,
             # --- MSMS INFORMATION ---
-            "msms_file": Path(msms_file).name if msms_file else "",
+            "msms_file": _strip_mode_suffix(Path(msms_file).name) if msms_file else "",
             "msms_rt": round(msms_rt, 2) if not np.isnan(msms_rt) else np.nan,
             "msms_numberofions": msms_num_ions,
             "msms_matchingions": msms_matching_ions,
@@ -1229,14 +1368,14 @@ def make_final_id_sheet(
     # Using the same colour logic as original but mapped to new spans
     _SECTION_COLORS = {
         "COMPOUND ANNOTATION":              "#DCEEFF",  # light blue
-        "COMPOUND IDENTIFICATION SCORES":   "#DCFFFF",  # cyan
-        "MS1 INTENSITY INFORMATION":        "#FFFFDC",  # yellow
+        "COMPOUND IDENTIFICATION SCORES":   "#FFFFDC",  # yellow
+        "MS1 INTENSITY INFORMATION":        "#DCFFFF",  # cyan
         "MSMS INFORMATION":                 "#FFDCFF",  # rose
-        "MSMS EVALUATION":                  "#FFDCFF",  # rose (continuation)
-        "ION INFORMATION":                  "#FFFFDC",  # yellow
-        "M/Z EVALUATION":                   "#FFFFDC",  # yellow
-        "CHROMATOGRAPHIC PEAK INFORMATION": "#FFFFDC",  # yellow
-        "RT EVALUATION":                    "#DCFFFF",  # cyan
+        "MSMS EVALUATION":                  "#FFDCFF",  # rose
+        "ION INFORMATION":                  "#FFE8DC",  # light orange
+        "M/Z EVALUATION":                   "#FFE8DC",  # light orange
+        "CHROMATOGRAPHIC PEAK INFORMATION": "#F0DCFF",  # light purple
+        "RT EVALUATION":                    "#F0DCFF",  # light purple
     }
 
     def _col_letter(col_idx: int) -> str:
@@ -1297,16 +1436,19 @@ def make_final_id_sheet(
         worksheet.set_column(2, 2, 30)   # label
         worksheet.set_column(3, 3, 30)   # overlapping_compound
         worksheet.set_column(4, 4, 30)   # overlapping_inchi_keys
-        worksheet.set_column(5, 5, 14)   # formula
+        worksheet.set_column(5, 5, 15)   # formula
         worksheet.set_column(6, 6, 10)   # polarity
-        worksheet.set_column(7, 7, 14)   # exact_mass
+        worksheet.set_column(7, 7, 15)   # exact_mass
         worksheet.set_column(8, 8, 28)   # inchi_key
-        worksheet.set_column(9, 13, 12)  # scores
-        worksheet.set_column(14, 19, 25) # notes
-        worksheet.set_column(20, 20, 16, f_scientific)  # max_intensity
-        worksheet.set_column(21, 22, 35) # file + rt
-        worksheet.set_column(23, 26, 35) # msms cols
-        worksheet.set_column(27, 27, 12) # msms_score
+        worksheet.set_column(9, 19, 12)  # scores + notes
+        worksheet.set_column(20, 20, 15, f_scientific)  # max_intensity
+        worksheet.set_column(21, 21, 35) # file
+        worksheet.set_column(22, 22, 15) # rt_peak
+        worksheet.set_column(23, 23, 35) # msms file
+        worksheet.set_column(24, 24, 15) # msms rt
+        worksheet.set_column(25, 25, 25) # msms ions
+        worksheet.set_column(26, 26, 20) # msms matches
+        worksheet.set_column(27, 27, 15) # msms_score
         worksheet.set_column(28, 30, 14) # ion info
         worksheet.set_column(31, 32, 14) # mz eval
         worksheet.set_column(33, 37, 14) # rt cols
@@ -1379,6 +1521,7 @@ def _render_eic_thumbnail(
     rt_max: float,
     fname_short: str,
     y_max: Optional[float],
+    bg_color: Optional[str] = None,
 ) -> None:
     """Draw one EIC thumbnail onto *ax*.
 
@@ -1387,7 +1530,12 @@ def _render_eic_thumbnail(
     y_max:
         When given, fixes the y-axis upper limit (shared-scale mode).
         When *None*, the axis auto-scales to the data (independent mode).
+    bg_color:
+        Optional background fill color for the subplot to visually group files.
     """
+
+    if bg_color:
+        ax.set_facecolor(bg_color)
 
     if rt_arr and i_arr:
         ax.plot(rt_arr, i_arr, color="steelblue", linewidth=0.8)
@@ -1451,7 +1599,7 @@ def _write_compound_eic_pdf(
 
     total_files = len(file_items)
     total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
-    title_base = f"[{compound_idx:04d}] {_strip_non_chars(compound_name)} | {_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
+    title_base = f"[{_display_compound_idx(compound_idx):04d}] {_strip_non_chars(compound_name)} | {_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
 
     _GRID_COLS = 5
     _GRID_ROWS = 5
@@ -1534,9 +1682,16 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     total_files = len(file_items)
     total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
     title_base = (
-        f"[{compound_idx:04d}] {_strip_non_chars(compound_name)} | "
+        f"[{_display_compound_idx(compound_idx):04d}] {_strip_non_chars(compound_name)} | "
         f"{_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
     )
+
+    group_bg_palette = ["#F3F8FF", "#EEFCF1", "#FFF8EA", "#FFF1F1", "#F5F0FF"]
+    group_to_color: dict[str, str] = {}
+    for item in file_items:
+        group_name = item.get("group_name") or _file_group(item.get("file_path", ""))
+        if group_name not in group_to_color:
+            group_to_color[group_name] = group_bg_palette[len(group_to_color) % len(group_bg_palette)]
 
     pdf_shared = PdfPages(path_shared)
     pdf_indep = PdfPages(path_indep)
@@ -1557,9 +1712,11 @@ def _compound_pdf_worker(kwargs: dict) -> str:
                 ax = axes_flat[slot_idx]
                 fname_s = _strip_non_chars(_short_fname(item["file_path"]))
                 y_max_indep = float(max(item["i_arr"])) if item["i_arr"] else None
+                group_name = item.get("group_name") or _file_group(item.get("file_path", ""))
                 _render_eic_thumbnail(
                     ax, item["rt_arr"], item["i_arr"],
                     rt_min, rt_peak, rt_max_val, fname_s, y_max_indep,
+                    bg_color=group_to_color.get(group_name),
                 )
                 active_axes.append(ax)
 
@@ -1597,8 +1754,9 @@ def make_eic_thumbnails(
     analysis_num = summary_obj.analysis_number
 
     base_dir = Path(output_loc)
-    dir_shared = base_dir / "eic_thumbnails_shared_y"
-    dir_indep = base_dir / "eic_thumbnails_independent_y"
+    shared_base_dir = base_dir / "eics"
+    dir_shared = shared_base_dir / "eic_thumbnails_shared_y"
+    dir_indep = shared_base_dir / "eic_thumbnails_independent_y"
     for dir in (dir_shared, dir_indep):
         if overwrite and dir.exists():
             logger.info("Overwriting enabled: clearing existing contents of %s", dir)
@@ -1633,27 +1791,39 @@ def make_eic_thumbnails(
 
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
-        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx}"
+        cmp_idx_display = _display_compound_idx(cmp_idx)
+        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
 
-        safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
+        safe_stem = f"{cmp_idx_display:04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
         path_shared = dir_shared / f"{safe_stem}.pdf"
         path_indep = dir_indep  / f"{safe_stem}.pdf"
 
         ms1_cmp = ms1_groups.get((inchi_key, adduct))
         if ms1_cmp is None or ms1_cmp.empty:
-            file_items = [{"file_path": "", "rt_arr": [], "i_arr": []}]
+            file_items = [{"file_path": "", "rt_arr": [], "i_arr": [], "group_name": "unknown"}]
         else:
             file_items = [
                 {
-                    "file_path": str(file_row.get("file_path", "")),
+                    "file_path": (file_path := str(file_row.get("file_path", ""))),
                     "rt_arr": rt_arr,
                     "i_arr": i_arr,
+                    "group_name": _file_group(file_path),
                 }
                 for _, file_row in ms1_cmp.iterrows()
                 for rt_arr, i_arr in (_parse_spectrum(file_row.get("raw_spectrum")),)
             ]
+
+            def _alphanum_key(text: str):
+                return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", text or "")]
+
+            file_items.sort(
+                key=lambda item: (
+                    _alphanum_key(item.get("group_name", "")),
+                    _alphanum_key(Path(item.get("file_path", "")).stem),
+                )
+            )
 
         tasks.append({
             "mc_row_dict": mc_row.to_dict(),
@@ -1840,7 +2010,7 @@ def _plot_compound_boxplot(
     if not data_per_group:
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=8, color="gray")
-        title_top = f"{compound_idx:04d}  {compound_name}  {adduct}"
+        title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
         if metric == "mz_centroid":
             title_bottom = f"m/z centroid: {atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'}"
             ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
@@ -1883,7 +2053,7 @@ def _plot_compound_boxplot(
     ax.set_ylabel(ylabel, fontsize=10)
 
     # Title formatting: large top line, smaller below
-    title_top = f"{compound_idx:04d}  {compound_name}  {adduct}"
+    title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
     if metric == "mz_centroid":
         mz_val = atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'
         title_bottom = f"m/z centroid: {mz_val}"
@@ -1912,7 +2082,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     metric_configs = kwargs["metric_configs"]
     cmp_metrics = kwargs["cmp_metrics"]
 
-    safe_stem = f"{cmp_idx:04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
+    safe_stem = f"{_display_compound_idx(cmp_idx):04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
 
     for metric, log_scale, ylabel, atlas_attr, metric_dir_str in metric_configs:
         pdf_path = Path(metric_dir_str) / f"{safe_stem}.pdf"
@@ -1997,6 +2167,7 @@ def make_boxplots(
     # ── 4. One task per compound — worker handles all 4 metric PDFs ───────────
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
+        cmp_idx_display = _display_compound_idx(cmp_idx)
         compound_name = mc_row.get("compound_name") or "unknown"
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
@@ -2133,9 +2304,10 @@ def make_best_ms2_hit_fragment_ions_csv(
         total=len(manual_curation_df),
         desc="Finding best MS2 hits for compounds",
     ):
+        cmp_idx_display = _display_compound_idx(cmp_idx)
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
-        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx}"
+        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
 
         best_hit = ms2_best.get((inchi_key, adduct))
         if best_hit is None:
@@ -2153,10 +2325,10 @@ def make_best_ms2_hit_fragment_ions_csv(
                     raw_spectrum = json.dumps([[], []])
 
         rows.append({
-            "compound_index": cmp_idx,
+            "compound_index": cmp_idx_display,
             "compound_name":  compound_name,
             "adduct": adduct,
-            "file_name": os.path.basename(str(best_hit.get("file_path", ""))),
+            "file_name": _strip_mode_suffix(os.path.basename(str(best_hit.get("file_path", "")))),
             "rt_peak": best_hit.get("rt", np.nan),
             "mz_peak": best_hit.get("mz_measured", np.nan),
             "spectrum": raw_spectrum,
@@ -2228,14 +2400,14 @@ def make_data_sheets(
     # Join compound_name and compound_index from manual_curation_df
     mc_reset = manual_curation_df.reset_index(drop=True)
     mc_slim = mc_reset[["inchi_key", "adduct", "compound_name"]].copy()
-    mc_slim["compound_index"] = mc_reset.index
+    mc_slim["compound_index"] = mc_reset.index + 1
     mc_slim = mc_slim.drop_duplicates(subset=["inchi_key", "adduct"])
     pfm = per_file_df.merge(mc_slim, on=["inchi_key", "adduct"], how="left")
 
     # Column labels: file stem (basename without extension)
     pfm = pfm.copy()
     pfm["_file_col"] = pfm["file_path"].apply(
-        lambda p: os.path.splitext(os.path.basename(str(p)))[0] if p else "unknown"
+        lambda p: _strip_mode_suffix(os.path.splitext(os.path.basename(str(p)))[0]) if p else "unknown"
     )
 
     _DATA_SHEET_METRICS = [
@@ -2296,19 +2468,25 @@ def make_peak_height_filtered_csv(
        regardless of this label.
        Compounds not detected in any non-control sample (all NaN) are labeled
        ``"remove"``.
-    2. **Row deduplication** — drops the ``adduct`` and ``compound_index``
-       columns, then merges rows sharing the same ``inchi_key`` /
-       ``compound_name`` / ``control_filter`` by taking the column-wise maximum.
+     2. **Row deduplication** — merges rows sharing the same ``inchi_key`` /
+         ``compound_name`` / ``control_filter`` by taking the column-wise maximum
+         of data columns. If ``adduct`` and/or ``polarity`` exist, keeps
+         ``chosen_adduct`` and ``chosen_polarity`` metadata columns indicating
+            which source row had the highest non-control signal (or highest overall
+            signal when no non-control columns exist). If no explicit ``polarity``
+            column exists, polarity is inferred from that selected file column label
+            by matching ``POS``/``NEG`` tokens.
     3. **Column shortening & deduplication** — drops the last two
        ``_``-separated tokens from each data column name (e.g.
        ``…_MS1_POS`` → ``…``), then merges any resulting duplicate column
        names by taking the row-wise maximum.
     4. **Missing-value imputation** — fills remaining NaN cells with the
        global minimum measured value in the final matrix.
-    5. **Export** — writes ``peak_height_filtered.csv`` into the same
+     5. **Export** — writes ``peak_height_filtered.csv`` into the same
        ``data_sheets`` sub-directory as ``peak_height.csv``.  Output columns
-       are ordered: ``control_filter``, ``compound_name``, ``inchi_key``,
-       followed by the data columns.
+         are ordered: ``control_filter``, ``compound_name``, ``inchi_key``, then
+         ``chosen_adduct`` / ``chosen_polarity`` when present, followed by the
+         data columns.
 
     Parameters
     ----------
@@ -2342,7 +2520,7 @@ def make_peak_height_filtered_csv(
 
     df = pd.read_csv(source_csv)
 
-    _META_COLS = {"compound_index", "compound_name", "inchi_key", "adduct"}
+    _META_COLS = {"compound_index", "compound_name", "inchi_key", "adduct", "polarity"}
     data_cols = [c for c in df.columns if c not in _META_COLS]
 
     # ── 1. Control-signal filter ───────────────────────────────────────────────
@@ -2374,12 +2552,58 @@ def make_peak_height_filtered_csv(
         logger.warning("No compounds found — no output written.")
         return
 
-    # ── 2. Drop extra metadata; merge identical inchi_key rows by max ──────────
-    drop_cols = [c for c in ("compound_index", "adduct") if c in df.columns]
+    # ── 2. Merge identical inchi_key rows by max and keep chosen adduct/polarity ──
+    group_keys = ["inchi_key", "compound_name", "control_filter"]
+    source_meta_cols = [c for c in ("adduct", "polarity") if c in df.columns]
+    selector_cols = non_ctrl_cols if non_ctrl_cols else data_cols
+
+    def _infer_polarity_from_label(label: object) -> str:
+        if not isinstance(label, str) or not label:
+            return ""
+        m = re.search(r"(^|[_\-])(pos|neg)([_\-]|$)", label, flags=re.IGNORECASE)
+        if m:
+            return m.group(2).upper()
+        m = re.search(r"(positive|negative)", label, flags=re.IGNORECASE)
+        if m:
+            return "POS" if m.group(1).lower().startswith("pos") else "NEG"
+        return ""
+
+    chosen_meta = None
+    if selector_cols:
+        # Choose metadata from the row with highest non-control signal per group.
+        selection_score = df[selector_cols].max(axis=1, skipna=True)
+        selector_frame = df[selector_cols]
+        best_col = selector_frame.idxmax(axis=1)
+        best_col = best_col.where(selector_frame.notna().any(axis=1), "")
+
+        chosen_src = df[group_keys + source_meta_cols].copy() if source_meta_cols else df[group_keys].copy()
+        chosen_src["_selection_score"] = selection_score.fillna(-np.inf)
+        chosen_src["_best_col"] = best_col
+        chosen_src["_row_order"] = np.arange(len(chosen_src))
+        chosen_src = chosen_src.sort_values(
+            ["_selection_score", "_row_order"],
+            ascending=[False, True],
+        )
+        chosen_meta = chosen_src.drop_duplicates(subset=group_keys, keep="first")
+        chosen_meta = chosen_meta.rename(columns={
+            "adduct": "chosen_adduct",
+            "polarity": "chosen_polarity",
+        })
+        if "chosen_polarity" not in chosen_meta.columns:
+            chosen_meta["chosen_polarity"] = chosen_meta["_best_col"].map(_infer_polarity_from_label)
+        else:
+            chosen_meta["chosen_polarity"] = chosen_meta["chosen_polarity"].fillna(
+                chosen_meta["_best_col"].map(_infer_polarity_from_label)
+            )
+        chosen_meta = chosen_meta.drop(columns=["_selection_score", "_best_col", "_row_order"])
+
+    drop_cols = [c for c in ("compound_index", "adduct", "polarity") if c in df.columns]
     df = df.drop(columns=drop_cols)
 
     n_before = len(df)
-    df = df.groupby(["inchi_key", "compound_name", "control_filter"], sort=False).max().reset_index()
+    df = df.groupby(group_keys, sort=False).max().reset_index()
+    if chosen_meta is not None:
+        df = df.merge(chosen_meta, on=group_keys, how="left")
     logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df))
 
     # ── 3. Shorten column names; merge duplicate columns by row-wise max ────────
@@ -2387,7 +2611,7 @@ def make_peak_height_filtered_csv(
         parts = col.split("_")
         return "_".join(parts[:-2]) if len(parts) > 2 else col
 
-    _META_FIXED = {"inchi_key", "compound_name", "control_filter"}
+    _META_FIXED = {"inchi_key", "compound_name", "control_filter", "chosen_adduct", "chosen_polarity"}
     df.columns = [c if c in _META_FIXED else _shorten(c) for c in df.columns]
 
     if df.columns.duplicated().any():
@@ -2412,9 +2636,14 @@ def make_peak_height_filtered_csv(
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
-    # ── 5. Reorder columns: control_filter first, then compound_name, inchi_key, data ──
-    other_cols = [c for c in df.columns if c not in _META_FIXED]
-    df = df[["control_filter", "compound_name", "inchi_key"] + other_cols]
+    # ── 5. Reorder columns: control_filter, compound_name, inchi_key, chosen meta, data ──
+    ordered_meta = ["control_filter", "compound_name", "inchi_key"]
+    if "chosen_adduct" in df.columns:
+        ordered_meta.append("chosen_adduct")
+    if "chosen_polarity" in df.columns:
+        ordered_meta.append("chosen_polarity")
+    other_cols = [c for c in df.columns if c not in set(ordered_meta)]
+    df = df[ordered_meta + other_cols]
 
     # ── 6. Export ──────────────────────────────────────────────────────────────
     df.to_csv(output_csv, index=False)
@@ -2670,6 +2899,8 @@ def run_all_summaries(
     if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
         logger.error("No manual curation entries found - aborting run_all_summaries.")
         return
+
+    _validate_required_note_selections(summary_obj)
 
     if "final_id_sheet" not in (skip_outputs or []):
         logger.info("Making Final Identification sheet...")

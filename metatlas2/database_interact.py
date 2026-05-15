@@ -472,8 +472,11 @@ def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
         _create_database_tables(conn, db_type="main")
 
     db_path.chmod(0o660)
-    metatlas_gid = grp.getgrnam("metatlas").gr_gid
-    os.chown(db_path, -1, metatlas_gid)
+    try:
+        metatlas_gid = grp.getgrnam("metatlas").gr_gid
+        os.chown(db_path, -1, metatlas_gid)
+    except KeyError:
+        logger.info("Group 'metatlas' not found. Skipping group ownership change.")
 
     logger.info(f"Main metatlas database created at {db_path}")
 

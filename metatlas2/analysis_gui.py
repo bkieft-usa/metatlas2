@@ -11,80 +11,18 @@ import json
 
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
+from metatlas2.note_options import (
+    get_note_options_and_hotkeys,
+    get_notes_opts,
+    normalize_note_value,
+    should_require_note_selection,
+)
 logger = lcf.get_logger("analysis_gui")
 
-def _get_notes_opts(owner: str = "jgi") -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
 
-    JGI_DEFAULT_MS2_HOTKEYS = {
-        "-1.0, poor match, should remove": "w",
-        "0.0, no match or no MSMS collected": "e",
-        "0.5, partial or putative match of fragments": "r",
-        "1.0, good match": "t",
-        "0.5, co-isolated precursor, partial match": "y",
-        "1.0, co-isolated precursor, good match": "u",
-        "0.5, single ion match, no evidence": "i",
-        "1.0, single ion match, ISTD/ref evidence": "o",
-    }
-    JGI_DEFAULT_MS1_HOTKEYS = {
-        "keep": "p",
-        "remove": "q",
-    }
-    JGI_DEFAULT_OTHER_HOTKEYS = {
-        "unresolvable isomers": "1",
-        "poor peak shape": "2",
-        "potential rt shifting":  "3",
-        "high ppm diff": "4",
-        "noisy or high background": "5",
-        "needs review": "6",
-        "contains refstd files": "7",
-    }
-    EGSB_DEFAULT_MS2_HOTKEYS = {
-        "-1.0, poor match, should remove": "w",
-        "0.0, no match or no MSMS collected": "e",
-        "0.5, partial or putative match of fragments": "r",
-        "1.0, good match": "t",
-        "0.5, co-isolated precursor, partial match": "y",
-        "1.0, co-isolated precursor, good match": "u",
-        "0.5, single ion match, no evidence": "i",
-        "1.0, single ion match, ISTD/ref evidence": "o",
-    }
-    EGSB_DEFAULT_MS1_HOTKEYS = {
-        "no selection": "1",
-        "OK - single peak at correct RT": "2",
-        "OK - single peak at shifted RT": "3",
-        "OK - multiple peaks, unresolvable": "4",
-        "OK - multiple peaks, resolvable": "5",
-        "Remove - background level/noise": "6",
-        "Remove - signal in ExCtrl >= sample": "7",
-        "Remove - bad MSMS": "8",
-        "Remove - ND": "9",
-        "Remove - Not Evaluated": "0",
-        "Remove - duplicate": "-",
-        "Remove - evidence of contamination or incorrect ID": "=",
-    }
-    EGSB_DEFAULT_OTHER_HOTKEYS = {
-        "unresolvable isomers": "z",
-        "poor peak shape": "x",
-        "potential rt shifting":  "c",
-        "high ppm diff": "v",
-        "noisy or high background": "b",
-        "needs review": "g",
-        "contains refstd files": "h",
-    }
-        
-    if owner.lower() == "egsb":
-        return EGSB_DEFAULT_MS2_HOTKEYS, EGSB_DEFAULT_MS1_HOTKEYS, EGSB_DEFAULT_OTHER_HOTKEYS
-    else:
-        return JGI_DEFAULT_MS2_HOTKEYS, JGI_DEFAULT_MS1_HOTKEYS, JGI_DEFAULT_OTHER_HOTKEYS
-
-def get_note_options_and_hotkeys(override_dict, default_hotkeys):
-    if isinstance(override_dict, dict) and len(override_dict) > 0:
-        # Use analyst-supplied dictionary (text: hotkey)
-        hotkeys = dict(override_dict)
-    else:
-        hotkeys = dict(default_hotkeys)
-    options = list(hotkeys.keys())
-    return options, hotkeys
+def _display_compound_idx(compound_idx: int) -> int:
+    """Convert internal zero-based index to user-facing one-based index."""
+    return int(compound_idx) + 1
 
 def _validate_override_parameters(override_parameters):
     if not isinstance(override_parameters, dict):
@@ -145,13 +83,13 @@ def build_dash_app(
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
-        {"label": f"{i}: {row['compound_name']}", "value": i}
-        for i, row in manual_curation_df.reset_index().iterrows()
+        {"label": f"{_display_compound_idx(i)}: {row['compound_name']}", "value": i}
+        for i, row in manual_curation_df.reset_index(drop=True).iterrows()
     ]
 
     # Allow override of note options/hotkeys from override_parameters
-    owner = analysis_gui_obj.config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
-    ms2_notes_opts, ms1_notes_opts, other_notes_opts = _get_notes_opts(owner = owner)
+    owner = (analysis_gui_obj.config.get('WORKFLOWS', {}).get('PATHS', {}).get('owner') or "jgi").lower()
+    ms2_notes_opts, ms1_notes_opts, other_notes_opts = get_notes_opts(owner=owner)
     _validate_override_parameters(analysis_gui_obj.override_parameters)
     ms1_options, ms1_hotkeys = get_note_options_and_hotkeys(
         analysis_gui_obj.override_parameters["note_options_overrides"].get("ms1_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
@@ -222,9 +160,9 @@ def build_dash_app(
     def _load_state(compound_idx, ms2_idx=0, session_id=None, edit_seq=0):
         row = _compound_row(compound_idx)
         rt_min, rt_max = _rt_bounds_from_row(row)
-        ms2_note = row.get("ms2_notes") or ""
-        ms1_note = row.get("ms1_notes") or ms1_options[0]
-        other_notes_raw = row.get("other_notes")
+        ms2_note = normalize_note_value(row.get("ms2_notes"), ms2_options)
+        ms1_note = normalize_note_value(row.get("ms1_notes"), ms1_options)
+        other_notes_raw = row.get("other_notes", [])
         if other_notes_raw is None or other_notes_raw == "" or (isinstance(other_notes_raw, float) and np.isnan(other_notes_raw)):
             other_note = []
         else:
@@ -285,10 +223,10 @@ def build_dash_app(
 
     starting_compound_idx = _find_starting_compound_idx()
     if starting_compound_idx > 0:
-        logger.info(f"Resuming analysis at compound {starting_compound_idx}: "
+        logger.info(f"Resuming analysis at compound {_display_compound_idx(starting_compound_idx)}: "
                    f"{manual_curation_df.iloc[starting_compound_idx]['compound_name']}")
     else:
-        logger.info(f"Starting new analysis at compound 0")
+        logger.info("Starting new analysis at compound 1")
 
     keyboard_listener = EventListener(
         id="keyboard",
@@ -343,7 +281,7 @@ def build_dash_app(
                                     dcc.RadioItems(
                                         id="ms1-radio",
                                         options=[{"label": f"[{ms1_hotkeys[lbl]}] {lbl}", "value": lbl} for lbl in ms1_options],
-                                        value="keep" if "keep" in ms1_options else ms1_options[0],
+                                        value=ms1_options[0],
                                         labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
                                         inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
                                     ),
@@ -411,8 +349,8 @@ def build_dash_app(
                                 config={
                                     "displayModeBar": True,
                                     "edits": {"shapePosition": True, "titleText": False},
-                                    "doubleClick": False,
-                                    "modeBarButtonsToRemove": ["autoScale2d", "resetScale2d"],
+                                    "doubleClick": True,
+                                    #"modeBarButtonsToRemove": ["autoScale2d", "resetScale2d"],
                                 },
                                 style={"height": ms1_height},
                             ),
@@ -593,6 +531,68 @@ def build_dash_app(
         val, ints = _clean_spectrum(val, ints)
         return val, ints
 
+    def _compute_rt_peak_from_window(state):
+        """Estimate RT peak as the mean of per-file max-intensity RTs in the current window."""
+        row = _compound_row(state["compound_idx"])
+        inchi, adduct = row["inchi_key"], row["adduct"]
+        rt_min = float(state["rt_min"])
+        rt_max = float(state["rt_max"])
+        if rt_max < rt_min:
+            rt_min, rt_max = rt_max, rt_min
+
+        sub = analysis_gui_obj.ms1_df[
+            (analysis_gui_obj.ms1_df["inchi_key"] == inchi)
+            & (analysis_gui_obj.ms1_df["adduct"] == adduct)
+        ]
+        if sub.empty:
+            return (rt_min + rt_max) / 2.0
+
+        # Keep only one running best (intensity, rt) per file in a single pass.
+        best_by_file = {}
+        if "file_path" in sub.columns:
+            iter_rows = sub[["file_path", "raw_spectrum"]].itertuples(index=False, name=None)
+        else:
+            iter_rows = ((None, raw) for raw in sub["raw_spectrum"])
+
+        for file_path, raw_spectrum in iter_rows:
+            try:
+                rt_vals, intensities = _parse_spectrum_cached(raw_spectrum)
+            except Exception:
+                continue
+
+            rt_arr = np.asarray(rt_vals, dtype=float)
+            int_arr = np.asarray(intensities, dtype=float)
+            if rt_arr.size == 0 or int_arr.size == 0:
+                continue
+
+            n = min(rt_arr.size, int_arr.size)
+            rt_arr = rt_arr[:n]
+            int_arr = int_arr[:n]
+
+            mask = (
+                (rt_arr >= rt_min)
+                & (rt_arr <= rt_max)
+                & np.isfinite(rt_arr)
+                & np.isfinite(int_arr)
+            )
+            if not np.any(mask):
+                continue
+
+            masked_int = np.where(mask, int_arr, -np.inf)
+            local_idx = int(np.argmax(masked_int))
+            local_intensity = float(masked_int[local_idx])
+            if not np.isfinite(local_intensity):
+                continue
+            local_rt = float(rt_arr[local_idx])
+
+            prev = best_by_file.get(file_path)
+            if prev is None or local_intensity > prev[0]:
+                best_by_file[file_path] = (local_intensity, local_rt)
+
+        if best_by_file:
+            return float(np.mean([rt for _, rt in best_by_file.values()]))
+        return (rt_min + rt_max) / 2.0
+
     def _flush_to_db(state):
         sid = state.get("session_id", "unknown")
         seq = int(state.get("edit_seq", 0))
@@ -608,12 +608,12 @@ def build_dash_app(
         updates = {
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
-            "rt_peak": (state["rt_min"] + state["rt_max"]) / 2,
-            "ms2_notes": state.get("ms2_note") or "",
-            "ms1_notes": state["ms1_note"],
-            "other_notes": " // ".join(state["other_note"]) if state.get("other_note") else "",
-            "analyst_notes": state["analyst_notes"],
-            "identification_notes": state["id_notes"],
+            "rt_peak": _compute_rt_peak_from_window(state),
+            "ms2_notes": normalize_note_value(state.get("ms2_note"), ms2_options),
+            "ms1_notes": normalize_note_value(state.get("ms1_note"), ms1_options),
+            "other_notes": " // ".join(state.get("other_note", [])),
+            "analyst_notes": state.get("analyst_notes", ""),
+            "identification_notes": state.get("id_notes", ""),
         }
 
         # DB write outside lock
@@ -630,8 +630,8 @@ def build_dash_app(
             "name": row["compound_name"],
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
-            "ms1": state["ms1_note"],
-            "ms2": state["ms2_note"],
+            "ms1": updates["ms1_notes"],
+            "ms2": updates["ms2_notes"],
             "other": state["other_note"],
             "analyst_notes": state.get("analyst_notes", ""),
             "id_notes": state.get("id_notes", ""),
@@ -647,13 +647,7 @@ def build_dash_app(
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
         else:
-            lcmsruns_color_map = {
-                'ISTD': 'blue', 
-                'QC': 'blue', 
-                'EXCTRL': 'red', 
-                'TXCTRL': 'red', 
-                'REFSTD': 'black'
-            }
+            lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
     
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
@@ -714,7 +708,7 @@ def build_dash_app(
                         raise ValueError(f"There were multiple isomer_match of isomer {iso_name} {iso_adduct} {iso_inchi} to the manual curation object")
                     if isomer_match.empty:
                         continue
-                    if isomer_match.iloc[0]["ms1_notes"] == "remove":
+                    if "remove" in isomer_match.iloc[0]["ms1_notes"].lower():
                         continue
                     iso_df_idx = isomer_match.index[0]
                     iso_display_idx = iso_df_idx
@@ -867,7 +861,7 @@ def build_dash_app(
             name="RT max", editable=True,
         )
 
-        compound_display_idx = state["compound_idx"]
+        compound_display_idx = _display_compound_idx(state["compound_idx"])
 
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi}</span><br>"
@@ -897,13 +891,49 @@ def build_dash_app(
                 zeroline=False,
                 type=yaxis_scale,
                 range=y_range,
-                fixedrange=True,
+                fixedrange=False,
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
             ),
         )
 
         return fig
+
+    def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, row_idx, col_idx, colors=None, default_color="red", line_width_px=3):
+        """Add MS2 peak sticks with fixed pixel width regardless of x-axis range."""
+        if not mz_vals or not intensities:
+            return
+
+        # Group segments by color so each trace can keep a single line color.
+        grouped = {}
+        if colors is not None and len(colors) == len(mz_vals):
+            for mz, intensity, color in zip(mz_vals, intensities, colors):
+                grouped.setdefault(color or default_color, []).append((mz, intensity))
+        else:
+            grouped[default_color] = list(zip(mz_vals, intensities))
+
+        for color, pairs in grouped.items():
+            x_vals = []
+            y_vals = []
+            custom_vals = []
+            for mz, intensity in pairs:
+                x_vals.extend([mz, mz, None])
+                y_vals.extend([0.0, intensity, None])
+                custom_vals.extend([intensity, intensity, None])
+
+            fig.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=y_vals,
+                    customdata=custom_vals,
+                    mode="lines",
+                    line=dict(color=color, width=line_width_px),
+                    showlegend=False,
+                    hovertemplate=f"m/z: %{{x:.4f}}<br>Int: %{{customdata:.2e}}<extra>{hover_label}</extra>",
+                ),
+                row=row_idx,
+                col=col_idx,
+            )
 
     def _make_ms2_figure(state):
         row = _compound_row(state["compound_idx"])
@@ -970,59 +1000,69 @@ def build_dash_app(
             scan_idx = max(0, min(ms2_idx, len(scans) - 1))
             scan = scans.iloc[scan_idx]
 
-            bars = []
             label_points = []
             scale = 1.0
+            stick_width_px = 3
             
             qry = scan.get("qry_spectrum") if "qry_spectrum" in scan.index else None
             ref = scan.get("ref_spectrum") if "ref_spectrum" in scan.index else None
             num_ref_fragments = 0
             num_matching_fragments = 0
-            bar_width = 0.5
             
             if pd.notnull(qry) and pd.notnull(ref):
                 mz_q, int_q = _parse_spectrum_cached(scan["qry_spectrum"])
                 mz_r, int_r = _parse_spectrum_cached(scan["ref_spectrum"])
                 scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
                 ref_y = [-i * scale for i in int_r]
-                # Scale bar width based on range of m/z values, with a minimum width to ensure visibility
-                if mz_q and mz_r:
-                    mz_min = min(min(mz_q), min(mz_r))
-                    mz_max = max(max(mz_q), max(mz_r))
-                    mz_range = mz_max - mz_min
-                    if mz_range > 0:
-                        bar_width = max(0.5, mz_range * 0.005)
 
                 raw_colors = scan.get("aligned_fragment_colors") if "aligned_fragment_colors" in scan.index else None
                 frag_colors = None
+                num_ref_fragments = len(mz_r)
                 if pd.notnull(raw_colors) and raw_colors:
                     frag_colors = json.loads(raw_colors)
                     if len(frag_colors) != len(mz_q):
                         raise ValueError(f"color length mismatch: {len(frag_colors)} != {len(mz_q)}")
-                    num_ref_fragments = len(mz_r)
                     num_matching_fragments = sum(1 for c in frag_colors if c == "green")
 
-                fig.add_trace(go.Bar(
-                    x=mz_q, y=int_q, marker_color=frag_colors, width=bar_width,
-                    showlegend=False,
-                    hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Query</extra>"
-                ), row=1, col=col_idx)
-                
-                fig.add_trace(go.Bar(
-                    x=mz_r, y=ref_y, marker_color=frag_colors, width=bar_width,
-                    showlegend=False,
-                    hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>Reference</extra>"
-                ), row=1, col=col_idx)
+                _add_ms2_stick_traces(
+                    fig,
+                    mz_q,
+                    int_q,
+                    hover_label="Query",
+                    row_idx=1,
+                    col_idx=col_idx,
+                    colors=frag_colors,
+                    default_color="red",
+                    line_width_px=stick_width_px,
+                )
+
+                ref_colors = frag_colors if frag_colors is not None and len(frag_colors) == len(mz_r) else None
+                _add_ms2_stick_traces(
+                    fig,
+                    mz_r,
+                    ref_y,
+                    hover_label="Reference",
+                    row_idx=1,
+                    col_idx=col_idx,
+                    colors=ref_colors,
+                    default_color="blue",
+                    line_width_px=stick_width_px,
+                )
 
                 label_points.extend(zip(mz_q, int_q))
                 label_points.extend(zip(mz_r, ref_y))
             else:
                 mz, ints = _parse_spectrum_cached(scan["raw_spectrum"])
-                fig.add_trace(go.Bar(
-                    x=mz, y=ints, marker_color="red", width=bar_width,
-                    showlegend=False,
-                    hovertemplate="m/z: %{x:.4f}<br>Int: %{y:.2e}<extra>MS2</extra>"
-                ), row=1, col=col_idx)
+                _add_ms2_stick_traces(
+                    fig,
+                    mz,
+                    ints,
+                    hover_label="MS2",
+                    row_idx=1,
+                    col_idx=col_idx,
+                    default_color="red",
+                    line_width_px=stick_width_px,
+                )
                 label_points.extend(zip(mz, ints))
 
             # Add horizontal line at y=0
@@ -1198,20 +1238,28 @@ def build_dash_app(
         new_state["flush_error"] = flush_error
         return new_state
 
-    def _get_force_eval_and_ms2_warning(state, delta):
-        """Return (force_eval, ms2_warning) for navigation logic."""
+    def _get_force_eval_and_warnings(state, delta):
+        """Return warning messages for required-evaluation navigation logic."""
         force_eval = analysis_gui_obj.workflow_params.get("gui_require_all_evaluated", False)
         if analysis_gui_obj.override_parameters["gui_require_all_evaluated"] is not None:
             force_eval = analysis_gui_obj.override_parameters["gui_require_all_evaluated"]
         ms2_warning = None
+        ms1_warning = None
         if (
             delta == 1
             and force_eval
-            and not state.get("ms2_note")
-            and state.get("ms1_note") != "remove"
+            and "remove" not in state.get("ms1_note", ms1_options[0]).lower()
+            and should_require_note_selection(state.get("ms2_note", ms2_options[0]), ms2_options)
         ):
             ms2_warning = "Please select MS2 quality note before proceeding"
-        return force_eval, ms2_warning
+        if (
+            delta == 1
+            and force_eval
+            and "remove" not in state.get("ms1_note", ms1_options[0]).lower()
+            and should_require_note_selection(state.get("ms1_note", ms1_options[0]), ms1_options)
+        ):
+            ms1_warning = "Please select MS1 quality note before proceeding"
+        return ms2_warning, ms1_warning
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -1239,7 +1287,7 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
 
         flush_error = None
-        force_eval, ms2_warning = _get_force_eval_and_ms2_warning(state, delta)
+        ms2_warning, ms1_warning = _get_force_eval_and_warnings(state, delta)
 
         try:
             state = _flush_to_db(state)
@@ -1261,6 +1309,10 @@ def build_dash_app(
             new_state["ms2_warning"] = ms2_warning
         else:
             new_state.pop("ms2_warning", None)
+        if ms1_warning:
+            new_state["ms1_warning"] = ms1_warning
+        else:
+            new_state.pop("ms1_warning", None)
         return new_state, new_idx
 
     @app.callback(
@@ -1527,15 +1579,7 @@ def build_dash_app(
             if new_idx == int(state["compound_idx"]):
                 raise dash.exceptions.PreventUpdate
             flush_error = None
-            force_eval, ms2_warning = _get_force_eval_and_ms2_warning(state, delta)
-            if (
-                delta == 1
-                and ms2_warning is not None
-            ):
-                # Show warning, do not proceed
-                new_state = dict(state)
-                new_state["ms2_warning"] = ms2_warning
-                return new_state, dash.no_update
+            ms2_warning, ms1_warning = _get_force_eval_and_warnings(state, delta)
             try:
                 state = _flush_to_db(state)
             except Exception as exc:
@@ -1553,8 +1597,8 @@ def build_dash_app(
             new_state["_nav_programmatic"] = True
             if ms2_warning:
                 new_state["ms2_warning"] = ms2_warning
-            else:
-                new_state.pop("ms2_warning", None)
+            if ms1_warning:
+                new_state["ms1_warning"] = ms1_warning
             return new_state, new_idx
 
         if key in ms2_key_to_label:
@@ -1587,6 +1631,7 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         flush_err = state.get("flush_error")
         ms2_warning = state.get("ms2_warning")
+        ms1_warning = state.get("ms1_warning")
         try:
             ms1_fig = _make_ms1_figure(state, yaxis_scale)
             ms2_fig = _make_ms2_figure(state)
@@ -1599,6 +1644,11 @@ def build_dash_app(
             if ms2_warning:
                 banners.append(html.Div(
                     ms2_warning,
+                    style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
+                ))
+            if ms1_warning:
+                banners.append(html.Div(
+                    ms1_warning,
                     style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
                 ))
             banner = banners if banners else ""
@@ -1626,7 +1676,7 @@ def build_dash_app(
         if state is None:
             raise dash.exceptions.PreventUpdate
         row = _compound_row(state["compound_idx"])
-        comp_txt = f"Compound {state['compound_idx']+1} of {len(compound_options)}"
+        comp_txt = f"Compound {_display_compound_idx(state['compound_idx'])} of {len(compound_options)}"
         
         # Get scans by collision energy for detailed count
         scans_by_energy = _get_ms2_scans(row["inchi_key"], row["adduct"], state["rt_min"], state["rt_max"])
@@ -1672,9 +1722,9 @@ def build_dash_app(
     def sync_controls(state):
         if state is None:
             # Return default values if state is missing
-            return "", "No identification notes", ("keep" if "keep" in ms1_options else ms1_options[0]), "", [], 0
-        ms2_val = state["ms2_note"] if state["ms2_note"] in ms2_options else ""
-        ms1_val = state["ms1_note"] if state["ms1_note"] in ms1_options else ("keep" if "keep" in ms1_options else ms1_options[0])
+            return "", "No identification notes", ms1_options[0], ms2_options[0], [], 0
+        ms2_val = state["ms2_note"] if state["ms2_note"] in ms2_options else ms2_options[0]
+        ms1_val = state["ms1_note"] if state["ms1_note"] in ms1_options else ms1_options[0]
         other_val = [v for v in state["other_note"] if v in other_options] if isinstance(state["other_note"], list) else []
         analyst_notes = state.get("analyst_notes", "")
         id_notes = state.get("id_notes", "No identification notes")
