@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/global/cfs/cdirs/metatlas/tools/metatlas2/.venv/bin/python
 
 import argparse
 import logging
