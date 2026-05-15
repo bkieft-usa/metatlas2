@@ -3,7 +3,6 @@
 import configparser
 import json
 import logging
-import re
 import subprocess
 
 from datetime import datetime
@@ -12,7 +11,7 @@ from subprocess import PIPE, Popen
 from typing import List, Optional, Tuple
 
 from IPython.display import HTML, display
-from tqdm.auto import tqdm
+from tqdm.notebook import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,10 @@ RCLONE_UPLOAD_EXCLUDES = [
     "manually_curated_compound_data.csv",
     "curated_atlases.csv",
     "auto_ided_atlases.csv",
+    ".*",
+    ".*/**",
+    "**/.*",
+    "**/.*/**",
 ]
 
 # ------------------------------------------------------------------ #
@@ -66,55 +69,33 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
     cmd = [
         RCLONE_PATH, "copy", str(source), dest,
         "--progress",
-        "--transfers", "4",  # Parallel transfers for better performance
-        "--checkers", "8",   # Parallel file checks
-        "--drive-chunk-size", "16M",  # Larger chunks for Google Drive
-        "--stats", "1s",     # Update stats every second
-        "--stats-one-line",  # Single line stats output
+        "--transfers", "4",
+        "--checkers", "8",
+        "--drive-chunk-size", "16M",
     ]
     for pattern in RCLONE_UPLOAD_EXCLUDES:
         cmd.extend(["--exclude", pattern])
     if overwrite:
         cmd.append("--ignore-times")
     
-    percent_pattern = re.compile(r"(\d+(?:\.\d+)?)%")
-
     try:
         logger.info("Starting rclone upload: %s -> %s", source, dest)
         with tqdm(total=100, desc="Uploading to Google Drive", unit="%") as pbar:
-            last_percent = 0
-            stderr_chunks = []
-            with Popen(cmd, stdout=PIPE, stderr=PIPE, bufsize=1, universal_newlines=True) as proc:
-                # rclone progress frequently uses carriage-return updates, not newline-terminated lines.
-                buffer = ""
-                while proc.stderr is not None:
-                    chunk = proc.stderr.read(1)
-                    if chunk == "":
-                        break
-                    stderr_chunks.append(chunk)
-                    if chunk in ("\r", "\n"):
-                        line = buffer.strip()
-                        buffer = ""
-                        if "Transferred:" in line and "%" in line:
-                            matches = percent_pattern.findall(line)
-                            if matches:
-                                try:
-                                    percent = float(matches[-1])
-                                    percent = max(0.0, min(100.0, percent))
-                                    if percent > last_percent:
-                                        pbar.update(percent - last_percent)
-                                        last_percent = percent
-                                except ValueError:
-                                    pass
-                    else:
-                        buffer += chunk
+            with Popen(cmd, stdout=PIPE, bufsize=1, universal_newlines=True) as proc:
+                for line in proc.stdout or []:
+                    line = line.strip()
+                    if line.startswith("Transferred:") and line.endswith("%"):
+                        try:
+                            percent = float(line.split(",")[1].split("%")[0])
+                            pbar.n = percent
+                            pbar.refresh()
+                        except (IndexError, ValueError):
+                            pass
                 proc.wait()
                 if proc.returncode != 0:
-                    stderr_output = "".join(stderr_chunks).strip()
-                    logger.error("rclone failed with exit code %d: %s", proc.returncode, stderr_output)
-                    raise subprocess.CalledProcessError(proc.returncode, cmd, output=stderr_output)
-                if last_percent < 100:
-                    pbar.update(100 - last_percent)
+                    raise subprocess.CalledProcessError(proc.returncode, cmd)
+                pbar.n = 100
+                pbar.refresh()
     except subprocess.CalledProcessError as err:
         logger.exception("rclone copy failed: %s", err)
         raise

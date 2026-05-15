@@ -768,8 +768,7 @@ class AnalysisSummary:
 
         atlas_compounds = None
         if self.post_curation_atlas_obj and self.post_curation_atlas_obj.compound_mzrts:
-            import pandas as _pd
-            atlas_compounds = _pd.DataFrame([
+            atlas_compounds = pd.DataFrame([
                 {'inchi_key': c.inchi_key, 'adduct': c.adduct}
                 for c in self.post_curation_atlas_obj.compound_mzrts.values()
             ])
