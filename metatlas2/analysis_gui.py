@@ -543,6 +543,16 @@ def build_dash_app(
 
     def _compute_window_ms1_metrics(state):
         """Compute all window-based MS1 metrics in one pass across file spectra."""
+        def _ppm_error(measured_mz, atlas_mz):
+            if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(measured_mz):
+                return (float(measured_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
+            return np.nan
+
+        def _rt_delta(measured_rt, atlas_rt_peak):
+            if pd.notnull(atlas_rt_peak) and np.isfinite(measured_rt):
+                return float(measured_rt) - float(atlas_rt_peak)
+            return np.nan
+
         row = _compound_row(state["compound_idx"])
         inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min = float(state["rt_min"])
@@ -559,12 +569,17 @@ def build_dash_app(
             (analysis_gui_obj.ms1_df["inchi_key"] == inchi)
             & (analysis_gui_obj.ms1_df["adduct"] == adduct)
         ]
+        atlas_mz = row.get("atlas_mz", np.nan)
+        atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
         if sub.empty:
+            fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
+            fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
+            fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
             return {
                 "rt_peak": fallback_rt_peak,
-                "mz": float(fallback_mz) if pd.notnull(fallback_mz) else np.nan,
-                "rt_error": float(row.get("rt_error", np.nan)),
-                "mz_error": float(row.get("mz_error", np.nan)),
+                "mz": fallback_mz_val,
+                "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
+                "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
                 "best_ms1_file": row.get("best_ms1_file", ""),
                 "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
                 "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
@@ -648,11 +663,14 @@ def build_dash_app(
                 best_by_file[file_path] = (local_intensity, local_rt, local_mz)
 
         if not best_by_file:
+            fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
+            fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
+            fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
             return {
                 "rt_peak": fallback_rt_peak,
-                "mz": float(fallback_mz) if pd.notnull(fallback_mz) else np.nan,
-                "rt_error": float(row.get("rt_error", np.nan)),
-                "mz_error": float(row.get("mz_error", np.nan)),
+                "mz": fallback_mz_val,
+                "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
+                "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
                 "best_ms1_file": row.get("best_ms1_file", ""),
                 "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
                 "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
@@ -670,27 +688,15 @@ def build_dash_app(
         if not np.isfinite(best_mz):
             best_mz = mz_mean
 
-        atlas_mz = row.get("atlas_mz", np.nan)
-        if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(best_mz):
-            best_ppm_error = (float(best_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
-        else:
-            best_ppm_error = np.nan
-
-        atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
-        if pd.notnull(atlas_rt_peak) and np.isfinite(best_rt):
-            best_rt_error = float(best_rt) - float(atlas_rt_peak)
-        else:
-            best_rt_error = np.nan
-
-        if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(best_mz):
-            mz_error = (best_mz - atlas_mz) / atlas_mz * 1e6
-        else:
-            mz_error = np.nan
+        best_ppm_error = _ppm_error(best_mz, atlas_mz)
+        best_rt_error = _rt_delta(best_rt, atlas_rt_peak)
+        mz_error = _ppm_error(mz_mean, atlas_mz)
+        rt_error = _rt_delta(rt_peak, atlas_rt_peak)
 
         return {
             "rt_peak": rt_peak,
             "mz": mz_mean,
-            "rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+            "rt_error": float(rt_error) if np.isfinite(rt_error) else np.nan,
             "mz_error": float(mz_error) if np.isfinite(mz_error) else np.nan,
             "best_ms1_file": "" if best_file is None else str(best_file),
             "best_ms1_rt": float(best_rt),

@@ -1,3 +1,24 @@
+# Metric provenance map
+#
+# GUI flush metrics (written to manual_curation):
+# - rt_min, rt_max: analyst-set RT bounds in GUI
+# - rt_peak: mean of per-file highest-intensity RT within [rt_min, rt_max]
+# - mz: mean of per-file m/z at those highest-intensity RT points
+# - rt_error: rt_peak - atlas_rt_peak
+# - mz_error: ((mz - atlas_mz) / atlas_mz) * 1e6
+# - best_ms1_file: file containing highest intensity point in RT window
+# - best_ms1_rt, best_ms1_mz, best_ms1_intensity: coordinates/intensity of that point
+# - best_ms1_ppm_error: ((best_ms1_mz - atlas_mz) / atlas_mz) * 1e6
+# - best_ms1_rt_error: best_ms1_rt - atlas_rt_peak
+#
+# Summary/final-sheet consumers:
+# - MS1 intensity section: best_ms1_intensity, best_ms1_file, best_ms1_rt
+# - Chromatographic/RT evaluation: rt_min, rt_max, rt_peak, rt_error
+# - Ion and m/z evaluation columns: measured m/z is the average of measured m/z
+#   across the top-3 MS2 hits (score-ranked, one hit per file when available), with
+#   mz delta/ppm and mz quality derived from that averaged measured value.
+# - MSMS information/evaluation columns: sourced from the best MS2 hit.
+
 import itertools
 import shutil
 from typing import Optional, List, Tuple, Dict
@@ -167,6 +188,30 @@ def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
         return list(x_arr), list(y_arr)
     except Exception:
         return [], []
+
+
+def _get_top3_ms2_hits(ms2_hits_df: pd.DataFrame) -> pd.DataFrame:
+    """Return top-3 score-ranked MS2 hits, keeping at most one hit per file."""
+    if ms2_hits_df is None or ms2_hits_df.empty:
+        return pd.DataFrame()
+    return (
+        ms2_hits_df
+        .sort_values("score", ascending=False)
+        .drop_duplicates("file_path")
+        .head(3)
+        .reset_index(drop=True)
+    )
+
+
+def _top3_measured_mz_mean(top3_hits_df: pd.DataFrame) -> float:
+    """Return mean measured m/z for top-3 hits (prefers mz_measured, falls back to mz)."""
+    if top3_hits_df is None or top3_hits_df.empty:
+        return np.nan
+    mz_series = pd.to_numeric(top3_hits_df.get("mz_measured", top3_hits_df.get("mz")), errors="coerce")
+    mz_series = mz_series[np.isfinite(mz_series)]
+    if len(mz_series) == 0:
+        return np.nan
+    return float(np.mean(mz_series))
 
 def _get_compound_info_batch(
     main_db_path: str,
@@ -528,12 +573,24 @@ def _plot_hit_info_table(
     name_without_ext = _strip_mode_suffix(raw_name.split(".")[0])
 
     # Scalar values
+    def _to_float(value, default=np.nan):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    best_hit_mz = _to_float(best_hit.get("mz_measured", np.nan))
+    best_hit_rt = _to_float(best_hit.get("rt", np.nan))
     atlas_mz = float(mc_row.get("atlas_mz", np.nan))
-    measured_mz = float(mc_row.get("mz", np.nan))
-    ppm_error = float(mc_row.get("mz_error", np.nan))
+    measured_mz = best_hit_mz
+    ppm_error = (
+        ((measured_mz - atlas_mz) / atlas_mz * 1e6)
+        if (not np.isnan(measured_mz) and not np.isnan(atlas_mz) and atlas_mz != 0)
+        else np.nan
+    )
     atlas_rt = float(mc_row.get("atlas_rt_peak", np.nan))
-    measured_rt = float(mc_row.get("rt_peak", np.nan))
-    rt_error = float(mc_row.get("rt_error", np.nan))
+    measured_rt = best_hit_rt
+    rt_error = (measured_rt - atlas_rt) if (not np.isnan(measured_rt) and not np.isnan(atlas_rt)) else np.nan
     score = float(best_hit.get("score", np.nan))
     num_matches = int(best_hit.get("num_matches", 0))
     ref_frags = int(best_hit.get("ref_frags", 0))
@@ -720,13 +777,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ms2_raw_df = kwargs["ms2_raw_df"]
     ms2_hits_df = kwargs["ms2_hits_df"]
 
-    top3 = (
-        ms2_hits_df
-        .sort_values("score", ascending=False)
-        .drop_duplicates("file_path")
-        .head(3)
-        .reset_index(drop=True)
-    ) if not ms2_hits_df.empty else pd.DataFrame()
+    top3 = _get_top3_ms2_hits(ms2_hits_df)
 
     fig = plt.figure(figsize=(25, 15))
     gs = fig.add_gridspec(
@@ -1066,12 +1117,18 @@ def make_final_id_sheet(
     }
 
     if not ms2_hits_all_df.empty:
-        ms2_best: dict[tuple, pd.Series] = {
-            key: grp.sort_values("score", ascending=False).iloc[0]
-            for key, grp in ms2_hits_all_df.groupby(["inchi_key", "adduct"], sort=False)
-        }
+        ms2_best: dict[tuple, pd.Series] = {}
+        ms2_top3_mz_avg: dict[tuple, float] = {}
+        for key, grp in ms2_hits_all_df.groupby(["inchi_key", "adduct"], sort=False):
+            grp_sorted = grp.sort_values("score", ascending=False)
+            ms2_best[key] = grp_sorted.iloc[0]
+            top3 = _get_top3_ms2_hits(grp_sorted)
+            top3_mz_mean = _top3_measured_mz_mean(top3)
+            if np.isfinite(top3_mz_mean):
+                ms2_top3_mz_avg[key] = float(top3_mz_mean)
     else:
         ms2_best = {}
+        ms2_top3_mz_avg = {}
 
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
 
@@ -1099,32 +1156,23 @@ def make_final_id_sheet(
         overlapping_compound, overlapping_inchi_keys = overlapping_map.get(compound_idx, ("", ""))
         identified_metabolite = compound_name if not overlapping_compound else overlapping_compound
 
-        # --- MS1 metrics ---
+        # --- Shared theoretical values from atlas ---
         mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
-        mz_measured = float(mc_row.get("mz", np.nan))
-        ppm_error = float(mc_row.get("mz_error", np.nan))
         rt_theoretical = float(mc_row.get("atlas_rt_peak", np.nan))
+
+        # --- GUI window-derived MS1 metrics ---
+        mz_measured_ms1 = float(mc_row.get("mz", np.nan))
+        ppm_error_ms1 = float(mc_row.get("mz_error", np.nan))
         rt_measured = float(mc_row.get("rt_peak", np.nan))
         rt_error = float(mc_row.get("rt_error", np.nan))
+        best_ms1_rt = float(mc_row.get("best_ms1_rt", np.nan))
         max_intensity = float(mc_row.get("best_ms1_intensity", np.nan))
         max_int_file = mc_row.get("best_ms1_file", "")
 
-        mz_error_da = (
-            abs(mz_theoretical - mz_measured)
-            if not (np.isnan(mz_theoretical) or np.isnan(mz_measured))
-            else np.nan
-        )
-
-        mz_q = _mz_quality(ppm_error, mz_error_da)
-        rt_q = _rt_quality(rt_error, chromatography)
-
+        # --- Best MS2 hit measured values for ion/mz evaluation ---
+        mz_measured_ms2 = mz_measured_ms1
+        ppm_error_ms2 = ppm_error_ms1
         ms2_notes = mc_row.get("ms2_notes", "") or ""
-        try:
-            msms_q = float(str(ms2_notes).split(",")[0])
-        except (ValueError, AttributeError):
-            msms_q = np.nan
-
-        total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
 
         # --- MSMS metrics ---
         msms_file = ""
@@ -1138,6 +1186,17 @@ def make_final_id_sheet(
             msms_file = str(best_hit.get("file_path", ""))
             msms_rt = float(best_hit.get("rt", np.nan))
             msms_score = float(best_hit.get("score", np.nan))
+
+            try:
+                mz_measured_ms2 = float(best_hit.get("mz_measured", best_hit.get("mz", np.nan)))
+            except Exception:
+                mz_measured_ms2 = mz_measured_ms1
+
+            ppm_error_ms2 = (
+                ((mz_measured_ms2 - mz_theoretical) / mz_theoretical * 1e6)
+                if (not np.isnan(mz_measured_ms2) and not np.isnan(mz_theoretical) and mz_theoretical != 0)
+                else np.nan
+            )
 
             num_matches = int(best_hit.get("num_matches", 0))
             ref_frags = int(best_hit.get("ref_frags", 0))
@@ -1163,6 +1222,30 @@ def make_final_id_sheet(
                 note_tag = " (single matching fragment is the precursor)" if precursor_match else "(single matching fragment is NOT the precursor)"
                 if "1.0, single ion match" in ms2_notes or "0.5, single ion match" in ms2_notes:
                     ms2_notes = ms2_notes + note_tag
+
+        # Final-sheet measured m/z for ion/mz evaluation uses top-3 MS2 average when available.
+        mz_measured_ms2 = float(ms2_top3_mz_avg.get((inchi_key, adduct), mz_measured_ms2))
+        ppm_error_ms2 = (
+            ((mz_measured_ms2 - mz_theoretical) / mz_theoretical * 1e6)
+            if (not np.isnan(mz_measured_ms2) and not np.isnan(mz_theoretical) and mz_theoretical != 0)
+            else np.nan
+        )
+
+        mz_error_da = (
+            abs(mz_theoretical - mz_measured_ms2)
+            if not (np.isnan(mz_theoretical) or np.isnan(mz_measured_ms2))
+            else np.nan
+        )
+
+        mz_q = _mz_quality(ppm_error_ms2, mz_error_da)
+        rt_q = _rt_quality(rt_error, chromatography)
+
+        try:
+            msms_q = float(str(ms2_notes).split(",")[0])
+        except (ValueError, AttributeError):
+            msms_q = np.nan
+
+        total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
 
         rows.append({
             # --- COMPOUND ANNOTATION ---
@@ -1190,7 +1273,7 @@ def make_final_id_sheet(
             # --- MS1 INTENSITY INFORMATION ---
             "max_intensity": max_intensity,
             "max_intensity_file": _strip_mode_suffix(Path(max_int_file).name) if max_int_file else "",
-            "ms1_rt_peak": rt_measured,
+            "ms1_rt_peak": round(best_ms1_rt, 2) if not np.isnan(best_ms1_rt) else np.nan,
             # --- MSMS INFORMATION ---
             "msms_file": _strip_mode_suffix(Path(msms_file).name) if msms_file else "",
             "msms_rt": round(msms_rt, 2) if not np.isnan(msms_rt) else np.nan,
@@ -1201,10 +1284,10 @@ def make_final_id_sheet(
             # --- ION INFORMATION ---
             "mz_adduct": adduct,
             "mz_theoretical": round(mz_theoretical, 4) if not np.isnan(mz_theoretical) else np.nan,
-            "mz_measured": round(mz_measured, 4) if not np.isnan(mz_measured) else np.nan,
+            "mz_measured": round(mz_measured_ms2, 4) if not np.isnan(mz_measured_ms2) else np.nan,
             # --- M/Z EVALUATION ---
             "mz_error": round(mz_error_da, 4) if not np.isnan(mz_error_da) else np.nan,
-            "mz_ppmerror": round(ppm_error, 4) if not np.isnan(ppm_error) else np.nan,
+            "mz_ppmerror": round(ppm_error_ms2, 4) if not np.isnan(ppm_error_ms2) else np.nan,
             # --- CHROMATOGRAPHIC PEAK INFORMATION ---
             "rt_min": round(float(mc_row.get("rt_min", np.nan)), 2),
             "rt_max": round(float(mc_row.get("rt_max", np.nan)), 2),
