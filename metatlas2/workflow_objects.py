@@ -272,11 +272,6 @@ class Atlas:
         if not self.compound_mzrts or len(self.compound_mzrts) == 0:
             raise ValueError("No compound MZRTs in atlas")
 
-        # Check for duplicate compound_uids
-        compound_uids = [c.compound_uid for c in self.compound_mzrts.values()]
-        if len(compound_uids) != len(set(compound_uids)):
-            raise ValueError("Duplicate compound_uids found in compound_mzrts")
-
         # Validate each CompoundMZRT
         for key, compound in self.compound_mzrts.items():
             inchi_key = compound.inchi_key or "<unknown>"
@@ -334,8 +329,11 @@ class Atlas:
         source = meta.get('source', '')
         source_atlas_uid = meta.get('source_atlas_uid', None)
         compound_mzrts = {}
-        for _, row in atlas_df.iterrows():
-            key = row.get('inchi_key', row.get('compound_uid', ''))
+        for row_index, row in atlas_df.iterrows():
+            # Keep a unique dictionary key per row so repeated inchi_key/adduct entries are not overwritten.
+            inchi_key = row.get('inchi_key', '')
+            adduct = row.get('adduct', '')
+            key = f"{inchi_key}|{adduct}|{row_index}"
             compound_mzrt = CompoundMZRT.from_atlas_row(row)
             compound_mzrts[key] = compound_mzrt
 

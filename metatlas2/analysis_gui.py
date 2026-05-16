@@ -68,6 +68,42 @@ def build_dash_app(
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.manual_curation_df
+
+    def _ensure_df_columns(df, required_cols):
+        """Return a DataFrame guaranteed to contain required columns."""
+        if not isinstance(df, pd.DataFrame):
+            out = pd.DataFrame(columns=required_cols)
+        else:
+            out = df.copy()
+            if out.empty and len(out.columns) == 0:
+                out = pd.DataFrame(columns=required_cols)
+            else:
+                for col in required_cols:
+                    if col not in out.columns:
+                        out[col] = pd.Series(dtype="object")
+        return out
+
+    # Normalize analysis tables so blank/no-data compounds render empty plots instead of errors.
+    analysis_gui_obj.ms1_df = _ensure_df_columns(
+        analysis_gui_obj.ms1_df,
+        ["inchi_key", "adduct", "file_path", "raw_spectrum", "mz"],
+    )
+    analysis_gui_obj.ms2_df = _ensure_df_columns(
+        analysis_gui_obj.ms2_df,
+        [
+            "inchi_key", "adduct", "file_path", "rt", "collision_energy",
+            "raw_spectrum", "precursor_MZ", "precursor_intensity",
+        ],
+    )
+    analysis_gui_obj.ms2_hits_df = _ensure_df_columns(
+        analysis_gui_obj.ms2_hits_df,
+        [
+            "inchi_key", "adduct", "file_path", "rt", "score", "num_matches",
+            "mz_theoretical", "ppm_error", "qry_spectrum", "ref_spectrum",
+            "aligned_fragment_colors", "ref_name",
+        ],
+    )
+
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
     if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
         top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
@@ -781,7 +817,13 @@ def build_dash_app(
 
         # Use the manual-curation row's best MS1 intensity as the y-axis reference max.
         y_min_positive_data = None
-        y_max_data = float(row["best_ms1_intensity"])
+        y_max_data = row.get("best_ms1_intensity", np.nan)
+        if pd.isna(y_max_data):
+            y_max_data = 0.0
+        else:
+            y_max_data = float(y_max_data)
+        if not np.isfinite(y_max_data) or y_max_data <= 0:
+            y_max_data = 1.0
         if yaxis_scale == "log":
             for fp in sub["file_path"].unique():
                 for _, r in sub[sub["file_path"] == fp].iterrows():
@@ -798,7 +840,7 @@ def build_dash_app(
                     except Exception as e:
                         traceback.print_exc()
                         logger.error(f"MS1 parse error {fp}: {e}")
-        y_upper_bound = y_max_data * 1.1
+        y_upper_bound = max(y_max_data * 1.1, 1.0)
 
         if yaxis_scale == "log":
             log_min = max((y_min_positive_data or 1e-6), 1e-12)

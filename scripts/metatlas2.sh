@@ -6,6 +6,7 @@
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-atlases   --config_path FILE
+#   metatlas2 [--image TAG] [--dev] get-atlases   --atlas_uids UID1,UID2 [--output_path PATH]
 #   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):
@@ -231,11 +232,13 @@ if [[ "${SUBCOMMAND}" == "submit" ]]; then
 
     sbatch "${TMPSCRIPT}"
 
-elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" ]]; then
+elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "get-atlases" ]]; then
     if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
         PY_MODULE="metatlas2.add_compounds_to_db"
-    else
+    elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
         PY_MODULE="metatlas2.add_atlases_to_db"
+    else
+        PY_MODULE="metatlas2.get_atlases_from_db"
     fi
 
     if [[ "${DEV_MODE}" == "true" ]]; then

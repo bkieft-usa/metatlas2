@@ -245,7 +245,7 @@ def create_new_atlas_from_dataframe(
     compound_lookup = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
 
     compound_mzrts = {}
-    for _, row in atlas_df.iterrows():
+    for row_index, row in atlas_df.iterrows():
         # main key
         inchi_key = row.get('inchi_key', '')
         adduct = str(row.get('adduct', None))
@@ -295,7 +295,8 @@ def create_new_atlas_from_dataframe(
             source=atlas_file_path,
             identification_notes=identification_notes,
         )
-        compound_mzrts[inchi_key] = compound_mzrt
+        dict_key = f"{inchi_key}|{adduct}|{row_index}"
+        compound_mzrts[dict_key] = compound_mzrt
 
     atlas_uid = _generate_uid("ref_atlas", decorator=f"{analysis_type.lower()}-{chromatography.lower()}-{polarity.lower()}")
     atlas_obj = Atlas(
@@ -2671,6 +2672,15 @@ def apply_auto_id_filters(
     ms1_min_int   = auto_id_obj.workflow_params.get('ms1_min_peak_intensity')
     remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', True)
 
+    # When remove_unided_compounds is False, keep all atlas compounds through Stage 1.
+    # This preserves compounds with no extracted MS1/MS2 data for GUI review.
+    if remove_unided is False:
+        logger.info(
+            "remove_unided_compounds=False: preserving all compounds from input atlas "
+            "for post-auto-ID atlas/GUI (no Stage 1 compound removals)."
+        )
+        return auto_id_obj.experimental_data
+
     # Log filtering parameters for debugging
     logger.info(
         f"Applying quality filters for {source_atlas.analysis_type}: "
@@ -2832,6 +2842,7 @@ def create_new_atlas_after_auto_id(
     """
     prov = get_provenance()
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
+    remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', True)
     
     # experimental_data has already been filtered by apply_auto_id_filters()
     survived_pairs = {(mc.inchi_key, mc.adduct) for mc in auto_id_obj.experimental_data.manual_curation}
@@ -2839,9 +2850,15 @@ def create_new_atlas_after_auto_id(
     # Deep-copy every surviving CompoundMZRT into the new atlas
     new_compound_mzrts = {}
     for dict_key, cmzrt in tqdm(source_atlas.compound_mzrts.items(), desc="Creating new Atlas from curated compounds"):
-        if (cmzrt.inchi_key, cmzrt.adduct) not in survived_pairs:
+        if remove_unided and (cmzrt.inchi_key, cmzrt.adduct) not in survived_pairs:
             continue
         new_compound_mzrts[dict_key] = copy.deepcopy(cmzrt)
+
+    if remove_unided is False and len(new_compound_mzrts) != len(source_atlas.compound_mzrts):
+        logger.warning(
+            "remove_unided_compounds=False but post-auto-ID atlas size does not match source atlas "
+            f"({len(new_compound_mzrts)} vs {len(source_atlas.compound_mzrts)})."
+        )
 
     # Generate a new atlas UID
     new_atlas_uid = _generate_uid(
