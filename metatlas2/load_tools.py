@@ -433,11 +433,11 @@ def load_compound_input(file_path: str) -> pd.DataFrame:
     else:
         df = pd.read_csv(file_path)
 
-    # Normalize compound name column: prefer 'compound_name', fall back to 'label'
-    if 'compound_name' not in df.columns and 'label' in df.columns:
+    # Check for required columns (need to use label if it's present)
+    if 'compound_name' in df.columns and 'label' in df.columns:
+        df.rename(columns={'compound_name': 'compound_name_input', 'label': 'compound_name'}, inplace=True)
+    elif 'compound_name' not in df.columns and 'label' in df.columns:
         df = df.rename(columns={'label': 'compound_name'})
-
-    # Check for required columns
     required_columns = ['inchi_key', 'compound_name']
     check_missing_columns(df, required_columns)
     
@@ -488,11 +488,11 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
     else:
         df = pd.read_csv(file_path)
 
-    # Normalize compound name column: prefer 'compound_name', fall back to 'label'
-    if 'compound_name' not in df.columns and 'label' in df.columns:
+    # Check for required columns for atlas creation (need to use label if it's present)
+    if 'compound_name' in df.columns and 'label' in df.columns:
+        df.rename(columns={'compound_name': 'compound_name_input', 'label': 'compound_name'}, inplace=True)
+    elif 'compound_name' not in df.columns and 'label' in df.columns:
         df = df.rename(columns={'label': 'compound_name'})
-
-    # Check for required columns for atlas creation
     required_columns = ['inchi_key', 'compound_name', 'rt_peak', 'mz', 'adduct']
     check_missing_columns(df, required_columns)
     

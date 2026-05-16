@@ -1936,7 +1936,6 @@ def load_and_filter_gui_inputs(
         analysis_number=analysis_gui_obj.analysis_number,
         atlas_compounds=atlas_compounds,
         analysis_type=analysis_gui_obj.post_autoid_atlas_obj.analysis_type,
-        remove_unidentified_compounds=False,  # Already filtered during auto-ID
     )
     
     # Apply second-stage filtering if override parameters differ from workflow params

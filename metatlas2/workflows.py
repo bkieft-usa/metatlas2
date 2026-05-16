@@ -396,28 +396,6 @@ def run_analysis_summary(
     
     logger.info(f"Setting override parameters for analysis summary...")
     summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
-    
-    if override_parameters:
-        # Check if any override parameters actually differ from workflow params
-        params_differ = False
-        for param in ["ms1_min_peak_intensity", "ms1_min_num_points", 
-                      "ms2_min_score", "ms2_min_matching_frags", "remove_unided_compounds"]:
-            override_val = override_parameters.get(param)
-            workflow_val = summary_obj.workflow_params.get(param)
-            if override_val is not None and override_val != workflow_val:
-                params_differ = True
-                break
-        
-        if params_differ:
-            logger.info(
-                "Override parameters differ from saved workflow parameters. "
-                "Second-stage filtering will be applied when loading data for summary."
-            )
-        else:
-            logger.info(
-                "Override parameters provided but match saved workflow parameters. "
-                "No additional filtering will be applied."
-            )
 
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
     summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(

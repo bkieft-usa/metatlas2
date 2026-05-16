@@ -48,8 +48,8 @@ def get_notes_opts(owner: str = "jgi") -> tuple[dict[str, str], dict[str, str], 
         "Remove - bad MSMS": "8",
         "Remove - ND": "9",
         "Remove - Not Evaluated": "0",
-        "Remove - duplicate": "-",
-        "Remove - evidence of contamination or incorrect ID": "=",
+        "Remove - duplicate": "[",
+        "Remove - evidence of contamination or incorrect ID": "]",
     }
     EGSB_DEFAULT_OTHER_HOTKEYS = {
         "unresolvable isomers": "z",

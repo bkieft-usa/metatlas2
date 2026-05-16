@@ -171,8 +171,51 @@ def build_dash_app(
     def _compound_row(idx):
         return manual_curation_df.iloc[idx]
 
+    def _safe_float(value):
+        """Return a finite float or np.nan for null/invalid values."""
+        try:
+            if pd.isna(value):
+                return np.nan
+            out = float(value)
+            return out if np.isfinite(out) else np.nan
+        except (TypeError, ValueError):
+            return np.nan
+
+    def _fmt_num(value, precision=4):
+        """Format numeric values for plot titles, returning NA for missing values."""
+        fval = _safe_float(value)
+        if not np.isfinite(fval):
+            return "NA"
+        return f"{fval:.{precision}f}"
+
     def _rt_bounds_from_row(row):
-        return float(row["rt_min"]), float(row["rt_max"])
+        rt_min = _safe_float(row.get("rt_min"))
+        rt_max = _safe_float(row.get("rt_max"))
+
+        if not (np.isfinite(rt_min) and np.isfinite(rt_max)):
+            atlas_rt_min = _safe_float(row.get("atlas_rt_min"))
+            atlas_rt_max = _safe_float(row.get("atlas_rt_max"))
+            if np.isfinite(atlas_rt_min) and np.isfinite(atlas_rt_max):
+                rt_min, rt_max = atlas_rt_min, atlas_rt_max
+            else:
+                suggested_rt_min = _safe_float(row.get("suggested_rt_min"))
+                suggested_rt_max = _safe_float(row.get("suggested_rt_max"))
+                if np.isfinite(suggested_rt_min) and np.isfinite(suggested_rt_max):
+                    rt_min, rt_max = suggested_rt_min, suggested_rt_max
+                else:
+                    atlas_rt_peak = _safe_float(row.get("atlas_rt_peak"))
+                    if np.isfinite(atlas_rt_peak):
+                        rt_min, rt_max = atlas_rt_peak - 0.5, atlas_rt_peak + 0.5
+                    else:
+                        rt_min, rt_max = 0.0, 1.0
+
+        if rt_max < rt_min:
+            rt_min, rt_max = rt_max, rt_min
+        if not np.isfinite(rt_min):
+            rt_min = 0.0
+        if not np.isfinite(rt_max) or rt_max <= rt_min:
+            rt_max = rt_min + 1.0
+        return float(rt_min), float(rt_max)
 
     def _default_plot_bounds_from_row(row, pad=2.0):
         atlas_rt_min = row.get("atlas_rt_min")
@@ -617,11 +660,11 @@ def build_dash_app(
                 "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
                 "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
                 "best_ms1_file": row.get("best_ms1_file", ""),
-                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
-                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
-                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
-                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
-                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
+                "best_ms1_rt": _safe_float(row.get("best_ms1_rt")),
+                "best_ms1_mz": _safe_float(row.get("best_ms1_mz")),
+                "best_ms1_intensity": _safe_float(row.get("best_ms1_intensity")),
+                "best_ms1_ppm_error": _safe_float(row.get("best_ms1_ppm_error")),
+                "best_ms1_rt_error": _safe_float(row.get("best_ms1_rt_error")),
             }
 
         has_file_path = "file_path" in sub.columns
@@ -708,11 +751,11 @@ def build_dash_app(
                 "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
                 "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
                 "best_ms1_file": row.get("best_ms1_file", ""),
-                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
-                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
-                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
-                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
-                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
+                "best_ms1_rt": _safe_float(row.get("best_ms1_rt")),
+                "best_ms1_mz": _safe_float(row.get("best_ms1_mz")),
+                "best_ms1_intensity": _safe_float(row.get("best_ms1_intensity")),
+                "best_ms1_ppm_error": _safe_float(row.get("best_ms1_ppm_error")),
+                "best_ms1_rt_error": _safe_float(row.get("best_ms1_rt_error")),
             }
 
         rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
@@ -981,14 +1024,16 @@ def build_dash_app(
                     logger.error(f"MS1 parse error {fp}: {e}")
 
         # Atlas RT peak line (black, static)
-        fig.add_trace(go.Scatter(
-            x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
-            y=[y_bottom, y_max_data],
-            mode="lines",
-            line=dict(color="black", width=2.5),
-            showlegend=False,
-            hoverinfo="skip",
-        ))
+        atlas_rt_peak = _safe_float(row.get("atlas_rt_peak"))
+        if np.isfinite(atlas_rt_peak):
+            fig.add_trace(go.Scatter(
+                x=[atlas_rt_peak, atlas_rt_peak],
+                y=[y_bottom, y_max_data],
+                mode="lines",
+                line=dict(color="black", width=2.5),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
 
         # Suggested RT lines (orange, static)
         if pd.notnull(row.get("suggested_rt_min")):
@@ -1030,8 +1075,8 @@ def build_dash_app(
 
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi}</span><br>"
-            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['best_ms1_rt']:.4f}  |  RT Δ: {row['best_ms1_rt_error']:.3f}<br>"
-            f"Atlas m/z: {row['atlas_mz']:.4f}  |  ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
+            f"Atlas RT: {_fmt_num(row.get('atlas_rt_peak'), 4)}  |  Meas RT: {_fmt_num(row.get('best_ms1_rt'), 4)}  |  RT Δ: {_fmt_num(row.get('best_ms1_rt_error'), 3)}<br>"
+            f"Atlas m/z: {_fmt_num(row.get('atlas_mz'), 4)}  |  ppm Δ: {_fmt_num(row.get('best_ms1_ppm_error'), 2)}<br>"
             f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
         )
 

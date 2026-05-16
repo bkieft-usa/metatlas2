@@ -230,11 +230,13 @@ def _find_hits_from_ms2_df(
             ref_arr = np.array([ref_mz, ref_int])
             alignment_data = _align_spectra_for_plotting(qry_arr, ref_arr, frag_mz_tolerance)
 
+            ref_name = ref.get('name') or ref.get('compound_name') or ref.get('id') or 'Unknown'
+
             all_hits.append({
                 'inchi_key': inchi_key,
                 'database': ref.get('database', 'unknown'),
                 'ref_id': ref.get('id', ''),
-                'ref_name': ref.get('name', 'Unknown'),
+                'ref_name': ref_name,
                 'score': score,
                 'num_matches': num_matches,
                 'mz_theoretical': float(precursor_mz_ref),
