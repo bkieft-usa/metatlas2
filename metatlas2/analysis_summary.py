@@ -190,6 +190,239 @@ def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
         return [], []
 
 
+def _parse_mz_array(raw_mz: object) -> List:
+    """Parse optional per-scan m/z payload from ms1_data.mz into a list."""
+    if raw_mz is None:
+        return []
+    if isinstance(raw_mz, float) and np.isnan(raw_mz):
+        return []
+    if isinstance(raw_mz, str):
+        try:
+            parsed = json.loads(raw_mz)
+            return list(parsed) if isinstance(parsed, (list, tuple, np.ndarray)) else []
+        except Exception:
+            return []
+    if isinstance(raw_mz, (list, tuple, np.ndarray)):
+        return list(raw_mz)
+    return []
+
+
+def _ppm_error(measured_mz: float, atlas_mz: float) -> float:
+    if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(measured_mz):
+        return (float(measured_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
+    return np.nan
+
+
+def _rt_delta(measured_rt: float, atlas_rt_peak: float) -> float:
+    if pd.notnull(atlas_rt_peak) and np.isfinite(measured_rt):
+        return float(measured_rt) - float(atlas_rt_peak)
+    return np.nan
+
+
+def _compute_window_ms1_metrics_for_summary_row(mc_row: pd.Series, ms1_sub: pd.DataFrame) -> dict:
+    """Recompute GUI-style window MS1 metrics for one manual-curation row."""
+    def _as_float(value: object) -> float:
+        try:
+            out = float(value)
+            return out if np.isfinite(out) else np.nan
+        except (TypeError, ValueError):
+            return np.nan
+
+    rt_min = _as_float(mc_row.get("rt_min", np.nan))
+    rt_max = _as_float(mc_row.get("rt_max", np.nan))
+    if np.isfinite(rt_min) and np.isfinite(rt_max) and rt_max < rt_min:
+        rt_min, rt_max = rt_max, rt_min
+
+    if not np.isfinite(rt_min):
+        rt_min = _as_float(mc_row.get("atlas_rt_min", np.nan))
+    if not np.isfinite(rt_max):
+        rt_max = _as_float(mc_row.get("atlas_rt_max", np.nan))
+    if not np.isfinite(rt_min):
+        rt_min = 0.0
+    if not np.isfinite(rt_max) or rt_max <= rt_min:
+        rt_max = rt_min + 1.0
+
+    fallback_rt_peak = (rt_min + rt_max) / 2.0
+    fallback_mz = mc_row.get("best_ms1_mz", np.nan)
+    if pd.isna(fallback_mz):
+        fallback_mz = mc_row.get("atlas_mz", np.nan)
+
+    atlas_mz = mc_row.get("atlas_mz", np.nan)
+    atlas_rt_peak = mc_row.get("atlas_rt_peak", np.nan)
+
+    if ms1_sub is None or ms1_sub.empty:
+        fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
+        fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
+        fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
+        return {
+            "rt_peak": fallback_rt_peak,
+            "mz": fallback_mz_val,
+            "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
+            "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
+            "best_ms1_file": mc_row.get("best_ms1_file", ""),
+            "best_ms1_rt": _as_float(mc_row.get("best_ms1_rt", np.nan)),
+            "best_ms1_mz": _as_float(mc_row.get("best_ms1_mz", np.nan)),
+            "best_ms1_intensity": _as_float(mc_row.get("best_ms1_intensity", np.nan)),
+            "best_ms1_ppm_error": _as_float(mc_row.get("best_ms1_ppm_error", np.nan)),
+            "best_ms1_rt_error": _as_float(mc_row.get("best_ms1_rt_error", np.nan)),
+        }
+
+    has_file_path = "file_path" in ms1_sub.columns
+    has_mz = "mz" in ms1_sub.columns
+    best_by_file = {}
+
+    cols = []
+    if has_file_path:
+        cols.append("file_path")
+    cols.append("raw_spectrum")
+    if has_mz:
+        cols.append("mz")
+
+    for row_vals in ms1_sub[cols].itertuples(index=False, name=None):
+        if has_file_path and has_mz:
+            file_path, raw_spectrum, raw_mz = row_vals
+        elif has_file_path:
+            file_path, raw_spectrum = row_vals
+            raw_mz = None
+        elif has_mz:
+            raw_spectrum, raw_mz = row_vals
+            file_path = None
+        else:
+            (raw_spectrum,) = row_vals
+            file_path = None
+            raw_mz = None
+
+        rt_vals, intensities = _parse_spectrum(raw_spectrum)
+        rt_arr = np.asarray(rt_vals, dtype=float)
+        int_arr = np.asarray(intensities, dtype=float)
+        if rt_arr.size == 0 or int_arr.size == 0:
+            continue
+
+        n = min(rt_arr.size, int_arr.size)
+        rt_arr = rt_arr[:n]
+        int_arr = int_arr[:n]
+
+        mz_arr = np.asarray([], dtype=float)
+        if raw_mz is not None:
+            mz_vals = _parse_mz_array(raw_mz)
+            if mz_vals:
+                mz_arr = np.asarray(mz_vals, dtype=float)[:n]
+
+        mask = (
+            (rt_arr >= rt_min)
+            & (rt_arr <= rt_max)
+            & np.isfinite(rt_arr)
+            & np.isfinite(int_arr)
+        )
+        if not np.any(mask):
+            continue
+
+        masked_int = np.where(mask, int_arr, -np.inf)
+        local_idx = int(np.argmax(masked_int))
+        local_intensity = float(masked_int[local_idx])
+        if not np.isfinite(local_intensity):
+            continue
+
+        local_rt = float(rt_arr[local_idx])
+        local_mz = np.nan
+        if mz_arr.size == n and local_idx < mz_arr.size and np.isfinite(mz_arr[local_idx]):
+            local_mz = float(mz_arr[local_idx])
+
+        prev = best_by_file.get(file_path)
+        if prev is None or local_intensity > prev[0]:
+            best_by_file[file_path] = (local_intensity, local_rt, local_mz)
+
+    if not best_by_file:
+        fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
+        fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
+        fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
+        return {
+            "rt_peak": fallback_rt_peak,
+            "mz": fallback_mz_val,
+            "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
+            "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
+            "best_ms1_file": mc_row.get("best_ms1_file", ""),
+            "best_ms1_rt": _as_float(mc_row.get("best_ms1_rt", np.nan)),
+            "best_ms1_mz": _as_float(mc_row.get("best_ms1_mz", np.nan)),
+            "best_ms1_intensity": _as_float(mc_row.get("best_ms1_intensity", np.nan)),
+            "best_ms1_ppm_error": _as_float(mc_row.get("best_ms1_ppm_error", np.nan)),
+            "best_ms1_rt_error": _as_float(mc_row.get("best_ms1_rt_error", np.nan)),
+        }
+
+    rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
+    mz_vals = [mz for _, _, mz in best_by_file.values() if np.isfinite(mz)]
+    mz_mean = float(np.mean(mz_vals)) if mz_vals else (float(fallback_mz) if pd.notnull(fallback_mz) else np.nan)
+
+    best_file, best_triplet = max(best_by_file.items(), key=lambda kv: kv[1][0])
+    best_intensity, best_rt, best_mz = best_triplet
+    if not np.isfinite(best_mz):
+        best_mz = mz_mean
+
+    best_ppm_error = _ppm_error(best_mz, atlas_mz)
+    best_rt_error = _rt_delta(best_rt, atlas_rt_peak)
+    mz_error = _ppm_error(mz_mean, atlas_mz)
+    rt_error = _rt_delta(rt_peak, atlas_rt_peak)
+
+    return {
+        "rt_peak": rt_peak,
+        "mz": mz_mean,
+        "rt_error": float(rt_error) if np.isfinite(rt_error) else np.nan,
+        "mz_error": float(mz_error) if np.isfinite(mz_error) else np.nan,
+        "best_ms1_file": "" if best_file is None else str(best_file),
+        "best_ms1_rt": float(best_rt),
+        "best_ms1_mz": float(best_mz) if np.isfinite(best_mz) else np.nan,
+        "best_ms1_intensity": float(best_intensity),
+        "best_ms1_ppm_error": float(best_ppm_error) if np.isfinite(best_ppm_error) else np.nan,
+        "best_ms1_rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+    }
+
+
+def backfill_manual_curation_ms1_metrics(summary_obj: "AnalysisSummary") -> None:
+    """Backfill GUI-derived MS1 window metrics in-memory before summary outputs."""
+    if getattr(summary_obj, "_summary_ms1_metrics_backfilled", False):
+        return
+    if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
+        return
+
+    manual_curation_df = summary_obj.manual_curation_df.reset_index(drop=True).copy()
+    ms1_all_df = summary_obj.ms1_all_df
+
+    if ms1_all_df is not None and not ms1_all_df.empty:
+        ms1_groups = {
+            key: grp.reset_index(drop=True)
+            for key, grp in ms1_all_df.groupby(["inchi_key", "adduct"], sort=False)
+        }
+    else:
+        ms1_groups = {}
+
+    empty_df = pd.DataFrame()
+    metric_cols = [
+        "mz",
+        "rt_peak",
+        "rt_error",
+        "mz_error",
+        "best_ms1_file",
+        "best_ms1_rt",
+        "best_ms1_mz",
+        "best_ms1_intensity",
+        "best_ms1_ppm_error",
+        "best_ms1_rt_error",
+    ]
+
+    for idx, row in manual_curation_df.iterrows():
+        key = (row.get("inchi_key", ""), row.get("adduct", ""))
+        metrics = _compute_window_ms1_metrics_for_summary_row(row, ms1_groups.get(key, empty_df))
+        for col in metric_cols:
+            manual_curation_df.at[idx, col] = metrics.get(col, np.nan)
+
+    summary_obj.manual_curation_df = manual_curation_df
+    setattr(summary_obj, "_summary_ms1_metrics_backfilled", True)
+    logger.info(
+        "Backfilled GUI-style MS1 window metrics for %d compounds before summary generation.",
+        len(manual_curation_df),
+    )
+
+
 def _get_top3_ms2_hits(ms2_hits_df: pd.DataFrame) -> pd.DataFrame:
     """Return top-3 score-ranked MS2 hits, keeping at most one hit per file."""
     if ms2_hits_df is None or ms2_hits_df.empty:
@@ -2972,6 +3205,8 @@ def run_all_summaries(
     """
     output_loc = Path(summary_obj.paths.get("analysis_output_dir", None)) / f"{summary_obj.post_autoid_atlas_obj.polarity}-{summary_obj.post_autoid_atlas_obj.analysis_type}"
     os.makedirs(output_loc, exist_ok=True)
+    if summary_obj.manual_curation_df is None:
+        summary_obj.load_data()
     if summary_obj.override_parameters.get("skip_outputs") is not None:
         skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
     else:
@@ -2980,6 +3215,8 @@ def run_all_summaries(
     if summary_obj.manual_curation_df is None or summary_obj.manual_curation_df.empty:
         logger.error("No manual curation entries found - aborting run_all_summaries.")
         return
+
+    backfill_manual_curation_ms1_metrics(summary_obj)
 
     _validate_required_note_selections(summary_obj)
 

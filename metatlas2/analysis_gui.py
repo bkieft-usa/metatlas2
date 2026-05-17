@@ -12,52 +12,10 @@ import json
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 from metatlas2.note_options import (
-    get_note_options_and_hotkeys,
-    get_notes_opts,
     normalize_note_value,
     should_require_note_selection,
 )
 logger = lcf.get_logger("analysis_gui")
-
-
-def _display_compound_idx(compound_idx: int) -> int:
-    """Convert internal zero-based index to user-facing one-based index."""
-    return int(compound_idx) + 1
-
-def _validate_override_parameters(override_parameters):
-    if not isinstance(override_parameters, dict):
-        raise ValueError("analysis_gui_obj.override_parameters must be a dict")
-    if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
-        raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
-    if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
-        raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
-    if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
-        raise ValueError("override_parameters['ms1_min_peak_intensity'] must be a number or None")
-    if not isinstance(override_parameters["ms1_min_num_points"], (type(None), int)):
-        raise ValueError("override_parameters['ms1_min_num_points'] must be an integer or None")
-    if not isinstance(override_parameters["ms2_min_score"], (type(None), (int, float))):
-        raise ValueError("override_parameters['ms2_min_score'] must be a number or None")
-    if not isinstance(override_parameters["ms2_min_matching_frags"], (type(None), int)):
-        raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
-    if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
-        raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("apply_istd_to_ema"), (type(None), bool)):
-        raise ValueError("override_parameters['apply_istd_to_ema'] must be a boolean or None")
-    if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
-        raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
-        raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
-    if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
-        raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
-    if isinstance(override_parameters["note_options_overrides"], dict):
-        for note_type, options in override_parameters["note_options_overrides"].items():
-            if note_type not in ["ms1_notes", "ms2_notes", "other_notes"]:
-                raise ValueError(f"Invalid note type in note_options_overrides: {note_type} (must be 'ms1_notes', 'ms2_notes', or 'other_notes')")
-            if not isinstance(options, dict):
-                raise ValueError(f"Options for {note_type} in note_options_overrides must be a dict mapping option text to hotkeys")
-            for opt_text, hotkey in options.items():
-                if not isinstance(opt_text, str) or not isinstance(hotkey, str):
-                    raise ValueError(f"Invalid option in note_options_overrides for {note_type}: {opt_text}: {hotkey} (both must be strings)")
 
 def build_dash_app(
     analysis_gui_obj,
@@ -68,47 +26,11 @@ def build_dash_app(
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.manual_curation_df
-
-    def _ensure_df_columns(df, required_cols):
-        """Return a DataFrame guaranteed to contain required columns."""
-        if not isinstance(df, pd.DataFrame):
-            out = pd.DataFrame(columns=required_cols)
-        else:
-            out = df.copy()
-            if out.empty and len(out.columns) == 0:
-                out = pd.DataFrame(columns=required_cols)
-            else:
-                for col in required_cols:
-                    if col not in out.columns:
-                        out[col] = pd.Series(dtype="object")
-        return out
-
-    # Normalize analysis tables so blank/no-data compounds render empty plots instead of errors.
-    analysis_gui_obj.ms1_df = _ensure_df_columns(
-        analysis_gui_obj.ms1_df,
-        ["inchi_key", "adduct", "file_path", "raw_spectrum", "mz"],
-    )
-    analysis_gui_obj.ms2_df = _ensure_df_columns(
-        analysis_gui_obj.ms2_df,
-        [
-            "inchi_key", "adduct", "file_path", "rt", "collision_energy",
-            "raw_spectrum", "precursor_MZ", "precursor_intensity",
-        ],
-    )
-    analysis_gui_obj.ms2_hits_df = _ensure_df_columns(
-        analysis_gui_obj.ms2_hits_df,
-        [
-            "inchi_key", "adduct", "file_path", "rt", "score", "num_matches",
-            "mz_theoretical", "ppm_error", "qry_spectrum", "ref_spectrum",
-            "aligned_fragment_colors", "ref_name",
-        ],
-    )
+    logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
     if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
         top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
-
-    logger.info(f"Analysis starting with {len(manual_curation_df)} compounds:")
 
     # Extract metadata for display
     chrom = analysis_gui_obj.post_autoid_atlas_obj.chromatography
@@ -119,30 +41,9 @@ def build_dash_app(
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
-        {"label": f"{_display_compound_idx(i)}: {row['compound_name']}", "value": i}
+        {"label": f"{i+1}: {row['compound_name']}", "value": i}
         for i, row in manual_curation_df.reset_index(drop=True).iterrows()
     ]
-
-    # Allow override of note options/hotkeys from override_parameters
-    owner = (analysis_gui_obj.config.get('WORKFLOWS', {}).get('PATHS', {}).get('owner') or "jgi").lower()
-    ms2_notes_opts, ms1_notes_opts, other_notes_opts = get_notes_opts(owner=owner)
-    _validate_override_parameters(analysis_gui_obj.override_parameters)
-    ms1_options, ms1_hotkeys = get_note_options_and_hotkeys(
-        analysis_gui_obj.override_parameters["note_options_overrides"].get("ms1_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        ms1_notes_opts,
-    )
-    ms2_options, ms2_hotkeys = get_note_options_and_hotkeys(
-        analysis_gui_obj.override_parameters["note_options_overrides"].get("ms2_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        ms2_notes_opts,
-    )
-    other_options, other_hotkeys = get_note_options_and_hotkeys(
-        analysis_gui_obj.override_parameters["note_options_overrides"].get("other_notes", {}) if analysis_gui_obj.override_parameters.get("note_options_overrides") else {},
-        other_notes_opts,
-    )
-
-    ms1_key_to_label = {v: k for k, v in ms1_hotkeys.items()}
-    ms2_key_to_label = {v: k for k, v in ms2_hotkeys.items()}
-    other_key_to_label = {v: k for k, v in other_hotkeys.items()}
 
     # Create the app
     try:
@@ -167,55 +68,57 @@ def build_dash_app(
     cache_lock = threading.Lock()
     latest_flushed_seq_by_session = {}
     ms2_scans_cache = {}
+    
+    # PHASE 3 OPTIMIZATION: Add figure caching to avoid regeneration
+    figure_cache = {}
+    figure_cache_lock = threading.Lock()
+    isomer_string_cache = {}  # Cache expensive isomer calculations
+    
+    # PHASE 4 OPTIMIZATION: Async database writes to avoid blocking UI
+    db_write_queue = []
+    db_write_lock = threading.Lock()
+    
+    def _async_db_write(db_path, curation_uid, updates):
+        """Non-blocking database write using thread pool."""
+        def _write():
+            try:
+                dbi.write_gui_updates_to_db(db_path, curation_uid, updates)
+            except Exception as e:
+                logger.error(f"Async DB write failed: {e}")
+        
+        # Execute in separate thread to not block UI
+        thread = threading.Thread(target=_write, daemon=True)
+        thread.start()
+
+    # PHASE 1 OPTIMIZATION: Pre-index DataFrames by (inchi_key, adduct) for fast lookups
+    logger.info("Pre-indexing MS data by compound for fast lookups...")
+    index_start = time.time()
+
+    # Build lookup dictionaries keyed by (inchi_key, adduct)
+    ms1_by_compound = {}
+    ms2_by_compound = {}
+    ms2_hits_by_compound = {}
+
+    # Index MS1 data
+    for (inchi_key, adduct), group in analysis_gui_obj.ms1_df.groupby(["inchi_key", "adduct"], observed=True):
+        ms1_by_compound[(inchi_key, adduct)] = group
+
+    # Index MS2 data
+    for (inchi_key, adduct), group in analysis_gui_obj.ms2_df.groupby(["inchi_key", "adduct"], observed=True):
+        ms2_by_compound[(inchi_key, adduct)] = group
+
+    # Index MS2 hits data
+    for (inchi_key, adduct), group in analysis_gui_obj.ms2_hits_df.groupby(["inchi_key", "adduct"], observed=True):
+        ms2_hits_by_compound[(inchi_key, adduct)] = group
+
+    index_time = time.time() - index_start
+    logger.info(f"Indexed {len(ms1_by_compound)} unique compounds in {index_time:.2f}s")
+    logger.info(f"  MS1: {len(analysis_gui_obj.ms1_df)} rows → {len(ms1_by_compound)} groups")
+    logger.info(f"  MS2: {len(analysis_gui_obj.ms2_df)} rows → {len(ms2_by_compound)} groups")
+    logger.info(f"  MS2 hits: {len(analysis_gui_obj.ms2_hits_df)} rows → {len(ms2_hits_by_compound)} groups")
 
     def _compound_row(idx):
         return manual_curation_df.iloc[idx]
-
-    def _safe_float(value):
-        """Return a finite float or np.nan for null/invalid values."""
-        try:
-            if pd.isna(value):
-                return np.nan
-            out = float(value)
-            return out if np.isfinite(out) else np.nan
-        except (TypeError, ValueError):
-            return np.nan
-
-    def _fmt_num(value, precision=4):
-        """Format numeric values for plot titles, returning NA for missing values."""
-        fval = _safe_float(value)
-        if not np.isfinite(fval):
-            return "NA"
-        return f"{fval:.{precision}f}"
-
-    def _rt_bounds_from_row(row):
-        rt_min = _safe_float(row.get("rt_min"))
-        rt_max = _safe_float(row.get("rt_max"))
-
-        if not (np.isfinite(rt_min) and np.isfinite(rt_max)):
-            atlas_rt_min = _safe_float(row.get("atlas_rt_min"))
-            atlas_rt_max = _safe_float(row.get("atlas_rt_max"))
-            if np.isfinite(atlas_rt_min) and np.isfinite(atlas_rt_max):
-                rt_min, rt_max = atlas_rt_min, atlas_rt_max
-            else:
-                suggested_rt_min = _safe_float(row.get("suggested_rt_min"))
-                suggested_rt_max = _safe_float(row.get("suggested_rt_max"))
-                if np.isfinite(suggested_rt_min) and np.isfinite(suggested_rt_max):
-                    rt_min, rt_max = suggested_rt_min, suggested_rt_max
-                else:
-                    atlas_rt_peak = _safe_float(row.get("atlas_rt_peak"))
-                    if np.isfinite(atlas_rt_peak):
-                        rt_min, rt_max = atlas_rt_peak - 0.5, atlas_rt_peak + 0.5
-                    else:
-                        rt_min, rt_max = 0.0, 1.0
-
-        if rt_max < rt_min:
-            rt_min, rt_max = rt_max, rt_min
-        if not np.isfinite(rt_min):
-            rt_min = 0.0
-        if not np.isfinite(rt_max) or rt_max <= rt_min:
-            rt_max = rt_min + 1.0
-        return float(rt_min), float(rt_max)
 
     def _default_plot_bounds_from_row(row, pad=2.0):
         atlas_rt_min = row.get("atlas_rt_min")
@@ -225,7 +128,7 @@ def build_dash_app(
             base_min = float(atlas_rt_min)
             base_max = float(atlas_rt_max)
         else:
-            base_min, base_max = _rt_bounds_from_row(row)
+            base_min, base_max = float(row["rt_min"]), float(row["rt_max"])
 
         if base_max < base_min:
             base_min, base_max = base_max, base_min
@@ -238,9 +141,9 @@ def build_dash_app(
 
     def _load_state(compound_idx, ms2_idx=0, session_id=None, edit_seq=0):
         row = _compound_row(compound_idx)
-        rt_min, rt_max = _rt_bounds_from_row(row)
-        ms2_note = normalize_note_value(row.get("ms2_notes"), ms2_options)
-        ms1_note = normalize_note_value(row.get("ms1_notes"), ms1_options)
+        rt_min, rt_max = float(row["rt_min"]), float(row["rt_max"])
+        ms2_note = normalize_note_value(row.get("ms2_notes"), analysis_gui_obj.notes["ms2_notes"])
+        ms1_note = normalize_note_value(row.get("ms1_notes"), analysis_gui_obj.notes["ms1_notes"])
         other_notes_raw = row.get("other_notes", [])
         if other_notes_raw is None or other_notes_raw == "" or (isinstance(other_notes_raw, float) and np.isnan(other_notes_raw)):
             other_note = []
@@ -254,7 +157,7 @@ def build_dash_app(
                     other_note = list(other_notes_raw)
             except Exception:
                 other_note = [other_notes_raw] if other_notes_raw else []
-        other_note = [v for v in other_note if v in other_options]
+        other_note = [v for v in other_note if v in analysis_gui_obj.notes["other_notes"]]
         
         return {
             "session_id": session_id or str(uuid.uuid4()),
@@ -283,7 +186,13 @@ def build_dash_app(
     def _patch_rt_change(state, new_min, new_max):
         rt_min = max(0.0, min(new_min, new_max))
         rt_max = max(rt_min, new_max)
-        return _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4))
+        logger.debug(f"[_patch_rt_change] Called with new_min={new_min}, new_max={new_max} -> rt_min={rt_min}, rt_max={rt_max}")
+        # PHASE 4 FIX: Preserve cached_y_max to keep isomer boxes visible
+        new_state = _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4))
+        logger.debug(f"[_patch_rt_change] Returning new_state with edit_seq={new_state.get('edit_seq')}, rt_min={new_state.get('rt_min')}, rt_max={new_state.get('rt_max')}")
+        if "cached_y_max" in state:
+            new_state["cached_y_max"] = state["cached_y_max"]
+        return new_state
 
     def _find_starting_compound_idx():
         """Find the first compound with no ms2_notes set.
@@ -302,7 +211,7 @@ def build_dash_app(
 
     starting_compound_idx = _find_starting_compound_idx()
     if starting_compound_idx > 0:
-        logger.info(f"Resuming analysis at compound {_display_compound_idx(starting_compound_idx)}: "
+        logger.info(f"Resuming analysis at compound {starting_compound_idx+1}: "
                    f"{manual_curation_df.iloc[starting_compound_idx]['compound_name']}")
     else:
         logger.info("Starting new analysis at compound 1")
@@ -313,8 +222,8 @@ def build_dash_app(
     )
 
     # format of the app itself
-    ms1_height = "700px" if owner == "egsb" else "625px"
-    ms2_height = "700px" if owner == "egsb" else "550px"
+    ms1_height = "650px"
+    ms2_height = "550px"
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
@@ -359,8 +268,8 @@ def build_dash_app(
                                     html.Label("MS1 quality:", className="fw-bold", style={"fontSize": "1.5rem"}),
                                     dcc.RadioItems(
                                         id="ms1-radio",
-                                        options=[{"label": f"[{ms1_hotkeys[lbl]}] {lbl}", "value": lbl} for lbl in ms1_options],
-                                        value=ms1_options[0],
+                                        options=[{"label": f"[{analysis_gui_obj.notes['ms1_hotkeys'].get(lbl, '')}] {lbl}", "value": lbl} for lbl in analysis_gui_obj.notes["ms1_notes"]],
+                                        value=analysis_gui_obj.notes["ms1_notes"][0],
                                         labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
                                         inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
                                     ),
@@ -372,7 +281,7 @@ def build_dash_app(
                                     html.Label("MS2 quality:", className="fw-bold", style={"fontSize": "1.5rem"}),
                                     dcc.RadioItems(
                                         id="ms2-radio",
-                                        options=[{"label": f"[{ms2_hotkeys[val]}] {val}", "value": val} for val in ms2_options],
+                                        options=[{"label": f"[{analysis_gui_obj.notes['ms2_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["ms2_notes"]],
                                         value="",
                                         labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
                                         inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
@@ -385,7 +294,7 @@ def build_dash_app(
                                     html.Label("Other notes:", className="fw-bold", style={"fontSize": "1.5rem"}),
                                     dcc.Checklist(
                                         id="other-checklist",
-                                        options=[{"label": f"[{other_hotkeys[val]}] {val}", "value": val} for val in other_options],
+                                        options=[{"label": f"[{analysis_gui_obj.notes['other_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["other_notes"]],
                                         value=[],
                                         labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
                                         inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
@@ -565,14 +474,14 @@ def build_dash_app(
             if key in ms2_scans_cache:
                 return ms2_scans_cache[key]
 
-        ms2_sub = analysis_gui_obj.ms2_df[(analysis_gui_obj.ms2_df["inchi_key"] == inchi_key) & (analysis_gui_obj.ms2_df["adduct"] == adduct)]
-        if rt_min is not None and rt_max is not None:
+        # OPTIMIZED: Use pre-indexed lookup instead of filtering entire DataFrame
+        compound_key = (inchi_key, adduct)
+        ms2_sub = ms2_by_compound.get(compound_key, pd.DataFrame())
+        if not ms2_sub.empty and rt_min is not None and rt_max is not None:
             ms2_sub = ms2_sub[(ms2_sub["rt"] >= rt_min) & (ms2_sub["rt"] <= rt_max)]
-        hits_sub = analysis_gui_obj.ms2_hits_df[
-            (analysis_gui_obj.ms2_hits_df["inchi_key"] == inchi_key)
-            & (analysis_gui_obj.ms2_hits_df["adduct"] == adduct)
-        ]
-        if rt_min is not None and rt_max is not None:
+        
+        hits_sub = ms2_hits_by_compound.get(compound_key, pd.DataFrame())
+        if not hits_sub.empty and rt_min is not None and rt_max is not None:
             hits_sub = hits_sub[(hits_sub["rt"] >= rt_min) & (hits_sub["rt"] <= rt_max)]
 
         # Group by collision energy and get top N from each
@@ -604,13 +513,15 @@ def build_dash_app(
         out_i = [0 if (isinstance(i, float) and np.isnan(i)) else i for i in int_arr]
         return val_arr, out_i
 
-    @functools.lru_cache(maxsize=None)
+    # PHASE 2 OPTIMIZATION: Add size limits to prevent unbounded memory growth
+    # PHASE 4: Increased cache size for better hit rate with large datasets
+    @functools.lru_cache(maxsize=5000)
     def _parse_spectrum_cached(raw_spectrum):
         val, ints = json.loads(raw_spectrum)
         val, ints = _clean_spectrum(val, ints)
         return val, ints
 
-    @functools.lru_cache(maxsize=None)
+    @functools.lru_cache(maxsize=1000)
     def _parse_mz_cached(raw_mz):
         if raw_mz is None or (isinstance(raw_mz, float) and np.isnan(raw_mz)):
             return []
@@ -620,8 +531,186 @@ def build_dash_app(
             return list(raw_mz)
         return []
 
+    # PHASE 2 OPTIMIZATION: Create memoized wrapper for expensive metric computation
+    # Cache key: (compound_idx, rounded rt_min, rounded rt_max)
+    @functools.lru_cache(maxsize=200)
+    def _compute_window_ms1_metrics_cached(compound_idx, rt_min_round, rt_max_round):
+        """Cached version of metrics computation with rounded RT values."""
+        row = _compound_row(compound_idx)
+        inchi, adduct = row["inchi_key"], row["adduct"]
+        rt_min = float(rt_min_round)
+        rt_max = float(rt_max_round)
+        
+        def _ppm_error(measured_mz, atlas_mz):
+            if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(measured_mz):
+                return (float(measured_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
+            return np.nan
+
+        def _rt_delta(measured_rt, atlas_rt_peak):
+            if pd.notnull(atlas_rt_peak) and np.isfinite(measured_rt):
+                return float(measured_rt) - float(atlas_rt_peak)
+            return np.nan
+
+        if rt_max < rt_min:
+            rt_min, rt_max = rt_max, rt_min
+
+        fallback_rt_peak = (rt_min + rt_max) / 2.0
+        fallback_mz = row.get("best_ms1_mz", np.nan)
+        if pd.isna(fallback_mz):
+            fallback_mz = row.get("atlas_mz", np.nan)
+
+        compound_key = (inchi, adduct)
+        sub = ms1_by_compound.get(compound_key, pd.DataFrame())
+        
+        atlas_mz = row.get("atlas_mz", np.nan)
+        atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
+        if sub.empty:
+            fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
+            fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
+            fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
+            return {
+                "rt_peak": fallback_rt_peak,
+                "mz": fallback_mz_val,
+                "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
+                "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
+                "best_ms1_file": row.get("best_ms1_file", ""),
+                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
+                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
+                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
+                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
+                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
+            }
+
+        has_file_path = "file_path" in sub.columns
+        has_mz = "mz" in sub.columns
+        best_by_file = {}
+
+        cols = []
+        if has_file_path:
+            cols.append("file_path")
+        cols.append("raw_spectrum")
+        if has_mz:
+            cols.append("mz")
+        iter_rows = sub[cols].itertuples(index=False, name=None)
+
+        for row_vals in iter_rows:
+            if has_file_path and has_mz:
+                file_path, raw_spectrum, raw_mz = row_vals
+            elif has_file_path:
+                file_path, raw_spectrum = row_vals
+                raw_mz = None
+            elif has_mz:
+                raw_spectrum, raw_mz = row_vals
+                file_path = None
+            else:
+                (raw_spectrum,) = row_vals
+                file_path = None
+                raw_mz = None
+
+            try:
+                rt_vals, intensities = _parse_spectrum_cached(raw_spectrum)
+            except Exception:
+                continue
+
+            rt_arr = np.asarray(rt_vals, dtype=float)
+            int_arr = np.asarray(intensities, dtype=float)
+            if rt_arr.size == 0 or int_arr.size == 0:
+                continue
+
+            n = min(rt_arr.size, int_arr.size)
+            rt_arr = rt_arr[:n]
+            int_arr = int_arr[:n]
+
+            mz_arr = np.asarray([], dtype=float)
+            if raw_mz is not None:
+                try:
+                    mz_list = _parse_mz_cached(raw_mz)
+                    mz_arr = np.asarray(mz_list, dtype=float)
+                    if mz_arr.size > n:
+                        mz_arr = mz_arr[:n]
+                except Exception:
+                    pass
+
+            mask = (
+                (rt_arr >= rt_min)
+                & (rt_arr <= rt_max)
+                & np.isfinite(rt_arr)
+                & np.isfinite(int_arr)
+            )
+            if not np.any(mask):
+                continue
+
+            masked_int = np.where(mask, int_arr, -np.inf)
+            local_idx = int(np.argmax(masked_int))
+            local_intensity = float(masked_int[local_idx])
+            if not np.isfinite(local_intensity):
+                continue
+
+            local_rt = float(rt_arr[local_idx])
+            local_mz = np.nan
+            if mz_arr.size == n and local_idx < mz_arr.size and np.isfinite(mz_arr[local_idx]):
+                local_mz = float(mz_arr[local_idx])
+
+            prev = best_by_file.get(file_path)
+            if prev is None or local_intensity > prev[0]:
+                best_by_file[file_path] = (local_intensity, local_rt, local_mz)
+
+        if not best_by_file:
+            fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
+            fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
+            fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
+            return {
+                "rt_peak": fallback_rt_peak,
+                "mz": fallback_mz_val,
+                "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
+                "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
+                "best_ms1_file": row.get("best_ms1_file", ""),
+                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
+                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
+                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
+                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
+                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
+            }
+
+        rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
+        mz_vals = [mz for _, _, mz in best_by_file.values() if np.isfinite(mz)]
+        mz_mean = float(np.mean(mz_vals)) if mz_vals else (float(fallback_mz) if pd.notnull(fallback_mz) else np.nan)
+
+        best_file, best_triplet = max(best_by_file.items(), key=lambda kv: kv[1][0])
+        best_intensity, best_rt, best_mz = best_triplet
+        if not np.isfinite(best_mz):
+            best_mz = mz_mean
+
+        best_ppm_error = _ppm_error(best_mz, atlas_mz)
+        best_rt_error = _rt_delta(best_rt, atlas_rt_peak)
+        mz_error = _ppm_error(mz_mean, atlas_mz)
+        rt_error = _rt_delta(rt_peak, atlas_rt_peak)
+
+        return {
+            "rt_peak": rt_peak,
+            "mz": mz_mean,
+            "rt_error": float(rt_error) if np.isfinite(rt_error) else np.nan,
+            "mz_error": float(mz_error) if np.isfinite(mz_error) else np.nan,
+            "best_ms1_file": "" if best_file is None else str(best_file),
+            "best_ms1_rt": float(best_rt),
+            "best_ms1_mz": float(best_mz) if np.isfinite(best_mz) else np.nan,
+            "best_ms1_intensity": float(best_intensity),
+            "best_ms1_ppm_error": float(best_ppm_error) if np.isfinite(best_ppm_error) else np.nan,
+            "best_ms1_rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+        }
+
     def _compute_window_ms1_metrics(state):
-        """Compute all window-based MS1 metrics in one pass across file spectra."""
+        """Compute all window-based MS1 metrics in one pass across file spectra.
+        
+        OPTIMIZED: Routes to cached version with rounded RT values to enable memoization.
+        """
+        # Round RT values to 3 decimal places for cache key (0.001 min = 0.06 sec resolution)
+        rt_min_round = round(float(state["rt_min"]), 3)
+        rt_max_round = round(float(state["rt_max"]), 3)
+        return _compute_window_ms1_metrics_cached(state["compound_idx"], rt_min_round, rt_max_round)
+
+    def _compute_window_ms1_metrics_old(state):
+        """DEPRECATED: Old uncached version kept for reference."""
         def _ppm_error(measured_mz, atlas_mz):
             if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(measured_mz):
                 return (float(measured_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
@@ -644,10 +733,10 @@ def build_dash_app(
         if pd.isna(fallback_mz):
             fallback_mz = row.get("atlas_mz", np.nan)
 
-        sub = analysis_gui_obj.ms1_df[
-            (analysis_gui_obj.ms1_df["inchi_key"] == inchi)
-            & (analysis_gui_obj.ms1_df["adduct"] == adduct)
-        ]
+        # OPTIMIZED: Use pre-indexed lookup instead of filtering entire DataFrame
+        compound_key = (inchi, adduct)
+        sub = ms1_by_compound.get(compound_key, pd.DataFrame())
+        
         atlas_mz = row.get("atlas_mz", np.nan)
         atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
         if sub.empty:
@@ -660,11 +749,11 @@ def build_dash_app(
                 "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
                 "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
                 "best_ms1_file": row.get("best_ms1_file", ""),
-                "best_ms1_rt": _safe_float(row.get("best_ms1_rt")),
-                "best_ms1_mz": _safe_float(row.get("best_ms1_mz")),
-                "best_ms1_intensity": _safe_float(row.get("best_ms1_intensity")),
-                "best_ms1_ppm_error": _safe_float(row.get("best_ms1_ppm_error")),
-                "best_ms1_rt_error": _safe_float(row.get("best_ms1_rt_error")),
+                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
+                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
+                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
+                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
+                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
             }
 
         has_file_path = "file_path" in sub.columns
@@ -751,11 +840,11 @@ def build_dash_app(
                 "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
                 "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
                 "best_ms1_file": row.get("best_ms1_file", ""),
-                "best_ms1_rt": _safe_float(row.get("best_ms1_rt")),
-                "best_ms1_mz": _safe_float(row.get("best_ms1_mz")),
-                "best_ms1_intensity": _safe_float(row.get("best_ms1_intensity")),
-                "best_ms1_ppm_error": _safe_float(row.get("best_ms1_ppm_error")),
-                "best_ms1_rt_error": _safe_float(row.get("best_ms1_rt_error")),
+                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
+                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
+                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
+                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
+                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
             }
 
         rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
@@ -797,44 +886,58 @@ def build_dash_app(
             latest_flushed_seq_by_session[flush_key] = seq
 
         row = _compound_row(state["compound_idx"])
-        window_metrics = _compute_window_ms1_metrics(state)
-        updates = {
-            "mz": window_metrics["mz"],
-            "rt_min": state["rt_min"],
-            "rt_max": state["rt_max"],
-            "rt_peak": window_metrics["rt_peak"],
-            "rt_error": window_metrics["rt_error"],
-            "mz_error": window_metrics["mz_error"],
-            "best_ms1_file": window_metrics["best_ms1_file"],
-            "best_ms1_rt": window_metrics["best_ms1_rt"],
-            "best_ms1_mz": window_metrics["best_ms1_mz"],
-            "best_ms1_intensity": window_metrics["best_ms1_intensity"],
-            "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
-            "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
-            "ms2_notes": normalize_note_value(state.get("ms2_note"), ms2_options),
-            "ms1_notes": normalize_note_value(state.get("ms1_note"), ms1_options),
-            "other_notes": " // ".join(state.get("other_note", [])),
-            "analyst_notes": state.get("analyst_notes", ""),
-            "identification_notes": state.get("id_notes", ""),
-        }
+        
+        # PHASE 4 OPTIMIZATION: Move expensive computation to async thread
+        # Instead of blocking UI, compute metrics and write DB in background
+        def _async_flush_worker():
+            try:
+                window_metrics = _compute_window_ms1_metrics(state)
+                updates = {
+                    "mz": window_metrics["mz"],
+                    "rt_min": state["rt_min"],
+                    "rt_max": state["rt_max"],
+                    "rt_peak": window_metrics["rt_peak"],
+                    "rt_error": window_metrics["rt_error"],
+                    "mz_error": window_metrics["mz_error"],
+                    "best_ms1_file": window_metrics["best_ms1_file"],
+                    "best_ms1_rt": window_metrics["best_ms1_rt"],
+                    "best_ms1_mz": window_metrics["best_ms1_mz"],
+                    "best_ms1_intensity": window_metrics["best_ms1_intensity"],
+                    "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
+                    "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
+                    "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+                    "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                    "other_notes": " // ".join(state.get("other_note", [])),
+                    "analyst_notes": state.get("analyst_notes", ""),
+                    "identification_notes": state.get("id_notes", ""),
+                }
+                
+                # DB write
+                dbi.write_gui_updates_to_db(analysis_gui_obj.paths["project_db_path"], row["curation_uid"], updates)
+                
+                # Update in-memory DataFrame
+                idx = state["compound_idx"]
+                df_idx = manual_curation_df.index[idx]
+                with flush_lock:
+                    for col, val in updates.items():
+                        if col in manual_curation_df.columns:
+                            manual_curation_df.at[df_idx, col] = val
+            except Exception as e:
+                logger.error(f"Async flush worker failed: {e}")
+                traceback.print_exc()
+        
+        # Launch async worker thread - don't block UI!
+        thread = threading.Thread(target=_async_flush_worker, daemon=True)
+        thread.start()
 
-        # DB write outside lock
-        dbi.write_gui_updates_to_db(analysis_gui_obj.paths["project_db_path"], row["curation_uid"], updates)
-
-        idx = state["compound_idx"]
-        df_idx = manual_curation_df.index[idx]
-        with flush_lock:
-            for col, val in updates.items():
-                if col in manual_curation_df.columns:
-                    manual_curation_df.at[df_idx, col] = val
-
+        # Return immediately with optimistic state update
         state["last_saved"] = {
             "name": row["compound_name"],
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
-            "ms1": updates["ms1_notes"],
-            "ms2": updates["ms2_notes"],
-            "other": state["other_note"],
+            "ms1": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+            "ms2": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+            "other": state.get("other_note", []),
             "analyst_notes": state.get("analyst_notes", ""),
             "id_notes": state.get("id_notes", ""),
             "timestamp": time.strftime("%H:%M:%S"),
@@ -844,6 +947,9 @@ def build_dash_app(
 
     # main figures for ms data display
     def _make_ms1_figure(state, yaxis_scale="linear"):
+        import time
+        fig_start = time.time()
+        
         y_bottom = 0.0
 
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
@@ -856,9 +962,12 @@ def build_dash_app(
         rt_min, rt_max = state["rt_min"], state["rt_max"]
         x_window_min, x_window_max = _default_plot_bounds_from_row(row)
 
-        sub = analysis_gui_obj.ms1_df[(analysis_gui_obj.ms1_df["inchi_key"] == inchi) & (analysis_gui_obj.ms1_df["adduct"] == adduct)]
+        # OPTIMIZED: Use pre-indexed lookup instead of filtering entire DataFrame
+        compound_key = (inchi, adduct)
+        sub = ms1_by_compound.get(compound_key, pd.DataFrame())
 
         # Use the manual-curation row's best MS1 intensity as the y-axis reference max.
+        # PHASE 4 FIX: Cache y_max_data consistently to prevent isomer boxes from disappearing
         y_min_positive_data = None
         y_max_data = row.get("best_ms1_intensity", np.nan)
         if pd.isna(y_max_data):
@@ -867,22 +976,17 @@ def build_dash_app(
             y_max_data = float(y_max_data)
         if not np.isfinite(y_max_data) or y_max_data <= 0:
             y_max_data = 1.0
+        
+        # Store in state for consistency across redraws when RT changes
+        if "cached_y_max" not in state or state.get("force_y_recalc", False):
+            state["cached_y_max"] = y_max_data
+        else:
+            y_max_data = state["cached_y_max"]
+        
+        # PHASE 4 OPTIMIZATION: Skip expensive log scale calculation - use simple estimate
         if yaxis_scale == "log":
-            for fp in sub["file_path"].unique():
-                for _, r in sub[sub["file_path"] == fp].iterrows():
-                    try:
-                        _, intensity = _parse_spectrum_cached(r["raw_spectrum"])
-                        if intensity:
-                            positive_vals = [v for v in intensity if v > 0]
-                            if positive_vals:
-                                local_min = min(positive_vals)
-                                if y_min_positive_data is None:
-                                    y_min_positive_data = local_min
-                                else:
-                                    y_min_positive_data = min(y_min_positive_data, local_min)
-                    except Exception as e:
-                        traceback.print_exc()
-                        logger.error(f"MS1 parse error {fp}: {e}")
+            # Instead of parsing all files, use a reasonable minimum
+            y_min_positive_data = y_max_data / 1e6  # Assume 6 orders of magnitude dynamic range
         y_upper_bound = max(y_max_data * 1.1, 1.0)
 
         if yaxis_scale == "log":
@@ -893,105 +997,91 @@ def build_dash_app(
 
         fig = go.Figure()
         
-        isomer_str = "No Isomers Found"
-        try:
-            isomers = _parse_isomers(row.get("isomers")) # all study isomers for this compound
-            if isomers:
-                isomer_lines = []
-                resolved_isomers = []
-                # First, build resolved_isomers as before
-                for iso in isomers:
-                    iso_inchi = iso.get('inchi_key', '')
-                    iso_name = iso.get('compound_name', '')
-                    iso_adduct = iso.get('adduct', '')
-                    iso_rt = iso.get('rt', None)
-                    iso_mz = iso.get('mz', None)
-                    mask = (
-                        (manual_curation_df["inchi_key"] == iso_inchi) &
-                        (manual_curation_df["compound_name"] == iso_name) &
-                        (manual_curation_df["adduct"] == iso_adduct)
-                    )
-                    isomer_match = manual_curation_df[mask]
-                    if len(isomer_match) > 1:
-                        raise ValueError(f"There were multiple isomer_match of isomer {iso_name} {iso_adduct} {iso_inchi} to the manual curation object")
-                    if isomer_match.empty:
-                        continue
-                    if "remove" in isomer_match.iloc[0]["ms1_notes"].lower():
-                        continue
-                    iso_df_idx = isomer_match.index[0]
-                    iso_display_idx = iso_df_idx
-                    iso_rt_min = float(isomer_match.iloc[0]["rt_min"])
-                    iso_rt_max = float(isomer_match.iloc[0]["rt_max"])
-                    resolved_isomers.append({
-                        "display_idx": iso_display_idx,
-                        "name": iso_name,
-                        "adduct": iso_adduct,
-                        "rt_min": iso_rt_min,
-                        "rt_max": iso_rt_max,
-                        "rt": iso_rt,
-                        "mz": iso_mz,
-                        "df_idx": iso_df_idx,
-                    })
-                # Now, for each isomer, check if its window overlaps with any other
-                if resolved_isomers:
-                    def _window_overlaps(a_min, a_max, b_min, b_max):
-                        return (a_min <= b_max) and (b_min <= a_max)
-
-                    # The current compound's RT window
-                    current_rt_min = state["rt_min"]
-                    current_rt_max = state["rt_max"]
-
-                    for i, iso in enumerate(resolved_isomers):
-                        overlaps = False
-                        # Check overlap with current compound window (skip self if this is the current compound)
-                        if _window_overlaps(iso["rt_min"], iso["rt_max"], current_rt_min, current_rt_max):
+        # PHASE 4 OPTIMIZATION: Cache isomer metadata, draw rectangles separately
+        compound_idx = state["compound_idx"]
+        if compound_idx in isomer_string_cache:
+            resolved_isomers = isomer_string_cache[compound_idx]
+        else:
+            resolved_isomers = []
+            try:
+                isomers = _parse_isomers(row.get("isomers"))
+                if isomers:
+                    # Build resolved_isomers list (cache this part)
+                    for iso in isomers:
+                        iso_inchi = iso.get('inchi_key', '')
+                        iso_name = iso.get('compound_name', '')
+                        iso_adduct = iso.get('adduct', '')
+                        iso_rt = iso.get('rt', None)
+                        iso_mz = iso.get('mz', None)
+                        mask = (
+                            (manual_curation_df["inchi_key"] == iso_inchi) &
+                            (manual_curation_df["compound_name"] == iso_name) &
+                            (manual_curation_df["adduct"] == iso_adduct)
+                        )
+                        isomer_match = manual_curation_df[mask]
+                        if len(isomer_match) > 1:
+                            raise ValueError(f"Multiple isomer matches for {iso_name} {iso_adduct}")
+                        if isomer_match.empty:
+                            continue
+                        if "remove" in isomer_match.iloc[0]["ms1_notes"].lower():
+                            continue
+                        iso_df_idx = isomer_match.index[0]
+                        resolved_isomers.append({
+                            "display_idx": iso_df_idx,
+                            "name": iso_name,
+                            "adduct": iso_adduct,
+                            "rt_min": float(isomer_match.iloc[0]["rt_min"]),
+                            "rt_max": float(isomer_match.iloc[0]["rt_max"]),
+                            "rt": iso_rt,
+                            "mz": iso_mz,
+                            "df_idx": iso_df_idx,
+                        })
+            except Exception as exc:
+                traceback.print_exc()
+                logger.error(f"Isomer detection failed with {exc}")
+            
+            # Store in cache (metadata only, not rectangles)
+            isomer_string_cache[compound_idx] = resolved_isomers
+        
+        # PHASE 4 FIX: Draw isomer rectangles outside cache block (always draw)
+        isomer_lines = []
+        if resolved_isomers:
+            def _window_overlaps(a_min, a_max, b_min, b_max):
+                return (a_min <= b_max) and (b_min <= a_max)
+            
+            current_rt_min = state["rt_min"]
+            current_rt_max = state["rt_max"]
+            
+            for i, iso in enumerate(resolved_isomers):
+                # Check overlap with current compound window
+                overlaps = _window_overlaps(iso["rt_min"], iso["rt_max"], current_rt_min, current_rt_max)
+                # Check overlap with other isomers
+                if not overlaps:
+                    for j, other in enumerate(resolved_isomers):
+                        if i != j and _window_overlaps(iso["rt_min"], iso["rt_max"], other["rt_min"], other["rt_max"]):
                             overlaps = True
-                        # Check overlap with other isomers
-                        for j, other in enumerate(resolved_isomers):
-                            if i == j:
-                                continue
-                            if _window_overlaps(iso["rt_min"], iso["rt_max"], other["rt_min"], other["rt_max"]):
-                                overlaps = True
-                                break
-                        fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"  # lighter true red if overlaps, else lighter blue
-                        iso_rect_trace = go.Scatter(
-                            x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
-                            y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
-                            mode="lines",
-                            fill="toself",
-                            fillcolor=fillcolor,
-                            line=dict(width=0, color="rgba(0,0,0,0)"),
-                            showlegend=False,
-                            hoverinfo="skip",
-                        )
-                        fig.add_trace(iso_rect_trace)
-                        # fig.add_annotation(
-                        #     x=iso["rt_min"],
-                        #     y=0.5,
-                        #     xref="x", yref="paper",
-                        #     text=f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})",
-                        #     showarrow=False,
-                        #     font=dict(size=8, color="dimgray"),
-                        #     xanchor="right", yanchor="middle",
-                        #     textangle=-90,
-                        #     bgcolor="rgba(255,255,255,0.7)",
-                        #     bordercolor="gray", borderwidth=1,
-                        #     captureevents=False,
-                        # )
-                        rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
-                        mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
-                        isomer_lines.append(
-                            f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
-                            f"RT: {rt_str}  |  m/z: {mz_str}"
-                        )
-                    isomer_str = " // ".join(isomer_lines) if resolved_isomers else "No Isomers Found"
-                else:
-                    isomer_str = "No Isomers Found"
-            else:
-                isomer_str = "No Isomers Found"
-        except Exception as exc:
-            traceback.print_exc()
-            logger.error(f"Isomer detection failed with {exc}")
+                            break
+                
+                fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"
+                fig.add_trace(go.Scatter(
+                    x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
+                    y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
+                    mode="lines",
+                    fill="toself",
+                    fillcolor=fillcolor,
+                    line=dict(width=0, color="rgba(0,0,0,0)"),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ))
+                rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
+                mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
+                isomer_lines.append(
+                    f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
+                    f"RT: {rt_str}  |  m/z: {mz_str}"
+                )
+        
+        isomer_str = " // ".join(isomer_lines) if resolved_isomers else "No Isomers Found"
+        
         # find number of isomers in isomer_str and add line breaks every 3 isomers for readability
         if isomer_str != "No Isomers Found":
             isomer_list = isomer_str.split(" // ")
@@ -1003,37 +1093,75 @@ def build_dash_app(
         # Now add MS1 data traces (they will appear on top of isomer rectangles)
         highlighted_files = state.get("highlighted_files") or []
         has_highlights = bool(highlighted_files)
-        for fp in sub["file_path"].unique():
+        
+        # PHASE 4 RADICAL OPTIMIZATION: Combine traces by visual properties to reduce count
+        # Group files by (color, line_width, opacity) and create ONE trace per group
+        trace_groups = {}
+        
+        # Expand the window for MS1 plotting by 0.5 min on each side
+        expanded_rt_min = state["rt_min"] - 1
+        expanded_rt_max = state["rt_max"] + 1
+
+        for fp, fp_group in sub.groupby("file_path", observed=True):
             short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fp).split(".")[0].split("_")[11:]))
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fp.lower()), "gray")
             is_highlighted = fp in highlighted_files
             line_width = 3.5 if is_highlighted else 1.5
             opacity = 1.0 if (is_highlighted or not has_highlights) else 0.25
-            for _, r in sub[sub["file_path"] == fp].iterrows():
+
+            # Create group key based on visual properties
+            group_key = (color, line_width, opacity)
+            if group_key not in trace_groups:
+                trace_groups[group_key] = {"x": [], "y": [], "names": [], "files": []}
+
+            # Process all rows for this file (usually just 1)
+            for _, r in fp_group.iterrows():
                 try:
                     rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
-                    fig.add_trace(go.Scatter(
-                        x=rt, y=intensity, mode="lines", name=short_name,
-                        line=dict(color=color, width=line_width),
-                        opacity=opacity,
-                        customdata=[fp] * len(rt),
-                        hovertemplate="%{x:.3f} min<br>%{y:.2e}",
-                    ))
+                    # Only keep points within the expanded RT window
+                    filtered = [(x, y) for x, y in zip(rt, intensity) if x is not None and expanded_rt_min <= x <= expanded_rt_max]
+                    if filtered:
+                        filtered_rt, filtered_intensity = zip(*filtered)
+                    else:
+                        filtered_rt, filtered_intensity = [], []
+                    # Add this file's data to the group, using NaN separator for discontinuity
+                    if trace_groups[group_key]["x"] and filtered_rt:  # Not first in group, add separator
+                        trace_groups[group_key]["x"].append(None)
+                        trace_groups[group_key]["y"].append(None)
+                    trace_groups[group_key]["x"].extend(filtered_rt)
+                    trace_groups[group_key]["y"].extend(filtered_intensity)
+                    trace_groups[group_key]["names"].append(short_name)
+                    trace_groups[group_key]["files"].append(fp)
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"MS1 parse error {fp}: {e}")
+        
+        # Create one Scattergl trace per visual group (typically 2-4 traces instead of 27!)
+        for (color, line_width, opacity), data in trace_groups.items():
+            if data["x"]:
+                group_name = f"{len(data['names'])} files: {', '.join(data['names'][:3])}{'...' if len(data['names']) > 3 else ''}"
+                fig.add_trace(go.Scattergl(
+                    x=data["x"],
+                    y=data["y"],
+                    mode="lines",
+                    name=group_name,
+                    line=dict(color=color, width=line_width),
+                    opacity=opacity,
+                    hovertemplate="%{x:.3f} min<br>%{y:.2e}",
+                    showlegend=False,
+                ))
+        
+        logger.debug(f"MS1 traces created: {len(trace_groups)} combined traces from {len(sub['file_path'].unique())} files")
 
         # Atlas RT peak line (black, static)
-        atlas_rt_peak = _safe_float(row.get("atlas_rt_peak"))
-        if np.isfinite(atlas_rt_peak):
-            fig.add_trace(go.Scatter(
-                x=[atlas_rt_peak, atlas_rt_peak],
-                y=[y_bottom, y_max_data],
-                mode="lines",
-                line=dict(color="black", width=2.5),
-                showlegend=False,
-                hoverinfo="skip",
-            ))
+        fig.add_trace(go.Scatter(
+            x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
+            y=[y_bottom, y_max_data],
+            mode="lines",
+            line=dict(color="black", width=2.5),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
 
         # Suggested RT lines (orange, static)
         if pd.notnull(row.get("suggested_rt_min")):
@@ -1071,12 +1199,12 @@ def build_dash_app(
             name="RT max", editable=True,
         )
 
-        compound_display_idx = _display_compound_idx(state["compound_idx"])
+        compound_display_idx = state["compound_idx"]+1
 
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi}</span><br>"
-            f"Atlas RT: {_fmt_num(row.get('atlas_rt_peak'), 4)}  |  Meas RT: {_fmt_num(row.get('best_ms1_rt'), 4)}  |  RT Δ: {_fmt_num(row.get('best_ms1_rt_error'), 3)}<br>"
-            f"Atlas m/z: {_fmt_num(row.get('atlas_mz'), 4)}  |  ppm Δ: {_fmt_num(row.get('best_ms1_ppm_error'), 2)}<br>"
+            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['best_ms1_rt']:.4f}  |  RT Δ: {row['best_ms1_rt_error']:.3f}<br>"
+            f"Atlas m/z: {row['atlas_mz']:.4f}  |  ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
             f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
         )
 
@@ -1084,17 +1212,20 @@ def build_dash_app(
             title=dict(text=ms1_title_text, x=0.5, xanchor="center", font=dict(size=18)),
             xaxis_title="RT",
             yaxis_title="Intensity",
-            hovermode="closest", showlegend=False,
-            margin=dict(l=50, r=20, t=125, b=40), dragmode="zoom",
+            hovermode="closest", 
+            showlegend=False,
+            margin=dict(l=50, r=20, t=125, b=40), 
+            dragmode="zoom",
             plot_bgcolor="white",
             uirevision=f"ms1-{state['compound_idx']}-{yaxis_scale}",
             xaxis=dict(
-                rangeslider=dict(visible=True, thickness=0.1),
+                #rangeslider=dict(visible=False),
                 showgrid=False,
                 zeroline=False,
                 range=[x_window_min, x_window_max],
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
+                autorange=False,
             ),
             yaxis=dict(
                 showgrid=False,
@@ -1104,9 +1235,12 @@ def build_dash_app(
                 fixedrange=False,
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
+                autorange=False,
             ),
         )
 
+        fig_time = time.time() - fig_start
+        logger.debug(f"_make_ms1_figure completed in {fig_time:.3f}s")
         return fig
 
     def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, row_idx, col_idx, colors=None, default_color="red", line_width_px=3):
@@ -1286,14 +1420,14 @@ def build_dash_app(
             y_pad = y_span * 0.01
             TEXT_HEIGHT_OFFSET = y_span * 0.01
 
-            # Find top 5 peaks by intensity
+            # PHASE 4 OPTIMIZATION: Reduce peak labels from 5 to 3 for speed
             top_label_idxs = {
                 idx
                 for idx, _ in sorted(
                     enumerate(label_points),
                     key=lambda item: abs(item[1][1]),
                     reverse=True,
-                )[:5]
+                )[:3]  # Reduced from 5 to 3 for faster rendering
             }
 
             # Sort top labels by x-position for overlap detection
@@ -1306,6 +1440,8 @@ def build_dash_app(
             prev_mz = None
             stagger_level = 0
 
+            # PHASE 4 OPTIMIZATION: Batch annotations to reduce overhead
+            annotations_batch = []
             for idx, mz_val, y_val in top_labels_sorted:
                 y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
                 
@@ -1320,7 +1456,7 @@ def build_dash_app(
                 xref_coord = "x" if col_idx == 1 else f"x{col_idx}"
                 yref_coord = "y" if col_idx == 1 else f"y{col_idx}"
                 
-                fig.add_annotation(
+                annotations_batch.append(dict(
                     x=mz_val,
                     y=y_position,
                     text=f"{mz_val:.4f}",
@@ -1331,9 +1467,12 @@ def build_dash_app(
                     textangle=0,
                     xref=xref_coord,
                     yref=yref_coord,
-                    row=1, col=col_idx
-                )
+                ))
                 prev_mz = mz_val
+            
+            # Add all annotations at once (more efficient than one-by-one)
+            for ann in annotations_batch:
+                fig.add_annotation(ann)
 
             # Update axes for this subplot
             # xaxis_name = "xaxis" if col_idx == 1 else f"xaxis{col_idx}"
@@ -1389,13 +1528,14 @@ def build_dash_app(
                 yanchor="bottom",
             )
 
-        # Overall layout
+        # Overall layout - PHASE 4 OPTIMIZATION: Simplify for speed
         fig.update_layout(
             barmode="overlay",
             hovermode="closest",
             margin=dict(l=50, r=20, t=120, b=40),
             plot_bgcolor="white",
             height=550,
+            showlegend=False,  # Disable legend for speed
         )
 
         return fig
@@ -1438,7 +1578,11 @@ def build_dash_app(
                 logger.error(f"init_store: _flush_to_db failed: {exc}")
                 flush_error = f"Save failed: {type(exc).__name__}: {exc}"
 
-        ms2_scans_cache.clear()
+        # OPTIMIZED: Don't clear entire cache, let it grow to reasonable size
+        # Only clear if cache gets too large (> 1000 entries)
+        if len(ms2_scans_cache) > 1000:
+            ms2_scans_cache.clear()
+        
         new_state = _load_state(
             compound_idx,
             session_id=(old_state or {}).get("session_id"),
@@ -1458,15 +1602,15 @@ def build_dash_app(
         if (
             delta == 1
             and force_eval
-            and "remove" not in state.get("ms1_note", ms1_options[0]).lower()
-            and should_require_note_selection(state.get("ms2_note", ms2_options[0]), ms2_options)
+            and "remove" not in state.get("ms1_note", analysis_gui_obj.notes["ms1_notes"][0]).lower()
+            and should_require_note_selection(state.get("ms2_note", analysis_gui_obj.notes["ms2_notes"][0]), analysis_gui_obj.notes["ms2_notes"])
         ):
             ms2_warning = "Please select MS2 quality note before proceeding"
         if (
             delta == 1
             and force_eval
-            and "remove" not in state.get("ms1_note", ms1_options[0]).lower()
-            and should_require_note_selection(state.get("ms1_note", ms1_options[0]), ms1_options)
+            and "remove" not in state.get("ms1_note", analysis_gui_obj.notes["ms1_notes"][0]).lower()
+            and should_require_note_selection(state.get("ms1_note", analysis_gui_obj.notes["ms1_notes"][0]), analysis_gui_obj.notes["ms1_notes"])
         ):
             ms1_warning = "Please select MS1 quality note before proceeding"
         return ms2_warning, ms1_warning
@@ -1506,7 +1650,11 @@ def build_dash_app(
             logger.error(f"navigate_compound: _flush_to_db failed: {exc}")
             flush_error = f"Save failed: {type(exc).__name__}: {exc}"
 
-        ms2_scans_cache.clear()
+        # OPTIMIZED: Don't clear entire cache, let it grow to reasonable size
+        # Only clear if cache gets too large (> 1000 entries)
+        if len(ms2_scans_cache) > 1000:
+            ms2_scans_cache.clear()
+        
         new_state = _load_state(
             new_idx,
             session_id=state.get("session_id"),
@@ -1606,7 +1754,7 @@ def build_dash_app(
     def set_other_note(vals, state):
         if state is None:
             raise dash.exceptions.PreventUpdate
-        filtered_vals = [v for v in vals if v in other_options] if vals else []
+        filtered_vals = [v for v in vals if v in analysis_gui_obj.notes["other_notes"]] if vals else []
         if filtered_vals == state.get("other_note"):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, other_note=filtered_vals)
@@ -1665,6 +1813,14 @@ def build_dash_app(
             if y_moved:
                 return _patch_with_seq(state)
             raise dash.exceptions.PreventUpdate
+        
+        # PHASE 2 OPTIMIZATION: Threshold check to avoid unnecessary recomputation
+        # Only update if change is significant (> 0.001 min = 0.06 seconds)
+        rt_min_change = abs(new_min - state["rt_min"])
+        rt_max_change = abs(new_max - state["rt_max"])
+        if rt_min_change < 0.001 and rt_max_change < 0.001:
+            raise dash.exceptions.PreventUpdate
+        
         return _patch_rt_change(state, new_min, new_max)
 
     @app.callback(
@@ -1709,9 +1865,9 @@ def build_dash_app(
 
 
         ALL_HOTKEYS = (
-            set(ms2_key_to_label)
-            | set(ms1_key_to_label)
-            | set(other_key_to_label)
+            set(analysis_gui_obj.notes["ms2_key_to_label"])
+            | set(analysis_gui_obj.notes["ms1_key_to_label"])
+            | set(analysis_gui_obj.notes["other_key_to_label"])
             | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
         )
 
@@ -1743,6 +1899,7 @@ def build_dash_app(
             rt_max = round(rt_max + 0.05, 4); changed = True
 
         if changed:
+            logger.debug(f"[_handle_keyboard_inner] RT nudge key={key}, new rt_min={rt_min}, new rt_max={rt_max}")
             return _patch_rt_change(state, rt_min, rt_max), dash.no_update
 
         if key in ("l", "ArrowUp"):
@@ -1796,7 +1953,11 @@ def build_dash_app(
                 traceback.print_exc()
                 logger.error(f"handle_keyboard navigation _flush_to_db failed: {exc}")
                 flush_error = f"Save failed: {type(exc).__name__}: {exc}"
-            ms2_scans_cache.clear()
+            # OPTIMIZED: Don't clear entire cache, let it grow to reasonable size
+            # Only clear if cache gets too large (> 1000 entries)
+            if len(ms2_scans_cache) > 1000:
+                ms2_scans_cache.clear()
+            
             new_state = _load_state(
                 new_idx,
                 session_id=state.get("session_id"),
@@ -1811,15 +1972,15 @@ def build_dash_app(
                 new_state["ms1_warning"] = ms1_warning
             return new_state, new_idx
 
-        if key in ms2_key_to_label:
-            return _patch_with_seq(state, ms2_note=ms2_key_to_label[key]), dash.no_update
-        if key in ms1_key_to_label:
-            return _patch_with_seq(state, ms1_note=ms1_key_to_label[key]), dash.no_update
-        if key in other_key_to_label:
+        if key in analysis_gui_obj.notes["ms2_key_to_label"]:
+            return _patch_with_seq(state, ms2_note=analysis_gui_obj.notes["ms2_key_to_label"][key]), dash.no_update
+        if key in analysis_gui_obj.notes["ms1_key_to_label"]:
+            return _patch_with_seq(state, ms1_note=analysis_gui_obj.notes["ms1_key_to_label"][key]), dash.no_update
+        if key in analysis_gui_obj.notes["other_key_to_label"]:
             current = state.get("other_note")
             if not isinstance(current, list):
                 current = []
-            label = other_key_to_label[key]
+            label = analysis_gui_obj.notes["other_key_to_label"][key]
             if label in current:
                 current = [v for v in current if v != label]
             else:
@@ -1839,12 +2000,100 @@ def build_dash_app(
     def update_figures(state, yaxis_scale):
         if state is None:
             raise dash.exceptions.PreventUpdate
+        
+        # PHASE 4 OPTIMIZATION: Add timing logs to diagnose remaining delays
+        import time
+        update_start = time.time()
+        
+        # PHASE 4 RADICAL OPTIMIZATION: Separate data cache from RT-dependent elements
+        # Cache key includes only fields that affect DATA (not RT lines which are fast to update)
+        compound_idx = state.get("compound_idx")
+        rt_min = state.get("rt_min", 0)
+        rt_max = state.get("rt_max", 0)
+        ms2_idx = state.get("ms2_idx", 0)
+        highlighted_files = tuple(sorted(state.get("highlighted_files") or []))
+        
+        # For MS1: INCLUDE RT bounds in cache key so figure is regenerated when window changes
+        # Round RT to 0.01 min (0.6 sec) to increase cache hits during small adjustments
+        rt_min_rounded = round(float(rt_min) * 100) / 100  # 0.01 min resolution
+        rt_max_rounded = round(float(rt_max) * 100) / 100
+
+        ms1_cache_key = (compound_idx, yaxis_scale, highlighted_files, rt_min_rounded, rt_max_rounded)
+        ms2_cache_key = (compound_idx, rt_min_rounded, rt_max_rounded, ms2_idx)
+        
+        # Debug logging to identify cache misses
+        logger.debug(f"Cache keys - MS1: {ms1_cache_key}, MS2: {ms2_cache_key}")
+        
+        with figure_cache_lock:
+            ms1_cached = ms1_cache_key in figure_cache
+            ms2_cached = ms2_cache_key in figure_cache
+            
+            if ms1_cached and ms2_cached:
+                cached_ms1 = figure_cache[ms1_cache_key]
+                cached_ms2 = figure_cache[ms2_cache_key]
+                cache_time = time.time() - update_start
+                logger.debug(f"Figure cache FULL HIT for compound {compound_idx} ({cache_time:.3f}s)")
+                # Return cached figures with current banner state
+                flush_err = state.get("flush_error")
+                ms2_warning = state.get("ms2_warning")
+                ms1_warning = state.get("ms1_warning")
+                banners = []
+                if flush_err:
+                    banners.append(html.Div(
+                        f"⚠ {flush_err}",
+                        style={"color": "red", "fontSize": "14px", "fontWeight": "bold", "marginBottom": "8px"},
+                    ))
+                if ms2_warning:
+                    banners.append(html.Div(
+                        ms2_warning,
+                        style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
+                    ))
+                if ms1_warning:
+                    banners.append(html.Div(
+                        ms1_warning,
+                        style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
+                    ))
+                return cached_ms1, cached_ms2, banners
+        
+        # Partial or full cache miss - regenerate as needed
+        logger.debug(f"Figure cache MISS for compound {compound_idx} (MS1={'HIT' if ms1_cached else 'MISS'}, MS2={'HIT' if ms2_cached else 'MISS'}), regenerating...")
+        
         flush_err = state.get("flush_error")
         ms2_warning = state.get("ms2_warning")
         ms1_warning = state.get("ms1_warning")
         try:
-            ms1_fig = _make_ms1_figure(state, yaxis_scale)
-            ms2_fig = _make_ms2_figure(state)
+            # Generate only what's not cached
+            if not ms1_cached:
+                ms1_start = time.time()
+                ms1_fig = _make_ms1_figure(state, yaxis_scale)
+                ms1_time = time.time() - ms1_start
+                logger.debug(f"MS1 figure generated in {ms1_time:.3f}s")
+                with figure_cache_lock:
+                    figure_cache[ms1_cache_key] = ms1_fig
+            else:
+                ms1_fig = figure_cache[ms1_cache_key]
+            
+            if not ms2_cached:
+                ms2_start = time.time()
+                ms2_fig = _make_ms2_figure(state)
+                ms2_time = time.time() - ms2_start
+                logger.debug(f"MS2 figure generated in {ms2_time:.3f}s")
+                with figure_cache_lock:
+                    figure_cache[ms2_cache_key] = ms2_fig
+            else:
+                ms2_fig = figure_cache[ms2_cache_key]
+            
+            total_time = time.time() - update_start
+            logger.debug(f"Total update_figures time: {total_time:.3f}s")
+            
+            # Limit cache size
+            with figure_cache_lock:
+                if len(figure_cache) > 100:  # Increased from 50
+                    # Remove oldest entries (keep last 80)
+                    keys_to_remove = list(figure_cache.keys())[:20]
+                    for key in keys_to_remove:
+                        figure_cache.pop(key, None)
+            
             banners = []
             if flush_err:
                 banners.append(html.Div(
@@ -1886,7 +2135,7 @@ def build_dash_app(
         if state is None:
             raise dash.exceptions.PreventUpdate
         row = _compound_row(state["compound_idx"])
-        comp_txt = f"Compound {_display_compound_idx(state['compound_idx'])} of {len(compound_options)}"
+        comp_txt = f"Compound {state['compound_idx']+1} of {len(compound_options)}"
         
         # Get scans by collision energy for detailed count
         scans_by_energy = _get_ms2_scans(row["inchi_key"], row["adduct"], state["rt_min"], state["rt_max"])
@@ -1932,10 +2181,10 @@ def build_dash_app(
     def sync_controls(state):
         if state is None:
             # Return default values if state is missing
-            return "", "No identification notes", ms1_options[0], ms2_options[0], [], 0
-        ms2_val = state["ms2_note"] if state["ms2_note"] in ms2_options else ms2_options[0]
-        ms1_val = state["ms1_note"] if state["ms1_note"] in ms1_options else ms1_options[0]
-        other_val = [v for v in state["other_note"] if v in other_options] if isinstance(state["other_note"], list) else []
+            return "", "No identification notes", analysis_gui_obj.notes["ms1_notes"][0], analysis_gui_obj.notes["ms2_notes"][0], [], 0
+        ms2_val = state["ms2_note"] if state["ms2_note"] in analysis_gui_obj.notes["ms2_notes"] else analysis_gui_obj.notes["ms2_notes"][0]
+        ms1_val = state["ms1_note"] if state["ms1_note"] in analysis_gui_obj.notes["ms1_notes"] else analysis_gui_obj.notes["ms1_notes"][0]
+        other_val = [v for v in state["other_note"] if v in analysis_gui_obj.notes["other_notes"]] if isinstance(state["other_note"], list) else []
         analyst_notes = state.get("analyst_notes", "")
         id_notes = state.get("id_notes", "No identification notes")
         compound_idx = state.get("compound_idx", 0)

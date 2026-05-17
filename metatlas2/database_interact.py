@@ -1897,7 +1897,6 @@ def apply_istd_curation_to_ema(
 
 def load_and_filter_gui_inputs(
         analysis_gui_obj,
-        override_parameters: dict = None
 ):
     """
     Load GUI inputs from database and optionally apply second-stage filtering.
@@ -1914,7 +1913,7 @@ def load_and_filter_gui_inputs(
     To permanently save these stricter filters, the analyst should update the config
     and run a new analysis with incremented analysis_number.
     """
-    _overrides = override_parameters or {}
+    _overrides = analysis_gui_obj.override_parameters or {}
     
     apply_istd_to_ema = (
         _overrides.get("apply_istd_to_ema")
@@ -1939,7 +1938,7 @@ def load_and_filter_gui_inputs(
     )
     
     # Apply second-stage filtering if override parameters differ from workflow params
-    if override_parameters:
+    if analysis_gui_obj.override_parameters:
         # Check if any override parameters actually differ
         params_differ = False
         override_values = {}
@@ -2022,7 +2021,6 @@ def load_and_filter_gui_inputs(
     analysis_gui_obj.ms1_df = ms1_df
     analysis_gui_obj.ms2_df = ms2_df
     analysis_gui_obj.ms2_hits_df = ms2_hits_df
-    analysis_gui_obj.override_parameters = override_parameters
     return
 
 def get_manual_curation_entries(
@@ -2387,9 +2385,7 @@ def load_experimental_data_from_db(
                 )
             )
 
-    logger.info(
-        "load_experimental_data_from_db: loaded %d compounds, %d MS1 file-groups, "
-        "%d MS2 file-groups, %d MS2 hit file-groups.",
+    logger.info("Loaded %d compounds, %d MS1 file-groups, %d MS2 file-groups, %d MS2 hit file-groups.",
         len(exp_data.manual_curation),
         len(exp_data.ms1_data),
         len(exp_data.ms2_data),
@@ -2593,6 +2589,52 @@ def filter_experimental_data(
     )
     return filtered, n_removed
 
+def validate_override_parameters(override_parameters):
+    if not isinstance(override_parameters, dict):
+        raise ValueError("override_parameters must be a dict")
+    if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
+        raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
+    if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
+        raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
+    if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
+        raise ValueError("override_parameters['ms1_min_peak_intensity'] must be a number or None")
+    if not isinstance(override_parameters["ms1_min_num_points"], (type(None), int)):
+        raise ValueError("override_parameters['ms1_min_num_points'] must be an integer or None")
+    if not isinstance(override_parameters["ms2_min_score"], (type(None), (int, float))):
+        raise ValueError("override_parameters['ms2_min_score'] must be a number or None")
+    if not isinstance(override_parameters["ms2_min_matching_frags"], (type(None), int)):
+        raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
+    if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
+        raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
+    if not isinstance(override_parameters.get("apply_istd_to_ema"), (type(None), bool)):
+        raise ValueError("override_parameters['apply_istd_to_ema'] must be a boolean or None")
+    if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
+        raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
+    if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
+        raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
+    if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
+        raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
+    if isinstance(override_parameters["note_options_overrides"], dict):
+        for note_type, options in override_parameters["note_options_overrides"].items():
+            if note_type not in ["ms1_notes", "ms2_notes", "other_notes"]:
+                raise ValueError(f"Invalid note type in note_options_overrides: {note_type}")
+            if not isinstance(options, dict):
+                raise ValueError(f"Options for {note_type} in note_options_overrides must be a dict mapping option text to hotkeys")
+            for opt_text, hotkey in options.items():
+                if not isinstance(opt_text, str) or not isinstance(hotkey, str):
+                    raise ValueError(f"Invalid option in note_options_overrides for {note_type}: {opt_text}: {hotkey}")
+
+
+def _ensure_df_columns(df, required_cols):
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame(columns=required_cols)
+    out = df.copy()
+    if out.empty and len(out.columns) == 0:
+        return pd.DataFrame(columns=required_cols)
+    for col in required_cols:
+        if col not in out.columns:
+            out[col] = pd.Series(dtype="object")
+    return out
 
 def experimental_data_to_dataframes(
     exp_data: "ExperimentalData",
@@ -2628,6 +2670,23 @@ def experimental_data_to_dataframes(
         if exp_data.ms2_hits
         else pd.DataFrame()
     )
+
+    ms1_df = _ensure_df_columns(
+        ms1_df,
+        ["inchi_key", "adduct", "file_path", "raw_spectrum", "mz"],
+    )
+    ms2_df = _ensure_df_columns(
+        ms2_df,
+        ["inchi_key", "adduct", "file_path", "rt", "collision_energy",
+         "raw_spectrum", "precursor_MZ", "precursor_intensity"],
+    )
+    ms2_hits_df = _ensure_df_columns(
+        ms2_hits_df,
+        ["inchi_key", "adduct", "file_path", "rt", "score", "num_matches",
+         "mz_theoretical", "ppm_error", "qry_spectrum", "ref_spectrum",
+         "aligned_fragment_colors", "ref_name"],
+    )
+
     return mc_df, ms1_df, ms2_df, ms2_hits_df
 
 

@@ -314,7 +314,10 @@ def run_analysis_gui(
         project_name=project_name, 
         rt_alignment_number=rt_alignment_number, 
         analysis_number=analysis_number,
+        override_parameters=override_parameters
     )
+
+    analysis_gui_obj.get_note_options()
 
     analysis_gui_obj.post_autoid_atlas_obj = Atlas.from_database(
         database_path=analysis_gui_obj.paths['project_db_path'],
@@ -328,7 +331,6 @@ def run_analysis_gui(
     logger.info("Loading and filtering GUI inputs...")
     dbi.load_and_filter_gui_inputs(
         analysis_gui_obj=analysis_gui_obj,
-        override_parameters=override_parameters
     )
 
     logger.info("Launching Analysis GUI...")

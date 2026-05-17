@@ -12,6 +12,7 @@ import metatlas2.lcmsruns_tools as lrt
 import metatlas2.analysis_summary as asm
 import metatlas2.logging_config as lcf
 import metatlas2.run_targeted_analysis as rtg
+import metatlas2.note_options as gno
 logger = lcf.get_logger('workflow_objects')
 
 @dataclass
@@ -671,6 +672,7 @@ class AnalysisGUI:
     config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
+    notes: Dict[str, Any] = field(default_factory=dict)
 
     # Attributes added during analysis
     workflow_params: Dict[str, Any] = field(default_factory=dict)
@@ -687,7 +689,7 @@ class AnalysisGUI:
     ms2_hits_df: Optional[pd.DataFrame] = None
     override_parameters: Dict[str, Any] = field(default_factory=dict)
 
-    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int):
+    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int, override_parameters: Optional[Dict[str, Any]] = None):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
@@ -699,6 +701,43 @@ class AnalysisGUI:
         self.project_name = project_name
         self.config = ldt.load_metatlas2_config(config_path)
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
+        if override_parameters is not None:
+            self.override_parameters = override_parameters
+
+    def get_note_options(self):
+        """Get note options from config for manual curation."""
+        
+        owner = (self.config.get('WORKFLOWS', {}).get('PATHS', {}).get('owner') or "jgi").lower()
+        ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=owner)
+        dbi.validate_override_parameters(self.override_parameters)
+        ms1_options, ms1_hotkeys = gno.get_note_options_and_hotkeys(
+            self.override_parameters["note_options_overrides"].get("ms1_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
+            ms1_notes_opts,
+        )
+        ms2_options, ms2_hotkeys = gno.get_note_options_and_hotkeys(
+            self.override_parameters["note_options_overrides"].get("ms2_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
+            ms2_notes_opts,
+        )
+        other_options, other_hotkeys = gno.get_note_options_and_hotkeys(
+            self.override_parameters["note_options_overrides"].get("other_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
+            other_notes_opts,
+        )
+
+        ms1_key_to_label = {v: k for k, v in ms1_hotkeys.items()}
+        ms2_key_to_label = {v: k for k, v in ms2_hotkeys.items()}
+        other_key_to_label = {v: k for k, v in other_hotkeys.items()}
+
+        self.notes = {
+            "ms1_notes": ms1_options,
+            "ms1_hotkeys": ms1_hotkeys,
+            "ms2_notes": ms2_options,
+            "ms2_hotkeys": ms2_hotkeys,
+            "other_notes": other_options,
+            "other_hotkeys": other_hotkeys,
+            "ms1_key_to_label": ms1_key_to_label,
+            "ms2_key_to_label": ms2_key_to_label,
+            "other_key_to_label": other_key_to_label
+        }
 
 @dataclass
 class AnalysisSummary:
