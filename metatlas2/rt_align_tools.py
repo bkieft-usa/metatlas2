@@ -227,14 +227,16 @@ def build_rt_alignment_model(
     logger.info("Building RT alignment model from experimental data and atlas...")
     exclude_inchikeys = rt_align.rt_alignment_params.get('exclude_inchikeys', [])
 
-    # Build a lookup for MS1Data by (inchi_key, adduct)
+    # Build a lookup for MS1Data by mz_rt_uid
     ms1_lookup = {}
     for ms1 in experimental_data.ms1_data:
-        key = (ms1.inchi_key, ms1.adduct)
-        ms1_lookup.setdefault(key, []).append(ms1)
+        key = getattr(ms1, 'mz_rt_uid', None)
+        if key is not None:
+            ms1_lookup.setdefault(key, []).append(ms1)
 
     compound_stats = []
     for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Building RT alignment model"):
+        mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
         compound_uid = compound_mzrt.compound_uid
@@ -247,7 +249,7 @@ def build_rt_alignment_model(
         if exclude_inchikeys and inchi_key in exclude_inchikeys:
             continue
 
-        ms1_list = ms1_lookup.get((inchi_key, adduct), [])
+        ms1_list = ms1_lookup.get(mz_rt_uid, [])
         if not ms1_list:
             continue
 
@@ -280,6 +282,7 @@ def build_rt_alignment_model(
 
         compound_stats.append({
             'compound_uid': compound_uid,
+            'mz_rt_uid': mz_rt_uid,
             'compound_name': compound_name,
             'inchi_key': inchi_key,
             'adduct': adduct,
@@ -348,7 +351,7 @@ def build_rt_alignment_model(
     best_model['compounds_used_for_modeling'] = reliable_compounds['compound_uid'].tolist()
 
     logger.info(f"Compound RT Statistics:")
-    logger.info(f"\n{compound_rt_stats[['inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 'observation_count', 'exp_rt_std']].to_string()}")
+    logger.info(f"\n{compound_rt_stats[['compound_name', 'inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 'observation_count', 'exp_rt_std']].to_string()}")
 
     rt_align.rt_alignment_model = best_model
     rt_align.modeling_data = modeling_results_df
@@ -377,20 +380,21 @@ def create_file_matching_summary(
     total_peaks_extracted = 0
     file_match_counts = {}
 
-    # Build a lookup for MS1Data by (inchi_key, adduct)
+
+    # Build a lookup for MS1Data by mz_rt_uid
     ms1_lookup = {}
     for ms1 in experimental_data.ms1_data:
-        key = (ms1.inchi_key, ms1.adduct)
-        ms1_lookup.setdefault(key, []).append(ms1)
+        key = getattr(ms1, 'mz_rt_uid', None)
+        if key is not None:
+            ms1_lookup.setdefault(key, []).append(ms1)
 
     for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Creating file matching summary"):
-        inchi_key = compound_mzrt.inchi_key
-        adduct = compound_mzrt.adduct
+        mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
         total_compounds += 1
         has_matches = False
         compound_peaks = 0
 
-        ms1_list = ms1_lookup.get((inchi_key, adduct), [])
+        ms1_list = ms1_lookup.get(mz_rt_uid, [])
         if not ms1_list:
             compounds_without_matches += 1
             continue

@@ -90,26 +90,26 @@ def build_dash_app(
         thread = threading.Thread(target=_write, daemon=True)
         thread.start()
 
-    # PHASE 1 OPTIMIZATION: Pre-index DataFrames by (inchi_key, adduct) for fast lookups
-    logger.info("Pre-indexing MS data by compound for fast lookups...")
+    # PHASE 1 OPTIMIZATION: Pre-index DataFrames by mz_rt_uid for fast lookups
+    logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
     index_start = time.time()
 
-    # Build lookup dictionaries keyed by (inchi_key, adduct)
+    # Build lookup dictionaries keyed by mz_rt_uid
     ms1_by_compound = {}
     ms2_by_compound = {}
     ms2_hits_by_compound = {}
 
     # Index MS1 data
-    for (inchi_key, adduct), group in analysis_gui_obj.ms1_df.groupby(["inchi_key", "adduct"], observed=True):
-        ms1_by_compound[(inchi_key, adduct)] = group
+    for mz_rt_uid, group in analysis_gui_obj.ms1_df.groupby(["mz_rt_uid"], observed=True):
+        ms1_by_compound[mz_rt_uid] = group
 
     # Index MS2 data
-    for (inchi_key, adduct), group in analysis_gui_obj.ms2_df.groupby(["inchi_key", "adduct"], observed=True):
-        ms2_by_compound[(inchi_key, adduct)] = group
+    for mz_rt_uid, group in analysis_gui_obj.ms2_df.groupby(["mz_rt_uid"], observed=True):
+        ms2_by_compound[mz_rt_uid] = group
 
     # Index MS2 hits data
-    for (inchi_key, adduct), group in analysis_gui_obj.ms2_hits_df.groupby(["inchi_key", "adduct"], observed=True):
-        ms2_hits_by_compound[(inchi_key, adduct)] = group
+    for mz_rt_uid, group in analysis_gui_obj.ms2_hits_df.groupby(["mz_rt_uid"], observed=True):
+        ms2_hits_by_compound[mz_rt_uid] = group
 
     index_time = time.time() - index_start
     logger.info(f"Indexed {len(ms1_by_compound)} unique compounds in {index_time:.2f}s")
@@ -450,37 +450,41 @@ def build_dash_app(
             return []
         bounds = []
         for iso in isomers:
-            mask = (
-                (manual_curation_df["inchi_key"] == iso.get("inchi_key", "")) &
-                (manual_curation_df["compound_name"] == iso.get("compound_name", "")) &
-                (manual_curation_df["adduct"] == iso.get("adduct", ""))
-            )
-            isomer_match = manual_curation_df[mask]
+            mz_rt_uid = iso.get("mz_rt_uid", None)
+            if mz_rt_uid is None:
+                continue
+            isomer_match = manual_curation_df[manual_curation_df["mz_rt_uid"] == mz_rt_uid]
             if isomer_match.empty:
                 continue
             bounds.append((float(isomer_match.iloc[0]["rt_min"]), float(isomer_match.iloc[0]["rt_max"])))
         return sorted(bounds, key=lambda x: x[0])
 
-    def _get_ms2_scans(inchi_key, adduct, rt_min=None, rt_max=None):
+    def _get_ms2_scans(row, rt_min=None, rt_max=None):
         """Return dictionary of sorted, capped scans DataFrames grouped by collision energy.
 
         Returns a dict: {collision_energy: DataFrame} with top N hits from each collision energy.
         Results are cached by (inchi_key, adduct, top_n_hits, rt_min, rt_max).
         """
-        key = (inchi_key, adduct, int(top_n_hits),
+        mz_rt_uid = row["mz_rt_uid"] if isinstance(row, dict) and "mz_rt_uid" in row else None
+        if mz_rt_uid is None:
+            # fallback for legacy call signature
+            mz_rt_uid = None
+            if isinstance(row, dict):
+                mz_rt_uid = row.get("mz_rt_uid", None)
+            if mz_rt_uid is None and "mz_rt_uid" in analysis_gui_obj.ms2_df.columns:
+                mz_rt_uid = analysis_gui_obj.ms2_df.iloc[0]["mz_rt_uid"]
+        key = (mz_rt_uid, int(top_n_hits),
                round(rt_min, 4) if rt_min is not None else None,
                round(rt_max, 4) if rt_max is not None else None)
         with cache_lock:
             if key in ms2_scans_cache:
                 return ms2_scans_cache[key]
 
-        # OPTIMIZED: Use pre-indexed lookup instead of filtering entire DataFrame
-        compound_key = (inchi_key, adduct)
-        ms2_sub = ms2_by_compound.get(compound_key, pd.DataFrame())
+        ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
         if not ms2_sub.empty and rt_min is not None and rt_max is not None:
             ms2_sub = ms2_sub[(ms2_sub["rt"] >= rt_min) & (ms2_sub["rt"] <= rt_max)]
         
-        hits_sub = ms2_hits_by_compound.get(compound_key, pd.DataFrame())
+        hits_sub = ms2_hits_by_compound.get(mz_rt_uid, pd.DataFrame())
         if not hits_sub.empty and rt_min is not None and rt_max is not None:
             hits_sub = hits_sub[(hits_sub["rt"] >= rt_min) & (hits_sub["rt"] <= rt_max)]
 
@@ -494,7 +498,7 @@ def build_dash_app(
                 scans_by_energy[ce] = group.sort_values("rt").head(top_n_hits)
         else:
             # Merge with hits and group by collision energy
-            merged = pd.merge(ms2_sub, hits_sub, on=["inchi_key", "adduct", "file_path", "rt"], how="left")
+            merged = pd.merge(ms2_sub, hits_sub, on=["mz_rt_uid", "file_path", "rt"], how="left")
             merged["score"] = merged["score"].fillna(0)
             for ce, group in merged.groupby("collision_energy"):
                 scans_by_energy[ce] = group.sort_values(["score", "rt"], ascending=[False, True]).head(top_n_hits)
@@ -505,7 +509,7 @@ def build_dash_app(
         return ms2_scans_cache[key]
 
     def _count_ms2_scans(row, rt_min=None, rt_max=None):
-        scans_by_energy = _get_ms2_scans(row["inchi_key"], row["adduct"], rt_min, rt_max)
+        scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
         # Return max count across all collision energies for navigation
         return max((len(df) for df in scans_by_energy.values()), default=0)
 
@@ -537,7 +541,7 @@ def build_dash_app(
     def _compute_window_ms1_metrics_cached(compound_idx, rt_min_round, rt_max_round):
         """Cached version of metrics computation with rounded RT values."""
         row = _compound_row(compound_idx)
-        inchi, adduct = row["inchi_key"], row["adduct"]
+        mz_rt_uid = row["mz_rt_uid"]
         rt_min = float(rt_min_round)
         rt_max = float(rt_max_round)
         
@@ -559,8 +563,7 @@ def build_dash_app(
         if pd.isna(fallback_mz):
             fallback_mz = row.get("atlas_mz", np.nan)
 
-        compound_key = (inchi, adduct)
-        sub = ms1_by_compound.get(compound_key, pd.DataFrame())
+        sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
         
         atlas_mz = row.get("atlas_mz", np.nan)
         atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
@@ -722,7 +725,7 @@ def build_dash_app(
             return np.nan
 
         row = _compound_row(state["compound_idx"])
-        inchi, adduct = row["inchi_key"], row["adduct"]
+        mz_rt_uid = row["mz_rt_uid"]
         rt_min = float(state["rt_min"])
         rt_max = float(state["rt_max"])
         if rt_max < rt_min:
@@ -734,8 +737,7 @@ def build_dash_app(
             fallback_mz = row.get("atlas_mz", np.nan)
 
         # OPTIMIZED: Use pre-indexed lookup instead of filtering entire DataFrame
-        compound_key = (inchi, adduct)
-        sub = ms1_by_compound.get(compound_key, pd.DataFrame())
+        sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
         
         atlas_mz = row.get("atlas_mz", np.nan)
         atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
@@ -958,13 +960,14 @@ def build_dash_app(
             lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
     
         row = _compound_row(state["compound_idx"])
-        inchi, adduct = row["inchi_key"], row["adduct"]
+        mz_rt_uid = row["mz_rt_uid"]
+        adduct = row.get("adduct", "")
+        inchi_key = row.get("inchi_key", "")
         rt_min, rt_max = state["rt_min"], state["rt_max"]
         x_window_min, x_window_max = _default_plot_bounds_from_row(row)
 
         # OPTIMIZED: Use pre-indexed lookup instead of filtering entire DataFrame
-        compound_key = (inchi, adduct)
-        sub = ms1_by_compound.get(compound_key, pd.DataFrame())
+        sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
 
         # Use the manual-curation row's best MS1 intensity as the y-axis reference max.
         # PHASE 4 FIX: Cache y_max_data consistently to prevent isomer boxes from disappearing
@@ -1090,15 +1093,32 @@ def build_dash_app(
                     [" // ".join(isomer_list[i:i+3]) for i in range(0, len(isomer_list), 3)]
                 )
 
+
+        # --- Add mean EIC trace for rangeslider ---
+        mean_eic_rt = row.get("mean_eic_rt", [])
+        mean_eic_intensity = row.get("mean_eic_intensity", [])
+        if mean_eic_rt and mean_eic_intensity and len(mean_eic_rt) == len(mean_eic_intensity):
+            fig.add_trace(go.Scattergl(
+                x=mean_eic_rt,
+                y=mean_eic_intensity,
+                mode="lines",
+                name="Mean EIC (slider)",
+                line=dict(color="#222", width=2, dash="dot"),
+                opacity=0.7,
+                hoverinfo="skip",
+                showlegend=False,
+                visible="legendonly",  # Hide from main plot, but will show in rangeslider
+            ))
+
         # Now add MS1 data traces (they will appear on top of isomer rectangles)
         highlighted_files = state.get("highlighted_files") or []
         has_highlights = bool(highlighted_files)
-        
+
         # PHASE 4 RADICAL OPTIMIZATION: Combine traces by visual properties to reduce count
         # Group files by (color, line_width, opacity) and create ONE trace per group
         trace_groups = {}
-        
-        # Expand the window for MS1 plotting by 0.5 min on each side
+
+        # Expand the window for MS1 plotting by x min on each side
         expanded_rt_min = state["rt_min"] - 1
         expanded_rt_max = state["rt_max"] + 1
 
@@ -1135,7 +1155,7 @@ def build_dash_app(
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"MS1 parse error {fp}: {e}")
-        
+
         # Create one Scattergl trace per visual group (typically 2-4 traces instead of 27!)
         for (color, line_width, opacity), data in trace_groups.items():
             if data["x"]:
@@ -1150,7 +1170,7 @@ def build_dash_app(
                     hovertemplate="%{x:.3f} min<br>%{y:.2e}",
                     showlegend=False,
                 ))
-        
+
         logger.debug(f"MS1 traces created: {len(trace_groups)} combined traces from {len(sub['file_path'].unique())} files")
 
         # Atlas RT peak line (black, static)
@@ -1202,7 +1222,7 @@ def build_dash_app(
         compound_display_idx = state["compound_idx"]+1
 
         ms1_title_text = (
-            f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi}</span><br>"
+            f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
             f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['best_ms1_rt']:.4f}  |  RT Δ: {row['best_ms1_rt_error']:.3f}<br>"
             f"Atlas m/z: {row['atlas_mz']:.4f}  |  ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
             f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
@@ -1219,13 +1239,14 @@ def build_dash_app(
             plot_bgcolor="white",
             uirevision=f"ms1-{state['compound_idx']}-{yaxis_scale}",
             xaxis=dict(
-                #rangeslider=dict(visible=False),
+                rangeslider=dict(visible=True),
                 showgrid=False,
                 zeroline=False,
                 range=[x_window_min, x_window_max],
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
                 autorange=False,
+                rangeslider_thickness=0.12,
             ),
             yaxis=dict(
                 showgrid=False,
@@ -1281,10 +1302,9 @@ def build_dash_app(
 
     def _make_ms2_figure(state):
         row = _compound_row(state["compound_idx"])
-        inchi, adduct = row["inchi_key"], row["adduct"]
         rt_min, rt_max = state["rt_min"], state["rt_max"]
 
-        scans_by_energy = _get_ms2_scans(inchi, adduct, rt_min, rt_max)
+        scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
 
         if len(scans_by_energy) == 0:
             fig = go.Figure()
@@ -2138,7 +2158,7 @@ def build_dash_app(
         comp_txt = f"Compound {state['compound_idx']+1} of {len(compound_options)}"
         
         # Get scans by collision energy for detailed count
-        scans_by_energy = _get_ms2_scans(row["inchi_key"], row["adduct"], state["rt_min"], state["rt_max"])
+        scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
         if scans_by_energy:
             ce_counts = {ce: len(df) for ce, df in scans_by_energy.items()}
             max_scans = max(ce_counts.values())

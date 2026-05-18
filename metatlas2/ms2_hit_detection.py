@@ -39,13 +39,13 @@ def _worker_init(refs_by_inchi_key, workflow_params):
     _worker_params = workflow_params
 
 def _process_job_global(job):
-    inchi_key, adduct, file_path, ms2_df = job
+    mz_rt_uid, file_path, ms2_df = job
     try:
-        hits_df = _find_hits_from_ms2_df(ms2_df, inchi_key, _worker_refs, _worker_params)
-        return (inchi_key, adduct, file_path, hits_df)
+        hits_df = _find_hits_from_ms2_df(ms2_df, mz_rt_uid, _worker_refs, _worker_params)
+        return (mz_rt_uid, file_path, hits_df)
     except Exception as e:
-        logger.error(f"Error in hit detection for {inchi_key} {adduct} {file_path}: {e}")
-        return (inchi_key, adduct, file_path, pd.DataFrame())
+        logger.error(f"Error in hit detection for {mz_rt_uid} {file_path}: {e}")
+        return (mz_rt_uid, file_path, pd.DataFrame())
 
 
 def find_ms2_hits(auto_id_obj) -> None:
@@ -57,6 +57,9 @@ def find_ms2_hits(auto_id_obj) -> None:
     from metatlas2.workflow_objects import MS2Hit
 
     database_filter = auto_id_obj.config.get('WORKFLOWS').get('PATHS').get('msms_refs_db_filter', "metatlas")
+
+    refs_by_mz_rt_uid = {getattr(ms2, 'mz_rt_uid', None): [] for ms2 in auto_id_obj.experimental_data.ms2_data if getattr(ms2, 'mz_rt_uid', None)}
+    # For now, still load refs_by_inchi_key, but will map to mz_rt_uid below
     refs_by_inchi_key = ldt.load_msms_refs_file(
         Path(auto_id_obj.paths['msms_refs_path']),
         database_filter=database_filter,
@@ -64,13 +67,19 @@ def find_ms2_hits(auto_id_obj) -> None:
     if not refs_by_inchi_key:
         raise FileNotFoundError("No reference database found - skipping hit detection")
 
-    total_refs = sum(len(v) for v in refs_by_inchi_key.values())
-    logger.info(f"Loaded {total_refs} reference spectra across {len(refs_by_inchi_key)} InChI keys.")
+    # Map refs_by_inchi_key to refs_by_mz_rt_uid using ms2_data
+    for ms2 in auto_id_obj.experimental_data.ms2_data:
+        mz_rt_uid = getattr(ms2, 'mz_rt_uid', None)
+        if mz_rt_uid:
+            refs_by_mz_rt_uid[mz_rt_uid] = refs_by_inchi_key.get(getattr(ms2, 'inchi_key', ''), [])
+
+    total_refs = sum(len(v) for v in refs_by_mz_rt_uid.values())
+    logger.info(f"Loaded {total_refs} reference spectra across {len(refs_by_mz_rt_uid)} mz_rt_uids.")
 
     jobs = [
-        (ms2.inchi_key, ms2.adduct, ms2.filename, ms2.data)
+        (ms2.mz_rt_uid, ms2.filename, ms2.data)
         for ms2 in auto_id_obj.experimental_data.ms2_data
-        if not ms2.data.empty
+        if not ms2.data.empty and getattr(ms2, 'mz_rt_uid', None)
     ]
     if not jobs:
         logger.warning("No MS2 data found, skipping hit detection")
@@ -85,7 +94,7 @@ def find_ms2_hits(auto_id_obj) -> None:
         with ProcessPoolExecutor(
             max_workers=max_workers,
             initializer=_worker_init,
-            initargs=(refs_by_inchi_key, auto_id_obj.workflow_params)
+            initargs=(refs_by_mz_rt_uid, auto_id_obj.workflow_params)
         ) as executor:
             futures = [executor.submit(_process_job_global, job) for job in jobs]
             with tqdm(total=len(jobs), desc="Detecting MS2 hits") as pbar:
@@ -99,24 +108,24 @@ def find_ms2_hits(auto_id_obj) -> None:
                 results.append(_process_job_global(job))
                 pbar.update(1)
 
+
     # Assign results to ExperimentalData.ms2_hits as MS2Hit objects
-    for inchi_key, adduct, filename, ms2_hits_df in results:
+    for mz_rt_uid, filename, ms2_hits_df in results:
         ms2_hit_obj = MS2Hit(
-            inchi_key=inchi_key,
-            adduct=adduct,
+            mz_rt_uid=mz_rt_uid,
             filename=filename,
             data=ms2_hits_df
         )
         auto_id_obj.experimental_data.ms2_hits.append(ms2_hit_obj)
 
-    # Limit to top N hits per compound (inchi_key + adduct) by score, across all files
+    # Limit to top N hits per compound (mz_rt_uid) by score, across all files
     max_hits = 100
-    hits_by_compound: Dict[Tuple[str, str], List] = {}
-    logger.info(f"Limiting to top {max_hits} hits per compound (InChI key + adduct) across all files...")
+    hits_by_uid: Dict[str, List] = {}
+    logger.info(f"Limiting to top {max_hits} hits per compound (mz_rt_uid) across all files...")
     for hit_obj in auto_id_obj.experimental_data.ms2_hits:
-        hits_by_compound.setdefault((hit_obj.inchi_key, hit_obj.adduct), []).append(hit_obj)
+        hits_by_uid.setdefault(hit_obj.mz_rt_uid, []).append(hit_obj)
 
-    for (inchi_key, adduct), hit_objs in hits_by_compound.items():
+    for mz_rt_uid, hit_objs in hits_by_uid.items():
         hit_objs_with_data = [h for h in hit_objs if not h.data.empty and 'score' in h.data.columns]
         if not hit_objs_with_data:
             continue
@@ -130,17 +139,17 @@ def find_ms2_hits(auto_id_obj) -> None:
             for hit_obj in hit_objs_with_data:
                 mask = combined['_hit_obj_id'] == id(hit_obj)
                 hit_obj.data = combined.loc[mask].drop(columns='_hit_obj_id').reset_index(drop=True)
-            logger.debug(f"Compound {inchi_key} {adduct}: trimmed {total_for_compound} hits to top {max_hits} by score.")
+            logger.debug(f"Compound {mz_rt_uid}: trimmed {total_for_compound} hits to top {max_hits} by score.")
 
     # Summary
     hits_list = [
-        (h.inchi_key, h.adduct, h.filename, len(h.data))
+        (h.mz_rt_uid, h.filename, len(h.data))
         for h in auto_id_obj.experimental_data.ms2_hits
         if not h.data.empty
     ]
-    total_hits = sum(n for _, _, _, n in hits_list)
-    unique_compounds = len({(ik, ad) for ik, ad, _, _ in hits_list})
-    unique_files = len({fn for _, _, fn, _ in hits_list})
+    total_hits = sum(n for _, _, n in hits_list)
+    unique_compounds = len({uid for uid, _, _ in hits_list})
+    unique_files = len({fn for _, fn, _ in hits_list})
     logger.info(
         f"Hit detection complete: {total_hits} total hits across "
         f"{unique_compounds} compounds and {unique_files} files."
@@ -149,8 +158,8 @@ def find_ms2_hits(auto_id_obj) -> None:
 
 def _find_hits_from_ms2_df(
     ms2_df: pd.DataFrame,
-    inchi_key: str,
-    refs_by_inchi_key: Dict[str, list],
+    mz_rt_uid: str,
+    refs_by_mz_rt_uid: Dict[str, list],
     workflow_params: Dict[str, Any]
 ) -> pd.DataFrame:
     """
@@ -168,7 +177,8 @@ def _find_hits_from_ms2_df(
     if ms2_df.empty:
         return pd.DataFrame()
 
-    ref_spectra = refs_by_inchi_key.get(inchi_key)
+
+    ref_spectra = refs_by_mz_rt_uid.get(mz_rt_uid)
     if not ref_spectra:
         return pd.DataFrame()
 
@@ -233,7 +243,7 @@ def _find_hits_from_ms2_df(
             ref_name = ref.get('name') or ref.get('compound_name') or ref.get('id') or 'Unknown'
 
             all_hits.append({
-                'inchi_key': inchi_key,
+                'mz_rt_uid': mz_rt_uid,
                 'database': ref.get('database', 'unknown'),
                 'ref_id': ref.get('id', ''),
                 'ref_name': ref_name,

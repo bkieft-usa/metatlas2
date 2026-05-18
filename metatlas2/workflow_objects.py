@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import os
 from dataclasses import asdict
+from tqdm.auto import tqdm
 
 import metatlas2.database_interact as dbi
 import metatlas2.load_tools as ldt
@@ -329,14 +330,15 @@ class Atlas:
         created_date = meta.get('created_date', '')
         source = meta.get('source', '')
         source_atlas_uid = meta.get('source_atlas_uid', None)
+
+        # Use mz_rt_uid as the unique key for each CompoundMZRT
         compound_mzrts = {}
-        for row_index, row in atlas_df.iterrows():
-            # Keep a unique dictionary key per row so repeated inchi_key/adduct entries are not overwritten.
-            inchi_key = row.get('inchi_key', '')
-            adduct = row.get('adduct', '')
-            key = f"{inchi_key}|{adduct}|{row_index}"
+        for _, row in atlas_df.iterrows():
             compound_mzrt = CompoundMZRT.from_atlas_row(row)
-            compound_mzrts[key] = compound_mzrt
+            mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
+            if not mz_rt_uid:
+                raise ValueError("Each row must have a valid mz_rt_uid to be used as a unique key in compound_mzrts.")
+            compound_mzrts[mz_rt_uid] = compound_mzrt
 
         return cls(
             atlas_uid=atlas_uid,
@@ -370,42 +372,47 @@ class Atlas:
         config = ldt.load_atlas_config(config_path)
         paths = rtg.set_up_paths(config=config)
         main_db_path = paths.get("main_db_path", None)
-        
+
         atlases = []
         summary = []
+        # Flatten all atlas jobs into a list for single progress bar
+        atlas_jobs = []
         for chrom, pol_dict in config['ATLASES'].items():
             for pol, pol_config in pol_dict.items():
                 for analysis_type, atlas_info in pol_config.items():
                     atlas_entries = atlas_info if isinstance(atlas_info, list) else [atlas_info]
                     for entry_index, atlas_entry in enumerate(atlas_entries, start=1):
-                        if not atlas_entry.get('path'):
-                            logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
-                            continue
-                        try:
-                            atlas_compounds_df = ldt.load_atlas_input(atlas_entry['path'])
-                            atlas_name = atlas_entry.get('name', 'Unnamed Atlas')
-                            if len(atlas_entries) > 1 and not atlas_name:
-                                atlas_name = f"{analysis_type} {chrom} {pol} #{entry_index}"
-                            atlas_obj = dbi.create_new_atlas_from_dataframe(
-                                atlas_df=atlas_compounds_df,
-                                atlas_name=atlas_name,
-                                atlas_description=atlas_entry.get('desc', 'No Description'),
-                                analysis_type=analysis_type,
-                                chromatography=chrom,
-                                polarity=pol,
-                                atlas_file_path=atlas_entry.get('path', 'No File Origin Provided'),
-                                main_db_path=main_db_path
-                            )
-                            dbi.save_atlas_to_database(atlas_obj, main_db_path)
-                            logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
-                            atlases.append(atlas_obj)
-                            summary.append({
-                                'atlas_uid': atlas_obj.atlas_uid,
-                                'atlas_name': atlas_obj.atlas_name,
-                                'compound_count': len(atlas_obj.compound_mzrts)
-                            })
-                        except Exception as e:
-                            logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol} entry {entry_index}: {e}")
+                        atlas_jobs.append((chrom, pol, analysis_type, atlas_entry, entry_index, len(atlas_entries)))
+
+        for chrom, pol, analysis_type, atlas_entry, entry_index, n_entries in tqdm(atlas_jobs, desc="Creating atlases from config"):
+            if not atlas_entry.get('path'):
+                logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
+                continue
+            try:
+                atlas_compounds_df = ldt.load_atlas_input(atlas_entry['path'])
+                atlas_name = atlas_entry.get('name', 'Unnamed Atlas')
+                if n_entries > 1 and not atlas_name:
+                    atlas_name = f"{analysis_type} {chrom} {pol} #{entry_index}"
+                atlas_obj = dbi.create_new_atlas_from_dataframe(
+                    atlas_df=atlas_compounds_df,
+                    atlas_name=atlas_name,
+                    atlas_description=atlas_entry.get('desc', 'No Description'),
+                    analysis_type=analysis_type,
+                    chromatography=chrom,
+                    polarity=pol,
+                    atlas_file_path=atlas_entry.get('path', 'No File Origin Provided'),
+                    main_db_path=main_db_path
+                )
+                dbi.save_atlas_to_database(atlas_obj, main_db_path)
+                logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
+                atlases.append(atlas_obj)
+                summary.append({
+                    'atlas_uid': atlas_obj.atlas_uid,
+                    'atlas_name': atlas_obj.atlas_name,
+                    'compound_count': len(atlas_obj.compound_mzrts)
+                })
+            except Exception as e:
+                logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol} entry {entry_index}: {e}")
 
         logger.info("Summary of new atlases.")
         logger.info("**Make sure to add these to your analysis config to use as project reference atlases:**")
@@ -573,25 +580,26 @@ class RTAlign:
 
 @dataclass
 class ManualCuration:
-    inchi_key: str
-    adduct: str
+    mz_rt_uid: str
+    compound_uid: str
+    inchi_key: str = ""
+    adduct: str = ""
     data: pd.DataFrame = field(default=None, compare=False)
     # data columns: compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number,
     #   compound_name, auto_ided, polarity, chromatography, mz_tolerance, atlas_mz,
     #   atlas_rt_peak, atlas_rt_min, atlas_rt_max,
     #   mz, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
     #   identification_notes, analyst_notes, best_ms1_file, best_ms1_rt, best_ms1_mz,
-    #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, isomers,
+    #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, mean_eic_rt, mean_eic_intensity, isomers,
     #   suggested_rt_min, suggested_rt_max, suggested_rt_peak, rt_suggestion_confidence
-
 
 @dataclass
 class _SpecData:
-    inchi_key: str
-    adduct: str
-    filename: str
+    mz_rt_uid: str
+    inchi_key: str = ""
+    adduct: str = ""
+    filename: str = ""
     data: pd.DataFrame = field(default=None, compare=False)
-
 
 MS1Data = _SpecData
 # data columns: rt, mz, i
@@ -600,7 +608,7 @@ MS2Data = _SpecData
 # data columns: rt, mz, i, precursor_MZ, precursor_intensity, collision_energy
 
 MS2Hit = _SpecData
-# data columns: inchi_key, database, ref_id, ref_name, score, num_matches,
+# data columns: mz_rt_uid, inchi_key, database, ref_id, ref_name, score, num_matches,
 #   mz_theoretical, mz_measured, ppm_error, rt, qry_intensity_peak,
 #   ref_frags, data_frags, matched_fragments, aligned_fragment_colors,
 #   qry_spectrum, ref_spectrum
@@ -806,7 +814,7 @@ class AnalysisSummary:
         atlas_compounds = None
         if self.post_curation_atlas_obj and self.post_curation_atlas_obj.compound_mzrts:
             atlas_compounds = pd.DataFrame([
-                {'inchi_key': c.inchi_key, 'adduct': c.adduct}
+                {'mz_rt_uid': c.mz_rt_uid}
                 for c in self.post_curation_atlas_obj.compound_mzrts.values()
             ])
 

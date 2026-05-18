@@ -61,27 +61,32 @@ def extract_eic_and_ms2_from_parquet(
                 for parquet_file in project_files_list
             }
 
-            for future in as_completed(future_to_file):
+            for future in tqdm(as_completed(future_to_file), total=len(future_to_file), desc="Extracting data from parquet files (parallel)"):
                 parquet_file = future_to_file[future]
 
                 try:
                     file_results = future.result()
-                    for inchi_key, adduct_data in file_results.items():
-                        for adduct, file_data in adduct_data.items():
-                            ms1_obj = MS1Data(
-                                inchi_key=inchi_key,
-                                adduct=adduct,
-                                filename=parquet_file,
-                                data=file_data['ms1_data']
-                            )
-                            experimental_data_obj.ms1_data.append(ms1_obj)
-                            ms2_obj = MS2Data(
-                                inchi_key=inchi_key,
-                                adduct=adduct,
-                                filename=parquet_file,
-                                data=file_data['ms2_data']
-                            )
-                            experimental_data_obj.ms2_data.append(ms2_obj)
+                    for mz_rt_uid, file_data in file_results.items():
+                        # Find the compound_mzrt for this mz_rt_uid
+                        compound_mzrt = next((c for c in compound_mzrts if getattr(c, 'mz_rt_uid', None) == mz_rt_uid), None)
+                        inchi_key = getattr(compound_mzrt, 'inchi_key', "") if compound_mzrt else ""
+                        adduct = getattr(compound_mzrt, 'adduct', "") if compound_mzrt else ""
+                        ms1_obj = MS1Data(
+                            mz_rt_uid=mz_rt_uid,
+                            inchi_key=inchi_key,
+                            adduct=adduct,
+                            filename=parquet_file,
+                            data=file_data['ms1_data']
+                        )
+                        experimental_data_obj.ms1_data.append(ms1_obj)
+                        ms2_obj = MS2Data(
+                            mz_rt_uid=mz_rt_uid,
+                            inchi_key=inchi_key,
+                            adduct=adduct,
+                            filename=parquet_file,
+                            data=file_data['ms2_data']
+                        )
+                        experimental_data_obj.ms2_data.append(ms2_obj)
 
                 except Exception as e:
                     logger.error(f"Error processing {parquet_file}: {e}")
@@ -93,23 +98,26 @@ def extract_eic_and_ms2_from_parquet(
                 file_results = _process_single_parquet_file(
                     parquet_file, compound_mzrts, workflow_params, only_ms_level
                 )
-                for inchi_key, adduct_data in file_results.items():
-                    for adduct, file_data in adduct_data.items():
-                        ms1_obj = MS1Data(
-                            inchi_key=inchi_key,
-                            adduct=adduct,
-                            filename=parquet_file,
-                            data=file_data['ms1_data']
-                        )
-                        experimental_data_obj.ms1_data.append(ms1_obj)
-                        ms2_obj = MS2Data(
-                            inchi_key=inchi_key,
-                            adduct=adduct,
-                            filename=parquet_file,
-                            data=file_data['ms2_data']
-                        )
-                        experimental_data_obj.ms2_data.append(ms2_obj)
-                
+                for mz_rt_uid, file_data in file_results.items():
+                    compound_mzrt = next((c for c in compound_mzrts if getattr(c, 'mz_rt_uid', None) == mz_rt_uid), None)
+                    inchi_key = getattr(compound_mzrt, 'inchi_key', "") if compound_mzrt else ""
+                    adduct = getattr(compound_mzrt, 'adduct', "") if compound_mzrt else ""
+                    ms1_obj = MS1Data(
+                        mz_rt_uid=mz_rt_uid,
+                        inchi_key=inchi_key,
+                        adduct=adduct,
+                        filename=parquet_file,
+                        data=file_data['ms1_data']
+                    )
+                    experimental_data_obj.ms1_data.append(ms1_obj)
+                    ms2_obj = MS2Data(
+                        mz_rt_uid=mz_rt_uid,
+                        inchi_key=inchi_key,
+                        adduct=adduct,
+                        filename=parquet_file,
+                        data=file_data['ms2_data']
+                    )
+                    experimental_data_obj.ms2_data.append(ms2_obj)
             except Exception as e:
                 logger.error(f"Error processing {parquet_file}: {e}")
                 continue
@@ -136,10 +144,13 @@ def _process_single_parquet_file(
     
     results = {}
     for compound_mzrt in compound_mzrts:
-        inchi_key = compound_mzrt.inchi_key
-        adduct = compound_mzrt.adduct
+        mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
+        logger.debug(f"Processing compound_mzrt: mz_rt_uid={mz_rt_uid}, m/z={compound_mzrt.mz}, rt_min={compound_mzrt.rt_min}, rt_max={compound_mzrt.rt_max} for file {filename}...")
+        if not mz_rt_uid:
+            logger.warning("CompoundMZRT missing mz_rt_uid, skipping.")
+            continue
         compound_data = {'ms1_data': pd.DataFrame(), 'ms2_data': pd.DataFrame()}
-        
+
         if is_ms1 and (only_ms_level is None or only_ms_level == 1):
             ms1_data = _extract_ms1_from_parquet(
                 parquet_file,
@@ -148,6 +159,7 @@ def _process_single_parquet_file(
                 rt_max=compound_mzrt.rt_max,
                 workflow_params=workflow_params
             )
+            logger.debug(f"  [MS1] mz_rt_uid={mz_rt_uid}: extracted {ms1_data.shape[0]} rows.")
             ms1_data = ms1_data.sort_values(by=['rt', 'i'], ascending=[True, False]).reset_index(drop=True)
             compound_data['ms1_data'] = ms1_data
         elif is_ms2 and (only_ms_level is None or only_ms_level == 2):
@@ -158,12 +170,13 @@ def _process_single_parquet_file(
                 rt_max=compound_mzrt.rt_max,
                 workflow_params=workflow_params
             )
+            logger.debug(f"  [MS2] mz_rt_uid={mz_rt_uid}: extracted {ms2_data.shape[0]} rows.")
             ms2_data = ms2_data.sort_values(by=['rt', 'mz'], ascending=[True, True]).reset_index(drop=True)
             compound_data['ms2_data'] = ms2_data
-        # Store results for this inchi_key and adduct
-        if inchi_key not in results:
-            results[inchi_key] = {}
-        results[inchi_key][adduct] = compound_data
+        else:
+            logger.debug(f"  Skipping extraction for mz_rt_uid={mz_rt_uid}: is_ms1={is_ms1}, is_ms2={is_ms2}, only_ms_level={only_ms_level}")
+        # Store results for this mz_rt_uid
+        results[mz_rt_uid] = compound_data
     return results
 
 def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:

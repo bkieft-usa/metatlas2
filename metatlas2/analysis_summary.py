@@ -390,7 +390,7 @@ def backfill_manual_curation_ms1_metrics(summary_obj: "AnalysisSummary") -> None
     if ms1_all_df is not None and not ms1_all_df.empty:
         ms1_groups = {
             key: grp.reset_index(drop=True)
-            for key, grp in ms1_all_df.groupby(["inchi_key", "adduct"], sort=False)
+            for key, grp in ms1_all_df.groupby(["mz_rt_uid"], sort=False)
         }
     else:
         ms1_groups = {}
@@ -410,7 +410,7 @@ def backfill_manual_curation_ms1_metrics(summary_obj: "AnalysisSummary") -> None
     ]
 
     for idx, row in manual_curation_df.iterrows():
-        key = (row.get("inchi_key", ""), row.get("adduct", ""))
+        key = row.get("mz_rt_uid", "")
         metrics = _compute_window_ms1_metrics_for_summary_row(row, ms1_groups.get(key, empty_df))
         for col in metric_cols:
             manual_curation_df.at[idx, col] = metrics.get(col, np.nan)
@@ -697,15 +697,15 @@ def _plot_eic(
 ) -> None:
     """Plot EIC traces for all files of one compound.
 
-    *ms1_compound_df* is already filtered to the target inchi_key + adduct.
+    *ms1_compound_df* is already filtered to the target mz_rt_uid.
     Each row holds the full EIC for one file in ``raw_spectrum`` (JSON [rt_list, i_list]).
-    
+
     Parameters
     ----------
     ax : matplotlib axis
         Axis to plot on
     ms1_compound_df : pd.DataFrame
-        MS1 data for one compound (filtered to target inchi_key + adduct)
+        MS1 data for one compound (filtered to target mz_rt_uid)
     mc_row : pd.Series
         Manual curation row for the compound
     log_scale : bool
@@ -1136,7 +1136,7 @@ def make_identification_figure(
             return {}
         return {
             key: grp.reset_index(drop=True)
-            for key, grp in df.groupby(["inchi_key", "adduct"], sort=False)
+            for key, grp in df.groupby(["mz_rt_uid"], sort=False)
         }
 
     ms1_groups = _pregroup(ms1_all_df)
@@ -1148,6 +1148,7 @@ def make_identification_figure(
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
         compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
+        mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
 
@@ -1160,7 +1161,7 @@ def make_identification_figure(
         mc_row_dict = mc_row.to_dict()
         mc_row_dict.update({"formula": formula, "smiles": smiles, "inchi": inchi})
 
-        key = (inchi_key, adduct)
+        key = mz_rt_uid
         tasks.append({
             "mc_row_dict":  mc_row_dict,
             "compound_name": compound_name,
@@ -1350,9 +1351,9 @@ def make_final_id_sheet(
     }
 
     if not ms2_hits_all_df.empty:
-        ms2_best: dict[tuple, pd.Series] = {}
-        ms2_top3_mz_avg: dict[tuple, float] = {}
-        for key, grp in ms2_hits_all_df.groupby(["inchi_key", "adduct"], sort=False):
+        ms2_best: dict[str, pd.Series] = {}
+        ms2_top3_mz_avg: dict[str, float] = {}
+        for key, grp in ms2_hits_all_df.groupby(["mz_rt_uid"], sort=False):
             grp_sorted = grp.sort_values("score", ascending=False)
             ms2_best[key] = grp_sorted.iloc[0]
             top3 = _get_top3_ms2_hits(grp_sorted)
@@ -1414,7 +1415,8 @@ def make_final_id_sheet(
         msms_num_ions = ""
         msms_matching_ions = ""
 
-        best_hit = ms2_best.get((inchi_key, adduct))
+        mz_rt_uid = mc_row.get("mz_rt_uid", "")
+        best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is not None:
             msms_file = str(best_hit.get("file_path", ""))
             msms_rt = float(best_hit.get("rt", np.nan))
@@ -1457,7 +1459,7 @@ def make_final_id_sheet(
                     ms2_notes = ms2_notes + note_tag
 
         # Final-sheet measured m/z for ion/mz evaluation uses top-3 MS2 average when available.
-        mz_measured_ms2 = float(ms2_top3_mz_avg.get((inchi_key, adduct), mz_measured_ms2))
+        mz_measured_ms2 = float(ms2_top3_mz_avg.get(mz_rt_uid, mz_measured_ms2))
         ppm_error_ms2 = (
             ((mz_measured_ms2 - mz_theoretical) / mz_theoretical * 1e6)
             if (not np.isnan(mz_measured_ms2) and not np.isnan(mz_theoretical) and mz_theoretical != 0)
@@ -2603,11 +2605,11 @@ def make_best_ms2_hit_fragment_ions_csv(
         logger.error("No manual curation entries found - best MS2 hit CSV not written.")
         return
 
-    # Pre-compute best hit per (inchi_key, adduct)
+    # Pre-compute best hit per mz_rt_uid
     if ms2_hits_all_df is not None and not ms2_hits_all_df.empty:
-        ms2_best: dict[tuple, pd.Series] = {
+        ms2_best: dict[str, pd.Series] = {
             key: grp.sort_values("score", ascending=False).iloc[0]
-            for key, grp in ms2_hits_all_df.groupby(["inchi_key", "adduct"], sort=False)
+            for key, grp in ms2_hits_all_df.groupby(["mz_rt_uid"], sort=False)
         }
     else:
         ms2_best = {}
@@ -2619,11 +2621,10 @@ def make_best_ms2_hit_fragment_ions_csv(
         desc="Finding best MS2 hits for compounds",
     ):
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        inchi_key = mc_row.get("inchi_key", "")
-        adduct = mc_row.get("adduct", "")
+        mz_rt_uid = mc_row.get("mz_rt_uid", "")
         compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
 
-        best_hit = ms2_best.get((inchi_key, adduct))
+        best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is None:
             continue
 
@@ -2676,7 +2677,7 @@ def make_data_sheets(
     - ``mz_peak.csv``       — m/z at peak intensity per file
     - ``mz_centroid.csv``   — intensity-weighted mean m/z per file
 
-    Each CSV is wide-format: rows = compounds (compound_name, inchi_key, adduct),
+    Each CSV is wide-format: rows = compounds (compound_name, mz_rt_uid),
     columns = one per input file (file stem without extension).
 
     Parameters
@@ -2713,10 +2714,10 @@ def make_data_sheets(
 
     # Join compound_name and compound_index from manual_curation_df
     mc_reset = manual_curation_df.reset_index(drop=True)
-    mc_slim = mc_reset[["inchi_key", "adduct", "compound_name"]].copy()
+    mc_slim = mc_reset[["mz_rt_uid", "compound_name"]].copy()
     mc_slim["compound_index"] = mc_reset.index + 1
-    mc_slim = mc_slim.drop_duplicates(subset=["inchi_key", "adduct"])
-    pfm = per_file_df.merge(mc_slim, on=["inchi_key", "adduct"], how="left")
+    mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
+    pfm = per_file_df.merge(mc_slim, on=["mz_rt_uid"], how="left")
 
     # Column labels: file stem (basename without extension)
     pfm = pfm.copy()
@@ -2734,9 +2735,8 @@ def make_data_sheets(
     ]
     _INDEX_COLS = [
         "compound_index",
-        "compound_name", 
-        "inchi_key", 
-        "adduct"
+        "compound_name",
+        "mz_rt_uid"
     ]
     for metric in _DATA_SHEET_METRICS:
         if metric not in pfm.columns:

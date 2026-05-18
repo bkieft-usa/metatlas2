@@ -26,9 +26,10 @@ def create_manual_curation_obj(
     ms1_index = _build_ms1_index(auto_id_obj.experimental_data)
     
     logger.info("Starting Compound loop...")
-    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Creating manual curation objects"):
 
+    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Creating manual curation objects"):
         compound_data = pd.DataFrame([{
+            'mz_rt_uid': atlas_compound_mzrt.mz_rt_uid,
             'compound_uid': atlas_compound_mzrt.compound_uid,
             'inchi_key': atlas_compound_mzrt.inchi_key,
             'adduct': atlas_compound_mzrt.adduct,
@@ -60,6 +61,8 @@ def create_manual_curation_obj(
             'best_ms1_intensity': 0.0,
             'best_ms1_ppm_error': 0.0,
             'best_ms1_rt_error': 0.0,
+            'mean_eic_rt': [],
+            'mean_eic_intensity': [],
             'isomers': None,
             'suggested_rt_min': 0.0,
             'suggested_rt_max': 0.0,
@@ -68,8 +71,10 @@ def create_manual_curation_obj(
         }])
 
         manual_curation_obj = ManualCuration(
-            inchi_key=atlas_compound_mzrt.inchi_key, 
-            adduct=atlas_compound_mzrt.adduct, 
+            mz_rt_uid=atlas_compound_mzrt.mz_rt_uid,
+            compound_uid=atlas_compound_mzrt.compound_uid,
+            inchi_key=atlas_compound_mzrt.inchi_key,
+            adduct=atlas_compound_mzrt.adduct,
             data=compound_data
         )
 
@@ -79,7 +84,7 @@ def create_manual_curation_obj(
             ms1_index
         )
 
-        isomer_list = isomer_dict.get(atlas_compound_mzrt.inchi_key, [])
+        isomer_list = isomer_dict.get(atlas_compound_mzrt.mz_rt_uid, [])
         manual_curation_obj.data.at[0, 'isomers'] = isomer_list
 
         _add_rt_suggestions_to_manual_curation_obj(
@@ -94,33 +99,33 @@ def create_manual_curation_obj(
 
 def _build_ms1_index(
     exp_data_obj: "ExperimentalData"
-) -> Dict[tuple, List]:
+) -> Dict[str, List]:
     """
-    Build an index of MS1 data by (inchi_key, adduct) for fast lookup.
-    Returns a dict: (inchi_key, adduct) -> list of MS1 _SpecData objects
+    Build an index of MS1 data by mz_rt_uid for fast lookup.
+    Returns a dict: mz_rt_uid -> list of MS1 _SpecData objects
     """
     ms1_index = {}
     for ms1 in exp_data_obj.ms1_data:
-        key = (ms1.inchi_key, ms1.adduct)
-        if key not in ms1_index:
-            ms1_index[key] = []
-        ms1_index[key].append(ms1)
+        key = getattr(ms1, 'mz_rt_uid', None)
+        if key is not None:
+            ms1_index.setdefault(key, []).append(ms1)
     return ms1_index
 
 def _fill_best_ms1_to_manual_curation(
     manual_curation_obj: "ManualCuration",
     atlas_compound_mzrt: "CompoundMZRT",
-    ms1_index: Dict[tuple, List]
+    ms1_index: Dict[str, List]
 ) -> None:
     """
     For a given atlas compound, find the best MS1 file (highest intensity)
     and fill manual_curation_obj.data with its info.
-    Uses pre-built ms1_index for fast lookup.
+    Uses pre-built ms1_index for fast lookup by mz_rt_uid.
     """
     all_files = []
-    key = (atlas_compound_mzrt.inchi_key, atlas_compound_mzrt.adduct)
+    key = getattr(atlas_compound_mzrt, 'mz_rt_uid', None)
     ms1_list = ms1_index.get(key, [])
-    
+    rt_arrays = []
+    intensity_arrays = []
     for ms1 in ms1_list:
         if ms1.data is not None and not ms1.data.empty:
             sum_intensity = ms1.data['i'].sum()
@@ -140,7 +145,9 @@ def _fill_best_ms1_to_manual_curation(
                     'ppm_error': ppm_error,
                     'rt_error': rt_error
                 })
-                
+            # Collect RT and intensity arrays for mean EIC calculation
+            rt_arrays.append(ms1.data['rt'].to_numpy())
+            intensity_arrays.append(ms1.data['i'].to_numpy())
     if all_files:
         manual_curation_obj.data.loc[0, 'auto_ided'] = True
         best = max(all_files, key=lambda x: x['peak_height'])
@@ -151,11 +158,27 @@ def _fill_best_ms1_to_manual_curation(
         manual_curation_obj.data.loc[0, 'best_ms1_ppm_error'] = float(best['ppm_error'])
         manual_curation_obj.data.loc[0, 'best_ms1_rt_error'] = float(best['rt_error'])
 
+    # Calculate mean_eic_rt and mean_eic_intensity
+    mean_eic_rt = []
+    mean_eic_intensity = []
+    if rt_arrays and intensity_arrays:
+        all_rts = np.unique(np.concatenate(rt_arrays))
+        interp_intensities = []
+        for rts, ints in zip(rt_arrays, intensity_arrays):
+            interp = np.interp(all_rts, rts, ints, left=0, right=0)
+            interp_intensities.append(interp)
+        mean_intensity_arr = np.mean(interp_intensities, axis=0)
+        mean_eic_rt = all_rts.tolist()
+        mean_eic_intensity = mean_intensity_arr.tolist()
+    # Store in DataFrame (use .at to avoid ValueError for list assignment)
+    manual_curation_obj.data.at[0, 'mean_eic_rt'] = mean_eic_rt
+    manual_curation_obj.data.at[0, 'mean_eic_intensity'] = mean_eic_intensity
+
 def _build_isomer_dict(
     atlas_obj: "Atlas"
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Return a dict: inchi_key → list of isomer dicts (empty list if none).
+    Return a dict: mz_rt_uid → list of isomer dicts (empty list if none).
     Isomers are defined as:
       - mz or mono_isotopic_molecular_weight within 0.005
       - OR inchi_key prefix (before '-') identical
@@ -169,6 +192,7 @@ def _build_isomer_dict(
     else:
         masses = np.full(n, np.nan)
     inchi_keys = atlas_df["inchi_key"].astype(str).to_numpy()
+    mz_rt_uids = atlas_df["mz_rt_uid"].astype(str).to_numpy()
     inchi_prefixes = np.array([ik.split("-")[0] for ik in inchi_keys], dtype=object)
 
     # Pairwise comparisons
@@ -191,8 +215,9 @@ def _build_isomer_dict(
     isomer_dict: Dict[str, List[Dict[str, Any]]] = {}
     for idx, row in atlas_df.iterrows():
         isomer_idxs = np.where(isomer_mask[idx])[0]
-        isomer_dict[row["inchi_key"]] = [
+        isomer_dict[row["mz_rt_uid"]] = [
             {
+                "mz_rt_uid": atlas_df.iloc[j]["mz_rt_uid"],
                 "inchi_key": atlas_df.iloc[j]["inchi_key"],
                 "adduct": atlas_df.iloc[j]["adduct"],
                 "compound_name": atlas_df.iloc[j].get("compound_name", ""),
@@ -206,16 +231,15 @@ def _build_isomer_dict(
 def _add_rt_suggestions_to_manual_curation_obj(
     manual_curation_obj: "ManualCuration",
     atlas_compound_mzrt: "CompoundMZRT",
-    ms1_index: Dict[tuple, List]
+    ms1_index: Dict[str, List]
 ) -> None:
     """
     Add RT bound suggestions to a ManualCuration object based on ms1 data.
-    Uses pre-built ms1_index for fast lookup.
+    Uses pre-built ms1_index for fast lookup by mz_rt_uid.
     """
     df = manual_curation_obj.data
-    key = (atlas_compound_mzrt.inchi_key, atlas_compound_mzrt.adduct)
+    key = getattr(atlas_compound_mzrt, 'mz_rt_uid', None)
     ms1_list = ms1_index.get(key, [])
-    
     ms1_data_dict = {}
     for ms1_data in ms1_list:
         ms1_df = ms1_data.data
