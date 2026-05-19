@@ -588,7 +588,7 @@ class ManualCuration:
     #   atlas_rt_peak, atlas_rt_min, atlas_rt_max,
     #   mz, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
     #   identification_notes, analyst_notes, best_ms1_file, best_ms1_rt, best_ms1_mz,
-    #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, mean_eic_rt, mean_eic_intensity, isomers,
+    #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, max_eic_rt, max_eic_intensity, isomers,
     #   suggested_rt_min, suggested_rt_max, suggested_rt_peak, rt_suggestion_confidence
 
 @dataclass
@@ -679,6 +679,7 @@ class AnalysisGUI:
     paths: Dict[str, str] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
     notes: Dict[str, Any] = field(default_factory=dict)
+    owner: str = "jgi"
 
     # Attributes added during analysis
     workflow_params: Dict[str, Any] = field(default_factory=dict)
@@ -706,6 +707,7 @@ class AnalysisGUI:
         self.config_path = config_path
         self.project_name = project_name
         self.config = ldt.load_metatlas2_config(config_path)
+        self.owner = (self.config.get('WORKFLOWS', {}).get('PATHS', {}).get('owner') or "jgi").lower()
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
         if override_parameters is not None:
             self.override_parameters = override_parameters
@@ -713,8 +715,7 @@ class AnalysisGUI:
     def get_note_options(self):
         """Get note options from config for manual curation."""
         
-        owner = (self.config.get('WORKFLOWS', {}).get('PATHS', {}).get('owner') or "jgi").lower()
-        ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=owner)
+        ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=self.owner)
         dbi.validate_override_parameters(self.override_parameters)
         ms1_options, ms1_hotkeys = gno.get_note_options_and_hotkeys(
             self.override_parameters["note_options_overrides"].get("ms1_notes", {}) if self.override_parameters.get("note_options_overrides") else {},

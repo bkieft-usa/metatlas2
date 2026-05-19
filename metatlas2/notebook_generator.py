@@ -72,6 +72,7 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
         "gui_lcmsruns_colors",
         "gui_require_all_evaluated",
         "gui_top_n_hits",
+        "apply_suggested_bounds",
         "note_options_overrides",
         "remove_unided_compounds",
         "remove_flagged_compounds",

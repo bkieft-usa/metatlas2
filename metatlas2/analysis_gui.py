@@ -72,29 +72,26 @@ def build_dash_app(
     # Add figure caching to avoid regeneration
     figure_cache = {}
     figure_cache_lock = threading.Lock()
-    isomer_string_cache = {}  # Cache expensive isomer calculations
+    isomer_string_cache = {}
     
-    # Async database writes to avoid blocking UI
-    db_write_queue = []
-    db_write_lock = threading.Lock()
+    # # Async database writes to avoid blocking UI
+    # db_write_queue = []
+    # db_write_lock = threading.Lock()
     
-    def _async_db_write(db_path, curation_uid, updates):
-        """Non-blocking database write using thread pool."""
-        def _write():
-            try:
-                dbi.write_gui_updates_to_db(db_path, curation_uid, updates)
-            except Exception as e:
-                logger.error(f"Async DB write failed: {e}")
+    # def _async_db_write(db_path, curation_uid, updates):
+    #     """Non-blocking database write using thread pool."""
+    #     def _write():
+    #         try:
+    #             dbi.write_gui_updates_to_db(db_path, curation_uid, updates)
+    #         except Exception as e:
+    #             logger.error(f"Async DB write failed: {e}")
         
-        # Execute in separate thread to not block UI
-        thread = threading.Thread(target=_write, daemon=True)
-        thread.start()
+    #     # Execute in separate thread to not block UI
+    #     thread = threading.Thread(target=_write, daemon=True)
+    #     thread.start()
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
     logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
-    index_start = time.time()
-
-    # Build lookup dictionaries keyed by mz_rt_uid
     ms1_by_compound = {}
     ms2_by_compound = {}
     ms2_hits_by_compound = {}
@@ -221,8 +218,10 @@ def build_dash_app(
     )
 
     # format of the app itself
-    ms1_height = "650px"
-    ms2_height = "550px"
+    all_notes_len = len(analysis_gui_obj.notes["ms1_notes"]) + len(analysis_gui_obj.notes["ms2_notes"]) + len(analysis_gui_obj.notes["other_notes"])
+    total_plot_height = all_notes_len*60
+    ms1_height = total_plot_height*0.4
+    ms2_height = total_plot_height*0.6
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
@@ -339,7 +338,7 @@ def build_dash_app(
                                     "doubleClick": True,
                                     #"modeBarButtonsToRemove": ["autoScale2d", "resetScale2d"],
                                 },
-                                style={"height": ms1_height},
+                                style={"height": f"{str(ms1_height)}px"},
                             ),
                             dbc.Row(
                                 [
@@ -401,7 +400,7 @@ def build_dash_app(
                             dcc.Graph(
                                 id="ms2-graph", 
                                 config={"displayModeBar": True}, 
-                                style={"height": ms2_height}
+                                style={"height": f"{str(ms2_height)}px"}
                             ),
                             dbc.Row(
                                 [
@@ -554,7 +553,7 @@ def build_dash_app(
             return np.nan
 
         if rt_max < rt_min:
-            rt_min, rt_max = rt_max, rt_min
+            raise ValueError(f"Invalid RT window, rt_min={rt_min} cannot be larger than rt_max={rt_max}")
 
         fallback_rt_peak = (rt_min + rt_max) / 2.0
         fallback_mz = row.get("best_ms1_mz", np.nan)
@@ -562,7 +561,6 @@ def build_dash_app(
             fallback_mz = row.get("atlas_mz", np.nan)
 
         sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
-        display(sub.head())
         
         atlas_mz = row.get("atlas_mz", np.nan)
         atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
@@ -733,27 +731,57 @@ def build_dash_app(
         # Instead of blocking UI, compute metrics and write DB in background
         def _async_flush_worker():
             try:
-                window_metrics = _compute_window_ms1_metrics(state)
-                updates = {
-                    "mz": window_metrics["mz"],
-                    "rt_min": state["rt_min"],
-                    "rt_max": state["rt_max"],
-                    "rt_peak": window_metrics["rt_peak"],
-                    "rt_error": window_metrics["rt_error"],
-                    "mz_error": window_metrics["mz_error"],
-                    "best_ms1_file": window_metrics["best_ms1_file"],
-                    "best_ms1_rt": window_metrics["best_ms1_rt"],
-                    "best_ms1_mz": window_metrics["best_ms1_mz"],
-                    "best_ms1_intensity": window_metrics["best_ms1_intensity"],
-                    "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
-                    "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
-                    "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
-                    "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
-                    "other_notes": " // ".join(state.get("other_note", [])),
-                    "analyst_notes": state.get("analyst_notes", ""),
-                    "identification_notes": state.get("id_notes", ""),
-                }
-                
+                # Check if RT window matches the initial RT window (after suggestions)
+                tol = 1e-4
+                initial_rt_min = row.get("initial_rt_min", None)
+                initial_rt_max = row.get("initial_rt_max", None)
+                use_precomputed = False
+                if initial_rt_min is not None and initial_rt_max is not None:
+                    rt_min = float(state["rt_min"])
+                    rt_max = float(state["rt_max"])
+                    if abs(rt_min - float(initial_rt_min)) < tol and abs(rt_max - float(initial_rt_max)) < tol:
+                        use_precomputed = True
+                if use_precomputed:
+                    updates = {
+                        "mz": row.get("mz", None),
+                        "rt_min": state["rt_min"],
+                        "rt_max": state["rt_max"],
+                        "rt_peak": row.get("rt_peak", None),
+                        "rt_error": row.get("rt_error", None),
+                        "mz_error": row.get("mz_error", None),
+                        "best_ms1_file": row.get("best_ms1_file", None),
+                        "best_ms1_rt": row.get("best_ms1_rt", None),
+                        "best_ms1_mz": row.get("best_ms1_mz", None),
+                        "best_ms1_intensity": row.get("best_ms1_intensity", None),
+                        "best_ms1_ppm_error": row.get("best_ms1_ppm_error", None),
+                        "best_ms1_rt_error": row.get("best_ms1_rt_error", None),
+                        "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+                        "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                        "other_notes": " // ".join(state.get("other_note", [])),
+                        "analyst_notes": state.get("analyst_notes", ""),
+                        "identification_notes": state.get("id_notes", ""),
+                    }
+                else:
+                    window_metrics = _compute_window_ms1_metrics(state)
+                    updates = {
+                        "mz": window_metrics["mz"],
+                        "rt_min": state["rt_min"],
+                        "rt_max": state["rt_max"],
+                        "rt_peak": window_metrics["rt_peak"],
+                        "rt_error": window_metrics["rt_error"],
+                        "mz_error": window_metrics["mz_error"],
+                        "best_ms1_file": window_metrics["best_ms1_file"],
+                        "best_ms1_rt": window_metrics["best_ms1_rt"],
+                        "best_ms1_mz": window_metrics["best_ms1_mz"],
+                        "best_ms1_intensity": window_metrics["best_ms1_intensity"],
+                        "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
+                        "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
+                        "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+                        "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                        "other_notes": " // ".join(state.get("other_note", [])),
+                        "analyst_notes": state.get("analyst_notes", ""),
+                        "identification_notes": state.get("id_notes", ""),
+                    }
                 # DB write
                 dbi.write_gui_updates_to_db(analysis_gui_obj.paths["project_db_path"], row["curation_uid"], updates)
                 
@@ -920,20 +948,29 @@ def build_dash_app(
                     f"RT: {rt_str}  |  m/z: {mz_str}"
                 )
 
-        # Add mean EIC trace after isomer rectangles so it appears in the rangeslider
-        mean_eic_rt = row.get("mean_eic_rt", [])
-        mean_eic_intensity = row.get("mean_eic_intensity", [])
-        if mean_eic_rt and mean_eic_intensity and len(mean_eic_rt) == len(mean_eic_intensity):
-            fig.add_trace(go.Scatter(
-                x=mean_eic_rt,
-                y=mean_eic_intensity,
-                mode="lines",
-                name="Mean EIC (slider)",
-                line=dict(color="#0074D9", width=3, dash="dot"),
-                opacity=1.0,
-                hoverinfo="skip",
-                showlegend=False
-            ))
+        # Add max EIC trace after isomer rectangles so it appears in the rangeslider
+        max_eic_rt = row.get("max_eic_rt", [])
+        max_eic_intensity = row.get("max_eic_intensity", [])
+        if max_eic_rt and max_eic_intensity and len(max_eic_rt) == len(max_eic_intensity):
+            # Filter to only points above 5% of max intensity
+            try:
+                max_int = max(max_eic_intensity)
+                threshold = 0.05 * max_int
+                filtered_points = [(x, y) for x, y in zip(max_eic_rt, max_eic_intensity) if y > threshold]
+                if filtered_points:
+                    filtered_rt, filtered_int = zip(*filtered_points)
+                    fig.add_trace(go.Scatter(
+                        x=filtered_rt,
+                        y=filtered_int,
+                        mode="lines",
+                        name="Max EIC (slider)",
+                        line=dict(color="#0074D9", width=3, dash="dot"),
+                        opacity=1.0,
+                        hoverinfo="skip",
+                        showlegend=False
+                    ))
+            except Exception:
+                pass
         
         isomer_str = " // ".join(isomer_lines) if resolved_isomers else "No Isomers Found"
         
@@ -947,8 +984,6 @@ def build_dash_app(
 
         # Now add MS1 data traces (they will appear on top of isomer rectangles)
         highlighted_files = state.get("highlighted_files") or []
-        has_highlights = bool(highlighted_files)
-
 
         # Expand the window for MS1 plotting by x min on each side
         expanded_rt_min = state["rt_min"] - 1
@@ -959,8 +994,8 @@ def build_dash_app(
             short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fn).split(".")[0].split("_")[11:]))
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
             is_highlighted = fn in highlighted_files
-            line_width = 3.5 if is_highlighted else 1.5
-            opacity = 1.0 if (is_highlighted or not has_highlights) else 0.25
+            line_width = 3.0 if is_highlighted else 1.5
+            opacity = 1.0  # Always fully opaque, no dimming
 
             # Log if there are multiple rows for this file
             if len(fn_group) > 1:
@@ -988,7 +1023,7 @@ def build_dash_app(
                     x=all_rt,
                     y=all_intensity,
                     mode="lines",
-                    name=short_name,
+                    #name=short_name,
                     line=dict(color=color, width=line_width),
                     opacity=opacity,
                     customdata=customdata,

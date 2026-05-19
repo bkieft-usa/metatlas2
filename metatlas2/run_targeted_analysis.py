@@ -7,6 +7,20 @@ import re
 from pathlib import Path
 from typing import Dict, Any
 
+# Disable tqdm bars in non-interactive (batch) jobs
+def _is_interactive():
+    return sys.stdout.isatty() or sys.stderr.isatty()
+try:
+    import tqdm.auto as tqdm_auto
+    _orig_tqdm = tqdm_auto.tqdm
+    def _tqdm_patch(*args, **kwargs):
+        if "disable" not in kwargs:
+            kwargs["disable"] = not _is_interactive()
+        return _orig_tqdm(*args, **kwargs)
+    tqdm_auto.tqdm = _tqdm_patch
+except ImportError:
+    pass
+
 SLURM_TEMPLATE = """\
 #!/bin/bash
 #SBATCH --job-name={project}

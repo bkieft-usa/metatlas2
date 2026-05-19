@@ -1,6 +1,5 @@
 import numpy as np
 
-
 def get_notes_opts(owner: str = "jgi") -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """Return default MS2/MS1/Other note hotkey maps by owner."""
     JGI_DEFAULT_MS2_HOTKEYS = {

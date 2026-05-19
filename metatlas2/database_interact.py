@@ -1444,6 +1444,8 @@ def _create_database_tables(conn, db_type: str = "main"):
             rt_peak REAL,
             rt_min REAL,
             rt_max REAL,
+            initial_rt_min REAL,
+            initial_rt_max REAL,
             rt_error REAL,
             mz_error REAL,
             ms1_notes TEXT,
@@ -1457,8 +1459,8 @@ def _create_database_tables(conn, db_type: str = "main"):
             best_ms1_intensity REAL,
             best_ms1_ppm_error REAL,
             best_ms1_rt_error REAL,
-            mean_eic_rt TEXT,
-            mean_eic_intensity TEXT,
+            max_eic_rt TEXT,
+            max_eic_intensity TEXT,
             isomers TEXT,
             suggested_rt_min REAL,
             suggested_rt_max REAL,
@@ -1877,7 +1879,6 @@ def load_and_filter_gui_inputs(
     )
 
     # Create atlas_compounds DataFrame to scope queries to this specific atlas using mz_rt_uid
-    # This prevents loading compounds from other polarities/analyses with the same analysis_type
     atlas_compounds = pd.DataFrame([
         {"mz_rt_uid": cmzrt.mz_rt_uid}
         for cmzrt in analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.values()
@@ -2039,8 +2040,8 @@ def get_manual_curation_entries(
             .reset_index(drop=True)
         )
 
-    # Deserialize mean_eic_rt and mean_eic_intensity if present (convert from JSON string to list)
-    for col in ["mean_eic_rt", "mean_eic_intensity"]:
+    # Deserialize max_eic_rt and max_eic_intensity if present (convert from JSON string to list)
+    for col in ["max_eic_rt", "max_eic_intensity"]:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: json.loads(x) if isinstance(x, str) and x and x.strip().startswith("[") else x)
     return df
@@ -2087,7 +2088,7 @@ def get_ms1_data_for_compound(
         df = pd.DataFrame()
 
     if df.empty:
-        logger.warning(f"No MS1 data found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+        logger.warning(f"No MS1 data found for RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
 
     return df
 
@@ -2134,7 +2135,7 @@ def get_ms2_hits_for_compound(
         df = pd.DataFrame()
 
     if df.empty:
-        logger.warning(f"No MS2 hits found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+        logger.warning(f"No MS2 hits found for RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
     else:
         # Ensure critical fields have default values if missing/NULL
         default_fields = {
@@ -2196,7 +2197,7 @@ def get_ms2_data_for_compound(
         df = pd.DataFrame()
 
     if df.empty:
-        logger.warning(f"No MS2 data found for inchi_key {inchi_key}, adduct {adduct}, RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
+        logger.warning(f"No MS2 data found for RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
 
     return df
 
@@ -2301,11 +2302,21 @@ def load_experimental_data_from_db(
                 )
             )
 
-    logger.info("Loaded %d compounds, %d MS1 file-groups, %d MS2 file-groups, %d MS2 hit file-groups.",
+    # Count unique ref_ids from the dataframes inside each MS2Hit object
+    unique_ref_ids = set()
+    for d in exp_data.ms2_hits:
+        if 'ref_id' in d.data.columns:
+            unique_ref_ids.update(d.data['ref_id'].dropna().unique())
+    logger.info(
+        "Loaded %d compounds, %d MS1 data points (%d unique files), %d MS2 data points (%d unique files), %d MS2 reference hits (%d unique files and %d unique ref spectra).",
         len(exp_data.manual_curation),
         len(exp_data.ms1_data),
+        len(set(d.filename for d in exp_data.ms1_data)),
         len(exp_data.ms2_data),
+        len(set(d.filename for d in exp_data.ms2_data)),
         len(exp_data.ms2_hits),
+        len(set(d.filename for d in exp_data.ms2_hits)),
+        len(unique_ref_ids),
     )
     return exp_data
 
@@ -2510,6 +2521,8 @@ def validate_override_parameters(override_parameters):
         raise ValueError("override_parameters must be a dict")
     if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
         raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
+    # if not isinstance(override_parameters["apply_suggested_bounds"], (type(None), bool)):
+    #     raise ValueError("override_parameters['apply_suggested_bounds'] must be a boolean or None")
     if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
         raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
     if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
@@ -3226,6 +3239,8 @@ def _prepare_manual_curation_record(
             float(row.get('rt_peak', 0.0)),
             float(row.get('rt_min', 0.0)),
             float(row.get('rt_max', 0.0)),
+            float(row.get('initial_rt_min', 0.0)),
+            float(row.get('initial_rt_max', 0.0)),
             float(row.get('rt_error', 0.0)),
             float(row.get('mz_error', 0.0)),
             row.get('ms1_notes', ''),
@@ -3239,8 +3254,8 @@ def _prepare_manual_curation_record(
             float(row.get('best_ms1_intensity', 0.0)),
             float(row.get('best_ms1_ppm_error', 0.0)),
             float(row.get('best_ms1_rt_error', 0.0)),
-            json.dumps(row['mean_eic_rt'] if row['mean_eic_rt'] is not None else []),
-            json.dumps(row['mean_eic_intensity'] if row['mean_eic_intensity'] is not None else []),
+            json.dumps(row['max_eic_rt'] if row['max_eic_rt'] is not None else []),
+            json.dumps(row['max_eic_intensity'] if row['max_eic_intensity'] is not None else []),
             json.dumps(row['isomers']) if row['isomers'] is not None else '[]',
             float(row.get('suggested_rt_min', 0.0)),
             float(row.get('suggested_rt_max', 0.0)),
@@ -3414,7 +3429,7 @@ def _bulk_insert_analysis_data(
             _insert_in_batches(
                 conn,
                 """INSERT INTO manual_curation VALUES 
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 manual_curation_records,
                 "Inserting manual curation records"
             )
