@@ -1020,11 +1020,10 @@ def get_lcmsruns_from_db(
     logger.info(f"Retrieved {len(lcmsruns_list)} LC/MS run files from database with filters: file_types={file_types}, chromatography={chromatography}, polarity={polarity}, format={file_format}")
     return lcmsruns_list
 
-def batch_save_compounds_and_mzrts(
+def batch_save_compounds(
     db_path: str,
     compounds: List["Compound"],
-    compound_mzrts: List["CompoundMZRT"]
-) -> Tuple[int, int]:
+) -> int:
     """
     Schema-compliant batch save for compounds and references from raw input data.
     
@@ -1040,36 +1039,33 @@ def batch_save_compounds_and_mzrts(
         new_compound_obj: NewCompound object containing compounds and mzrts data
 
     Returns:
-        Tuple of (compounds_created, mzrts_created)
+        Tuple of (compounds_created)
     """
 
     compounds_data = [compound.to_dict() for compound in compounds]
-    mzrts_data = [compound_mzrt.to_dict() for compound_mzrt in compound_mzrts]
 
     compounds_created = 0
-    mzrts_created = 0
-    mzrts_skipped_identical = 0
     compounds_skipped_existing = 0
-    
+
     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
         # Get ALL existing compounds (inchi_key -> compound_uid mapping)
         existing_compounds = {}  # inchi_key -> compound_uid
         existing_result = conn.execute("SELECT inchi_key, compound_uid FROM compounds").fetchall()
         for row in existing_result:
             existing_compounds[row[0]] = row[1]
-        
+
         logger.info(f"Found {len(existing_compounds)} existing compounds in database")
-        
+
         # Process compound data and build inchi_key -> compound_uid mapping
         compound_records = []
         inchi_to_compound_uid = {}  # This will contain both existing and new compound mappings
-        
+
         for compound_data in compounds_data:
             inchi_key = compound_data.get('inchi_key')
             if not inchi_key:
                 logger.warning("Skipping compound with missing inchi_key")
                 continue
-                
+
             if inchi_key in existing_compounds:
                 # Compound already exists - use existing UID
                 inchi_to_compound_uid[inchi_key] = existing_compounds[inchi_key]
@@ -1082,79 +1078,26 @@ def batch_save_compounds_and_mzrts(
                     **compound_data,  # Raw data from input
                     'compound_uid': new_compound_uid  # Add the generated UID
                 })
-                
+
                 if compound_record:
                     compound_records.append(compound_record)
                     inchi_to_compound_uid[inchi_key] = new_compound_uid
                     existing_compounds[inchi_key] = new_compound_uid  # Prevent duplicates within batch
                     compounds_created += 1
                     logger.debug(f"New compound prepared: {inchi_key} -> {new_compound_uid}")
-        
+
         # Batch insert new compounds
         if compound_records:
             logger.info(f"Creating {len(compound_records)} new compounds...")
             conn.executemany("""
                 INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, compound_records)
-        
-        # Process reference data - match to compounds and check for duplicates using mz_rt_uid
-        if mzrts_data:
-            logger.info(f"Processing {len(mzrts_data)} reference entries...")
-            reference_records = []
 
-            for reference_data in mzrts_data:
-                mz_rt_uid = reference_data.get('mz_rt_uid')
-                if not mz_rt_uid:
-                    logger.warning("Skipping reference with missing mz_rt_uid (must be unique for each reference)")
-                    continue
-
-                # Find the compound_uid for this reference using inchi_key (for compound table only)
-                ref_inchi_key = reference_data.get('inchi_key')
-                compound_uid = inchi_to_compound_uid.get(ref_inchi_key)
-                if not compound_uid:
-                    logger.warning(f"No compound found for reference with inchi_key: {ref_inchi_key}")
-                    continue
-
-                # Prepare reference data with compound_uid
-                reference_with_uid = {
-                    **reference_data,
-                    'compound_uid': compound_uid
-                }
-
-                # Check if the same reference already exists by mz_rt_uid
-                identical_ref_exists = conn.execute(
-                    "SELECT 1 FROM compound_mzrt WHERE mz_rt_uid = ?", [mz_rt_uid]
-                ).fetchone()
-
-                if identical_ref_exists:
-                    mzrts_skipped_identical += 1
-                    logger.debug(f"Identical reference already exists for mz_rt_uid {mz_rt_uid}")
-                    continue
-
-                # Create new reference entry
-                reference_record = _prepare_reference_record_from_dict(reference_with_uid)
-                if reference_record:
-                    reference_records.append(reference_record)
-                    mzrts_created += 1
-                    logger.debug(f"New reference prepared for mz_rt_uid {mz_rt_uid}")
-
-            # Batch insert new references
-            if reference_records:
-                logger.info(f"Creating {len(reference_records)} new references...")
-                conn.executemany(
-                    """
-                    INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    reference_records
-                )
-    
     # Log summary
     logger.info("Batch save completed:")
     logger.info(f"  Compounds created: {compounds_created}")
     logger.info(f"  Compounds skipped (already exist): {compounds_skipped_existing}")
-    logger.info(f"  References created: {mzrts_created}")
-    logger.info(f"  References skipped (identical data): {mzrts_skipped_identical}")
-    
+
     return
 
 def _check_identical_reference_exists(conn, reference_data: Dict) -> bool:
@@ -2096,12 +2039,14 @@ def get_manual_curation_entries(
             .reset_index(drop=True)
         )
 
+    # Deserialize mean_eic_rt and mean_eic_intensity if present (convert from JSON string to list)
+    for col in ["mean_eic_rt", "mean_eic_intensity"]:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: json.loads(x) if isinstance(x, str) and x and x.strip().startswith("[") else x)
     return df
 
 def get_ms1_data_for_compound(
     project_db_path: str,
-    inchi_key: str = None,
-    adduct: str = None,
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
@@ -2121,12 +2066,6 @@ def get_ms1_data_for_compound(
     """
     try:
         params = []
-        if inchi_key is not None:
-            query += " AND inchi_key = ?"
-            params.append(inchi_key)
-        if adduct is not None:
-            query += " AND adduct = ?"
-            params.append(adduct)
         if rt_alignment_number is not None:
             query += " AND rt_alignment_number = ?"
             params.append(rt_alignment_number)
@@ -2154,8 +2093,6 @@ def get_ms1_data_for_compound(
 
 def get_ms2_hits_for_compound(
     project_db_path: str,
-    inchi_key: str = None,
-    adduct: str = None,
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
@@ -2175,12 +2112,6 @@ def get_ms2_hits_for_compound(
     """
     try:
         params = []
-        if inchi_key is not None:
-            query += " AND inchi_key = ?"
-            params.append(inchi_key)
-        if adduct is not None:
-            query += " AND adduct = ?"
-            params.append(adduct)
         if rt_alignment_number is not None:
             query += " AND rt_alignment_number = ?"
             params.append(rt_alignment_number)
@@ -2224,8 +2155,6 @@ def get_ms2_hits_for_compound(
 
 def get_ms2_data_for_compound(
     project_db_path: str,
-    inchi_key: str = None,
-    adduct: str = None,
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
@@ -2245,12 +2174,6 @@ def get_ms2_data_for_compound(
     """
     try:
         params = []
-        if inchi_key is not None:
-            query += " AND inchi_key = ?"
-            params.append(inchi_key)
-        if adduct is not None:
-            query += " AND adduct = ?"
-            params.append(adduct)
         if rt_alignment_number is not None:
             query += " AND rt_alignment_number = ?"
             params.append(rt_alignment_number)
@@ -2312,15 +2235,15 @@ def load_experimental_data_from_db(
         analysis_type=analysis_type,
     )
     ms1_flat = get_ms1_data_for_compound(
-        project_db_path, None, None, rt_alignment_number, analysis_number,
+        project_db_path, rt_alignment_number, analysis_number,
         atlas_compounds=atlas_compounds, analysis_type=analysis_type,
     )
     ms2_flat = get_ms2_data_for_compound(
-        project_db_path, None, None, rt_alignment_number, analysis_number,
+        project_db_path, rt_alignment_number, analysis_number,
         atlas_compounds=atlas_compounds, analysis_type=analysis_type,
     )
     ms2_hits_flat = get_ms2_hits_for_compound(
-        project_db_path, None, None, rt_alignment_number, analysis_number,
+        project_db_path, rt_alignment_number, analysis_number,
         atlas_compounds=atlas_compounds, analysis_type=analysis_type,
     )
 
@@ -2333,6 +2256,7 @@ def load_experimental_data_from_db(
                 inchi_key=row["inchi_key"],
                 adduct=row["adduct"],
                 mz_rt_uid=row["mz_rt_uid"],
+                compound_uid=row["compound_uid"],
                 data=pd.DataFrame([row.to_dict()]),
             )
         )
@@ -3077,20 +3001,25 @@ def save_auto_identification_results_to_db(
         if not compound_uid or ms1.data.empty:
             return []
         filename = ms1.filename
-        ms1.data['filename'] = filename
-        ms1.data = ms1.data[['filename', 'mz', 'i', 'rt']]
-        records = []
-        for _, row in ms1.data.iterrows():
-            record = _prepare_ms1_data_record(
-                row, compound_uid, ms1.inchi_key, ms1.adduct, filename,
-                rt_alignment_number, analysis_number, analysis_type, prov
-            )
-            if record is not None:
-                records.append(record)
-        n_total = len(ms1.data)
-        n_none = n_total - len(records)
-        if n_none > 0:
-            logger.warning(f"prepare_ms1_records: {n_none} of {n_total} records were None for compound_uid={compound_uid}, filename={filename}")
+        # Aggregate all RT and I values into lists for the full EIC
+        rt_vals = ms1.data['rt'].tolist() if 'rt' in ms1.data else []
+        i_vals = ms1.data['i'].tolist() if 'i' in ms1.data else []
+        mz_vals = ms1.data['mz'].tolist() if 'mz' in ms1.data else []
+        # Use the first mz value if present, else empty list
+        mz_for_record = mz_vals if mz_vals else []
+        # Construct a single row for the full EIC
+        row = {
+            'rt': rt_vals,
+            'i': i_vals,
+            'mz': mz_for_record
+        }
+        record = _prepare_ms1_data_record(
+            row, compound_uid, ms1.mz_rt_uid, ms1.inchi_key, ms1.adduct, filename,
+            rt_alignment_number, analysis_number, analysis_type, prov
+        )
+        records = [record] if record is not None else []
+        if not records:
+            logger.warning(f"prepare_ms1_records: No record for compound_uid={compound_uid}, filename={filename}")
         return records
     for ms1 in tqdm(exp_data_obj.ms1_data, desc="Preparing MS1 data entries for db"):
         ms1_records = prepare_ms1_records(ms1)
@@ -3109,20 +3038,23 @@ def save_auto_identification_results_to_db(
             'mz': list,
             'i': list,
         }).reset_index()
-        ms2_data_grouped['raw_spectrum'] = list(zip(ms2_data_grouped['mz'], ms2_data_grouped['i']))
-        # Vectorized: use itertuples to generate all records at once
-        records = [
-            _prepare_ms2_data_record(
-                row, compound_uid, ms2.inchi_key, ms2.adduct,
+        # Ensure raw_spectrum is always a tuple of lists (mz, i), matching MS1 format
+        ms2_data_grouped['raw_spectrum'] = ms2_data_grouped.apply(
+            lambda row: (list(row['mz']), list(row['i'])), axis=1
+        )
+        records = []
+        for _, row in ms2_data_grouped.iterrows():
+            record = _prepare_ms2_data_record(
+                row, compound_uid, ms2.mz_rt_uid, ms2.inchi_key, ms2.adduct,
                 rt_alignment_number, analysis_number, analysis_type, ms2.filename, prov
             )
-            for row in ms2_data_grouped.itertuples(index=False)
-        ]
-        n_total = len(records)
-        n_none = sum(1 for r in records if r is None)
+            if record is not None:
+                records.append(record)
+        n_total = len(ms2_data_grouped)
+        n_none = n_total - len(records)
         if n_none > 0:
             logger.warning(f"prepare_ms2_records: {n_none} of {n_total} records were None for compound_uid={compound_uid}, filename={ms2.filename}")
-        return [r for r in records if r is not None]
+        return records
     for ms2 in tqdm(exp_data_obj.ms2_data, desc="Preparing MS2 data entries for db"):
         ms2_records = prepare_ms2_records(ms2)
         ms2_data_records.extend(ms2_records)
@@ -3136,7 +3068,7 @@ def save_auto_identification_results_to_db(
             return records
         for _, hit in ms2_hit.data.iterrows():
             ms2_hit_record = _prepare_ms2_hit_record(
-                hit, compound_uid, ms2_hit.inchi_key, ms2_hit.adduct, ms2_hit.filename,
+                hit, compound_uid, ms2_hit.mz_rt_uid, ms2_hit.inchi_key, ms2_hit.adduct, ms2_hit.filename,
                 rt_alignment_number, analysis_number, analysis_type, prov
             )
             records.append(ms2_hit_record)
@@ -3324,6 +3256,7 @@ def _prepare_manual_curation_record(
 def _prepare_ms1_data_record(
     row: pd.Series,
     compound_uid: str,
+    mz_rt_uid: str,
     inchi_key: str,
     adduct: str,
     filename: str,
@@ -3334,10 +3267,19 @@ def _prepare_ms1_data_record(
 ) -> Optional[tuple]:
     """Prepare MS1 raw data record for database insertion."""
     try:
+        # Always construct raw_spectrum as a tuple of lists (rt, i)
+        rt_val = row.get('rt', [])
+        i_val = row.get('i', [])
+        # If scalar, wrap in list
+        if not isinstance(rt_val, (list, tuple, np.ndarray)):
+            rt_val = [rt_val]
+        if not isinstance(i_val, (list, tuple, np.ndarray)):
+            i_val = [i_val]
+        raw_spectrum = (list(rt_val), list(i_val))
         return (
             _generate_uid("ms1_data"),
             compound_uid,
-            row.get('mz_rt_uid', None),
+            mz_rt_uid,
             inchi_key,
             adduct,
             rt_alignment_number,
@@ -3345,7 +3287,7 @@ def _prepare_ms1_data_record(
             analysis_type,
             filename,
             json.dumps(row.get('mz', [])),
-            json.dumps(row.get('raw_spectrum', ('[]', '[]'))),
+            json.dumps(raw_spectrum),
             prov["analyst"],
             prov["timestamp"]
         )
@@ -3356,6 +3298,7 @@ def _prepare_ms1_data_record(
 def _prepare_ms2_data_record(
     row: pd.Series,
     compound_uid: str,
+    mz_rt_uid: str,
     inchi_key: str,
     adduct: str,
     rt_alignment_number: int,
@@ -3369,7 +3312,7 @@ def _prepare_ms2_data_record(
         return (
             _generate_uid("ms2_data"),
             compound_uid,
-            row.get('mz_rt_uid', None),
+            mz_rt_uid,
             inchi_key,
             adduct,
             rt_alignment_number,
@@ -3391,6 +3334,7 @@ def _prepare_ms2_data_record(
 def _prepare_ms2_hit_record(
     hit: pd.Series,
     compound_uid: str,
+    mz_rt_uid: str,
     inchi_key: str,
     adduct: str,
     filename: str,
@@ -3404,7 +3348,7 @@ def _prepare_ms2_hit_record(
         return (
             _generate_uid("ms2_hits"),
             compound_uid,
-            hit.get('mz_rt_uid', None),
+            mz_rt_uid,
             inchi_key,
             adduct,
             rt_alignment_number,

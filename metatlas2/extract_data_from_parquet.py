@@ -218,7 +218,7 @@ def _extract_ms1_from_parquet(
             ('mz', '>=', mz_min),
             ('mz', '<=', mz_max),
             ('rt', '>=', rt_min),
-            ('rt', '<=', rt_max)
+            ('rt', '<=', rt_max),
         ]
     ).to_pandas()
 
@@ -251,7 +251,7 @@ def _extract_ms2_from_parquet(
             ('precursor_MZ', '>=', mz_min),
             ('precursor_MZ', '<=', mz_max),
             ('rt', '>=', rt_min),
-            ('rt', '<=', rt_max)
+            ('rt', '<=', rt_max),
         ]
     ).to_pandas()
     

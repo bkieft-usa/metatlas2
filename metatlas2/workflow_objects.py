@@ -107,7 +107,6 @@ class Compound:
         pubchem_cache_path = paths.get("pubchem_cache_path", None)
 
         compounds = []
-        compound_mzrts = []
         # This will only create the database if it doesn't already exist, unless you want to overwrite
         dbi.create_metatlas_database(main_db_path, overwrite=overwrite_db)
 
@@ -131,11 +130,10 @@ class Compound:
                             compounds.append(compound)
                             compound_mzrt = CompoundMZRT.from_atlas_row(row)
                             compound_mzrt.source = file_path
-                            compound_mzrts.append(compound_mzrt)
                         except Exception as e:
                             logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('compound_name', 'Unknown')}: {e}")
 
-        dbi.batch_save_compounds_and_mzrts(main_db_path, compounds, compound_mzrts)
+        dbi.batch_save_compounds(main_db_path, compounds)
         return
 
 @dataclass
