@@ -299,7 +299,7 @@ def _add_rt_suggestions_to_manual_curation_obj(
         df.at[0, 'suggested_rt_max'] = suggestion['rt_max']
         df.at[0, 'suggested_rt_peak'] = suggestion['rt_peak']
         df.at[0, 'rt_suggestion_confidence'] = suggestion['confidence']
-        if suggestion['confidence'] > 0.9 and apply_suggested_bounds is True:
+        if suggestion['confidence'] > 0.75 and apply_suggested_bounds is True:
             df.at[0, 'rt_min'] = df.at[0, 'suggested_rt_min']
             df.at[0, 'rt_max'] = df.at[0, 'suggested_rt_max']
             df.at[0, 'rt_peak'] = 0.5 * (df.at[0, 'rt_min'] + df.at[0, 'rt_max'])

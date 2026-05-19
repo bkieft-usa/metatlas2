@@ -836,26 +836,36 @@ def build_dash_app(
 
         sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
 
-        # Use the manual-curation row's best MS1 intensity as the y-axis reference max.
+        # Determine y_max as the highest intensity point of all files within the current window
         y_min_positive_data = None
-        y_max_data = row.get("best_ms1_intensity", np.nan)
-        if pd.isna(y_max_data):
-            y_max_data = 0.0
+        max_eic_rt = row.get("max_eic_rt", [])
+        max_eic_intensity = row.get("max_eic_intensity", [])
+        # Use only EIC points within the current RT window
+        if max_eic_rt and max_eic_intensity and len(max_eic_rt) == len(max_eic_intensity):
+            # Use expanded_rt_min/max for consistency with trace plotting
+            expanded_rt_min = state["rt_min"] - 1
+            expanded_rt_max = state["rt_max"] + 1
+            filtered_intensity = [y for x, y in zip(max_eic_rt, max_eic_intensity) if expanded_rt_min <= x <= expanded_rt_max]
+            if filtered_intensity:
+                y_max_data = max(filtered_intensity)
+            else:
+                y_max_data = 0.0
         else:
-            y_max_data = float(y_max_data)
-        if not np.isfinite(y_max_data) or y_max_data <= 0:
-            y_max_data = 1.0
-        
+            y_max_data = row.get("best_ms1_intensity", np.nan)
+            if pd.isna(y_max_data):
+                y_max_data = 0.0
+            else:
+                y_max_data = float(y_max_data)
+            if not np.isfinite(y_max_data) or y_max_data <= 0:
+                y_max_data = 1.0
         # Store in state for consistency across redraws when RT changes
         if "cached_y_max" not in state or state.get("force_y_recalc", False):
             state["cached_y_max"] = y_max_data
         else:
             y_max_data = state["cached_y_max"]
-        
         if yaxis_scale == "log":
             y_min_positive_data = y_max_data / 1e6  # Assume 6 orders of magnitude dynamic range
         y_upper_bound = max(y_max_data * 1.1, 1.0)
-
         if yaxis_scale == "log":
             log_min = max((y_min_positive_data or 1e-6), 1e-12)
             y_range = [np.log10(log_min), np.log10(y_upper_bound)]
@@ -894,8 +904,9 @@ def build_dash_app(
                         if "remove" in isomer_match.iloc[0]["ms1_notes"].lower():
                             continue
                         iso_df_idx = isomer_match.index[0]
+                        iso_pos_idx = manual_curation_df.index.get_loc(iso_df_idx)
                         resolved_isomers.append({
-                            "display_idx": iso_df_idx,
+                            "display_idx": iso_pos_idx + 1,  # 1-based for display
                             "name": iso_name,
                             "adduct": iso_adduct,
                             "rt_min": float(isomer_match.iloc[0]["rt_min"]),
@@ -907,7 +918,6 @@ def build_dash_app(
             except Exception as exc:
                 traceback.print_exc()
                 logger.error(f"Isomer detection failed with {exc}")
-            
             # Store in cache (metadata only, not rectangles)
             isomer_string_cache[compound_idx] = resolved_isomers
         
@@ -916,24 +926,19 @@ def build_dash_app(
         if resolved_isomers:
             def _window_overlaps(a_min, a_max, b_min, b_max):
                 return (a_min <= b_max) and (b_min <= a_max)
-            
             current_rt_min = state["rt_min"]
             current_rt_max = state["rt_max"]
-            
             for i, iso in enumerate(resolved_isomers):
-                # Check overlap with current compound window
                 overlaps = _window_overlaps(iso["rt_min"], iso["rt_max"], current_rt_min, current_rt_max)
-                # Check overlap with other isomers
                 if not overlaps:
                     for j, other in enumerate(resolved_isomers):
                         if i != j and _window_overlaps(iso["rt_min"], iso["rt_max"], other["rt_min"], other["rt_max"]):
                             overlaps = True
                             break
-                
                 fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"
                 fig.add_trace(go.Scatter(
                     x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
-                    y=[y_bottom, y_max_data, y_max_data, y_bottom, y_bottom],
+                    y=[y_bottom, y_upper_bound, y_upper_bound, y_bottom, y_bottom],
                     mode="lines",
                     fill="toself",
                     fillcolor=fillcolor,
@@ -943,6 +948,7 @@ def build_dash_app(
                 ))
                 rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
                 mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
+                # iso['display_idx'] is now 1-based
                 isomer_lines.append(
                     f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
                     f"RT: {rt_str}  |  m/z: {mz_str}"
@@ -955,7 +961,7 @@ def build_dash_app(
             # Filter to only points above 5% of max intensity
             try:
                 max_int = max(max_eic_intensity)
-                threshold = 0.05 * max_int
+                threshold = 0.03 * max_int
                 filtered_points = [(x, y) for x, y in zip(max_eic_rt, max_eic_intensity) if y > threshold]
                 if filtered_points:
                     filtered_rt, filtered_int = zip(*filtered_points)
@@ -1037,7 +1043,7 @@ def build_dash_app(
         # Atlas RT peak line (black, static)
         fig.add_trace(go.Scatter(
             x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
-            y=[y_bottom, y_max_data],
+            y=[y_bottom, y_upper_bound],
             mode="lines",
             line=dict(color="black", width=2.5),
             showlegend=False,
@@ -1048,7 +1054,7 @@ def build_dash_app(
         if pd.notnull(row.get("suggested_rt_min")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_min"], row["suggested_rt_min"]],
-                y=[y_bottom, y_max_data],
+                y=[y_bottom, y_upper_bound],
                 mode="lines",
                 line=dict(color="orange", width=2.5),
                 showlegend=False,
@@ -1057,7 +1063,7 @@ def build_dash_app(
         if pd.notnull(row.get("suggested_rt_max")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_max"], row["suggested_rt_max"]],
-                y=[y_bottom, y_max_data],
+                y=[y_bottom, y_upper_bound],
                 mode="lines",
                 line=dict(color="orange", width=2.5, dash="dash"),
                 showlegend=False,
@@ -1066,7 +1072,7 @@ def build_dash_app(
 
         # RT min (purple, solid, editable): data-anchored so it matches reference-line height.
         fig.add_shape(
-            type="line", x0=rt_min, x1=rt_min, y0=y_bottom, y1=y_max_data,
+            type="line", x0=rt_min, x1=rt_min, y0=y_bottom, y1=y_upper_bound,
             xref="x", yref="y",
             line=dict(color="purple", width=7),
             name="RT min", editable=True,
@@ -1074,7 +1080,7 @@ def build_dash_app(
 
         # RT max (purple, dashed, editable) - MUST be shape[1] to match rt_drag callback
         fig.add_shape(
-            type="line", x0=rt_max, x1=rt_max, y0=y_bottom, y1=y_max_data,
+            type="line", x0=rt_max, x1=rt_max, y0=y_bottom, y1=y_upper_bound,
             xref="x", yref="y",
             line=dict(color="purple", width=7, dash="dash"),
             name="RT max", editable=True,
