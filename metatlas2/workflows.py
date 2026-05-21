@@ -11,6 +11,8 @@ import metatlas2.rt_align_tools as rat
 import metatlas2.ms2_hit_detection as mhd
 import metatlas2.manual_curation_summarizer as mcs
 import metatlas2.extract_data_from_parquet as edp
+import metatlas2.extract_data_from_h5 as edh
+import metatlas2.extract_data_from_h5_legacy as edhL
 import metatlas2.lcmsruns_tools as lrt
 import metatlas2.analysis_gui as agu
 import metatlas2.analysis_summary as asm
@@ -106,7 +108,7 @@ def run_rt_alignment(
     )
 
     logger.info("Passing Atlas and LCMSRuns to data extractor...")
-    experimental_data_obj = edp.extract_eic_and_ms2_from_parquet(
+    experimental_data_obj = edp.extract_data_from_raw(
         obj=rt_align_obj,
         stage="rt_alignment"
     )
@@ -241,10 +243,23 @@ def run_auto_identification(
         )
 
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
-        auto_id_obj.experimental_data = edp.extract_eic_and_ms2_from_parquet(
-            obj=auto_id_obj,
-            stage="auto_identification",
-        )
+        if auto_id_obj.workflow_params.get('data_extraction_method', 'parquet') == 'parquet':
+            auto_id_obj.experimental_data = edp.extract_data_from_raw(
+                obj=auto_id_obj,
+                stage="auto_identification",
+            )
+        elif auto_id_obj.workflow_params.get('data_extraction_method', 'parquet') == 'h5':
+            auto_id_obj.experimental_data = edh.extract_data_from_raw(
+                obj=auto_id_obj,
+                stage="auto_identification",
+            )
+        elif auto_id_obj.workflow_params.get('data_extraction_method', 'parquet') == 'h5_legacy':
+            auto_id_obj.experimental_data = edhL.extract_data_from_raw(
+                obj=auto_id_obj,
+                stage="auto_identification",
+            )
+        else:
+            raise ValueError(f"Unknown data extraction method: {auto_id_obj.workflow_params.get('data_extraction_method')}")
 
         logger.info("Passing ExperimentalData to MS2 hit finder...")
         mhd.find_ms2_hits(

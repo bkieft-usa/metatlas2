@@ -3,6 +3,8 @@ import pyarrow.parquet as pq
 from pathlib import Path
 from typing import Dict, Any
 from tqdm.auto import tqdm
+import time
+import tracemalloc
 
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -10,7 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('extract_data_from_parquet')
 
-def extract_eic_and_ms2_from_parquet(
+def extract_data_from_raw(
     obj: "RTAlignment" or "AutoIdentification",
     stage: str,
     use_parallel: bool = True,
@@ -34,10 +36,15 @@ def extract_eic_and_ms2_from_parquet(
     """
     from metatlas2.workflow_objects import ExperimentalData, MS1Data, MS2Data
 
+    t0 = time.perf_counter()
+    tracemalloc.start()
+    m0, _ = tracemalloc.get_traced_memory()
     atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
     lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns
     workflow_params = obj.rt_alignment_params if stage == "rt_alignment" else obj.workflow_params
     only_ms_level = 1 if stage == "rt_alignment" else None
+    t1 = time.perf_counter()
+    m1, _ = tracemalloc.get_traced_memory()
 
     logger.info(f"Starting data extraction based on {atlas.atlas_uid} ({atlas.atlas_name}) for stage '{stage}' from {len(lcmsruns)} LCMS runs...")
 
@@ -47,12 +54,18 @@ def extract_eic_and_ms2_from_parquet(
     project_files_list = [run.file_path for run in lcmsruns]
     logger.info(f"Starting data extraction for {len(atlas.compound_mzrts)} compounds from {len(project_files_list)} project files...")
     logger.info(f"Extra time set to {workflow_params.get('extra_time', 5.0)}")
+    t2 = time.perf_counter()
+    m2, _ = tracemalloc.get_traced_memory()
 
     if max_workers is None:
         max_workers = min(mp.cpu_count(), len(project_files_list), 8)
     use_parallel = use_parallel and max_workers > 1 and len(project_files_list) > 1
+    t3 = time.perf_counter()
+    m3, _ = tracemalloc.get_traced_memory()
 
     compound_mzrts = list(atlas.compound_mzrts.values())
+    t4 = time.perf_counter()
+    m4, _ = tracemalloc.get_traced_memory()
     if use_parallel:
         logger.info(f"Using parallel processing with {max_workers} workers...")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -121,7 +134,12 @@ def extract_eic_and_ms2_from_parquet(
             except Exception as e:
                 logger.error(f"Error processing {parquet_file}: {e}")
                 continue
+    t5 = time.perf_counter()
+    m5, _ = tracemalloc.get_traced_memory()
 
+    logger.info("Step timings (seconds): parse input: %.2f, setup exp obj: %.2f, file list: %.2f, setup parallel: %.2f, compound mzrts: %.2f, process files: %.2f", t1-t0, t2-t1, t2-t1, t3-t2, t4-t3, t5-t4)
+    logger.info("Memory (kB): start: %.1f, after parse: %.1f, after setup exp obj: %.1f, after file list: %.1f, after setup parallel: %.1f, after compound mzrts: %.1f",
+                m0/1024, m1/1024, m2/1024, m3/1024, m4/1024, m5/1024)
     return experimental_data_obj
 
 def _process_single_parquet_file(
@@ -142,8 +160,10 @@ def _process_single_parquet_file(
     if not Path(parquet_file).exists():
         raise FileNotFoundError(f"Parquet file not found: {parquet_file}")
     
+    t0 = time.perf_counter()
     results = {}
     for compound_mzrt in compound_mzrts:
+        t1 = time.perf_counter()
         mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
         logger.debug(f"Processing compound_mzrt: mz_rt_uid={mz_rt_uid}, m/z={compound_mzrt.mz}, rt_min={compound_mzrt.rt_min}, rt_max={compound_mzrt.rt_max} for file {filename}...")
         if not mz_rt_uid:
@@ -152,6 +172,7 @@ def _process_single_parquet_file(
         compound_data = {'ms1_data': pd.DataFrame(), 'ms2_data': pd.DataFrame()}
 
         if is_ms1 and (only_ms_level is None or only_ms_level == 1):
+            t2 = time.perf_counter()
             ms1_data = _extract_ms1_from_parquet(
                 parquet_file,
                 mz=compound_mzrt.mz,
@@ -159,10 +180,12 @@ def _process_single_parquet_file(
                 rt_max=compound_mzrt.rt_max,
                 workflow_params=workflow_params
             )
-            logger.debug(f"  [MS1] mz_rt_uid={mz_rt_uid}: extracted {ms1_data.shape[0]} rows.")
+            t3 = time.perf_counter()
+            logger.info(f"  [MS1] mz_rt_uid={mz_rt_uid}: extracted {ms1_data.shape[0]} rows. (extract time: %.2fs)", t3-t2)
             ms1_data = ms1_data.sort_values(by=['rt', 'i'], ascending=[True, False]).reset_index(drop=True)
             compound_data['ms1_data'] = ms1_data
         elif is_ms2 and (only_ms_level is None or only_ms_level == 2):
+            t2 = time.perf_counter()
             ms2_data = _extract_ms2_from_parquet(
                 parquet_file,
                 mz=compound_mzrt.mz,
@@ -170,13 +193,16 @@ def _process_single_parquet_file(
                 rt_max=compound_mzrt.rt_max,
                 workflow_params=workflow_params
             )
-            logger.debug(f"  [MS2] mz_rt_uid={mz_rt_uid}: extracted {ms2_data.shape[0]} rows.")
+            t3 = time.perf_counter()
+            logger.info(f"  [MS2] mz_rt_uid={mz_rt_uid}: extracted {ms2_data.shape[0]} rows. (extract time: %.2fs)", t3-t2)
             ms2_data = ms2_data.sort_values(by=['rt', 'mz'], ascending=[True, True]).reset_index(drop=True)
             compound_data['ms2_data'] = ms2_data
         else:
-            logger.debug(f"  Skipping extraction for mz_rt_uid={mz_rt_uid}: is_ms1={is_ms1}, is_ms2={is_ms2}, only_ms_level={only_ms_level}")
+            logger.info(f"  Skipping extraction for mz_rt_uid={mz_rt_uid}: is_ms1={is_ms1}, is_ms2={is_ms2}, only_ms_level={only_ms_level}")
         # Store results for this mz_rt_uid
         results[mz_rt_uid] = compound_data
+    t4 = time.perf_counter()
+    logger.info("%s: processed %d compounds in %.2fs", filename, len(compound_mzrts), t4-t0)
     return results
 
 def calculate_mz_bounds(mz: float, ppm_tolerance: float) -> tuple:

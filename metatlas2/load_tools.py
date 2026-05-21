@@ -20,6 +20,7 @@ import json
 import pandas as pd
 from pathlib import Path
 
+PRECURSOR_FILTER_OFFSET_DA = 2.5  # keep peaks below precursor + 2.5 Da (covers M+2 isotope)
 
 def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
     """Convert a legacy .tab msms refs file to .jsonl format."""
@@ -159,8 +160,12 @@ def load_msms_refs_file(
             intensities = np.array(int_list, dtype=np.float32)
 
             precursor_mz = rec.get('precursor_mz')
+            try:
+                precursor_mz = float(rec.get('precursor_mz')) if rec.get('precursor_mz') is not None else None
+            except (TypeError, ValueError):
+                precursor_mz = None
             if precursor_mz is not None and not np.isnan(precursor_mz):
-                mask = mz < precursor_mz + 2.5
+                mask = mz < precursor_mz + PRECURSOR_FILTER_OFFSET_DA
                 mz = mz[mask]
                 intensities = intensities[mask]
 
@@ -169,6 +174,11 @@ def load_msms_refs_file(
                 continue
 
             inchi_key = rec.get('inchi_key', '')
+            # matchms requires m/z ascending; defensively sort
+            if len(mz) > 1 and not np.all(mz[:-1] <= mz[1:]):
+                order = np.argsort(mz, kind='stable')
+                mz = mz[order]
+                intensities = intensities[order]
             spec = Spectrum(
                 mz=mz,
                 intensities=intensities,
@@ -183,9 +193,12 @@ def load_msms_refs_file(
             refs_by_inchi_key.setdefault(inchi_key, []).append(spec)
 
     if not refs_by_inchi_key:
-        raise ValueError(
-            "Reference file is empty after parsing — check the input file format."
-        )
+        if database_filter:
+            raise ValueError(
+                f"No spectra matched database_filter={database_filter!r} in {file_path}. "
+                f"Check the filter value or the 'database' field in the source file."
+            )
+        raise ValueError(f"Reference file {file_path} is empty after parsing.")
 
     total = sum(len(v) for v in refs_by_inchi_key.values())
     logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
@@ -193,7 +206,7 @@ def load_msms_refs_file(
         logger.warning(f"  Skipped {n_skipped} rows due to unparseable or empty spectra.")
 
     logger.info(f"  Saving reference cache to {cache_path}...")
-    joblib.dump(refs_by_inchi_key, cache_path, compress=0)
+    joblib.dump(refs_by_inchi_key, cache_path, compress=3)
     logger.info(f"  Cache saved.")
 
     return refs_by_inchi_key

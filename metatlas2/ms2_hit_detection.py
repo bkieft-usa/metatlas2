@@ -17,12 +17,8 @@ import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('ms2_hit_detection')
 
-_worker_refs = None
-_worker_params = None
-
 @contextmanager
 def _suppress_tqdm():
-    """Temporarily disable all tqdm progress bars (e.g. from matchms internals)."""
     original_init = tqdm_module.tqdm.__init__
     def _disabled_init(self, *args, **kwargs):
         kwargs['disable'] = True
@@ -33,20 +29,23 @@ def _suppress_tqdm():
     finally:
         tqdm_module.tqdm.__init__ = original_init
 
-def _worker_init(refs_by_inchi_key, workflow_params):
-    global _worker_refs, _worker_params
-    _worker_refs = refs_by_inchi_key
-    _worker_params = workflow_params
-
 def _process_job_global(job):
-    mz_rt_uid, file_path, ms2_df = job
+    (mz_rt_uid, file_path, ms2_df, ref_spectra,
+     frag_mz_tolerance, min_score, min_frags, 
+     max_ppm_error, limit_to_n_hits) = job
     try:
-        hits_df = _find_hits_from_ms2_df(ms2_df, mz_rt_uid, _worker_refs, _worker_params)
+        hits_df = _find_hits_from_ms2_df(
+            ms2_df, mz_rt_uid, ref_spectra,
+            frag_mz_tolerance=frag_mz_tolerance,
+            min_score=min_score,
+            min_frags=min_frags,
+            max_ppm_error=max_ppm_error,
+            limit_to_n_hits=limit_to_n_hits,
+        )
         return (mz_rt_uid, file_path, hits_df)
     except Exception as e:
-        logger.error(f"Error in hit detection for {mz_rt_uid} {file_path}: {e}")
+        logger.exception(f"Error in hit detection for {mz_rt_uid} {file_path}: {e}")
         return (mz_rt_uid, file_path, pd.DataFrame())
-
 
 def find_ms2_hits(auto_id_obj) -> None:
     """
@@ -56,30 +55,39 @@ def find_ms2_hits(auto_id_obj) -> None:
     """
     from metatlas2.workflow_objects import MS2Hit
 
-    database_filter = auto_id_obj.config.get('WORKFLOWS').get('PATHS').get('msms_refs_db_filter', "metatlas")
-
-    refs_by_mz_rt_uid = {getattr(ms2, 'mz_rt_uid', None): [] for ms2 in auto_id_obj.experimental_data.ms2_data if getattr(ms2, 'mz_rt_uid', None)}
-    # For now, still load refs_by_inchi_key, but will map to mz_rt_uid below
+    # load msms refs data
     refs_by_inchi_key = ldt.load_msms_refs_file(
         Path(auto_id_obj.paths['msms_refs_path']),
-        database_filter=database_filter,
+        database_filter=auto_id_obj.config.get('WORKFLOWS').get('PATHS').get('msms_refs_db_filter', "metatlas"),
     )
     if not refs_by_inchi_key:
         raise FileNotFoundError("No reference database found - skipping hit detection")
 
-    # Map refs_by_inchi_key to refs_by_mz_rt_uid using ms2_data
+    # Warn about ms2_data entries with no matching refs (informational only)
+    missing_uids = 0
+    missing_inchi_keys = set()
     for ms2 in auto_id_obj.experimental_data.ms2_data:
-        mz_rt_uid = getattr(ms2, 'mz_rt_uid', None)
-        if mz_rt_uid:
-            refs_by_mz_rt_uid[mz_rt_uid] = refs_by_inchi_key.get(getattr(ms2, 'inchi_key', ''), [])
+        if not refs_by_inchi_key.get(ms2.inchi_key, []):
+            missing_uids += 1
+            missing_inchi_keys.add(ms2.inchi_key)
+    logger.info(f"{missing_uids} ms2_data entries have no matching refs.")
+    logger.info(f"Unique inchi_keys from ms2_data not in reference database: {missing_inchi_keys}")
 
-    total_refs = sum(len(v) for v in refs_by_mz_rt_uid.values())
-    logger.info(f"Loaded {total_refs} reference spectra across {len(refs_by_mz_rt_uid)} mz_rt_uids.")
+    # Define filtering parameters
+    wp = auto_id_obj.workflow_params
+    frag_mz_tolerance = wp.get('ms2_frag_mz_tolerance', 0.05)
+    min_score = wp.get('ms2_min_score', 0.01)
+    min_frags = wp.get('ms2_min_matching_frags', 1)
+    max_ppm_error = wp.get('ppm_error')
+    limit_to_n_hits = wp.get('limit_to_n_hits', None)
 
+    # set up data to pass to parallel jobs
     jobs = [
-        (ms2.mz_rt_uid, ms2.filename, ms2.data)
+        (ms2.mz_rt_uid, ms2.filename, ms2.data,
+        refs_by_inchi_key.get(getattr(ms2, 'inchi_key', ''), []),
+        frag_mz_tolerance, min_score, min_frags, max_ppm_error, limit_to_n_hits)
         for ms2 in auto_id_obj.experimental_data.ms2_data
-        if not ms2.data.empty and getattr(ms2, 'mz_rt_uid', None)
+        if not ms2.data.empty and ms2.mz_rt_uid
     ]
     if not jobs:
         logger.warning("No MS2 data found, skipping hit detection")
@@ -87,15 +95,10 @@ def find_ms2_hits(auto_id_obj) -> None:
 
     logger.info(f"Searching {len(jobs)} query sets...")
     max_workers = min(mp.cpu_count(), len(jobs), 8)
-
     results = []
     if max_workers > 1 and len(jobs) > 1:
         logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=_worker_init,
-            initargs=(refs_by_mz_rt_uid, auto_id_obj.workflow_params)
-        ) as executor:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_process_job_global, job) for job in jobs]
             with tqdm(total=len(jobs), desc="Detecting MS2 hits") as pbar:
                 for future in as_completed(futures):
@@ -108,38 +111,14 @@ def find_ms2_hits(auto_id_obj) -> None:
                 results.append(_process_job_global(job))
                 pbar.update(1)
 
-
     # Assign results to ExperimentalData.ms2_hits as MS2Hit objects
     for mz_rt_uid, filename, ms2_hits_df in results:
         ms2_hit_obj = MS2Hit(
             mz_rt_uid=mz_rt_uid,
             filename=filename,
-            data=ms2_hits_df
+            data=ms2_hits_df,
         )
         auto_id_obj.experimental_data.ms2_hits.append(ms2_hit_obj)
-
-    # Limit to top N hits per compound (mz_rt_uid) by score, across all files
-    max_hits = 100
-    hits_by_uid: Dict[str, List] = {}
-    logger.info(f"Limiting to top {max_hits} hits per compound (mz_rt_uid) across all files...")
-    for hit_obj in auto_id_obj.experimental_data.ms2_hits:
-        hits_by_uid.setdefault(hit_obj.mz_rt_uid, []).append(hit_obj)
-
-    for mz_rt_uid, hit_objs in hits_by_uid.items():
-        hit_objs_with_data = [h for h in hit_objs if not h.data.empty and 'score' in h.data.columns]
-        if not hit_objs_with_data:
-            continue
-        combined = pd.concat(
-            [h.data.assign(_hit_obj_id=id(h)) for h in hit_objs_with_data],
-            ignore_index=True
-        )
-        total_for_compound = len(combined)
-        if total_for_compound > max_hits:
-            combined = combined.nlargest(max_hits, 'score')
-            for hit_obj in hit_objs_with_data:
-                mask = combined['_hit_obj_id'] == id(hit_obj)
-                hit_obj.data = combined.loc[mask].drop(columns='_hit_obj_id').reset_index(drop=True)
-            logger.debug(f"Compound {mz_rt_uid}: trimmed {total_for_compound} hits to top {max_hits} by score.")
 
     # Summary
     hits_list = [
@@ -150,263 +129,239 @@ def find_ms2_hits(auto_id_obj) -> None:
     total_hits = sum(n for _, _, n in hits_list)
     unique_compounds = len({uid for uid, _, _ in hits_list})
     unique_files = len({fn for _, fn, _ in hits_list})
+    limit_msg = ""
+    limit_to_n_hits = auto_id_obj.workflow_params.get('limit_to_n_hits', None)
+    if limit_to_n_hits is not None:
+        limit_msg = f" (capped at {limit_to_n_hits} hits per compound per file)"
     logger.info(
         f"Hit detection complete: {total_hits} total hits across "
-        f"{unique_compounds} compounds and {unique_files} files."
+        f"{unique_compounds} compounds and {unique_files} files{limit_msg}."
     )
 
 
 def _find_hits_from_ms2_df(
     ms2_df: pd.DataFrame,
     mz_rt_uid: str,
-    refs_by_mz_rt_uid: Dict[str, list],
-    workflow_params: Dict[str, Any]
+    ref_spectra: List,
+    frag_mz_tolerance: float,
+    min_score: float,
+    min_frags: int,
+    max_ppm_error: float,
+    limit_to_n_hits: int,
 ) -> pd.DataFrame:
     """
     Find reference hits for all MS2 scans in a DataFrame using cosine scoring.
 
-    Args:
-        ms2_df: MS2 data DataFrame with columns: rt, mz, i, precursor_MZ, precursor_intensity
-        inchi_key: InChI key for the compound being searched
-        refs_by_inchi_key: Pre-built dict mapping inchi_key -> list of matchms Spectrum objects
-        workflow_params: Workflow parameters dict for thresholds etc.
-
-    Returns:
-        DataFrame with one row per hit, columns include all hit metadata
+    Uses CosineHungarian.matrix() to score all (ref, query) pairs in one call
+    per compound, with a precursor-m/z prefilter applied per query to skip
+    refs outside max_ppm_error. Spectrum alignment for plotting is deferred:
+    it's only computed for hits that survive score/match thresholds, since
+    Hungarian alignment is O(n^3) and most candidate pairs don't pass.
     """
-    if ms2_df.empty:
+    if ms2_df.empty or not ref_spectra:
         return pd.DataFrame()
 
-
-    ref_spectra = refs_by_mz_rt_uid.get(mz_rt_uid)
-    if not ref_spectra:
-        return pd.DataFrame()
-
-    frag_mz_tolerance = workflow_params.get('ms2_frag_mz_tolerance', 0.05)
-    min_score = workflow_params.get('ms2_min_score', 0.01)
-    min_frags = workflow_params.get('ms2_min_matching_frags', 1)
-    max_ppm_error = workflow_params.get('ppm_error')
-
-    cos = CosineHungarian(tolerance=frag_mz_tolerance)
-
-    # Build one query Spectrum per RT group, with the actual measured precursor_mz
-    query_meta = []  # (rt, precursor_mz, precursor_intensity, frag_mz, frag_int, Spectrum)
-
+    # Build query Spectrum list, one per RT group
+    query_meta = []  # list of dicts; one per query
+    queries = []     # list of Spectrum, parallel to query_meta
     for rt_val, rt_group in ms2_df.groupby('rt', sort=False):
-        frag_mz = rt_group['mz'].values.astype(np.float32)
-        frag_int = rt_group['i'].values.astype(np.float32)
+        rt_sorted = rt_group.sort_values('mz', kind='stable')
+        frag_mz = rt_sorted['mz'].to_numpy(dtype=np.float32)
+        frag_int = rt_sorted['i'].to_numpy(dtype=np.float32)
         precursor_mz = float(rt_group['precursor_MZ'].iloc[0])
         precursor_int = float(rt_group['precursor_intensity'].iloc[0])
 
         qry = Spectrum(
             mz=frag_mz,
             intensities=frag_int,
-            metadata={'precursor_mz': precursor_mz}
+            metadata={'precursor_mz': precursor_mz},
         )
-        query_meta.append((rt_val, precursor_mz, precursor_int, frag_mz, frag_int, qry))
+        query_meta.append({
+            'rt': rt_val,
+            'precursor_mz': precursor_mz,
+            'precursor_int': precursor_int,
+            'frag_mz': frag_mz,
+            'frag_int': frag_int,
+        })
+        queries.append(qry)
 
-    if not query_meta:
+    if not queries:
         return pd.DataFrame()
 
+    # Precompute ref precursor m/z array for prefilter
+    ref_precursor_mz = np.array(
+        [float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra],
+        dtype=np.float64,
+    )
+
+    # Determine candidate (query_idx, ref_idx) pairs after precursor-mz prefilter
+    # Build a boolean mask over (n_queries, n_refs); True where the pair should be scored.
+    n_queries = len(queries)
+    n_refs = len(ref_spectra)
+    valid_ref = ref_precursor_mz != 0
+    q_mz = np.array([m['precursor_mz'] for m in query_meta])[:, None]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ppm_matrix = np.where(
+            valid_ref,
+            (q_mz - ref_precursor_mz) / np.where(valid_ref, ref_precursor_mz, 1.0) * 1e6,
+            np.nan,
+        )
+    if max_ppm_error is None:
+        candidate_mask = np.ones((n_queries, n_refs), dtype=bool)
+    else:
+        candidate_mask = valid_ref & (np.abs(ppm_matrix) <= max_ppm_error)
+    if not candidate_mask.any():
+        return pd.DataFrame()
+
+    # Score all pairs at once
+    with _suppress_tqdm():
+        score_matrix = CosineHungarian(tolerance=frag_mz_tolerance).matrix(references=ref_spectra, queries=queries)
+    scores = score_matrix['score'].T
+    matches = score_matrix['matches'].T
+
+    # Apply thresholds + prefilter mask in one vectorized step
+    passing = (
+        candidate_mask
+        & (scores >= min_score)
+        & (matches >= min_frags)
+    )
+    if not passing.any():
+        return pd.DataFrame()
+    if limit_to_n_hits is not None:
+        n_passing = int(passing.sum())
+        if n_passing > limit_to_n_hits:
+            flat_scores = np.where(passing, scores, -np.inf).ravel()
+            top_flat_idx = np.argpartition(flat_scores, -limit_to_n_hits)[-limit_to_n_hits:]
+            new_passing = np.zeros(passing.size, dtype=bool)
+            new_passing[top_flat_idx] = True
+            passing = new_passing.reshape(passing.shape)
+
+    # Build hit rows only for passing pairs; alignment computed here, on the survivors
     all_hits = []
+    passing_qi, passing_ri = np.where(passing)
+    for qi, ri in zip(passing_qi, passing_ri):
+        meta = query_meta[qi]
+        ref = ref_spectra[ri]
+        ref_mz = ref.mz
+        ref_int = ref.intensities
+        precursor_mz_ref = float(ref_precursor_mz[ri])
+        ppm_error = float(ppm_matrix[qi, ri])
 
-    for rt_val, precursor_mz, precursor_int, frag_mz, frag_int, qry in query_meta:
-        for ref in ref_spectra:
-            ref_mz = ref.mz
-            ref_int = ref.intensities
-            precursor_mz_ref = ref.get('precursor_mz', 0.0) or 0.0
+        qry_arr = np.array([meta['frag_mz'], meta['frag_int']])
+        ref_arr = np.array([ref_mz, ref_int])
+        alignment_data = _align_spectra_for_plotting(
+            meta['frag_mz'], meta['frag_int'], ref_mz, ref_int, frag_mz_tolerance
+        )
 
-            # Compute PPM error and apply precursor MZ tolerance filter
-            if precursor_mz_ref != 0:
-                ppm_error = ((precursor_mz - precursor_mz_ref) / precursor_mz_ref) * 1e6
-            else:
-                ppm_error = np.nan
-            if max_ppm_error is not None and (np.isnan(ppm_error) or abs(ppm_error) > max_ppm_error):
-                continue
+        ref_name = ref.get('name') or ref.get('compound_name') or ref.get('id') or 'Unknown'
 
-            # Score using pair(ref, query) — returns structured array with 'score' and 'matches'
-            with _suppress_tqdm():
-                result = cos.pair(ref, qry)
-            score = float(result['score'])
-            num_matches = int(result['matches'])
+        all_hits.append({
+            'mz_rt_uid': mz_rt_uid,
+            'database': ref.get('database', 'unknown'),
+            'ref_id': ref.get('id', ''),
+            'ref_name': ref_name,
+            'score': float(scores[qi, ri]),
+            'num_matches': int(matches[qi, ri]),
+            'mz_theoretical': precursor_mz_ref,
+            'mz_measured': meta['precursor_mz'],
+            'ppm_error': ppm_error,
+            'rt': float(meta['rt']),
+            'qry_intensity_peak': meta['precursor_int'],
+            'ref_frags': len(ref_mz),
+            'data_frags': len(meta['frag_mz']),
+            'matched_fragments': alignment_data['matched_fragments'],
+            'aligned_fragment_colors': alignment_data['fragment_colors'],
+            'qry_spectrum': alignment_data['query_aligned'],
+            'ref_spectrum': alignment_data['ref_aligned'],
+        })
 
-            if score < min_score:
-                continue
-            if num_matches < min_frags:
-                continue
+    HIT_COLUMNS = [
+        'mz_rt_uid', 'database', 'ref_id', 'ref_name', 'score', 'num_matches',
+        'mz_theoretical', 'mz_measured', 'ppm_error', 'rt',
+        'qry_intensity_peak', 'ref_frags', 'data_frags',
+        'matched_fragments', 'aligned_fragment_colors',
+        'qry_spectrum', 'ref_spectrum',
+    ]
 
-            # Alignment for plotting only (not used for score/match counting)
-            qry_arr = np.array([frag_mz, frag_int])
-            ref_arr = np.array([ref_mz, ref_int])
-            alignment_data = _align_spectra_for_plotting(qry_arr, ref_arr, frag_mz_tolerance)
-
-            ref_name = ref.get('name') or ref.get('compound_name') or ref.get('id') or 'Unknown'
-
-            all_hits.append({
-                'mz_rt_uid': mz_rt_uid,
-                'database': ref.get('database', 'unknown'),
-                'ref_id': ref.get('id', ''),
-                'ref_name': ref_name,
-                'score': score,
-                'num_matches': num_matches,
-                'mz_theoretical': float(precursor_mz_ref),
-                'mz_measured': float(precursor_mz),
-                'ppm_error': ppm_error,
-                'rt': float(rt_val),
-                'qry_intensity_peak': float(precursor_int),
-                'ref_frags': len(ref_mz),
-                'data_frags': len(frag_mz),
-                'matched_fragments': alignment_data['matched_fragments'],
-                'aligned_fragment_colors': alignment_data['fragment_colors'],
-                'qry_spectrum': alignment_data['query_aligned'],
-                'ref_spectrum': alignment_data['ref_aligned'],
-            })
-
-    return pd.DataFrame(all_hits) if all_hits else pd.DataFrame()
-
+    if not all_hits:
+        return pd.DataFrame(columns=HIT_COLUMNS)
+    return pd.DataFrame(all_hits, columns=HIT_COLUMNS)
 
 def _align_spectra_for_plotting(
-    query_spectrum: np.ndarray,
-    ref_spectrum: np.ndarray,
-    frag_mz_tolerance: float
+    query_mz: np.ndarray,
+    query_int: np.ndarray,
+    ref_mz: np.ndarray,
+    ref_int: np.ndarray,
+    frag_mz_tolerance: float,
 ) -> Dict:
     """
-    Align spectra using Hungarian assignment algorithm for proper mirror plotting.
+    Align query and reference spectra for mirror plotting.
+
+    Produces two parallel arrays where matched peaks share an index position,
+    and unmatched peaks have NaN on the opposing side. This lets a plotter
+    draw connecting lines between matched fragments.
     """
     try:
-        query_mz = query_spectrum[0]
-        ref_mz = ref_spectrum[0]
+        # Build cost matrix and solve assignment in one shot
+        mz_diff = np.abs(query_mz[:, None] - ref_mz[None, :])
+        within = mz_diff <= frag_mz_tolerance
+        cost = np.where(within, query_int[:, None] * ref_int[None, :], 0.0)
 
-        matched_peaks = _match_peaks(query_spectrum, ref_spectrum, frag_mz_tolerance)
-        matrix_size = max(len(query_mz), len(ref_mz))
-        filtered_coords = _hungarian_assignment(matched_peaks, matrix_size)
-        query_aligned, ref_aligned = _link_aligned_spectra(query_spectrum, ref_spectrum, filtered_coords)
+        if not cost.any():
+            return _no_match_alignment(query_mz, query_int, ref_mz, ref_int)
 
-        min_len = min(len(query_aligned[0]), len(ref_aligned[0]))
-        fragment_colors = ["red"] * min_len
-        matched_fragments = []
-        for idx in range(min_len):
-            q_val = query_aligned[0][idx]
-            r_val = ref_aligned[0][idx]
-            if not np.isnan(q_val) and not np.isnan(r_val):
-                matched_fragments.append(float(q_val))
-                fragment_colors[idx] = "green"
+        row_idx, col_idx = linear_sum_assignment(cost, maximize=True)
+        valid = cost[row_idx, col_idx] > 0
+        matched_q = row_idx[valid]
+        matched_r = col_idx[valid]
+
+        # Partition ref peaks into matched and unmatched
+        ref_matched_mask = np.zeros(len(ref_mz), dtype=bool)
+        ref_matched_mask[matched_r] = True
+        unmatched_r = ~ref_matched_mask
+
+        # Build aligned arrays:
+        #   [unmatched-ref peaks] + [all query peaks, with matched-ref peaks slotted in]
+        n_unmatched_r = int(unmatched_r.sum())
+        n_query = len(query_mz)
+
+        # Query side: NaN for unmatched-ref slots, then query peaks as-is
+        q_aligned_mz = np.concatenate([np.full(n_unmatched_r, np.nan), query_mz])
+        q_aligned_int = np.concatenate([np.full(n_unmatched_r, np.nan), query_int])
+
+        # Ref side: unmatched-ref peaks first, then NaN-filled query-length array
+        # with matched ref peaks placed at their query partner's index
+        r_slot_mz = np.full(n_query, np.nan)
+        r_slot_int = np.full(n_query, np.nan)
+        r_slot_mz[matched_q] = ref_mz[matched_r]
+        r_slot_int[matched_q] = ref_int[matched_r]
+        r_aligned_mz = np.concatenate([ref_mz[unmatched_r], r_slot_mz])
+        r_aligned_int = np.concatenate([ref_int[unmatched_r], r_slot_int])
+
+        # Build color + matched-fragment lists
+        both_present = ~np.isnan(q_aligned_mz) & ~np.isnan(r_aligned_mz)
+        fragment_colors = np.where(both_present, "green", "red").tolist()
+        matched_fragments = q_aligned_mz[both_present].tolist()
 
         return {
             'matched_fragments': matched_fragments,
             'fragment_colors': fragment_colors,
-            'query_aligned': query_aligned.tolist() if query_aligned is not None else [[], []],
-            'ref_aligned': ref_aligned.tolist() if ref_aligned is not None else [[], []],
-            'num_matched': len(matched_fragments)
+            'query_aligned': [q_aligned_mz.tolist(), q_aligned_int.tolist()],
+            'ref_aligned': [r_aligned_mz.tolist(), r_aligned_int.tolist()],
+            'num_matched': len(matched_fragments),
         }
 
-    except Exception as e:
-        logger.error(f"Error in spectrum alignment: {e}")
-        return {
-            'matched_fragments': [],
-            'fragment_colors': ['red'] * len(query_spectrum[0]) if len(query_spectrum) > 0 else [],
-            'query_aligned': [query_spectrum[0].tolist(), query_spectrum[1].tolist()] if len(query_spectrum) >= 2 else [[], []],
-            'ref_aligned': [ref_spectrum[0].tolist(), ref_spectrum[1].tolist()] if len(ref_spectrum) >= 2 else [[], []],
-            'num_matched': 0
-        }
+    except Exception:
+        logger.exception("Error in spectrum alignment")
+        return _no_match_alignment(query_mz, query_int, ref_mz, ref_int)
 
 
-def _match_peaks(
-    spec1: np.ndarray,
-    spec2: np.ndarray,
-    frag_mz_tolerance: float
-) -> List[Tuple[Tuple[int, int], float]]:
-    """
-    Match MS2 fragment peaks within m/z tolerance.
-    Returns list of ((query_idx, ref_idx), intensity_product) tuples.
-    """
-    matched_peaks = []
-    spec1_mz, spec1_intensity = spec1[0], spec1[1]
-    spec2_mz, spec2_intensity = spec2[0], spec2[1]
-
-    for i in range(len(spec1_mz)):
-        mz_diffs = np.abs(spec2_mz - spec1_mz[i])
-        within_tolerance = mz_diffs <= frag_mz_tolerance
-        if np.any(within_tolerance):
-            for j in np.where(within_tolerance)[0]:
-                matched_peaks.append(((i, j), float(spec1_intensity[i] * spec2_intensity[j])))
-
-    return matched_peaks
-
-
-def _hungarian_assignment(
-    matched_peaks: List[Tuple[Tuple[int, int], float]],
-    matrix_size: int
-) -> List[Tuple[int, int]]:
-    """
-    Filter matched peaks by maximizing matched intensity product using Hungarian algorithm.
-    """
-    if not matched_peaks:
-        return []
-
-    cost_matrix = np.zeros((matrix_size, matrix_size))
-    for (row, col), value in matched_peaks:
-        if row < matrix_size and col < matrix_size:
-            cost_matrix[row, col] = value
-
-    row_idx, col_idx = linear_sum_assignment(cost_matrix, maximize=True)
-
-    return [
-        (row_idx[i], col_idx[i])
-        for i in range(len(row_idx))
-        if cost_matrix[row_idx[i], col_idx[i]] > 0
-    ]
-
-
-def _link_aligned_spectra(
-    spec1: np.ndarray,
-    spec2: np.ndarray,
-    filtered_coords: List[Tuple[int, int]]
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Create linked and aligned MS2 spectra using filtered matching fragment indices.
-    Returns aligned spectra suitable for mirror plotting.
-    """
-    try:
-        spec1_mz, spec1_intensity = spec1[0], spec1[1]
-        spec2_mz, spec2_intensity = spec2[0], spec2[1]
-
-        if not filtered_coords:
-            return spec1, spec2
-
-        shared_spec1_idxs = [coord[0] for coord in filtered_coords]
-        shared_spec2_idxs = [coord[1] for coord in filtered_coords]
-
-        shared_spec2_mzs = np.array([spec2_mz[i] for i in shared_spec2_idxs])
-        shared_spec2_intensities = np.array([spec2_intensity[i] for i in shared_spec2_idxs])
-
-        unshared_mask = np.ones(len(spec2_mz), dtype=bool)
-        unshared_mask[shared_spec2_idxs] = False
-        unshared_spec2_mzs = spec2_mz[unshared_mask]
-        unshared_spec2_intensities = spec2_intensity[unshared_mask]
-
-        # Aligned spec1: nan placeholders for unshared spec2 peaks, then all spec1 peaks
-        spec1_alignment_linker = np.full(len(unshared_spec2_mzs), np.nan)
-        spec1_aligned = np.array([
-            np.concatenate((spec1_alignment_linker, spec1_mz)),
-            np.concatenate((spec1_alignment_linker, spec1_intensity))
-        ])
-
-        # Aligned spec2: unshared spec2 peaks, then nan-filled linker with matched peaks inserted
-        spec2_alignment_linker_mz = np.full(len(spec1_mz), np.nan)
-        spec2_alignment_linker_intensity = np.full(len(spec1_intensity), np.nan)
-        for i, spec1_idx in enumerate(shared_spec1_idxs):
-            if spec1_idx < len(spec2_alignment_linker_mz):
-                spec2_alignment_linker_mz[spec1_idx] = shared_spec2_mzs[i]
-                spec2_alignment_linker_intensity[spec1_idx] = shared_spec2_intensities[i]
-
-        spec2_aligned = np.array([
-            np.concatenate((unshared_spec2_mzs, spec2_alignment_linker_mz)),
-            np.concatenate((unshared_spec2_intensities, spec2_alignment_linker_intensity))
-        ])
-
-        return spec1_aligned, spec2_aligned
-
-    except Exception as e:
-        logger.error(f"Error in linking aligned spectra: {e}")
-        return spec1, spec2
+def _no_match_alignment(query_mz, query_int, ref_mz, ref_int) -> Dict:
+    """Fallback alignment when no peaks match (or on error)."""
+    return {
+        'matched_fragments': [],
+        'fragment_colors': ['red'] * len(query_mz),
+        'query_aligned': [query_mz.tolist(), query_int.tolist()],
+        'ref_aligned': [ref_mz.tolist(), ref_int.tolist()],
+        'num_matched': 0,
+    }
