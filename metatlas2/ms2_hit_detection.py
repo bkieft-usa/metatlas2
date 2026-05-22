@@ -76,9 +76,9 @@ def find_ms2_hits(auto_id_obj) -> None:
     # Define filtering parameters
     wp = auto_id_obj.workflow_params
     frag_mz_tolerance = wp.get('ms2_frag_mz_tolerance', 0.05)
-    min_score = wp.get('ms2_min_score', 0.01)
-    min_frags = wp.get('ms2_min_matching_frags', 1)
-    max_ppm_error = wp.get('ppm_error')
+    min_score = wp.get('ms2_min_score', 0)
+    min_frags = wp.get('ms2_min_matching_frags', 0)
+    max_ppm_error = wp.get('ppm_error', 5.0)
     limit_to_n_hits = wp.get('limit_to_n_hits', None)
 
     # set up data to pass to parallel jobs
@@ -94,7 +94,7 @@ def find_ms2_hits(auto_id_obj) -> None:
         return
 
     logger.info(f"Searching {len(jobs)} query sets...")
-    max_workers = min(mp.cpu_count(), len(jobs), 8)
+    max_workers = min(mp.cpu_count(), len(jobs))
     results = []
     if max_workers > 1 and len(jobs) > 1:
         logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
@@ -138,7 +138,6 @@ def find_ms2_hits(auto_id_obj) -> None:
         f"{unique_compounds} compounds and {unique_files} files{limit_msg}."
     )
 
-
 def _find_hits_from_ms2_df(
     ms2_df: pd.DataFrame,
     mz_rt_uid: str,
@@ -149,84 +148,81 @@ def _find_hits_from_ms2_df(
     max_ppm_error: float,
     limit_to_n_hits: int,
 ) -> pd.DataFrame:
-    """
-    Find reference hits for all MS2 scans in a DataFrame using cosine scoring.
-
-    Uses CosineHungarian.matrix() to score all (ref, query) pairs in one call
-    per compound, with a precursor-m/z prefilter applied per query to skip
-    refs outside max_ppm_error. Spectrum alignment for plotting is deferred:
-    it's only computed for hits that survive score/match thresholds, since
-    Hungarian alignment is O(n^3) and most candidate pairs don't pass.
-    """
     if ms2_df.empty or not ref_spectra:
         return pd.DataFrame()
 
-    # Build query Spectrum list, one per RT group
-    query_meta = []  # list of dicts; one per query
-    queries = []     # list of Spectrum, parallel to query_meta
-    for rt_val, rt_group in ms2_df.groupby('rt', sort=False):
-        rt_sorted = rt_group.sort_values('mz', kind='stable')
-        frag_mz = rt_sorted['mz'].to_numpy(dtype=np.float32)
-        frag_int = rt_sorted['i'].to_numpy(dtype=np.float32)
-        precursor_mz = float(rt_group['precursor_MZ'].iloc[0])
-        precursor_int = float(rt_group['precursor_intensity'].iloc[0])
-
-        qry = Spectrum(
-            mz=frag_mz,
-            intensities=frag_int,
-            metadata={'precursor_mz': precursor_mz},
-        )
-        query_meta.append({
-            'rt': rt_val,
-            'precursor_mz': precursor_mz,
-            'precursor_int': precursor_int,
-            'frag_mz': frag_mz,
-            'frag_int': frag_int,
-        })
+    # 1. Convert EVERYTHING to numpy immediately. 
+    # This eliminates Pandas overhead inside the loop.
+    ms2_df = ms2_df.sort_values('rt', kind='stable')
+    
+    all_rt = ms2_df['rt'].to_numpy()
+    all_pmz = ms2_df['precursor_MZ'].to_numpy()
+    all_pint = ms2_df['precursor_intensity'].to_numpy()
+    all_in_feature = ms2_df['in_feature'].to_numpy()
+    all_mz = ms2_df['mz'].to_numpy() # Added this
+    all_i = ms2_df['i'].to_numpy()   # Added this
+    
+    _, indices = np.unique(all_rt, return_index=True)
+    
+    query_meta = [] 
+    queries = []
+    
+    # 2. NumPy-only loop for Spectrum creation
+    for i in range(len(indices)):
+        start = indices[i]
+        end = indices[i+1] if i+1 < len(indices) else len(all_rt)
+        
+        # Slice numpy arrays instead of DataFrame .iloc
+        s_mz = all_mz[start:end]
+        s_i = all_i[start:end]
+        
+        # NumPy sort is orders of magnitude faster than df.sort_values
+        sort_idx = np.argsort(s_mz)
+        f_mz = s_mz[sort_idx].astype(np.float32)
+        f_int = s_i[sort_idx].astype(np.float32)
+        
+        qry = Spectrum(mz=f_mz, intensities=f_int, metadata={'precursor_mz': all_pmz[start]})
         queries.append(qry)
+        
+        query_meta.append({
+            'rt': all_rt[start],
+            'precursor_mz': all_pmz[start],
+            'precursor_int': all_pint[start],
+            'in_feature': all_in_feature[start],
+            'frag_mz': f_mz,
+            'frag_int': f_int,
+        })
 
     if not queries:
         return pd.DataFrame()
 
-    # Precompute ref precursor m/z array for prefilter
-    ref_precursor_mz = np.array(
-        [float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra],
-        dtype=np.float64,
-    )
-
-    # Determine candidate (query_idx, ref_idx) pairs after precursor-mz prefilter
-    # Build a boolean mask over (n_queries, n_refs); True where the pair should be scored.
-    n_queries = len(queries)
-    n_refs = len(ref_spectra)
-    valid_ref = ref_precursor_mz != 0
+    ref_precursor_mz = np.array([float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra], dtype=np.float64)
+    
+    # Vectorized PPM mask
+    n_queries, n_refs = len(queries), len(ref_spectra)
     q_mz = np.array([m['precursor_mz'] for m in query_meta])[:, None]
-    with np.errstate(divide='ignore', invalid='ignore'):
-        ppm_matrix = np.where(
-            valid_ref,
-            (q_mz - ref_precursor_mz) / np.where(valid_ref, ref_precursor_mz, 1.0) * 1e6,
-            np.nan,
-        )
+    
     if max_ppm_error is None:
         candidate_mask = np.ones((n_queries, n_refs), dtype=bool)
     else:
-        candidate_mask = valid_ref & (np.abs(ppm_matrix) <= max_ppm_error)
+        tol_matrix = ref_precursor_mz * (max_ppm_error * 1e-6)
+        candidate_mask = np.abs(q_mz - ref_precursor_mz) <= tol_matrix
+
     if not candidate_mask.any():
         return pd.DataFrame()
 
-    # Score all pairs at once
+    # Heavy computation
     with _suppress_tqdm():
         score_matrix = CosineHungarian(tolerance=frag_mz_tolerance).matrix(references=ref_spectra, queries=queries)
+    
     scores = score_matrix['score'].T
     matches = score_matrix['matches'].T
 
-    # Apply thresholds + prefilter mask in one vectorized step
-    passing = (
-        candidate_mask
-        & (scores >= min_score)
-        & (matches >= min_frags)
-    )
+    passing = candidate_mask & (scores >= min_score) & (matches >= min_frags)
+    
     if not passing.any():
         return pd.DataFrame()
+
     if limit_to_n_hits is not None:
         n_passing = int(passing.sum())
         if n_passing > limit_to_n_hits:
@@ -236,38 +232,45 @@ def _find_hits_from_ms2_df(
             new_passing[top_flat_idx] = True
             passing = new_passing.reshape(passing.shape)
 
-    # Build hit rows only for passing pairs; alignment computed here, on the survivors
+    # Final build: Pre-extract ref metadata to avoid dictionary lookups in the loop
+    ref_metadata = [
+        {
+            'db': r.get('database', 'unknown'),
+            'id': r.get('id', ''),
+            'name': r.get('name') or r.get('compound_name') or 'Unknown',
+            'mz': float(ref_precursor_mz[idx])
+        } 
+        for idx, r in enumerate(ref_spectra)
+    ]
+
     all_hits = []
     passing_qi, passing_ri = np.where(passing)
+    
     for qi, ri in zip(passing_qi, passing_ri):
         meta = query_meta[qi]
         ref = ref_spectra[ri]
-        ref_mz = ref.mz
-        ref_int = ref.intensities
-        precursor_mz_ref = float(ref_precursor_mz[ri])
-        ppm_error = float(ppm_matrix[qi, ri])
+        r_meta = ref_metadata[ri]
+        
+        actual_ppm = ((meta['precursor_mz'] - r_meta['mz']) / r_meta['mz']) * 1e6
 
-        qry_arr = np.array([meta['frag_mz'], meta['frag_int']])
-        ref_arr = np.array([ref_mz, ref_int])
         alignment_data = _align_spectra_for_plotting(
-            meta['frag_mz'], meta['frag_int'], ref_mz, ref_int, frag_mz_tolerance
+            meta['frag_mz'], meta['frag_int'], ref.mz, ref.intensities, frag_mz_tolerance
         )
-
-        ref_name = ref.get('name') or ref.get('compound_name') or ref.get('id') or 'Unknown'
 
         all_hits.append({
             'mz_rt_uid': mz_rt_uid,
-            'database': ref.get('database', 'unknown'),
-            'ref_id': ref.get('id', ''),
-            'ref_name': ref_name,
+            'in_feature': meta['in_feature'],
+            'database': r_meta['db'],
+            'ref_id': r_meta['id'],
+            'ref_name': r_meta['name'],
             'score': float(scores[qi, ri]),
             'num_matches': int(matches[qi, ri]),
-            'mz_theoretical': precursor_mz_ref,
+            'mz_theoretical': r_meta['mz'],
             'mz_measured': meta['precursor_mz'],
-            'ppm_error': ppm_error,
+            'ppm_error': actual_ppm,
             'rt': float(meta['rt']),
             'qry_intensity_peak': meta['precursor_int'],
-            'ref_frags': len(ref_mz),
+            'ref_frags': len(ref.mz),
             'data_frags': len(meta['frag_mz']),
             'matched_fragments': alignment_data['matched_fragments'],
             'aligned_fragment_colors': alignment_data['fragment_colors'],
@@ -275,17 +278,7 @@ def _find_hits_from_ms2_df(
             'ref_spectrum': alignment_data['ref_aligned'],
         })
 
-    HIT_COLUMNS = [
-        'mz_rt_uid', 'database', 'ref_id', 'ref_name', 'score', 'num_matches',
-        'mz_theoretical', 'mz_measured', 'ppm_error', 'rt',
-        'qry_intensity_peak', 'ref_frags', 'data_frags',
-        'matched_fragments', 'aligned_fragment_colors',
-        'qry_spectrum', 'ref_spectrum',
-    ]
-
-    if not all_hits:
-        return pd.DataFrame(columns=HIT_COLUMNS)
-    return pd.DataFrame(all_hits, columns=HIT_COLUMNS)
+    return pd.DataFrame(all_hits)
 
 def _align_spectra_for_plotting(
     query_mz: np.ndarray,

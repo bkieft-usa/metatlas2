@@ -8,7 +8,7 @@ def filter_lcmsruns_list(
     lcmsruns: List["LCMSRun"], 
     include_file_type: List[str] = None,
     exclude_file_type: List[str] = None,
-    file_format: str = "parquet",
+    file_format: str = "h5",
     chromatography: str = None,
     polarity: str = None,
     ms_level: int = None
@@ -22,14 +22,20 @@ def filter_lcmsruns_list(
 
     if polarity:
         if polarity.lower() in ["pos", "positive"]:
-            polarity = "positive"
+            polarity = ["positive", "fps"]
         elif polarity.lower() in ["neg", "negative"]:
-            polarity = "negative"
+            polarity = ["negative", "fps"]
 
     if ms_level is not None:
         ms_level = int(ms_level)
 
     logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: include_file_type={include_file_type}, exclude_file_type={exclude_file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}, ms_level={ms_level}...")
+    logger.info(f"Input files have the following unique types:")
+    logger.info(f"  - file_type: {set(getattr(run, 'file_type', None) for run in lcmsruns)}")
+    logger.info(f"  - file_format: {set(getattr(run, 'file_format', None) for run in lcmsruns)}")
+    logger.info(f"  - chromatography: {set(getattr(run, 'chromatography', None) for run in lcmsruns)}")
+    logger.info(f"  - polarity: {set(getattr(run, 'polarity', None) for run in lcmsruns)}")
+    logger.info(f"  - ms_level: {set(getattr(run, 'ms_level', None) for run in lcmsruns)}")
     filtered_runs = lcmsruns.copy()
 
     # Fix: ensure file_type is always a list
@@ -42,7 +48,7 @@ def filter_lcmsruns_list(
     if chromatography:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'chromatography', '').lower() == chromatography.lower()]
     if polarity:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'polarity', '').lower() == polarity.lower()]
+        filtered_runs = [run for run in filtered_runs if getattr(run, 'polarity', '').lower() in [p.lower() for p in polarity]]
     if ms_level is not None:
         filtered_runs = [run for run in filtered_runs if getattr(run, 'ms_level', None) == ms_level]
 
@@ -84,7 +90,7 @@ def _get_project_files(project_raw_files_path: str) -> dict:
     Scan project directory for LCMS files and organize by chromatography/ms_level/polarity/analysis type.
     
     Args:
-        project_raw_files_path: Path to directory containing .parquet files
+        project_raw_files_path: Path to directory containing raw files
         
     Returns:
         Nested dictionary: {chromatography: {ms_level: {polarity: {analysis_type: [file_paths]}}}}
@@ -100,26 +106,34 @@ def _get_project_files(project_raw_files_path: str) -> dict:
             logger.error(f"  - {f.name}")
         raise ValueError(f"Please address the .failed files before proceeding. Found {len(failed_conversion_files)} .failed files in {project_path}.")
     
-    # Check on directories and files
-    parquet_dir = project_path / "parquet"
-    if not parquet_dir.exists():
-        raise FileNotFoundError(f"parquet/ directory does not exist in {project_path}")
-    parquet_files = list(parquet_dir.glob("*.parquet"))
-    if not parquet_files:
-        raise ValueError(f"Missing .parquet files for {project_path}")
-    logger.info(f"Found {len(parquet_files)} .parquet files in {project_path}")
-    
-    files_by_group = {'parquet': {}}
-    _organize_files(parquet_files, files_by_group['parquet'])
-    
+    # Find files directly in the project directory
+    raw_files = list(project_path.glob("*.raw"))
+    mzML_files = list(project_path.glob("*.mzML"))
+    h5_files = list(project_path.glob("*.h5"))
+    if not raw_files or not mzML_files or not h5_files:
+        raise ValueError(f"Missing .raw, .mzML, or .h5 files for {project_path}")
+
+    logger.info(f"Found {len(raw_files)} .raw files in {project_path}")
+    logger.info(f"Found {len(mzML_files)} .mzML files in {project_path}")
+    logger.info(f"Found {len(h5_files)} .h5 files in {project_path}")
+
+    # Initialize nested dictionary
+    files_by_group = {'raw': {}, 'mzML': {}, 'h5': {}}
+
+    # Organize each file type
+    _organize_files(raw_files, 'raw', files_by_group['raw'])
+    _organize_files(mzML_files, 'mzML', files_by_group['mzML'])
+    _organize_files(h5_files, 'h5', files_by_group['h5'])
+
     return files_by_group
 
-def _organize_files(files: List[Path], files_dict: dict) -> None:
+def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None:
     """
     Helper function to organize files by chromatography/polarity/ms_level/analysis_type.
     
     Args:
         files: List of file paths to organize
+        file_type: Type of file ('raw', 'mzML', 'h5')
         files_dict: Dictionary to populate with organized files
     """
     for file_path in files:
@@ -128,26 +142,28 @@ def _organize_files(files: List[Path], files_dict: dict) -> None:
         # Infer chromatography from filename
         if any(x in filename.upper() for x in ['HILIC', 'HILICZ']):
             chromatography = 'HILIC'
-        elif any(x in filename.upper() for x in ['C18']):
+        elif any(x in filename.upper() for x in ['C18', 'RP']):
             chromatography = 'C18'
         else:
             chromatography = 'Unknown'
         
-        # Infer MS level and polarity from filename
-        filename_lower = filename.lower()
-        if filename_lower.endswith('_ms1_pos.parquet'):
-            ms_level, polarity = 1, 'positive'
-        elif filename_lower.endswith('_ms2_pos.parquet'):
-            ms_level, polarity = 2, 'positive'
-        elif filename_lower.endswith('_ms1_neg.parquet'):
-            ms_level, polarity = 1, 'negative'
-        elif filename_lower.endswith('_ms2_neg.parquet'):
-            ms_level, polarity = 2, 'negative'
+        if any(x in filename.upper() for x in ['_POS_', '_POSITIVE_']):
+            polarity = 'positive'
+        elif any(x in filename.upper() for x in ['_NEG_', '_NEGATIVE_']):
+            polarity = 'negative'
+        elif any(x in filename.upper() for x in ['_FPS_']):
+            polarity = 'fps'
         else:
-            ms_level, polarity = 'unknown', 'unknown'
+            polarity = 'Unknown'
+        if any(x in filename.upper() for x in ['_MS1_']):
+            ms_level = 1
+        elif any(x in filename.upper() for x in ['_MS2_', '_MSMS_']):
+            ms_level = 2
+        else:
+            ms_level = 'Unknown'
 
         # Infer analysis type from filename
-        if any(x in filename.upper() for x in ['-QC', 'QC-']):
+        if any(x in filename.upper() for x in ['-QC']):
             analysis_type = 'qc'
         elif any(x in filename.upper() for x in ['-ISTD']):
             analysis_type = 'istd'

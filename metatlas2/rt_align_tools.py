@@ -380,7 +380,6 @@ def create_file_matching_summary(
     total_peaks_extracted = 0
     file_match_counts = {}
 
-
     # Build a lookup for MS1Data by mz_rt_uid
     ms1_lookup = {}
     for ms1 in experimental_data.ms1_data:

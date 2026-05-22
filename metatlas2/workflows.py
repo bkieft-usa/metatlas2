@@ -10,9 +10,7 @@ import metatlas2.database_interact as dbi
 import metatlas2.rt_align_tools as rat
 import metatlas2.ms2_hit_detection as mhd
 import metatlas2.manual_curation_summarizer as mcs
-import metatlas2.extract_data_from_parquet as edp
 import metatlas2.extract_data_from_h5 as edh
-import metatlas2.extract_data_from_h5_legacy as edhL
 import metatlas2.lcmsruns_tools as lrt
 import metatlas2.analysis_gui as agu
 import metatlas2.analysis_summary as asm
@@ -108,7 +106,7 @@ def run_rt_alignment(
     )
 
     logger.info("Passing Atlas and LCMSRuns to data extractor...")
-    experimental_data_obj = edp.extract_data_from_raw(
+    experimental_data_obj = edh.extract_data_from_raw(
         obj=rt_align_obj,
         stage="rt_alignment"
     )
@@ -243,23 +241,10 @@ def run_auto_identification(
         )
 
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
-        if auto_id_obj.workflow_params.get('data_extraction_method', 'parquet') == 'parquet':
-            auto_id_obj.experimental_data = edp.extract_data_from_raw(
-                obj=auto_id_obj,
-                stage="auto_identification",
-            )
-        elif auto_id_obj.workflow_params.get('data_extraction_method', 'parquet') == 'h5':
-            auto_id_obj.experimental_data = edh.extract_data_from_raw(
-                obj=auto_id_obj,
-                stage="auto_identification",
-            )
-        elif auto_id_obj.workflow_params.get('data_extraction_method', 'parquet') == 'h5_legacy':
-            auto_id_obj.experimental_data = edhL.extract_data_from_raw(
-                obj=auto_id_obj,
-                stage="auto_identification",
-            )
-        else:
-            raise ValueError(f"Unknown data extraction method: {auto_id_obj.workflow_params.get('data_extraction_method')}")
+        auto_id_obj.experimental_data = edh.extract_data_from_raw(
+            obj=auto_id_obj,
+            stage="auto_identification",
+        )
 
         logger.info("Passing ExperimentalData to MS2 hit finder...")
         mhd.find_ms2_hits(
@@ -271,18 +256,8 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-        logger.info("Applying quality filters to ExperimentalData...")
-        auto_id_obj.experimental_data = dbi.apply_auto_id_filters(
-            auto_id_obj=auto_id_obj
-        )
-
         logger.info("Passing filtered AutoIdentification object to database saver...")
         dbi.save_auto_identification_results_to_db(
-            auto_id_obj=auto_id_obj
-        )
-
-        logger.info("Passing AutoIdentification object to summary generator...")
-        dbi.display_auto_id_summary(
             auto_id_obj=auto_id_obj
         )
 
@@ -298,13 +273,13 @@ def run_auto_identification(
         )
 
         logger.info("Passing Atlas object to curation notebook generator...")
-        nb_path = nbg.generate_gui_notebooks(
+        nbg.generate_gui_notebooks(
             auto_id_obj=auto_id_obj
         )
 
     logger.info(f"Auto identification procedure complete for RT alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}!")
 
-    return nb_path
+    return
 
 def run_analysis_gui(
     project_name: str,

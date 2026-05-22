@@ -1,49 +1,65 @@
-
 import pandas as pd
-import pyarrow.parquet as pq
-from pathlib import Path
-from typing import Dict, Any
+import numpy as np
 from tqdm.auto import tqdm
-import time
-import tracemalloc
-
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
+from pathlib import Path
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('extract_data_from_h5')
 
-def _load_h5_table(file_path: str, key: str) -> pd.DataFrame:
-    """Load a single PyTables table from an HDF5 file; empty df if missing."""
+_EMPTY_MS1 = pd.DataFrame(columns=["mz", "i", "rt"]).astype(np.float32)
+_EMPTY_MS2 = pd.DataFrame(columns=["mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy"]).astype(np.float32)
+
+def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
+    read_key = key + "_mz" if mz_bounds is not None else key
     try:
-        df = pd.read_hdf(file_path, key=key)
+        df = pd.read_hdf(file_path, key=read_key, columns=columns)
     except (KeyError, ValueError, OSError) as exc:
-        logger.warning("Could not read key %s from %s: %s", key, file_path, exc)
+        logger.warning("Could not read key %s from %s: %s", read_key, file_path, exc)
         return pd.DataFrame()
-    if not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(df)
+    
+    if df.empty:
+        return df
+
+    if mz_bounds is not None:
+        mz_min, mz_max = mz_bounds
+        mz = df["mz"].to_numpy()
+        lo = np.searchsorted(mz, mz_min, side="left")
+        hi = np.searchsorted(mz, mz_max, side="right")
+        df = df.iloc[lo:hi]
+    
+    float_cols = df.select_dtypes(include=['float64']).columns
+    if not float_cols.empty:
+        df[float_cols] = df[float_cols].astype(np.float32, copy=False)
+    
     return df
 
-def _expand_atlas_windows(atlas: pd.DataFrame, workflow_params: dict) -> pd.DataFrame:
+def _expand_atlas_windows(atlas: pd.DataFrame, workflow_params: dict, polarity: str) -> pd.DataFrame:
     """
     Pre-compute mz_min/mz_max and rt_min_pad/rt_max_pad columns for the atlas
     so that the merge step can do simple interval lookups.
     """
+    logger.info(
+        "Expanding atlas windows for %d entries with extra_time=%s and ppm_error=%s",
+        len(atlas),
+        workflow_params.get("extra_time", 0.0),
+        workflow_params.get("ppm_error", 5.0),
+    )
     extra_time = float(workflow_params.get("extra_time", 0.0))
     mz_tolerance = float(workflow_params.get("ppm_error", 5.0))
     out = atlas.copy()
-    out["mz_min"] = out["mz"] - out["mz"] * mz_tolerance * 1e-6
-    out["mz_max"] = out["mz"] + out["mz"] * mz_tolerance * 1e-6
-    out["rt_min_pad"] = out["rt_min"] - extra_time
-    out["rt_max_pad"] = out["rt_max"] + extra_time
-    return out
+    out["polarity"] = polarity
 
-def _filter_atlas_for_polarity(atlas: pd.DataFrame, polarity: str) -> pd.DataFrame:
-    """Return only atlas rows matching the file's polarity (if column present)."""
-    if "polarity" in atlas.columns:
-        return atlas[atlas["polarity"] == polarity].reset_index(drop=True)
-    return atlas
+    # Compute in float64 for precision, store as float32 to match scan data dtype.
+    mz = out["mz"].to_numpy(dtype=np.float64)
+    tol = mz * mz_tolerance * 1e-6
+    out["mz_min"] = (mz - tol).astype(np.float32)
+    out["mz_max"] = (mz + tol).astype(np.float32)
+    out["rt_min_pad"] = (out["rt_min"].to_numpy(dtype=np.float64) - extra_time).astype(np.float32)
+    out["rt_max_pad"] = (out["rt_max"].to_numpy(dtype=np.float64) + extra_time).astype(np.float32)
+    return out
 
 def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
     """Find all (query, atlas) index pairs where a query m/z falls inside an
@@ -56,7 +72,7 @@ def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
 
     Queries are internally sorted by m/z so that each processing chunk spans
     a narrow m/z window, bounding the per-chunk candidate set. This matters
-    for inputs like MS2 precursor_mz where consecutive scans can jump across
+    for inputs like MS2 precursor_MZ where consecutive scans can jump across
     the full m/z range. Output indices are remapped back to the caller's
     original query order.
 
@@ -87,8 +103,8 @@ def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
         q = q_sorted[start:stop]
 
         # Which intervals have opened by the max q in this chunk?
-        hi = np.searchsorted(sorted_min, q.max(), side="right")
         # Which of those are still possibly live at the min q in this chunk?
+        hi = np.searchsorted(sorted_min, q.max(), side="right")
         live_mask = sorted_max[:hi] >= q.min()
         live_pos = np.nonzero(live_mask)[0]
         if live_pos.size == 0:
@@ -113,9 +129,6 @@ def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
         if not keep.any():
             continue
 
-        # q_local[keep] indexes into the sorted chunk; remap to original
-        # query indices via mz_order. cand_pos[keep] indexes into the live
-        # arrays; remap to original atlas indices via live_pos then order_min.
         q_chunks_q.append(mz_order[start + q_local[keep]])
         q_chunks_a.append(order_min[live_pos[cand_pos[keep]]])
 
@@ -124,22 +137,13 @@ def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
 
     return np.concatenate(q_chunks_q), np.concatenate(q_chunks_a)
 
-
 def _join_ms1_to_atlas(
     ms1_df: pd.DataFrame,
     atlas: pd.DataFrame,
-) -> dict[str, pd.DataFrame]:
-    """
-    Vectorized interval join of an MS1 scan table against all atlas entries.
-    Returns {mz_rt_uid: subset_df}.
-
-    Every scan point is reported against every atlas entry whose mz window
-    contains it AND whose padded rt window contains it. Overlapping atlas
-    windows (e.g. isomers sharing m/z) create shared data - a scan point
-    inside K overlapping windows produces K hits.
-    """
+    keep_outside_of_feature: bool = True
+) -> pd.DataFrame:
     if ms1_df.empty or atlas.empty:
-        return {}
+        return pd.DataFrame(columns=["mz", "rt", "i", "mz_rt_uid", "in_feature"])
 
     scans = ms1_df[["mz", "rt", "i"]].reset_index(drop=True)
     atlas_r = atlas.reset_index(drop=True)
@@ -148,230 +152,185 @@ def _join_ms1_to_atlas(
     scan_rt = scans["rt"].to_numpy()
     scan_i = scans["i"].to_numpy()
 
-    q_idx, a_idx = _interval_join_mz(
-        scan_mz,
-        atlas_r["mz_min"].to_numpy(),
-        atlas_r["mz_max"].to_numpy(),
-    )
+    atlas_mz_min = atlas_r["mz_min"].to_numpy()
+    atlas_mz_max = atlas_r["mz_max"].to_numpy()
+    atlas_rt_min = atlas_r["rt_min_pad"].to_numpy()
+    atlas_rt_max = atlas_r["rt_max_pad"].to_numpy()
+    atlas_uid = atlas_r["mz_rt_uid"].to_numpy()
+
+    q_idx, a_idx = _interval_join_mz(scan_mz, atlas_mz_min, atlas_mz_max)
     if len(q_idx) == 0:
-        return {}
+        return pd.DataFrame(columns=["mz", "rt", "i", "mz_rt_uid", "in_window"])
 
-    # Apply the rt window filter on the candidate pairs.
-    rt_min_pad = atlas_r["rt_min_pad"].to_numpy()[a_idx]
-    rt_max_pad = atlas_r["rt_max_pad"].to_numpy()[a_idx]
     scan_rt_paired = scan_rt[q_idx]
-    rt_mask = (scan_rt_paired >= rt_min_pad) & (scan_rt_paired <= rt_max_pad)
+    in_window = (scan_rt_paired >= atlas_rt_min[a_idx]) & (scan_rt_paired <= atlas_rt_max[a_idx])
 
-    if not rt_mask.any():
-        return {}
+    if not keep_outside_of_feature:
+        q_idx = q_idx[in_window]
+        a_idx = a_idx[in_window]
+        if len(q_idx) == 0:
+            return pd.DataFrame(columns=["mz", "rt", "i", "mz_rt_uid", "in_window"])
+        in_window_val = np.ones(len(q_idx), dtype=bool)
+    else:
+        in_window_val = in_window
 
-    q_idx = q_idx[rt_mask]
-    a_idx = a_idx[rt_mask]
-
-    hits = pd.DataFrame({
+    return pd.DataFrame({
         "mz":        scan_mz[q_idx],
         "rt":        scan_rt[q_idx],
         "i":         scan_i[q_idx],
-        "mz_rt_uid": atlas_r["mz_rt_uid"].to_numpy()[a_idx],
+        "mz_rt_uid": atlas_uid[a_idx],
+        "in_window": in_window_val,
     })
-
-    return {uid: g.drop(columns="mz_rt_uid").reset_index(drop=True)
-            for uid, g in hits.groupby("mz_rt_uid", sort=False)}
-
 
 def _join_ms2_to_atlas(
     ms2_df: pd.DataFrame,
     atlas: pd.DataFrame,
-) -> dict[str, pd.DataFrame]:
-    """
-    Vectorized interval join of an MS2 fragment table against all atlas
-    entries, matched on precursor_mz vs. atlas mz window and filtered by
-    the atlas rt window. Fragment rows inherit the precursor's compound
-    assignment, so all (mz, i, precursor_mz/i, collision_energy) columns are
-    preserved per assigned compound.
-    """
+) -> pd.DataFrame:
     if ms2_df.empty or atlas.empty:
-        return {}
+        return pd.DataFrame()
 
-    needed = ("mz", "i", "rt", "precursor_mz", "precursor_intensity",
-              "collision_energy")
+    needed = ("mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy")
     keep_cols = [c for c in needed if c in ms2_df.columns]
-    if "precursor_mz" not in keep_cols or "rt" not in keep_cols:
-        logger.warning("MS2 table missing precursor_mz or rt; skipping")
-        return {}
+    if "precursor_MZ" not in keep_cols or "rt" not in keep_cols:
+        logger.warning("MS2 table missing precursor_MZ or rt; skipping")
+        return pd.DataFrame()
 
     scans = ms2_df[keep_cols].reset_index(drop=True)
-
-    # Drop rows with no usable precursor assignment. Some vendors write NaN,
-    # some write 0, when the instrument failed to isolate a precursor.
-    precursor_raw = scans["precursor_mz"].to_numpy()
+    precursor_raw = scans["precursor_MZ"].to_numpy()
     valid_precursor = ~np.isnan(precursor_raw) & (precursor_raw > 0)
     if not valid_precursor.all():
         scans = scans.loc[valid_precursor].reset_index(drop=True)
     if scans.empty:
-        return {}
+        return pd.DataFrame()
 
     atlas_r = atlas.reset_index(drop=True)
-
-    precursor_mz = scans["precursor_mz"].to_numpy()
+    precursor_MZ = scans["precursor_MZ"].to_numpy()
     scan_rt = scans["rt"].to_numpy()
+    atlas_mz_min = atlas_r["mz_min"].to_numpy()
+    atlas_mz_max = atlas_r["mz_max"].to_numpy()
+    atlas_rt_min = atlas_r["rt_min_pad"].to_numpy()
+    atlas_rt_max = atlas_r["rt_max_pad"].to_numpy()
+    atlas_uid = atlas_r["mz_rt_uid"].to_numpy()
 
-    q_idx, a_idx = _interval_join_mz(
-        precursor_mz,
-        atlas_r["mz_min"].to_numpy(),
-        atlas_r["mz_max"].to_numpy(),
-    )
+    q_idx, a_idx = _interval_join_mz(precursor_MZ, atlas_mz_min, atlas_mz_max)
     if len(q_idx) == 0:
-        return {}
+        return pd.DataFrame()
 
-    rt_min_pad = atlas_r["rt_min_pad"].to_numpy()[a_idx]
-    rt_max_pad = atlas_r["rt_max_pad"].to_numpy()[a_idx]
     scan_rt_paired = scan_rt[q_idx]
-    rt_mask = (scan_rt_paired >= rt_min_pad) & (scan_rt_paired <= rt_max_pad)
+    in_feature = (scan_rt_paired >= atlas_rt_min[a_idx]) & (scan_rt_paired <= atlas_rt_max[a_idx])
 
-    if not rt_mask.any():
-        return {}
-
-    q_idx = q_idx[rt_mask]
-    a_idx = a_idx[rt_mask]
-
-    # Build the result by taking the paired rows from `scans` and attaching the atlas assignment.
     hits = scans.iloc[q_idx].reset_index(drop=True)
-    hits["mz_rt_uid"] = atlas_r["mz_rt_uid"].to_numpy()[a_idx]
+    hits["mz_rt_uid"] = atlas_uid[a_idx]
+    hits["in_feature"] = in_feature
+    return hits
 
-    return {uid: g.drop(columns="mz_rt_uid").reset_index(drop=True)
-            for uid, g in hits.groupby("mz_rt_uid", sort=False)}
-
-# Per-file worker
 def _process_one_file(
     run,
     atlas: pd.DataFrame,
+    atlas_info: dict,
     remove_unided: bool = True,
     ms1_only: bool = False,
-) -> tuple[list["MS1Data"], list["MS2Data"]]:
+    keep_outside_of_feature: bool = True,
+    ms1_min_pts=None, 
+    ms1_min_int=None
+) -> tuple[list, list]:
     """Load one .h5, extract MS1 + MS2 results for all atlas entries."""
-    t0 = time.perf_counter()
-    m0, _ = tracemalloc.get_traced_memory()
-    polarity = run.polarity
-    atlas_pol = _filter_atlas_for_polarity(atlas, polarity)
-    t1 = time.perf_counter()
-    m1, _ = tracemalloc.get_traced_memory()
-    if atlas_pol.empty:
-        logger.info("No atlas entries for polarity=%s; skipping %s",
-                    polarity, run.filename)
-        return [], []
-
-    if ms1_only:
-        ms1_key = {"positive": "ms1_pos", "negative": "ms1_neg"}.get(polarity)
-        ms2_key = None
-    else:
-        ms1_key = {"positive": "ms1_pos", "negative": "ms1_neg"}.get(polarity)
-        ms2_key = {"positive": "ms2_pos", "negative": "ms2_neg"}.get(polarity)
+    polarity = atlas['polarity'].iloc[0] if 'polarity' in atlas.columns else 'unknown'
+    ms1_key = {"positive": "ms1_pos", "negative": "ms1_neg"}.get(polarity)
+    ms2_key = None if ms1_only else {"positive": "ms2_pos", "negative": "ms2_neg"}.get(polarity)
     if ms1_key is None:
-        logger.error("Unknown polarity %r on %s", polarity, run.file_path)
         return [], []
 
-    t2 = time.perf_counter()
-    m2, _ = tracemalloc.get_traced_memory()
-    ms1_df = _load_h5_table(run.file_path, ms1_key)
-    ms2_df = _load_h5_table(run.file_path, ms2_key)
-    t3 = time.perf_counter()
-    m3, _ = tracemalloc.get_traced_memory()
+    ms1_mz_lo = float(atlas["mz_min"].min())
+    ms1_mz_hi = float(atlas["mz_max"].max())
+    ms1_cols = ["mz", "rt", "i"]
+    ms2_cols = ["mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy"]
 
-    ms1_hits = _join_ms1_to_atlas(ms1_df, atlas_pol)
-    ms2_hits = _join_ms2_to_atlas(ms2_df, atlas_pol)
-    t4 = time.perf_counter()
-    m4, _ = tracemalloc.get_traced_memory()
+    # Load
+    ms1_df = _load_h5_table(run.file_path, ms1_key, columns=ms1_cols, mz_bounds=(ms1_mz_lo, ms1_mz_hi))
+    ms2_df = _load_h5_table(run.file_path, ms2_key, columns=ms2_cols) if ms2_key else _EMPTY_MS2
 
-    ms1_results, ms2_results = _build_per_file_lists(
-        atlas_pol, ms1_hits, ms2_hits, run.filename, remove_unided
-    )
-    t5 = time.perf_counter()
-    m5, _ = tracemalloc.get_traced_memory()
+    # Join
+    ms1_hits = _join_ms1_to_atlas(ms1_df, atlas, keep_outside_of_feature)
+    ms2_hits = _join_ms2_to_atlas(ms2_df, atlas)
 
-    logger.info("%s timings (s): filter_atlas: %.2f, load_tables: %.2f, join: %.2f, build_lists: %.2f", run.filename, t1-t0, t3-t2, t4-t3, t5-t4)
-    logger.info("%s memory (kB): start: %.1f, filter_atlas: %.1f, load_tables: %.1f, join: %.1f, build_lists: %.1f",
-                 run.filename, m0/1024, m1/1024, m2/1024, m3/1024, m4/1024, m5/1024)
-    logger.info("%s: %d MS1 entries (%d non-empty), %d MS2 entries (%d non-empty)",
-                 run.filename,
-                 len(ms1_results), sum(1 for r in ms1_results if not r.data.empty),
-                 len(ms2_results), sum(1 for r in ms2_results if not r.data.empty))
-    return ms1_results, ms2_results
+    # Build
+    return _build_per_file_lists(atlas, ms1_hits, ms2_hits, atlas_info, run.filename, remove_unided, ms1_min_pts, ms1_min_int)
+
+def _group_hits(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if df.empty: return {}
+    df = df.sort_values("rt", kind="mergesort")
+    return {uid: g.drop(columns="mz_rt_uid").reset_index(drop=True) 
+            for uid, g in df.groupby("mz_rt_uid", sort=False)}
 
 def _build_per_file_lists(
     atlas: pd.DataFrame,
-    ms1_by_uid: dict[str, pd.DataFrame],
-    ms2_by_uid: dict[str, pd.DataFrame],
+    ms1_hits: pd.DataFrame,
+    ms2_hits: pd.DataFrame,
+    atlas_info: dict,
     filename: str,
     remove_unided: bool = True,
-) -> tuple[list["MS1Data"], list["MS2Data"]]:
-    """
-    Build MS1Data / MS2Data objects for this file.
-
-    Add empty dfs if an atlas entry has no hits but all atlas compound should be kept
-
-    In both cases, non-empty frames are sorted by ascending rt.
-    """
-
+    ms1_min_pts: int = None,
+    ms1_min_int: float = None,
+) -> tuple[list, list, dict]:
     from metatlas2.workflow_objects import MS1Data, MS2Data
 
-    ms1_list: list[MS1Data] = []
-    ms2_list: list[MS2Data] = []
+    ms1_groups = _group_hits(ms1_hits)
+    ms2_groups = _group_hits(ms2_hits)
 
-    # Build lookup for inchi_key and adduct by mz_rt_uid
-    mzrt_info = atlas.set_index("mz_rt_uid")[["inchi_key", "adduct"]].to_dict(orient="index")
+    ms1_list, ms2_list = [], []
 
-    for uid in tqdm(atlas["mz_rt_uid"], desc=f"Building per-file lists for {filename}"):
-        info = mzrt_info.get(uid, {})
-        inchi_key = info.get("inchi_key", "")
-        adduct = info.get("adduct", "")
-
-        ms1_df = ms1_by_uid.get(uid)
-        if ms1_df is None or ms1_df.empty:
-            if remove_unided:
-                pass  # skip — don't emit an MS1Data for this uid
+    mz_rt_uid_removed = {}
+    for uid in atlas["mz_rt_uid"]:
+        info = atlas_info.get(uid, {})
+        ik, add = info.get("inchi_key", ""), info.get("adduct", "")
+        
+        # ms1 data and filter
+        m1 = ms1_groups.get(uid)
+        if m1 is not None:
+            pts_ok = (ms1_min_pts is None) or (len(m1) >= ms1_min_pts)
+            int_ok = (ms1_min_int is None) or (m1["i"].max() >= ms1_min_int)
+            if pts_ok and int_ok:
+                ms1_list.append(MS1Data(filename=filename, mz_rt_uid=uid, inchi_key=ik, adduct=add, data=m1))
+            elif not remove_unided:
+                ms1_list.append(MS1Data(filename=filename, mz_rt_uid=uid, inchi_key=ik, adduct=add, data=_EMPTY_MS1))
             else:
-                ms1_list.append(MS1Data(filename=filename, mz_rt_uid=uid, inchi_key=inchi_key, adduct=adduct,
-                                        data=_empty_ms1_frame()))
+                if not pts_ok and not int_ok:
+                    mz_rt_uid_removed[uid] = f"ms1 points {len(m1)} < {ms1_min_pts} and max intensity {m1['i'].max()} < {ms1_min_int}"
+                elif not pts_ok:
+                    mz_rt_uid_removed[uid] = f"ms1 points {len(m1)} < {ms1_min_pts}"
+                elif not int_ok:
+                    mz_rt_uid_removed[uid] = f"ms1 max intensity {m1['i'].max()} < {ms1_min_int}"
         else:
-            ms1_df = ms1_df.sort_values("rt", kind="mergesort").reset_index(drop=True)
-            ms1_list.append(MS1Data(filename=filename, mz_rt_uid=uid, inchi_key=inchi_key, adduct=adduct, data=ms1_df))
-
-        ms2_df = ms2_by_uid.get(uid)
-        if ms2_df is None or ms2_df.empty:
-            if remove_unided:
-                pass
+            if not remove_unided:
+                ms1_list.append(MS1Data(filename=filename, mz_rt_uid=uid, inchi_key=ik, adduct=add, data=_EMPTY_MS1))
+                ms2_list.append(MS2Data(filename=filename, mz_rt_uid=uid, inchi_key=ik, adduct=add, data=_EMPTY_MS2))
             else:
-                ms2_list.append(MS2Data(filename=filename, mz_rt_uid=uid, inchi_key=inchi_key, adduct=adduct,
-                                        data=_empty_ms2_frame()))
-        else:
-            ms2_df = ms2_df.sort_values("rt", kind="mergesort").reset_index(drop=True)
-            ms2_list.append(MS2Data(filename=filename, mz_rt_uid=uid, inchi_key=inchi_key, adduct=adduct, data=ms2_df))
+                mz_rt_uid_removed[uid] = "no ms1 data"
+            continue
 
-    return ms1_list, ms2_list
+        # ms2 data
+        m2 = ms2_groups.get(uid)
+        if m2 is not None:
+            ms2_list.append(MS2Data(filename=filename, mz_rt_uid=uid, inchi_key=ik, adduct=add, data=m2))
+        elif not remove_unided:
+            ms2_list.append(MS2Data(filename=filename, mz_rt_uid=uid, inchi_key=ik, adduct=add, data=_EMPTY_MS2))
 
-def _empty_ms1_frame() -> pd.DataFrame:
-    return pd.DataFrame({
-        "mz": pd.Series([], dtype="float64"),
-        "i":  pd.Series([], dtype="float64"),
-        "rt": pd.Series([], dtype="float64"),
-    })
+    return ms1_list, ms2_list, mz_rt_uid_removed
 
-def _empty_ms2_frame() -> pd.DataFrame:
-    return pd.DataFrame({
-        "mz":                 pd.Series([], dtype="float64"),
-        "i":                  pd.Series([], dtype="float64"),
-        "rt":                 pd.Series([], dtype="float64"),
-        "precursor_mz":       pd.Series([], dtype="float64"),
-        "precursor_intensity":pd.Series([], dtype="float64"),
-        "collision_energy":   pd.Series([], dtype="float64"),
-    })
+def _export_removal_reasons(removal_records: list[tuple], output_file: Path = None):
+    if removal_records:
+        import csv
+        with open(output_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['filename', 'mz_rt_uid', 'removal_reason'])
+            for row in removal_records:
+                writer.writerow(row)
+        logger.info(f"Exported compound removal reasons to {output_file}")
 
-# Top-level entry point
 def extract_data_from_raw(
     obj: "RTAlignment" or "AutoIdentification",
     stage: str,
-    max_workers: int | None = None,
 ) -> "ExperimentalData":
     """
     Extract MS1 and MS2 data for all atlas entries across a set of HDF5
@@ -393,55 +352,64 @@ def extract_data_from_raw(
         Object containing the extracted MS1 and MS2 data.
     """
 
-
-    from metatlas2.workflow_objects import ExperimentalData, MS1Data, MS2Data
-    # Start memory tracking
-    tracemalloc.start()
+    from metatlas2.workflow_objects import ExperimentalData
 
     # set up starting conditions from object
-    t0 = time.perf_counter()
     atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
+    polarity = "positive" if atlas.polarity.lower() == "pos" else "negative" if atlas.polarity.lower() == "neg" else atlas.polarity.lower()
     lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns
     workflow_params = obj.rt_alignment_params if stage == "rt_alignment" else obj.workflow_params
     remove_unided = workflow_params.get("remove_unided_compounds", True)
-    ms1_only = True if stage == "rt_alignment" else False
-    t1 = time.perf_counter()
+    ms1_min_pts = workflow_params.get("ms1_min_num_points", None)
+    ms1_min_int = workflow_params.get("ms1_min_peak_intensity", None)
+    ms1_only = (stage == "rt_alignment")
+    keep_outside_of_feature = (stage != "rt_alignment")
+    logger.info(f"Extracting raw data based on atlas: {atlas.polarity}, {atlas.chromatography}, {atlas.analysis_type}")
 
     # create expanded atlas and get lcmsrun files
-    atlas_df = atlas.compound_mzrts.to_dataframe().reset_index(drop=True)
-    atlas_expanded = _expand_atlas_windows(atlas_df, workflow_params)
+    atlas_df = atlas.to_dataframe()
+    atlas_expanded = _expand_atlas_windows(atlas_df, workflow_params, polarity)
     runs = [r for r in lcmsruns if getattr(r, "file_format", "h5") == "h5"]
-    t2 = time.perf_counter()
+    ms1_only = (stage == "rt_alignment")
 
-    # set up containers
-    experimental_data_obj = ExperimentalData()
-    ms1_all: list[MS1Data] = []
-    ms2_all: list[MS2Data] = []
+    # compute Atlas dictionary once
+    logger.info("Pre-computing atlas metadata dictionary...")
+    atlas_info = atlas_expanded.set_index("mz_rt_uid")[["inchi_key", "adduct"]].to_dict(orient="index")
 
-    n_workers = max_workers or mp.cpu_count()
-    n_workers = max(1, min(n_workers, len(runs)))
-    t3 = time.perf_counter()
-    if n_workers == 1:
-        worker = partial(_process_one_file, atlas=atlas_expanded, remove_unided=remove_unided, ms1_only=ms1_only)
-        for run in tqdm(runs, desc="Processing HDF5 files"):
-            ms1, ms2 = worker(run)
+    n_workers = min(mp.cpu_count(), len(runs), 10)
+    worker_func = partial(
+        _process_one_file, 
+        atlas=atlas_expanded, 
+        atlas_info=atlas_info, 
+        remove_unided=remove_unided, 
+        ms1_only=ms1_only,
+        keep_outside_of_feature=keep_outside_of_feature,
+        ms1_min_pts=ms1_min_pts,
+        ms1_min_int=ms1_min_int
+    )
+
+    ms1_all, ms2_all = [], []
+    removal_records = []  # List of (filename, mz_rt_uid, removal_reason)
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as ex:
+        futures = {ex.submit(worker_func, run): run for run in runs}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing HDF5 files"):
+            ms1, ms2, mz_rt_uid_removed = fut.result()
             ms1_all.extend(ms1)
             ms2_all.extend(ms2)
-    else:
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as ex:
-            futures = {ex.submit(_process_one_file, run, atlas=atlas_expanded, remove_unided=remove_unided, ms1_only=ms1_only): run for run in runs}
-            for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing HDF5 files (parallel)"):
-                ms1, ms2 = fut.result()
-                ms1_all.extend(ms1)
-                ms2_all.extend(ms2)
-    t4 = time.perf_counter()
+            filename = getattr(futures[fut], 'filename', 'unknown')
+            if mz_rt_uid_removed:
+                for uid, reason in mz_rt_uid_removed.items():
+                    removal_records.append((filename, uid, reason))
+                if stage == "autoid":
+                    output_file = Path(obj.paths.get("analysis_output_dir", None) / f"{stage}_compound_removal_reasons.csv")
+                elif stage == "rt_alignment":
+                    output_file = Path(obj.paths.get("rt_alignment_output_dir", None) / f"{stage}_compound_removal_reasons.csv")
+                else:
+                    output_file = None
+                _export_removal_reasons(removal_records, output_file)
 
-    logger.info("Step timings (seconds): parse input: %.2f, expand atlas: %.2f, setup: %.2f, process files: %.2f", t1-t0, t2-t1, t3-t2, t4-t3)
-    logger.info("Extracted %d MS1 and %d MS2 result groups from %d files",
-                len(ms1_all), len(ms2_all), len(runs))
-
-    experimental_data_obj.ms1_data = ms1_all
-    experimental_data_obj.ms2_data = ms2_all
-
-    return experimental_data_obj
+    exp_data = ExperimentalData()
+    exp_data.ms1_data = ms1_all
+    exp_data.ms2_data = ms2_all
+    return exp_data

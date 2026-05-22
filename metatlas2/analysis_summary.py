@@ -138,38 +138,6 @@ def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) 
     
     return "gray"
 
-
-def _strip_mode_suffix(file_label: str) -> str:
-    """Strip LCMS parquet mode suffixes from a filename label or stem.
-
-    Removes any trailing one of:
-    - ``_ms1_pos.parquet``
-    - ``_ms2_pos.parquet``
-    - ``_ms1_neg.parquet``
-    - ``_ms2_neg.parquet``
-
-    Also supports stem-only labels ending in ``_ms1_pos``, ``_ms2_pos``,
-    ``_ms1_neg``, or ``_ms2_neg``.
-    """
-    if not file_label:
-        return ""
-
-    suffixes = (
-        "_ms1_pos.parquet",
-        "_ms2_pos.parquet",
-        "_ms1_neg.parquet",
-        "_ms2_neg.parquet",
-        "_ms1_pos",
-        "_ms2_pos",
-        "_ms1_neg",
-        "_ms2_neg",
-    )
-    lower = file_label.lower()
-    for suffix in suffixes:
-        if lower.endswith(suffix):
-            return file_label[: -len(suffix)]
-    return file_label
-
 def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
     """Parse a JSON-encoded spectrum string into (x_array, y_array) lists.
 
@@ -803,7 +771,6 @@ def _plot_hit_info_table(
 
     # Abbreviated file name used as the table title
     raw_name = os.path.basename(str(best_hit["file_path"]))
-    name_without_ext = _strip_mode_suffix(raw_name.split(".")[0])
 
     # Scalar values
     def _to_float(value, default=np.nan):
@@ -867,7 +834,7 @@ def _plot_hit_info_table(
     frag_center = frag_top - frag_row_h / 2
 
     # File name as title (above the table) - aligned with table left edge
-    ax.text(col_x[0], 0.97, name_without_ext, fontsize=14, weight="bold",
+    ax.text(col_x[0], 0.97, raw_name, fontsize=14, weight="bold",
             ha="left", va="center", transform=ax.transAxes)
 
     GAP = 0.005
@@ -917,13 +884,13 @@ def _plot_hit_info_table(
 
     # 2nd best hit file
     if len(top3) >= 2:
-        second_best_file = _strip_mode_suffix(os.path.basename(str(top3.iloc[1]["file_path"])))
+        second_best_file = os.path.basename(str(top3.iloc[1]["file_path"]))
         ax.text(0, additional_info_y, f"2nd best: {second_best_file}", 
             fontsize=13, ha="left", va="top", transform=ax.transAxes)
 
     # 3rd best hit file
     if len(top3) >= 3:
-        third_best_file = _strip_mode_suffix(os.path.basename(str(top3.iloc[2]["file_path"])))
+        third_best_file = os.path.basename(str(top3.iloc[2]["file_path"]))
         ax.text(0, additional_info_y - line_spacing, f"3rd best: {third_best_file}", 
             fontsize=13, ha="left", va="top", transform=ax.transAxes)
 
@@ -1507,10 +1474,10 @@ def make_final_id_sheet(
             "ms2_notes": ms2_notes,
             # --- MS1 INTENSITY INFORMATION ---
             "max_intensity": max_intensity,
-            "max_intensity_file": _strip_mode_suffix(Path(max_int_file).name) if max_int_file else "",
+            "max_intensity_file": Path(max_int_file).name if max_int_file else "",
             "ms1_rt_peak": round(best_ms1_rt, 2) if not np.isnan(best_ms1_rt) else np.nan,
             # --- MSMS INFORMATION ---
-            "msms_file": _strip_mode_suffix(Path(msms_file).name) if msms_file else "",
+            "msms_file": Path(msms_file).name if msms_file else "",
             "msms_rt": round(msms_rt, 2) if not np.isnan(msms_rt) else np.nan,
             "msms_numberofions": msms_num_ions,
             "msms_matchingions": msms_matching_ions,
@@ -1683,15 +1650,15 @@ def make_final_id_sheet(
     # Section background colours (applied to data rows too via conditional format)
     # Using the same colour logic as original but mapped to new spans
     _SECTION_COLORS = {
-        "COMPOUND ANNOTATION":              "#DCEEFF",  # light blue
-        "COMPOUND IDENTIFICATION SCORES":   "#FFFFDC",  # yellow
-        "MS1 INTENSITY INFORMATION":        "#DCFFFF",  # cyan
-        "MSMS INFORMATION":                 "#FFDCFF",  # rose
+        "COMPOUND ANNOTATION":              "#FFFFFF",  # white
+        "COMPOUND IDENTIFICATION SCORES":   "#DCFFFF",  # cyan
+        "MS1 INTENSITY INFORMATION":        "#FFFFDC",  # yellow
+        "MSMS INFORMATION":                 "#FFFFDC",  # yellow
         "MSMS EVALUATION":                  "#FFDCFF",  # rose
-        "ION INFORMATION":                  "#FFE8DC",  # light orange
-        "M/Z EVALUATION":                   "#FFE8DC",  # light orange
-        "CHROMATOGRAPHIC PEAK INFORMATION": "#F0DCFF",  # light purple
-        "RT EVALUATION":                    "#F0DCFF",  # light purple
+        "ION INFORMATION":                  "#FFFFDC",  # yellow
+        "M/Z EVALUATION":                   "#FFDCFF",  # rose
+        "CHROMATOGRAPHIC PEAK INFORMATION": "#FFFFDC",  # yellow
+        "RT EVALUATION":                    "#FFDCFF",  # rose
     }
 
     def _col_letter(col_idx: int) -> str:
@@ -1747,27 +1714,27 @@ def make_final_id_sheet(
         worksheet.set_row(3, 40)   # internal field names
 
         # ---- Column widths ----
-        worksheet.set_column(0, 0, 10)   # index
-        worksheet.set_column(1, 1, 30)   # identified_metabolite
-        worksheet.set_column(2, 2, 30)   # label
-        worksheet.set_column(3, 3, 30)   # overlapping_compound
-        worksheet.set_column(4, 4, 30)   # overlapping_inchi_keys
-        worksheet.set_column(5, 5, 15)   # formula
-        worksheet.set_column(6, 6, 10)   # polarity
-        worksheet.set_column(7, 7, 15)   # exact_mass
-        worksheet.set_column(8, 8, 28)   # inchi_key
-        worksheet.set_column(9, 19, 12)  # scores + notes
-        worksheet.set_column(20, 20, 15, f_scientific)  # max_intensity
-        worksheet.set_column(21, 21, 35) # file
-        worksheet.set_column(22, 22, 15) # rt_peak
-        worksheet.set_column(23, 23, 35) # msms file
-        worksheet.set_column(24, 24, 15) # msms rt
-        worksheet.set_column(25, 25, 25) # msms ions
-        worksheet.set_column(26, 26, 20) # msms matches
-        worksheet.set_column(27, 27, 15) # msms_score
-        worksheet.set_column(28, 30, 14) # ion info
-        worksheet.set_column(31, 32, 14) # mz eval
-        worksheet.set_column(33, 37, 14) # rt cols
+        worksheet.set_column(0, 37, 15)   # index
+        # worksheet.set_column(1, 1, 30)   # identified_metabolite
+        # worksheet.set_column(2, 2, 30)   # label
+        # worksheet.set_column(3, 3, 30)   # overlapping_compound
+        # worksheet.set_column(4, 4, 30)   # overlapping_inchi_keys
+        # worksheet.set_column(5, 5, 15)   # formula
+        # worksheet.set_column(6, 6, 10)   # polarity
+        # worksheet.set_column(7, 7, 15)   # exact_mass
+        # worksheet.set_column(8, 8, 28)   # inchi_key
+        # worksheet.set_column(9, 19, 12)  # scores + notes
+        # worksheet.set_column(20, 20, 15, f_scientific)  # max_intensity
+        # worksheet.set_column(21, 21, 35) # file
+        # worksheet.set_column(22, 22, 15) # rt_peak
+        # worksheet.set_column(23, 23, 35) # msms file
+        # worksheet.set_column(24, 24, 15) # msms rt
+        # worksheet.set_column(25, 25, 25) # msms ions
+        # worksheet.set_column(26, 26, 20) # msms matches
+        # worksheet.set_column(27, 27, 15) # msms_score
+        # worksheet.set_column(28, 30, 14) # ion info
+        # worksheet.set_column(31, 32, 14) # mz eval
+        # worksheet.set_column(33, 37, 14) # rt cols
 
         # ---- Row 0: section header merges ----
         for start_idx, end_idx, label in _SECTION_SPANS:
@@ -2199,7 +2166,7 @@ def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
 
     Iterates once over all ms1_data rows and computes three scalar metrics per
     (compound x file) directly from the JSON spectra stored in the database —
-    no re-extraction from parquet files is needed.
+    no re-extraction from h5 files is needed.
 
     Metrics computed
     ----------------
@@ -2623,6 +2590,7 @@ def make_best_ms2_hit_fragment_ions_csv(
         cmp_idx_display = _display_compound_idx(cmp_idx)
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
+        adduct = mc_row.get("adduct", "")
 
         best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is None:
@@ -2643,7 +2611,7 @@ def make_best_ms2_hit_fragment_ions_csv(
             "compound_index": cmp_idx_display,
             "compound_name":  compound_name,
             "adduct": adduct,
-            "file_name": _strip_mode_suffix(os.path.basename(str(best_hit.get("file_path", "")))),
+            "file_name": os.path.basename(str(best_hit.get("file_path", ""))),
             "rt_peak": best_hit.get("rt", np.nan),
             "mz_peak": best_hit.get("mz_measured", np.nan),
             "spectrum": raw_spectrum,
@@ -2722,7 +2690,7 @@ def make_data_sheets(
     # Column labels: file stem (basename without extension)
     pfm = pfm.copy()
     pfm["_file_col"] = pfm["file_path"].apply(
-        lambda p: _strip_mode_suffix(os.path.splitext(os.path.basename(str(p)))[0]) if p else "unknown"
+        lambda p: os.path.splitext(os.path.basename(str(p)))[0] if p else "unknown"
     )
 
     _DATA_SHEET_METRICS = [

@@ -287,7 +287,7 @@ def main():
     if not args.skip_auto_id:
         if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
         logger.info("Running Auto Identification")
-        nb_path = wfs.run_auto_identification(
+        wfs.run_auto_identification(
             project_name=args.project,
             config=config,
             paths=paths,

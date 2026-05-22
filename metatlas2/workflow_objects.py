@@ -582,8 +582,8 @@ class ManualCuration:
     compound_uid: str
     inchi_key: str = ""
     adduct: str = ""
-    data: pd.DataFrame = field(default=None, compare=False)
-    # data columns: compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number,
+    data: dict = field(default=None, compare=False)
+    # data keys: compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number,
     #   compound_name, auto_ided, polarity, chromatography, mz_tolerance, atlas_mz,
     #   atlas_rt_peak, atlas_rt_min, atlas_rt_max,
     #   mz, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
@@ -600,10 +600,10 @@ class _SpecData:
     data: pd.DataFrame = field(default=None, compare=False)
 
 MS1Data = _SpecData
-# data columns: rt, mz, i
+# data columns: rt, mz, i, in_feature
 
 MS2Data = _SpecData
-# data columns: rt, mz, i, precursor_MZ, precursor_intensity, collision_energy
+# data columns: rt, mz, i, precursor_MZ, precursor_intensity, collision_energy, in_feature
 
 MS2Hit = _SpecData
 # data columns: mz_rt_uid, inchi_key, database, ref_id, ref_name, score, num_matches,
@@ -828,15 +828,15 @@ class AnalysisSummary:
             return
 
         self.ms1_all_df = dbi.get_ms1_data_for_compound(
-            project_db_path, None, None, rt_alignment_num, analysis_num,
+            project_db_path, rt_alignment_num, analysis_num,
             atlas_compounds=atlas_compounds, analysis_type=analysis_type,
         )
         self.ms2_raw_all_df = dbi.get_ms2_data_for_compound(
-            project_db_path, None, None, rt_alignment_num, analysis_num,
+            project_db_path, rt_alignment_num, analysis_num,
             atlas_compounds=atlas_compounds, analysis_type=analysis_type,
         )
         self.ms2_hits_all_df = dbi.get_ms2_hits_for_compound(
-            project_db_path, None, None, rt_alignment_num, analysis_num,
+            project_db_path, rt_alignment_num, analysis_num,
             atlas_compounds=atlas_compounds, analysis_type=analysis_type,
         )
         self.per_file_metrics_df = asm.extract_per_file_metrics(self.ms1_all_df)

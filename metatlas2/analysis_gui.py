@@ -220,8 +220,8 @@ def build_dash_app(
     # format of the app itself
     all_notes_len = len(analysis_gui_obj.notes["ms1_notes"]) + len(analysis_gui_obj.notes["ms2_notes"]) + len(analysis_gui_obj.notes["other_notes"])
     total_plot_height = all_notes_len*60
-    ms1_height = total_plot_height*0.4
-    ms2_height = total_plot_height*0.6
+    ms1_height = total_plot_height*0.6
+    ms2_height = total_plot_height*0.4
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
@@ -838,8 +838,8 @@ def build_dash_app(
 
         # Determine y_max as the highest intensity point of all files within the current window
         y_min_positive_data = None
-        max_eic_rt = row.get("max_eic_rt", [])
-        max_eic_intensity = row.get("max_eic_intensity", [])
+        max_eic_rt = json.loads(row, "max_eic_rt", default=[])
+        max_eic_intensity = json.loads(row, "max_eic_intensity", default=[])
         # Use only EIC points within the current RT window
         if max_eic_rt and max_eic_intensity and len(max_eic_rt) == len(max_eic_intensity):
             # Use expanded_rt_min/max for consistency with trace plotting
@@ -1000,7 +1000,7 @@ def build_dash_app(
             short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fn).split(".")[0].split("_")[11:]))
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
             is_highlighted = fn in highlighted_files
-            line_width = 3.0 if is_highlighted else 1.5
+            line_width = 5.0 if is_highlighted else 1.5
             opacity = 1.0  # Always fully opaque, no dimming
 
             # Log if there are multiple rows for this file
@@ -1070,18 +1070,18 @@ def build_dash_app(
                 hoverinfo="skip",
             ))
 
-        # RT min (purple, solid, editable): data-anchored so it matches reference-line height.
+        # RT min (purple, solid, editable): always span full y-axis
         fig.add_shape(
-            type="line", x0=rt_min, x1=rt_min, y0=y_bottom, y1=y_upper_bound,
-            xref="x", yref="y",
+            type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
+            xref="x", yref="paper",
             line=dict(color="purple", width=7),
             name="RT min", editable=True,
         )
 
-        # RT max (purple, dashed, editable) - MUST be shape[1] to match rt_drag callback
+        # RT max (purple, dashed, editable): always span full y-axis
         fig.add_shape(
-            type="line", x0=rt_max, x1=rt_max, y0=y_bottom, y1=y_upper_bound,
-            xref="x", yref="y",
+            type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
+            xref="x", yref="paper",
             line=dict(color="purple", width=7, dash="dash"),
             name="RT max", editable=True,
         )
@@ -1364,7 +1364,7 @@ def build_dash_app(
                     showarrow=False,
                     xanchor="center",
                     yanchor="bottom" if y_val >= 0 else "top",
-                    font=dict(size=10, color="black"),
+                    font=dict(size=12, color="black"),
                     textangle=0,
                     xref=xref_coord,
                     yref=yref_coord,
