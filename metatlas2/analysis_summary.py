@@ -51,6 +51,12 @@ from metatlas2.note_options import (
 )
 logger = lcf.get_logger('analysis_summary')
 
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
+
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
     return "".join(c for c in text if ord(c) not in range(0xFDD0, 0xFDF0) and ord(c) & 0xFFFF not in (0xFFFE, 0xFFFF))
@@ -1149,7 +1155,7 @@ def make_identification_figure(
     n_workers = max_workers or min(os.cpu_count() or 4, len(tasks))
     logger.info("Generating %d figures using %d workers...", len(tasks), n_workers)
 
-    pbar = tqdm(total=len(tasks), desc="Generating ID figures", unit="compound")
+    pbar = tqdm(total=len(tasks), desc="Generating ID figures", unit="compound", disable=should_disable_tqdm())
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
@@ -1343,6 +1349,7 @@ def make_final_id_sheet(
         manual_curation_df.iterrows(),
         total=len(manual_curation_df),
         desc="Adding compounds to final ID sheet",
+        disable=should_disable_tqdm()
     ):
         compound_idx_display = _display_compound_idx(compound_idx)
         compound_name = mc_row.get("compound_name") or f"compound_{compound_idx_display}"
@@ -2130,7 +2137,7 @@ def make_eic_thumbnails(
         len(tasks), n_workers,
     )
 
-    pbar = tqdm(total=len(tasks), desc="Generating EIC thumbnails", unit="compound")
+    pbar = tqdm(total=len(tasks), desc="Generating EIC thumbnails", unit="compound", disable=should_disable_tqdm())
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
@@ -2476,7 +2483,7 @@ def make_boxplots(
         len(tasks), len(_METRIC_CONFIGS), n_workers,
     )
 
-    pbar = tqdm(total=len(tasks), desc="Generating boxplots", unit="compound")
+    pbar = tqdm(total=len(tasks), desc="Generating boxplots", unit="compound", disable=should_disable_tqdm())
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
@@ -2586,6 +2593,7 @@ def make_best_ms2_hit_fragment_ions_csv(
         manual_curation_df.reset_index(drop=True).iterrows(),
         total=len(manual_curation_df),
         desc="Finding best MS2 hits for compounds",
+        disable=should_disable_tqdm()
     ):
         cmp_idx_display = _display_compound_idx(cmp_idx)
         mz_rt_uid = mc_row.get("mz_rt_uid", "")

@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
+import sys
 import csv
 import yaml
 import ast
@@ -22,6 +23,12 @@ from pathlib import Path
 
 PRECURSOR_FILTER_OFFSET_DA = 2.5  # keep peaks below precursor + 2.5 Da (covers M+2 isotope)
 
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
+
 def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
     """Convert a legacy .tab msms refs file to .jsonl format."""
     
@@ -38,7 +45,7 @@ def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
     n_skipped = 0
 
     with output_file_path.open('w') as out:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Converting spectra to JSONL"):
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Converting spectra to JSONL", disable=should_disable_tqdm()):
             try:
                 spectrum_data = ast.literal_eval(row['spectrum'])
                 mz_list, int_list = spectrum_data[0], spectrum_data[1]
@@ -523,6 +530,7 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
 
 def save_atlas_data_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
     """Save Atlas data to CSV file."""
+    logger.info(f"Saving Atlas data to {output_path}...")
     atlas_info = atlas_obj.to_dict()
     file_exists = os.path.isfile(output_path)
     with open(output_path, "a", newline='') as f:

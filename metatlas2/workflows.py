@@ -30,7 +30,7 @@ def _find_free_port(start: int, max_tries: int = 20) -> int:
             except OSError:
                 continue
     raise RuntimeError(
-        f"No free port found in the range {start}–{start + max_tries - 1}. "
+        f"No free port found in the range {start}-{start + max_tries - 1}. "
         "Close another notebook or specify a different starting port."
     )
 
@@ -66,12 +66,6 @@ def run_rt_alignment(
 
     from metatlas2.workflow_objects import RTAlign, Atlas
 
-    if not os.path.exists(paths["project_db_path"]):
-        raise FileNotFoundError(
-            f"Project database not found: {paths['project_db_path']}. "
-            "Please run project setup first."
-        )
-
     rt_align_obj = RTAlign()
 
     rt_align_obj.setup(
@@ -96,7 +90,7 @@ def run_rt_alignment(
         include_file_type=rt_align_obj.rt_alignment_params.get('include_lcmsruns', ["QC"]),
         exclude_file_type=rt_align_obj.rt_alignment_params.get('exclude_lcmsruns', ["NEG"]),
         chromatography=rt_align_obj.chromatography,
-        ms_level=1
+        ms_level="ms1"
     )
     
     logger.info("Retrieving template Atlas from database...")

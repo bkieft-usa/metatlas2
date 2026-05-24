@@ -14,6 +14,7 @@ import metatlas2.analysis_summary as asm
 import metatlas2.logging_config as lcf
 import metatlas2.run_targeted_analysis as rtg
 import metatlas2.note_options as gno
+import metatlas2.file_and_project_format as fpf
 logger = lcf.get_logger('workflow_objects')
 
 @dataclass
@@ -443,7 +444,7 @@ class Project:
 
     def setup(self, project_name: str, config: Dict[str, Any], paths: Dict[str, str], overwrite_existing: bool = False):
 
-        self.project_name = project_name
+        self.project_name = fpf.parse_project_name(project_name)
         self.config = config
         self.paths = paths
 
@@ -454,25 +455,22 @@ class Project:
             log_file_path=self.paths['log_path'],
             overwrite=overwrite_existing
         )
-        
-        # Register project in main database for meta-analysis tracking
-        if 'main_db_path' in self.paths:
-            logger.info(f"Registering project '{self.project_name}' in main database...")
-            dbi.save_project_to_main_db(
-                main_db_path=self.paths['main_db_path'],
-                project_name=self.project_name,
-                project_db_path=self.paths['project_db_path']
-            )
-        
         if exists:
             return
+        
+        logger.info(f"Registering project '{self.project_name}' in main database...")
+        dbi.save_project_to_main_db(
+            main_db_path=self.paths['main_db_path'],
+            project_name=self.project_name,
+            project_db_path=self.paths['project_db_path']
+        )
         
         logger.info(f"Loading LCMS runs...")
         lcmsruns_list = lrt.get_project_lcmsruns_from_disk(
             self.paths['lcmsruns_directory']
         )
 
-        logger.info("Saving LCMS runs metadata to database...")
+        logger.info(f"Saving {len(lcmsruns_list)} LCMS runs metadata to database...")
         dbi.save_lcmsruns_to_db(
             self.paths['project_db_path'],
             self.project_name,
@@ -492,7 +490,7 @@ class LCMSRun:
     file_format: str
     file_type: str
     chromatography: str
-    ms_level: int
+    ms_level: str
     polarity: str
     created_by: str
     created_date: str
@@ -548,6 +546,12 @@ class RTAlign:
         self.chromatography = next(iter(self.config["WORKFLOWS"]["RT_ALIGNMENT"].keys()))
         self.align_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
         self.rt_alignment_params = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('PARAMS', {})
+
+        if not os.path.exists(paths["project_db_path"]):
+            raise FileNotFoundError(
+                f"Project database not found: {paths['project_db_path']}. "
+                "Please run project setup first."
+            )
 
         if self.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases in text file
             self.run_alignment = False

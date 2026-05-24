@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
 from tqdm.auto import tqdm
@@ -28,6 +30,12 @@ def _suppress_tqdm():
         yield
     finally:
         tqdm_module.tqdm.__init__ = original_init
+
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
 
 def _process_job_global(job):
     (mz_rt_uid, file_path, ms2_df, ref_spectra,
@@ -64,13 +72,10 @@ def find_ms2_hits(auto_id_obj) -> None:
         raise FileNotFoundError("No reference database found - skipping hit detection")
 
     # Warn about ms2_data entries with no matching refs (informational only)
-    missing_uids = 0
     missing_inchi_keys = set()
     for ms2 in auto_id_obj.experimental_data.ms2_data:
         if not refs_by_inchi_key.get(ms2.inchi_key, []):
-            missing_uids += 1
             missing_inchi_keys.add(ms2.inchi_key)
-    logger.info(f"{missing_uids} ms2_data entries have no matching refs.")
     logger.info(f"Unique inchi_keys from ms2_data not in reference database: {missing_inchi_keys}")
 
     # Define filtering parameters
@@ -94,7 +99,7 @@ def find_ms2_hits(auto_id_obj) -> None:
         return
 
     logger.info(f"Searching {len(jobs)} query sets...")
-    max_workers = min(mp.cpu_count(), len(jobs))
+    max_workers = min(mp.cpu_count(), len(jobs), 10)
     results = []
     if max_workers > 1 and len(jobs) > 1:
         logger.info(f"Using parallel processing with {max_workers} workers for hit detection...")
@@ -106,7 +111,7 @@ def find_ms2_hits(auto_id_obj) -> None:
                     pbar.update(1)
     else:
         logger.info("Using sequential processing for hit detection...")
-        with tqdm(total=len(jobs), desc="Detecting MS2 hits") as pbar:
+        with tqdm(total=len(jobs), desc="Detecting MS2 hits", disable=should_disable_tqdm()) as pbar:
             for job in jobs:
                 results.append(_process_job_global(job))
                 pbar.update(1)
@@ -159,8 +164,8 @@ def _find_hits_from_ms2_df(
     all_pmz = ms2_df['precursor_MZ'].to_numpy()
     all_pint = ms2_df['precursor_intensity'].to_numpy()
     all_in_feature = ms2_df['in_feature'].to_numpy()
-    all_mz = ms2_df['mz'].to_numpy() # Added this
-    all_i = ms2_df['i'].to_numpy()   # Added this
+    all_mz = ms2_df['mz'].to_numpy()
+    all_i = ms2_df['i'].to_numpy()
     
     _, indices = np.unique(all_rt, return_index=True)
     
@@ -172,23 +177,23 @@ def _find_hits_from_ms2_df(
         start = indices[i]
         end = indices[i+1] if i+1 < len(indices) else len(all_rt)
         
-        # Slice numpy arrays instead of DataFrame .iloc
+        # Slice numpy arrays
         s_mz = all_mz[start:end]
         s_i = all_i[start:end]
         
-        # NumPy sort is orders of magnitude faster than df.sort_values
+        # NumPy sort
         sort_idx = np.argsort(s_mz)
         f_mz = s_mz[sort_idx].astype(np.float32)
         f_int = s_i[sort_idx].astype(np.float32)
         
-        qry = Spectrum(mz=f_mz, intensities=f_int, metadata={'precursor_mz': all_pmz[start]})
+        qry = Spectrum(mz=f_mz, intensities=f_int, metadata={'precursor_mz': float(all_pmz[start])})
         queries.append(qry)
         
         query_meta.append({
-            'rt': all_rt[start],
-            'precursor_mz': all_pmz[start],
-            'precursor_int': all_pint[start],
-            'in_feature': all_in_feature[start],
+            'rt': float(all_rt[start]),
+            'precursor_mz': float(all_pmz[start]),
+            'precursor_int': float(all_pint[start]),
+            'in_feature': bool(all_in_feature[start]),
             'frag_mz': f_mz,
             'frag_int': f_int,
         })

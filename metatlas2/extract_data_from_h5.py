@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import os
+import sys
 from tqdm.auto import tqdm
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -11,6 +13,12 @@ logger = lcf.get_logger('extract_data_from_h5')
 
 _EMPTY_MS1 = pd.DataFrame(columns=["mz", "i", "rt"]).astype(np.float32)
 _EMPTY_MS2 = pd.DataFrame(columns=["mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy"]).astype(np.float32)
+
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
 
 def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
     read_key = key + "_mz" if mz_bounds is not None else key
@@ -326,7 +334,23 @@ def _export_removal_reasons(removal_records: list[tuple], output_file: Path = No
             writer.writerow(['filename', 'mz_rt_uid', 'removal_reason'])
             for row in removal_records:
                 writer.writerow(row)
-        logger.info(f"Exported compound removal reasons to {output_file}")
+
+def _log_extraction_summary(exp_data, atlas_expanded,stage):
+    logger.info("Extraction summary for stage '%s':", stage)
+    logger.info("  Total MS1 entries extracted: %d", len(exp_data.ms1_data))
+    logger.info("  Total MS2 entries extracted: %d", len(exp_data.ms2_data))
+
+    # Total MS1 and MS2 data points (rows in all dataframes)
+    total_ms1_points = sum(len(ms1.data) for ms1 in exp_data.ms1_data if ms1.data is not None)
+    total_ms2_points = sum(len(ms2.data) for ms2 in exp_data.ms2_data if ms2.data is not None)
+    logger.info("  Total MS1 data points (all files, all compounds): %d", total_ms1_points)
+    logger.info("  Total MS2 data points (all files, all compounds): %d", total_ms2_points)
+
+    # Compounds with any MS1 or MS2 data (non-empty)
+    ms1_compounds = set(ms1.mz_rt_uid for ms1 in exp_data.ms1_data if ms1.data is not None and not ms1.data.empty)
+    ms2_compounds = set(ms2.mz_rt_uid for ms2 in exp_data.ms2_data if ms2.data is not None and not ms2.data.empty)
+    compounds_with_data = ms1_compounds.union(ms2_compounds)
+    logger.info("  Total compounds with any MS1 or MS2 data: %d/%d", len(compounds_with_data), len(atlas_expanded["mz_rt_uid"]))
 
 def extract_data_from_raw(
     obj: "RTAlignment" or "AutoIdentification",
@@ -376,7 +400,6 @@ def extract_data_from_raw(
     logger.info("Pre-computing atlas metadata dictionary...")
     atlas_info = atlas_expanded.set_index("mz_rt_uid")[["inchi_key", "adduct"]].to_dict(orient="index")
 
-    n_workers = min(mp.cpu_count(), len(runs), 10)
     worker_func = partial(
         _process_one_file, 
         atlas=atlas_expanded, 
@@ -388,28 +411,41 @@ def extract_data_from_raw(
         ms1_min_int=ms1_min_int
     )
 
+    n_workers = min(mp.cpu_count(), len(runs), 10)
     ms1_all, ms2_all = [], []
-    removal_records = []  # List of (filename, mz_rt_uid, removal_reason)
+    removal_records = [] 
     ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as ex:
-        futures = {ex.submit(worker_func, run): run for run in runs}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing HDF5 files"):
-            ms1, ms2, mz_rt_uid_removed = fut.result()
-            ms1_all.extend(ms1)
-            ms2_all.extend(ms2)
-            filename = getattr(futures[fut], 'filename', 'unknown')
-            if mz_rt_uid_removed:
-                for uid, reason in mz_rt_uid_removed.items():
-                    removal_records.append((filename, uid, reason))
-                if stage == "autoid":
-                    output_file = Path(obj.paths.get("analysis_output_dir", None) / f"{stage}_compound_removal_reasons.csv")
-                elif stage == "rt_alignment":
-                    output_file = Path(obj.paths.get("rt_alignment_output_dir", None) / f"{stage}_compound_removal_reasons.csv")
-                else:
-                    output_file = None
-                _export_removal_reasons(removal_records, output_file)
+
+    def process_result(ms1, ms2, mz_rt_uid_removed, filename):
+        ms1_all.extend(ms1)
+        ms2_all.extend(ms2)
+        if mz_rt_uid_removed:
+            for uid, reason in mz_rt_uid_removed.items():
+                removal_records.append((filename, uid, reason))
+            output_dir = obj.paths.get("rt_alignment_output_dir" if stage == "rt_alignment" else "analysis_output_dir", None)
+            if output_dir is not None:
+                output_file = Path(output_dir) / f"{stage}_compound_removal_reasons.csv"
+            else:
+                raise ValueError(f"Output directory not specified in obj.paths: {obj.paths}")
+            _export_removal_reasons(removal_records, output_file)
+
+    if n_workers <= 10:  # process in serial
+        for run in tqdm(runs, desc="Processing HDF5 files", disable=should_disable_tqdm()):
+            ms1, ms2, mz_rt_uid_removed = worker_func(run)
+            filename = getattr(run, 'filename', 'unknown')
+            process_result(ms1, ms2, mz_rt_uid_removed, filename)
+    else:  # process in parallel
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as ex:
+            futures = {ex.submit(worker_func, run): run for run in runs}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing HDF5 files", disable=should_disable_tqdm()):
+                ms1, ms2, mz_rt_uid_removed = fut.result()
+                filename = getattr(futures[fut], 'filename', 'unknown')
+                process_result(ms1, ms2, mz_rt_uid_removed, filename)
 
     exp_data = ExperimentalData()
     exp_data.ms1_data = ms1_all
     exp_data.ms2_data = ms2_all
+
+    _log_extraction_summary(exp_data, atlas_expanded, stage)
+
     return exp_data

@@ -5,6 +5,7 @@ import uuid
 import grp
 import re
 import os
+import sys
 import json
 import copy
 import getpass
@@ -17,10 +18,15 @@ from contextlib import contextmanager
 from tqdm.auto import tqdm
 
 import metatlas2.rt_align_tools as rat
-import metatlas2.pubchem_retrieval as pcr
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('database_interact')
+
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
 
 @contextmanager
 def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 10, initial_retry_delay: float = 0.5):
@@ -787,59 +793,6 @@ def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]
         logger.error(f"Error preparing reference record: {e}")
         return None
 
-def save_lcmsruns_to_db(
-    project_db_path: str,
-    project_name: str,
-    lcmsruns_list: List["LCMSRun"],
-    overwrite_existing: bool = False
-) -> int:
-    """
-    Save LCMS run files to project database from a flat list of run dicts.
-    If the lcmsruns table exists and has rows, do not overwrite unless overwrite_existing is True.
-    Returns the number of files saved.
-    """
-    with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
-        prov = get_provenance()
-
-        # Check if lcmsruns table exists and has rows
-        table_exists = conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'lcmsruns'"
-        ).fetchone()[0] > 0
-
-        has_rows = False
-        if table_exists:
-            has_rows = conn.execute("SELECT COUNT(*) FROM lcmsruns").fetchone()[0] > 0
-            if has_rows:
-                if not overwrite_existing:
-                    logger.info("LCMS runs already exist in the database and overwrite_existing is False. Skipping save.")
-                    return 0
-                else:
-                    logger.info(f"Overwriting existing LCMS runs in the database for {project_name}.")
-                    conn.execute("DELETE FROM lcmsruns")
-        else:
-            logger.info(f"No LCMS runs detected in project database for {project_name}. Creating a new table...")
-
-        total_files = 0
-        for run in lcmsruns_list:
-            conn.execute(
-                "INSERT INTO lcmsruns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    run["file_path"],
-                    run["filename"],
-                    run["file_format"],
-                    run["file_type"],
-                    run["chromatography"],
-                    run["ms_level"],
-                    run["polarity"],
-                    prov["analyst"],
-                    prov["timestamp"],
-                ),
-            )
-            total_files += 1
-
-    logger.info(f"Saved {total_files} LCMS runs to database.")
-    return total_files
-
 def save_project_to_main_db(
     main_db_path: str,
     project_name: str,
@@ -885,6 +838,49 @@ def save_project_to_main_db(
         logger.info(f"Registered project '{project_name}' in main database with UID {project_uid}.")
         return project_uid
 
+def save_lcmsruns_to_db(
+    project_db_path: str,
+    project_name: str,
+    lcmsruns_list: List[Dict],
+    overwrite_existing: bool = False
+) -> int:
+    with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+        prov = get_provenance()
+        
+        # Simplified check: try to count rows; if table doesn't exist, it will fail or return 0
+        # Note: For SQLite, use 'sqlite_master'. For others, information_schema is fine.
+        try:
+            has_rows = conn.execute("SELECT COUNT(*) FROM lcmsruns").fetchone()[0] > 0
+        except Exception:
+            has_rows = False
+
+        if has_rows:
+            if not overwrite_existing:
+                logger.info("LCMS runs already exist. Skipping save.")
+                return 0
+            logger.info(f"Overwriting existing runs for {project_name}.")
+            conn.execute("DELETE FROM lcmsruns")
+
+        # EFFICIENT: Bulk insertion using executemany
+        # Prepare data as a list of tuples
+        data_to_insert = [
+            (
+                run["file_path"], run["filename"], run["file_format"], run["file_type"],
+                run["chromatography"], run["ms_level"], run["polarity"],
+                prov["analyst"], prov["timestamp"]
+            )
+            for run in lcmsruns_list
+        ]
+        
+        conn.executemany(
+            "INSERT INTO lcmsruns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+            data_to_insert
+        )
+
+    logger.info(f"Saved {len(lcmsruns_list)} LCMS runs to database.")
+    return len(lcmsruns_list)
+
+
 def get_lcmsruns_from_db(
     project_db_path: str,
     file_types: Optional[List[str]] = None,
@@ -892,49 +888,43 @@ def get_lcmsruns_from_db(
     chromatography: str = None,
     polarity: str = None
 ) -> List["LCMSRun"]:
-    """
-    Retrieve LCMS runs from the database, optionally filtering by file_types, file_format, chromatography, and polarity.
-    Returns a flat list of LCMSRun objects.
-    """
-
     from metatlas2.workflow_objects import LCMSRun
+
+    # Normalization
+    if chromatography == "HILICZ": chromatography = "HILIC"
+    if polarity:
+        polarity = "positive" if polarity.lower() in ["pos", "positive"] else \
+                   "negative" if polarity.lower() in ["neg", "negative"] else polarity
 
     where_conditions = ["file_format = ?"]
     params = [file_format]
 
     if chromatography:
-        if chromatography == "HILICZ":
-            chromatography = "HILIC"
         where_conditions.append("UPPER(chromatography) = UPPER(?)")
         params.append(chromatography)
-
     if polarity:
-        if polarity.lower() in ["pos", "positive"]:
-            polarity = "positive"
-        elif polarity.lower() in ["neg", "negative"]:
-            polarity = "negative"
         where_conditions.append("UPPER(polarity) = UPPER(?)")
         params.append(polarity)
-
     if file_types:
-        for ft in file_types:
-            if ft not in ['qc', 'experimental', 'istd', 'exctrl']:
-                raise ValueError(f"Invalid file category: {ft}. Must be one of ['qc', 'experimental', 'istd', 'exctrl']")
         where_conditions.append(f"file_type IN ({','.join(['?']*len(file_types))})")
         params.extend(file_types)
 
     where_clause = " AND ".join(where_conditions)
+    
     with get_db_connection(project_db_path, read_only=True) as conn:
-        files_df = conn.execute(f"""
+        # EFFICIENT: Use cursor directly instead of Pandas .df()
+        cursor = conn.execute(f"""
             SELECT file_path, filename, file_format, file_type, chromatography, ms_level, polarity, created_by, created_date
             FROM lcmsruns
             WHERE {where_clause}
             ORDER BY chromatography, ms_level, polarity, file_path
-        """, params).df()
+        """, params)
+        
+        # Use a list comprehension directly on the cursor
+        # This avoids the overhead of creating a DataFrame and iterating via Series
+        lcmsruns_list = [LCMSRun(*row) for row in cursor.fetchall()]
 
-    lcmsruns_list = [LCMSRun(**row) for _, row in files_df.iterrows()]
-
-    logger.info(f"Retrieved {len(lcmsruns_list)} LC/MS run files from database with filters: file_types={file_types}, chromatography={chromatography}, polarity={polarity}, format={file_format}")
+    logger.info(f"Retrieved {len(lcmsruns_list)} runs from DB.")
     return lcmsruns_list
 
 def batch_save_compounds(
@@ -1165,7 +1155,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 file_format TEXT,
                 file_type TEXT,
                 chromatography TEXT,
-                ms_level INTEGER,
+                ms_level TEXT,
                 polarity TEXT,
                 created_by TEXT,
                 created_date TEXT
@@ -2196,7 +2186,6 @@ def update_atlas_with_rt_alignment(
 
     aligned_atlases = {}
     all_rt_shifts = []
-    # Flatten all atlas jobs into a list for single tqdm progress bar
     atlas_jobs = [
         (chrom, pol, analysis_type, atlas_params_dict)
         for chrom, pol_dict in targeted_analyses.items()
@@ -2204,7 +2193,7 @@ def update_atlas_with_rt_alignment(
         for analysis_type, atlas_params_dict in analysis_dict.items()
     ]
 
-    for chrom, pol, analysis_type, atlas_params_dict in tqdm(atlas_jobs, desc="Updating atlases with RT alignment"):
+    for chrom, pol, analysis_type, atlas_params_dict in tqdm(atlas_jobs, desc="Updating atlases with RT alignment", disable=should_disable_tqdm()):
         target_atlas_uid = atlas_params_dict.get('ATLAS', {}).get('uid', None)
         if target_atlas_uid is None:
             logger.info(f"Skipping {chrom} {pol} {analysis_type} - no target atlas UID found in parameters")
@@ -2443,42 +2432,6 @@ def vectorize_ms2_hits(df, constants, prov):
     ]
     return df.reindex(columns=column_order).fillna('')
 
-def _log_save_summary(df_manual, df_ms1, df_ms2, df_hits):
-    """
-    Generates a summary of the data being saved using vectorized aggregation.
-    """
-    if df_manual.empty:
-        logger.warning("No manual curation data to summarize.")
-        return
-
-    # Calculate counts per mz_rt_uid
-    ms1_counts = df_ms1.groupby('mz_rt_uid').size().to_frame('ms1_points')
-    ms2_counts = df_ms2.groupby('mz_rt_uid').size().to_frame('ms2_points')
-    hit_counts = df_hits.groupby('mz_rt_uid').size().to_frame('ms2_hits')
-
-    # Merge all counts onto the manual curation list
-    summary = df_manual[['mz_rt_uid', 'compound_name']].merge(
-        ms1_counts, on='mz_rt_uid', how='left'
-    ).merge(
-        ms2_counts, on='mz_rt_uid', how='left'
-    ).merge(
-        hit_counts, on='mz_rt_uid', how='left'
-    ).fillna(0)
-
-    total_compounds = len(summary)
-    total_ms1 = summary['ms1_points'].sum()
-    total_ms2 = summary['ms2_points'].sum()
-    total_hits = summary['ms2_hits'].sum()
-
-    logger.info(
-        f"\n--- Auto-ID Save Summary ---\n"
-        f"Compounds: {total_compounds}\n"
-        f"Total MS1 Points: {int(total_ms1)}\n"
-        f"Total MS2 Points: {int(total_ms2)}\n"
-        f"Total MS2 Hits:   {int(total_hits)}\n"
-        f"---------------------------"
-    )
-
 def save_auto_identification_results_to_db(auto_id_obj: "AutoIdentification") -> None:
     """Save complete analysis results to project database using vectorized DataFrame operations."""
     logger.info("Preparing AutoIdentification results for database save...")
@@ -2499,13 +2452,12 @@ def save_auto_identification_results_to_db(auto_id_obj: "AutoIdentification") ->
                   'inchi_key': ci.inchi_key, 'adduct': ci.adduct} for ci in exp_data_obj.manual_curation]
     df_meta = pd.DataFrame(meta_list).drop_duplicates('mz_rt_uid')
 
-
     # Manual Curation
     df_manual = pd.DataFrame([mc.data for mc in exp_data_obj.manual_curation])
 
     # MS1 Data
     ms1_dfs = []
-    for ms1 in tqdm(exp_data_obj.ms1_data, desc="Saving MS1 data", disable=len(exp_data_obj.ms1_data)<1):
+    for ms1 in tqdm(exp_data_obj.ms1_data, desc="Saving MS1 data", disable=should_disable_tqdm()):
         if ms1.data.empty: continue
         ms1_dfs.append(pd.DataFrame({
             'mz_rt_uid': [ms1.mz_rt_uid], 'filename': [ms1.filename],
@@ -2515,7 +2467,7 @@ def save_auto_identification_results_to_db(auto_id_obj: "AutoIdentification") ->
 
     # MS2 Data
     ms2_dfs = []
-    for ms2 in tqdm(exp_data_obj.ms2_data, desc="Saving MS2 data", disable=len(exp_data_obj.ms2_data)<1):
+    for ms2 in tqdm(exp_data_obj.ms2_data, desc="Saving MS2 data", disable=should_disable_tqdm()):
         if ms2.data.empty: continue
         grouped = ms2.data.groupby('rt', sort=False).agg({
             'precursor_MZ': 'first', 'precursor_intensity': 'first', 'collision_energy': 'first',
@@ -2529,7 +2481,7 @@ def save_auto_identification_results_to_db(auto_id_obj: "AutoIdentification") ->
 
     # MS2 Hits
     hit_dfs = [hit_obj.data.assign(mz_rt_uid=hit_obj.mz_rt_uid, filename=hit_obj.filename)
-               for hit_obj in tqdm(exp_data_obj.ms2_hits, desc="Saving MS2 hits", disable=len(exp_data_obj.ms2_hits)<1) if not hit_obj.data.empty]
+               for hit_obj in tqdm(exp_data_obj.ms2_hits, desc="Saving MS2 hits", disable=should_disable_tqdm()) if not hit_obj.data.empty]
     df_hits = pd.concat(hit_dfs) if hit_dfs else pd.DataFrame()
 
     # Join Metadata and Vectorize
@@ -2557,12 +2509,10 @@ def save_auto_identification_results_to_db(auto_id_obj: "AutoIdentification") ->
 
     logger.info(f"Final record counts for database insert:")
     logger.info(f"  Manual Curation: {len(df_manual_final)} rows")
-    logger.info(f"  MS1 Data:        {len(df_ms1_final)} rows")
-    logger.info(f"  MS2 Data:        {len(df_ms2_final)} rows")
-    logger.info(f"  MS2 Hits:        {len(df_hits_final)} rows")
+    logger.info(f"  MS1 Data: {len(df_ms1_final)} rows")
+    logger.info(f"  MS2 Data: {len(df_ms2_final)} rows")
+    logger.info(f"  MS2 Hits: {len(df_hits_final)} rows")
     logger.info("Database save complete.")
-
-    _log_save_summary(df_manual_final, df_ms1_final, df_ms2_final, df_hits_final)
 
     return
 

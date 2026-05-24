@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import sys
+import os
 from typing import Dict, Optional, List, Any
 from tqdm.auto import tqdm
 import warnings
@@ -9,6 +11,12 @@ from scipy.signal._peak_finding_utils import PeakPropertyWarning
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('curation_creator')
+
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
 
 def create_manual_curation_obj(auto_id_obj: "AutoIdentification") -> "ManualCuration":
     from metatlas2.workflow_objects import ManualCuration
@@ -21,7 +29,7 @@ def create_manual_curation_obj(auto_id_obj: "AutoIdentification") -> "ManualCura
     apply_bounds = wp.get('apply_suggested_bounds', False)
 
     logger.info("Processing compounds...")
-    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Creating manual curation objects"):
+    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Creating manual curation objects", disable=should_disable_tqdm()):
         
         # 1. Start with a dictionary instead of a 1-row DataFrame
         # This is 100x faster than pd.DataFrame([{}])
@@ -225,7 +233,7 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> Dict[str, List[Dict[str, Any]]]:
             isomer_dict[uids[i]] = [
                 {
                     "mz_rt_uid": row.mz_rt_uid, "inchi_key": row.inchi_key,
-                    "adduct": row.adduct, "compound_name": row.get("compound_name", ""),
+                    "adduct": row.adduct, "compound_name": row.compound_name,
                     "rt": row.rt_peak, "mz": row.mz,
                 } for row in matches.itertuples()
             ]

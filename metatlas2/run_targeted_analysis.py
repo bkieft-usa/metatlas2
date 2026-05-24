@@ -7,20 +7,6 @@ import re
 from pathlib import Path
 from typing import Dict, Any
 
-# Disable tqdm bars in non-interactive (batch) jobs
-def _is_interactive():
-    return sys.stdout.isatty() or sys.stderr.isatty()
-try:
-    import tqdm.auto as tqdm_auto
-    _orig_tqdm = tqdm_auto.tqdm
-    def _tqdm_patch(*args, **kwargs):
-        if "disable" not in kwargs:
-            kwargs["disable"] = not _is_interactive()
-        return _orig_tqdm(*args, **kwargs)
-    tqdm_auto.tqdm = _tqdm_patch
-except ImportError:
-    pass
-
 SLURM_TEMPLATE = """\
 #!/bin/bash
 #SBATCH --job-name={project}
@@ -157,7 +143,7 @@ def set_up_paths(
             "METATLAS_DATA_DIR environment variable is not set. "
             "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
         )
-    lcmsruns_path = f"{data_dir}/lcmsruns/"
+    lcmsruns_path = f"{data_dir}/raw_data/"
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.parquet"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"

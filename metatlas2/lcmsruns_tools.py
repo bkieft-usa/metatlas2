@@ -1,190 +1,149 @@
 from pathlib import Path
-from typing import List
-
+from typing import List, Any, Dict
+from collections import Counter
+import metatlas2.file_and_project_format as fpf
 import metatlas2.logging_config as lcf
+
 logger = lcf.get_logger('lcmsruns_tools')
 
+# Mapping for analysis type categorization
+ANALYSIS_TYPE_MAP = {
+    'qc': ['qc'],
+    'istd': ['istd'],
+    'exctrl': ['exctrl', 'txctrl'],
+    'injbl': ['injbl', 'blank'],
+    'refstd': ['refstd', 'standard'],
+}
+
+def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> List[Dict]:
+    project_path = Path(project_raw_files_path)
+    if not project_path.exists():
+        raise FileNotFoundError(f"Project path does not exist: {project_path}")
+    
+    if failed := list(project_path.glob("*.failed")):
+        logger.error("\n".join([f"  - {f.name}" for f in failed]))
+        raise ValueError(f"Please address {len(failed)} .failed files in {project_path}.")
+
+    lcmsruns = []
+    # Process all target extensions in one loop
+    for ext in ['raw', 'mzML', 'h5']:
+        files = list(project_path.glob(f"*.{ext}"))
+        logger.info(f"Found {len(files)} .{ext} files")
+        
+        for file_path in files:
+            try:
+                fields = fpf.parse_file_name(file_path.name)
+                s_name = fields.get("sample_name", "").lower()
+                r_meta = fields.get("run_metadata", "").lower()
+                combined = f"{s_name} {r_meta}"
+
+                # Determine analysis type using the mapping
+                analysis_type = 'experimental'
+                for category, keywords in ANALYSIS_TYPE_MAP.items():
+                    if any(k in combined for k in keywords):
+                        analysis_type = category
+                        break
+
+                lcmsruns.append({
+                    "file_path": str(file_path),
+                    "filename": file_path.name,
+                    "file_format": ext.lower(),
+                    "file_type": analysis_type.lower(),
+                    "chromatography": fields.get("chromatography", "Unknown").lower(),
+                    "ms_level": fields.get("ms_level", "Unknown").lower(),
+                    "polarity": fields.get("polarity", "Unknown").lower(),
+                    "created_by": None if fields.get("created_by") is None else str(fields.get("created_by")).lower(),
+                    "created_date": None if fields.get("created_date") is None else str(fields.get("created_date")).lower(),
+                })
+            except Exception as e:
+                raise ValueError(f"Error parsing filename '{file_path.name}': {e}")
+
+        if files:
+            file_types = [r["file_type"] for r in lcmsruns if r["file_format"] == ext]
+            chroms = [r["chromatography"] for r in lcmsruns if r["file_format"] == ext]
+            ms_levels = [r["ms_level"] for r in lcmsruns if r["file_format"] == ext]
+            polarities = [r["polarity"] for r in lcmsruns if r["file_format"] == ext]
+            logger.info(f"  file_type counts: {dict(Counter(file_types))}")
+            logger.info(f"  chromatography counts: {dict(Counter(chroms))}")
+            logger.info(f"  ms_level counts: {dict(Counter(ms_levels))}")
+            logger.info(f"  polarity counts: {dict(Counter(polarities))}")
+
+    if not lcmsruns:
+        raise ValueError(f"No .raw, .mzML, or .h5 files found in {project_path}")
+    
+    logger.info(f"Returning {len(lcmsruns)} LCMS runs.")
+    return lcmsruns
+
 def filter_lcmsruns_list(
-    lcmsruns: List["LCMSRun"], 
+    lcmsruns: List[Any], 
     include_file_type: List[str] = None,
     exclude_file_type: List[str] = None,
     file_format: str = "h5",
     chromatography: str = None,
     polarity: str = None,
-    ms_level: int = None
-) -> List["LCMSRun"]:
-    """
-    Filter a list of LCMSRun objects by file type, file format, chromatography, and polarity.
-    """
+    ms_level: str = None
+) -> List[Any]:
+
+    # Normalize and lowercase all filter inputs
     if chromatography:
-        if chromatography == "HILICZ":
-            chromatography = "HILIC"
+        chromatography = chromatography.lower()
+        # Accept both 'hilic' and 'hilicz' as equivalent if either is requested
+        if chromatography in ["hilic", "hilicz"]:
+            chromatography_set = {"hilic", "hilicz"}
+        else:
+            chromatography_set = {chromatography}
+    else:
+        chromatography_set = None
 
+    file_format = file_format.lower() if file_format else None
+
+    pol_set = set()
     if polarity:
-        if polarity.lower() in ["pos", "positive"]:
-            polarity = ["positive", "fps"]
-        elif polarity.lower() in ["neg", "negative"]:
-            polarity = ["negative", "fps"]
-
-    if ms_level is not None:
-        ms_level = int(ms_level)
-
-    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with parameters: include_file_type={include_file_type}, exclude_file_type={exclude_file_type}, file_format={file_format}, chromatography={chromatography}, polarity={polarity}, ms_level={ms_level}...")
-    logger.info(f"Input files have the following unique types:")
-    logger.info(f"  - file_type: {set(getattr(run, 'file_type', None) for run in lcmsruns)}")
-    logger.info(f"  - file_format: {set(getattr(run, 'file_format', None) for run in lcmsruns)}")
-    logger.info(f"  - chromatography: {set(getattr(run, 'chromatography', None) for run in lcmsruns)}")
-    logger.info(f"  - polarity: {set(getattr(run, 'polarity', None) for run in lcmsruns)}")
-    logger.info(f"  - ms_level: {set(getattr(run, 'ms_level', None) for run in lcmsruns)}")
-    filtered_runs = lcmsruns.copy()
-
-    # Fix: ensure file_type is always a list
-    if include_file_type:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() in [ft.lower() for ft in include_file_type]]
-    if exclude_file_type:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_type', '').lower() not in [ft.lower() for ft in exclude_file_type]]
-    if file_format:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'file_format', '').lower() == file_format.lower()]
-    if chromatography:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'chromatography', '').lower() == chromatography.lower()]
-    if polarity:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'polarity', '').lower() in [p.lower() for p in polarity]]
-    if ms_level is not None:
-        filtered_runs = [run for run in filtered_runs if getattr(run, 'ms_level', None) == ms_level]
-
-    logger.info(f"Filtered to {len(filtered_runs)} out of {len(lcmsruns)} total files.")
-    if len(filtered_runs) == 0:
-        logger.warning("No LCMS runs matched the filter criteria. Please check your parameters.")
-        raise ValueError("No LCMS runs matched the filter criteria. Please check your parameters.")
-
-    return filtered_runs
-
-def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list:
-    """
-    Scan project directory for LCMS files and return a flat list of LCMS run metadata dicts.
-    Each dict is suitable for direct insertion into the database or for LCMSRun(**row).
-    """
-    files_by_group = _get_project_files(project_raw_files_path)
-    lcmsruns = []
-    for file_format, chrom_dict in files_by_group.items():
-        for chrom, ms_level_dict in chrom_dict.items():
-            for ms_level, pol_dict in ms_level_dict.items():
-                for pol, analysis_dict in pol_dict.items():
-                    for file_type, file_list in analysis_dict.items():
-                        for file_path in file_list:
-                            lcmsruns.append({
-                                "file_path": file_path,
-                                "filename": Path(file_path).name,
-                                "file_format": file_format,
-                                "file_type": file_type,
-                                "chromatography": chrom,
-                                "ms_level": ms_level,
-                                "polarity": pol,
-                                "created_by": None,
-                                "created_date": None,
-                            })
-    return lcmsruns
-
-def _get_project_files(project_raw_files_path: str) -> dict:
-    """
-    Scan project directory for LCMS files and organize by chromatography/ms_level/polarity/analysis type.
-    
-    Args:
-        project_raw_files_path: Path to directory containing raw files
-        
-    Returns:
-        Nested dictionary: {chromatography: {ms_level: {polarity: {analysis_type: [file_paths]}}}}
-    """
-    project_path = Path(project_raw_files_path)
-    if not project_path.exists():
-        raise FileNotFoundError(f"Project path does not exist: {project_path}")
-    
-    # Find all files
-    failed_conversion_files = list(project_path.glob("*.failed"))
-    if failed_conversion_files:
-        for f in failed_conversion_files:
-            logger.error(f"  - {f.name}")
-        raise ValueError(f"Please address the .failed files before proceeding. Found {len(failed_conversion_files)} .failed files in {project_path}.")
-    
-    # Find files directly in the project directory
-    raw_files = list(project_path.glob("*.raw"))
-    mzML_files = list(project_path.glob("*.mzML"))
-    h5_files = list(project_path.glob("*.h5"))
-    if not raw_files or not mzML_files or not h5_files:
-        raise ValueError(f"Missing .raw, .mzML, or .h5 files for {project_path}")
-
-    logger.info(f"Found {len(raw_files)} .raw files in {project_path}")
-    logger.info(f"Found {len(mzML_files)} .mzML files in {project_path}")
-    logger.info(f"Found {len(h5_files)} .h5 files in {project_path}")
-
-    # Initialize nested dictionary
-    files_by_group = {'raw': {}, 'mzML': {}, 'h5': {}}
-
-    # Organize each file type
-    _organize_files(raw_files, 'raw', files_by_group['raw'])
-    _organize_files(mzML_files, 'mzML', files_by_group['mzML'])
-    _organize_files(h5_files, 'h5', files_by_group['h5'])
-
-    return files_by_group
-
-def _organize_files(files: List[Path], file_type: str, files_dict: dict) -> None:
-    """
-    Helper function to organize files by chromatography/polarity/ms_level/analysis_type.
-    
-    Args:
-        files: List of file paths to organize
-        file_type: Type of file ('raw', 'mzML', 'h5')
-        files_dict: Dictionary to populate with organized files
-    """
-    for file_path in files:
-        filename = file_path.name
-        
-        # Infer chromatography from filename
-        if any(x in filename.upper() for x in ['HILIC', 'HILICZ']):
-            chromatography = 'HILIC'
-        elif any(x in filename.upper() for x in ['C18', 'RP']):
-            chromatography = 'C18'
+        if isinstance(polarity, (list, set, tuple)):
+            pol_set = {str(p).lower() for p in polarity}
         else:
-            chromatography = 'Unknown'
-        
-        if any(x in filename.upper() for x in ['_POS_', '_POSITIVE_']):
-            polarity = 'positive'
-        elif any(x in filename.upper() for x in ['_NEG_', '_NEGATIVE_']):
-            polarity = 'negative'
-        elif any(x in filename.upper() for x in ['_FPS_']):
-            polarity = 'fps'
-        else:
-            polarity = 'Unknown'
-        if any(x in filename.upper() for x in ['_MS1_']):
-            ms_level = 1
-        elif any(x in filename.upper() for x in ['_MS2_', '_MSMS_']):
-            ms_level = 2
-        else:
-            ms_level = 'Unknown'
+            pol = str(polarity).lower()
+            if pol in ["pos", "positive", "fps"]:
+                pol_set = {"pos", "fps"}
+            elif pol in ["neg", "negative"]:
+                pol_set = {"neg"}
+            else:
+                pol_set = {pol}
 
-        # Infer analysis type from filename
-        if any(x in filename.upper() for x in ['-QC']):
-            analysis_type = 'qc'
-        elif any(x in filename.upper() for x in ['-ISTD']):
-            analysis_type = 'istd'
-        elif any(x in filename.upper() for x in ['EXCTRL-', 'TXCTRL-']):
-            analysis_type = 'exctrl'
-        elif any(x in filename.upper() for x in ['-INJBL', 'BLANK']):
-            analysis_type = 'injbl'
-        elif any(x in filename.upper() for x in ['-REFSTD', '-STANDARD']):
-            analysis_type = 'refstd'
-        else:
-            analysis_type = 'experimental'
-        
-        # Initialize nested structure
-        if chromatography not in files_dict:
-            files_dict[chromatography] = {}
-        if ms_level not in files_dict[chromatography]:
-            files_dict[chromatography][ms_level] = {}
-        if polarity not in files_dict[chromatography][ms_level]:
-            files_dict[chromatography][ms_level][polarity] = {}
-        if analysis_type not in files_dict[chromatography][ms_level][polarity]:
-            files_dict[chromatography][ms_level][polarity][analysis_type] = []
-        
-        # Add file to appropriate category
-        files_dict[chromatography][ms_level][polarity][analysis_type].append(str(file_path))
+    inc_set = {ft.lower() for ft in include_file_type} if include_file_type else None
+    exc_set = {ft.lower() for ft in exclude_file_type} if exclude_file_type else None
+
+    def match(run):
+        # Support both dict and object (namedtuple/dataclass) access
+        def get_val(k):
+            v = run[k] if isinstance(run, dict) else getattr(run, k, "")
+            return v.lower() if isinstance(v, str) else str(v).lower()
+
+        if inc_set and get_val('file_type') not in inc_set:
+            return False
+        if exc_set and get_val('file_type') in exc_set:
+            return False
+        if file_format and get_val('file_format') != file_format:
+            return False
+        if chromatography_set and get_val('chromatography') not in chromatography_set:
+            return False
+        if pol_set and get_val('polarity') not in pol_set:
+            return False
+        if ms_level is not None and get_val('ms_level') != str(ms_level).lower():
+            return False
+        return True
+
+    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with criteria: "
+                f"include_file_type={inc_set}, "
+                f"exclude_file_type={exc_set}, "
+                f"file_format={file_format}, "
+                f"chromatography={chromatography}, "
+                f"polarity={pol_set}, "
+                f"ms_level={ms_level}")
+    filtered = [run for run in lcmsruns if match(run)]
+
+    logger.info(f"Filtered to {len(filtered)} out of {len(lcmsruns)} total files.")
+    if not filtered:
+        raise ValueError("No LCMS runs matched the filter criteria.")
+
+    return filtered

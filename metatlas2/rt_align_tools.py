@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import sys
+import os
 from pathlib import Path
 from typing import Dict, Tuple, List
 from tqdm.auto import tqdm
@@ -13,6 +14,12 @@ import matplotlib.pyplot as plt
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('rt_align_tools')
+
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
 
 def apply_rt_alignment_to_target_atlases(
         rt_align_obj: "RTAlign"
@@ -235,7 +242,7 @@ def build_rt_alignment_model(
             ms1_lookup.setdefault(key, []).append(ms1)
 
     compound_stats = []
-    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Building RT alignment model"):
+    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Building RT alignment model", disable=should_disable_tqdm()):
         mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
@@ -387,7 +394,7 @@ def create_file_matching_summary(
         if key is not None:
             ms1_lookup.setdefault(key, []).append(ms1)
 
-    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Creating file matching summary"):
+    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Creating file matching summary", disable=should_disable_tqdm()):
         mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
         total_compounds += 1
         has_matches = False
