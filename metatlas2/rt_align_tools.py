@@ -218,32 +218,22 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     return
 
 def build_rt_alignment_model(
-    experimental_data: "ExperimentalData",
-    atlas: "Atlas",
-    rt_align: "RTAlign"
+    rt_align_obj: "RTAlign"
 ) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
     """
     Build RT alignment model directly from ExperimentalData and Atlas.
     Args:
-        experimental_data: ExperimentalData object with extracted MS1 data
-        atlas: Atlas object with compound references
         rt_align: RTAlign object with alignment settings
     Returns:
         Tuple of (rt_alignment_model, modeling_results_df, compound_rt_stats)
     """
     logger.info("Building RT alignment model from experimental data and atlas...")
-    exclude_inchikeys = rt_align.rt_alignment_params.get('exclude_inchikeys', [])
-
-    # Build a lookup for MS1Data by mz_rt_uid
-    ms1_lookup = {}
-    for ms1 in experimental_data.ms1_data:
-        key = getattr(ms1, 'mz_rt_uid', None)
-        if key is not None:
-            ms1_lookup.setdefault(key, []).append(ms1)
+    exclude_inchikeys = rt_align_obj.rt_alignment_params.get('exclude_inchikeys', [])
 
     compound_stats = []
-    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Building RT alignment model", disable=should_disable_tqdm()):
+    for compound_mzrt in tqdm(rt_align_obj.align_atlas_obj.compound_mzrts.values(), desc="Building RT alignment model", disable=should_disable_tqdm()):
         mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
+        ms1_df_comp = rt_align_obj.experimental_data.ms1_df[rt_align_obj.experimental_data.ms1_df['mz_rt_uid'] == mz_rt_uid]
         inchi_key = compound_mzrt.inchi_key
         adduct = compound_mzrt.adduct
         compound_uid = compound_mzrt.compound_uid
@@ -256,31 +246,33 @@ def build_rt_alignment_model(
         if exclude_inchikeys and inchi_key in exclude_inchikeys:
             continue
 
-        ms1_list = ms1_lookup.get(mz_rt_uid, [])
-        if not ms1_list:
-            continue
-
         observed_rts = []
         observed_mzs = []
         observed_intensities = []
         rt_diffs = []
         mz_errors = []
 
-        for ms1 in ms1_list:
-            ms1_data = ms1.data
-            if ms1_data.empty:
-                continue
-            sum_intensity = ms1_data['i'].sum()
-            if sum_intensity > 0:
-                idx = ms1_data['i'].idxmax()
-                observed_rt = float(ms1_data.loc[idx, 'rt'])
-                observed_mz = float((ms1_data['i'] * ms1_data['mz']).sum() / sum_intensity)
-                observed_intensity = float(ms1_data.loc[idx, 'i'])
-                ppm_diff = ((observed_mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
-                rt_diff = observed_rt - atlas_rt_peak if observed_rt is not None and atlas_rt_peak is not None else None
-                observed_rts.append(observed_rt)
-                observed_mzs.append(observed_mz)
-                observed_intensities.append(observed_intensity)
+        # Wide format: one row per compound per file, with lists in columns
+        for _, row in ms1_df_comp.iterrows():
+            rt_list = row.get('spec_rts', [])
+            intensity_list = row.get('spec_ints', [])
+            mz_list = row.get('spec_mzs', [])
+            in_feature_mask = row.get('in_feature', [True]*len(rt_list))
+            # Only use values where in_feature_mask is True
+            for i, use in enumerate(in_feature_mask):
+                if not use:
+                    continue
+                try:
+                    rt = rt_list[i]
+                    intensity = intensity_list[i]
+                    mz = mz_list[i]
+                except (IndexError, TypeError):
+                    continue
+                observed_rts.append(rt)
+                observed_mzs.append(mz)
+                observed_intensities.append(intensity)
+                ppm_diff = ((mz - atlas_mz) / atlas_mz) * 1e6 if atlas_mz > 0 else 0
+                rt_diff = rt - atlas_rt_peak if rt is not None and atlas_rt_peak is not None else None
                 rt_diffs.append(rt_diff)
                 mz_errors.append(ppm_diff)
 
@@ -322,7 +314,7 @@ def build_rt_alignment_model(
     logger.info(f"  Observed RT range (median): {compound_rt_stats['exp_rt_median'].min():.2f} - {compound_rt_stats['exp_rt_median'].max():.2f} min")
     logger.info(f"  Mean RT difference (observed - atlas): {compound_rt_stats['rt_diff_median'].mean():.3f} ± {compound_rt_stats['rt_diff_median'].std():.3f} min")
 
-    rt_align_settings = rt_align.rt_alignment_params
+    rt_align_settings = rt_align_obj.rt_alignment_params
     reliable_compounds = compound_rt_stats[
         compound_rt_stats['observation_count'] >= rt_align_settings['min_observations_per_compound']
     ]
@@ -360,14 +352,13 @@ def build_rt_alignment_model(
     logger.info(f"Compound RT Statistics:")
     logger.info(f"\n{compound_rt_stats[['compound_name', 'inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_median', 'rt_diff_median', 'observation_count', 'exp_rt_std']].to_string()}")
 
-    rt_align.rt_alignment_model = best_model
-    rt_align.modeling_data = modeling_results_df
+    rt_align_obj.rt_alignment_model = best_model
+    rt_align_obj.modeling_data = modeling_results_df
 
     return
 
 def create_file_matching_summary(
-    experimental_data: "ExperimentalData",
-    atlas: "Atlas"
+    rt_align_obj: "RTAlign",
 ) -> None:
     """
     Evaluate QC compound matching statistics directly from ExperimentalData and Atlas.
@@ -379,47 +370,51 @@ def create_file_matching_summary(
     Returns:
         None (logs statistics)
     """
-    logger.info("Evaluating QC compound matching statistics from ExperimentalData...")
+    logger.info(f"Evaluating QC compound matching statistics for {len(rt_align_obj.align_atlas_obj.compound_mzrts)} compounds"
+                f" from {len(rt_align_obj.experimental_data.ms1_df)} MS1 data points"
+                f" across {len(rt_align_obj.experimental_data.ms1_df['filename'].unique())} unique files"
+                f" for {len(rt_align_obj.experimental_data.ms1_df['mz_rt_uid'].unique())} compounds...")
 
     total_compounds = 0
     compounds_with_matches = 0
     compounds_without_matches = 0
     total_peaks_extracted = 0
     file_match_counts = {}
-
-    # Build a lookup for MS1Data by mz_rt_uid
-    ms1_lookup = {}
-    for ms1 in experimental_data.ms1_data:
-        key = getattr(ms1, 'mz_rt_uid', None)
-        if key is not None:
-            ms1_lookup.setdefault(key, []).append(ms1)
-
-    for compound_mzrt in tqdm(atlas.compound_mzrts.values(), desc="Creating file matching summary", disable=should_disable_tqdm()):
+    
+    for compound_mzrt in tqdm(rt_align_obj.align_atlas_obj.compound_mzrts.values(), desc="Creating file matching summary", disable=should_disable_tqdm()):
         mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
+        ms1_df_comp = rt_align_obj.experimental_data.ms1_df[rt_align_obj.experimental_data.ms1_df['mz_rt_uid'] == mz_rt_uid]
         total_compounds += 1
         has_matches = False
         compound_peaks = 0
 
-        ms1_list = ms1_lookup.get(mz_rt_uid, [])
-        if not ms1_list:
+        if ms1_df_comp.empty:
+            logger.warning(f"No MS1 data found for compound {compound_mzrt.compound_name} (mz_rt_uid: {mz_rt_uid}).")
             compounds_without_matches += 1
             continue
 
-        for ms1 in ms1_list:
-            ms1_data = ms1.data
-            if ms1_data.empty:
-                continue
-
-            sum_intensity = ms1_data['i'].sum()
-            if float(sum_intensity) > 0:
-                has_matches = True
-                compound_peaks += 1
-                # Track file-level statistics
-                file_path = ms1.filename
-                if file_path not in file_match_counts:
-                    file_match_counts[file_path] = {'compounds_matched': 0, 'total_peaks': 0}
-                file_match_counts[file_path]['compounds_matched'] += 1
-                file_match_counts[file_path]['total_peaks'] += 1
+        # Wide format: one row per compound per file, with lists in columns
+        for _, row in ms1_df_comp.iterrows():
+            filename = row.get('filename', None)
+            intensity_list = row.get('spec_ints', [])
+            in_feature_mask = row.get('in_feature', [True]*len(intensity_list))
+            found_peak = False
+            for i, use in enumerate(in_feature_mask):
+                if not use:
+                    continue
+                try:
+                    intensity = intensity_list[i]
+                except (IndexError, TypeError):
+                    continue
+                if float(intensity) > 0:
+                    has_matches = True
+                    found_peak = True
+                    compound_peaks += 1
+            if found_peak and filename is not None:
+                if filename not in file_match_counts:
+                    file_match_counts[filename] = {'compounds_matched': 0, 'total_peaks': 0}
+                file_match_counts[filename]['compounds_matched'] += 1
+                file_match_counts[filename]['total_peaks'] += 1
 
         if has_matches:
             compounds_with_matches += 1

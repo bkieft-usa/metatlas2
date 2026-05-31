@@ -98,24 +98,20 @@ def run_rt_alignment(
         database_path=rt_align_obj.paths['main_db_path'],
         atlas_uid=rt_align_obj.align_atlas_uid
     )
-
+    
     logger.info("Passing Atlas and LCMSRuns to data extractor...")
-    experimental_data_obj = edh.extract_data_from_raw(
+    edh.extract_data_from_raw(
         obj=rt_align_obj,
-        stage="rt_alignment"
     )
 
     logger.info("Passing ExperimentalData and Atlas to summarizer...")
     rat.create_file_matching_summary(
-        experimental_data=experimental_data_obj,
-        atlas=rt_align_obj.align_atlas_obj
+        rt_align_obj=rt_align_obj,
     )
 
     logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
     rat.build_rt_alignment_model(
-        experimental_data=experimental_data_obj,
-        atlas=rt_align_obj.align_atlas_obj, 
-        rt_align=rt_align_obj
+        rt_align_obj=rt_align_obj
     )
 
     logger.info("Passing RTAlign object to model database table saver...")
@@ -235,9 +231,8 @@ def run_auto_identification(
         )
 
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
-        auto_id_obj.experimental_data = edh.extract_data_from_raw(
+        edh.extract_data_from_raw(
             obj=auto_id_obj,
-            stage="auto_identification",
         )
 
         logger.info("Passing ExperimentalData to MS2 hit finder...")
@@ -313,7 +308,7 @@ def run_analysis_gui(
     analysis_gui_obj.workflow_params = analysis_gui_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][analysis_gui_obj.post_autoid_atlas_obj.chromatography][analysis_gui_obj.post_autoid_atlas_obj.polarity][analysis_gui_obj.post_autoid_atlas_obj.analysis_type]['PARAMS']
 
     logger.info("Loading and filtering GUI inputs...")
-    dbi.load_and_filter_gui_inputs(
+    dbi.load_and_filter_for_gui(
         analysis_gui_obj=analysis_gui_obj,
     )
 

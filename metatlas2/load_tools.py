@@ -101,6 +101,7 @@ def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
 def load_msms_refs_file(
     file_path: str,
     database_filter: str | None = None,
+    inchi_keys: list[str] | None = None,
 ) -> dict[str, list[Spectrum]]:
     """
     Load an msms refs file (.jsonl format) and return a dict mapping
@@ -111,34 +112,23 @@ def load_msms_refs_file(
     Args:
         file_path: Path to the msms_refs.jsonl file
         database_filter: If provided, only load spectra where database == this string
-
+        inchi_keys: If provided, only load spectra for the specified inchi_keys
     Returns:
         dict mapping inchi_key (str) -> list of matchms Spectrum objects
     """
+
     file_path = Path(file_path)
-
-    # Include the filter in the cache filename so different filters get different caches
-    filter_tag = f".{database_filter}" if database_filter else ""
-    cache_path = file_path.with_suffix(f'{filter_tag}.refs_cache.pkl')
-
-    if cache_path.exists() and cache_path.stat().st_mtime > file_path.stat().st_mtime:
-        logger.info(f"Loading reference spectra from cache: {cache_path}")
-        refs_by_inchi_key = joblib.load(cache_path)
-        total = sum(len(v) for v in refs_by_inchi_key.values())
-        logger.info(
-            f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} "
-            f"unique InChI keys (from cache)."
-        )
-        return refs_by_inchi_key
-
     logger.info(
         f"Loading reference spectra from {file_path}"
         + (f" (database='{database_filter}')" if database_filter else "")
+        + (f" (filtered to {len(inchi_keys)} inchi_keys)" if inchi_keys is not None else "")
         + "..."
     )
 
+
     refs_by_inchi_key: dict[str, list[Spectrum]] = {}
     n_skipped = 0
+    inchi_key_set = set(inchi_keys) if inchi_keys is not None else None
 
     with file_path.open('r') as fh:
         for line_num, line in enumerate(fh, start=1):
@@ -153,7 +143,12 @@ def load_msms_refs_file(
                 n_skipped += 1
                 continue
 
+
             if database_filter and rec.get('database') != database_filter:
+                continue
+
+            rec_inchi_key = rec.get('inchi_key', '')
+            if inchi_key_set is not None and rec_inchi_key not in inchi_key_set:
                 continue
 
             mz_list = rec.get('mz')
@@ -180,7 +175,7 @@ def load_msms_refs_file(
                 n_skipped += 1
                 continue
 
-            inchi_key = rec.get('inchi_key', '')
+            inchi_key = rec_inchi_key
             # matchms requires m/z ascending; defensively sort
             if len(mz) > 1 and not np.all(mz[:-1] <= mz[1:]):
                 order = np.argsort(mz, kind='stable')
@@ -211,10 +206,6 @@ def load_msms_refs_file(
     logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
     if n_skipped > 0:
         logger.warning(f"  Skipped {n_skipped} rows due to unparseable or empty spectra.")
-
-    logger.info(f"  Saving reference cache to {cache_path}...")
-    joblib.dump(refs_by_inchi_key, cache_path, compress=3)
-    logger.info(f"  Cache saved.")
 
     return refs_by_inchi_key
 

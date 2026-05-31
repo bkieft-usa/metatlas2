@@ -144,25 +144,30 @@ def _get_file_color(file_path: str, color_map: Optional[Dict[str, str]] = None) 
     
     return "gray"
 
-def _parse_spectrum(raw_spectrum_json: str) -> Tuple[List, List]:
-    """Parse a JSON-encoded spectrum string into (x_array, y_array) lists.
-
-    The stored format is a JSON array of two lists: [[x0, x1, ...], [y0, y1, ...]].
-    For ms1_data.raw_spectrum the x-axis is retention time; for ms2_data and
-    ms2_hits spectra the x-axis is m/z.
+def _parse_spectrum(data: object) -> Tuple[List, List]:
     """
-    if raw_spectrum_json is None:
+    Polymorphic parser: handles both legacy JSON strings [[x], [y]] 
+    and new Wide-format lists/arrays.
+    """
+    if data is None or (isinstance(data, float) and np.isnan(data)):
         return [], []
-    if isinstance(raw_spectrum_json, float) and np.isnan(raw_spectrum_json):
-        return [], []
-    try:
-        x_arr, y_arr = json.loads(raw_spectrum_json)
-        # Replace any NaN intensities with 0
-        y_arr = [0 if (isinstance(v, float) and np.isnan(v)) else v for v in y_arr]
-        return list(x_arr), list(y_arr)
-    except Exception:
-        return [], []
-
+    
+    # If it's already a list of lists (Wide format alignment or pre-parsed), return as is
+    if isinstance(data, (list, np.ndarray)) and len(data) == 2:
+        return list(data[0]), list(data[1])
+    
+    # If it's a JSON string, parse it
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, (list, tuple)) and len(parsed) == 2:
+                x, y = parsed
+                y = [0 if (isinstance(v, float) and np.isnan(v)) else v for v in y]
+                return list(x), list(y)
+        except Exception:
+            return [], []
+            
+    return [], []
 
 def _parse_mz_array(raw_mz: object) -> List:
     """Parse optional per-scan m/z payload from ms1_data.mz into a list."""
@@ -194,7 +199,7 @@ def _rt_delta(measured_rt: float, atlas_rt_peak: float) -> float:
 
 
 def _compute_window_ms1_metrics_for_summary_row(mc_row: pd.Series, ms1_sub: pd.DataFrame) -> dict:
-    """Recompute GUI-style window MS1 metrics for one manual-curation row."""
+    """Recompute GUI-style window MS1 metrics using Wide Format arrays."""
     def _as_float(value: object) -> float:
         try:
             out = float(value)
@@ -206,150 +211,66 @@ def _compute_window_ms1_metrics_for_summary_row(mc_row: pd.Series, ms1_sub: pd.D
     rt_max = _as_float(mc_row.get("rt_max", np.nan))
     if np.isfinite(rt_min) and np.isfinite(rt_max) and rt_max < rt_min:
         rt_min, rt_max = rt_max, rt_min
-
-    if not np.isfinite(rt_min):
-        rt_min = _as_float(mc_row.get("atlas_rt_min", np.nan))
-    if not np.isfinite(rt_max):
-        rt_max = _as_float(mc_row.get("atlas_rt_max", np.nan))
-    if not np.isfinite(rt_min):
-        rt_min = 0.0
-    if not np.isfinite(rt_max) or rt_max <= rt_min:
-        rt_max = rt_min + 1.0
-
-    fallback_rt_peak = (rt_min + rt_max) / 2.0
-    fallback_mz = mc_row.get("best_ms1_mz", np.nan)
-    if pd.isna(fallback_mz):
-        fallback_mz = mc_row.get("atlas_mz", np.nan)
-
+    
     atlas_mz = mc_row.get("atlas_mz", np.nan)
     atlas_rt_peak = mc_row.get("atlas_rt_peak", np.nan)
 
     if ms1_sub is None or ms1_sub.empty:
-        fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
-        fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
-        fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
         return {
-            "rt_peak": fallback_rt_peak,
-            "mz": fallback_mz_val,
-            "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
-            "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
-            "best_ms1_file": mc_row.get("best_ms1_file", ""),
-            "best_ms1_rt": _as_float(mc_row.get("best_ms1_rt", np.nan)),
-            "best_ms1_mz": _as_float(mc_row.get("best_ms1_mz", np.nan)),
-            "best_ms1_intensity": _as_float(mc_row.get("best_ms1_intensity", np.nan)),
-            "best_ms1_ppm_error": _as_float(mc_row.get("best_ms1_ppm_error", np.nan)),
-            "best_ms1_rt_error": _as_float(mc_row.get("best_ms1_rt_error", np.nan)),
+            "rt_peak": (rt_min + rt_max)/2, "mz": mc_row.get("best_ms1_mz", np.nan), 
+            "best_ms1_file": mc_row.get("best_ms1_file", ""), "best_ms1_intensity": np.nan
         }
 
-    has_file_path = "file_path" in ms1_sub.columns
-    has_mz = "mz" in ms1_sub.columns
-    best_by_file = {}
+    global_max_int = -np.inf
+    best_point = None
+    all_win_mzs, all_win_ints, all_win_rts = [], [], []
 
-    cols = []
-    if has_file_path:
-        cols.append("file_path")
-    cols.append("raw_spectrum")
-    if has_mz:
-        cols.append("mz")
+    for _, r in ms1_sub.iterrows():
+        # Access WIDE format columns directly
+        rt_arr = np.asarray(r.get("spec_rts", []), dtype=np.float32)
+        int_arr = np.asarray(r.get("spec_ints", []), dtype=np.float32)
+        mz_arr = np.asarray(r.get("spec_mzs", []), dtype=np.float32)
+        feat_mask = np.asarray(r.get("in_feature", []), dtype=bool)
 
-    for row_vals in ms1_sub[cols].itertuples(index=False, name=None):
-        if has_file_path and has_mz:
-            file_path, raw_spectrum, raw_mz = row_vals
-        elif has_file_path:
-            file_path, raw_spectrum = row_vals
-            raw_mz = None
-        elif has_mz:
-            raw_spectrum, raw_mz = row_vals
-            file_path = None
-        else:
-            (raw_spectrum,) = row_vals
-            file_path = None
-            raw_mz = None
+        if len(rt_arr) == 0: continue
+        if len(feat_mask) != len(rt_arr): feat_mask = np.ones(len(rt_arr), dtype=bool)
 
-        rt_vals, intensities = _parse_spectrum(raw_spectrum)
-        rt_arr = np.asarray(rt_vals, dtype=float)
-        int_arr = np.asarray(intensities, dtype=float)
-        if rt_arr.size == 0 or int_arr.size == 0:
-            continue
+        # Combine feature mask and RT window
+        win_mask = (feat_mask) & (rt_arr >= rt_min) & (rt_arr <= rt_max)
+        if not np.any(win_mask): continue
 
-        n = min(rt_arr.size, int_arr.size)
-        rt_arr = rt_arr[:n]
-        int_arr = int_arr[:n]
+        all_win_mzs.extend(mz_arr[win_mask])
+        all_win_ints.extend(int_arr[win_mask])
+        all_win_rts.extend(rt_arr[win_mask])
 
-        mz_arr = np.asarray([], dtype=float)
-        if raw_mz is not None:
-            mz_vals = _parse_mz_array(raw_mz)
-            if mz_vals:
-                mz_arr = np.asarray(mz_vals, dtype=float)[:n]
+        masked_ints = int_arr[win_mask]
+        local_idx = np.argmax(masked_ints)
+        if masked_ints[local_idx] > global_max_int:
+            global_max_int = masked_ints[local_idx]
+            abs_idx = np.where(win_mask)[0][local_idx]
+            best_point = {
+                "rt": rt_arr[abs_idx], "mz": mz_arr[abs_idx],
+                "int": global_max_int, "file": r.get("filename", "")
+            }
 
-        mask = (
-            (rt_arr >= rt_min)
-            & (rt_arr <= rt_max)
-            & np.isfinite(rt_arr)
-            & np.isfinite(int_arr)
-        )
-        if not np.any(mask):
-            continue
+    if best_point is None:
+        return { "rt_peak": np.nan, "mz": np.nan, "best_ms1_intensity": np.nan }
 
-        masked_int = np.where(mask, int_arr, -np.inf)
-        local_idx = int(np.argmax(masked_int))
-        local_intensity = float(masked_int[local_idx])
-        if not np.isfinite(local_intensity):
-            continue
-
-        local_rt = float(rt_arr[local_idx])
-        local_mz = np.nan
-        if mz_arr.size == n and local_idx < mz_arr.size and np.isfinite(mz_arr[local_idx]):
-            local_mz = float(mz_arr[local_idx])
-
-        prev = best_by_file.get(file_path)
-        if prev is None or local_intensity > prev[0]:
-            best_by_file[file_path] = (local_intensity, local_rt, local_mz)
-
-    if not best_by_file:
-        fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
-        fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
-        fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
-        return {
-            "rt_peak": fallback_rt_peak,
-            "mz": fallback_mz_val,
-            "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
-            "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
-            "best_ms1_file": mc_row.get("best_ms1_file", ""),
-            "best_ms1_rt": _as_float(mc_row.get("best_ms1_rt", np.nan)),
-            "best_ms1_mz": _as_float(mc_row.get("best_ms1_mz", np.nan)),
-            "best_ms1_intensity": _as_float(mc_row.get("best_ms1_intensity", np.nan)),
-            "best_ms1_ppm_error": _as_float(mc_row.get("best_ms1_ppm_error", np.nan)),
-            "best_ms1_rt_error": _as_float(mc_row.get("best_ms1_rt_error", np.nan)),
-        }
-
-    rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
-    mz_vals = [mz for _, _, mz in best_by_file.values() if np.isfinite(mz)]
-    mz_mean = float(np.mean(mz_vals)) if mz_vals else (float(fallback_mz) if pd.notnull(fallback_mz) else np.nan)
-
-    best_file, best_triplet = max(best_by_file.items(), key=lambda kv: kv[1][0])
-    best_intensity, best_rt, best_mz = best_triplet
-    if not np.isfinite(best_mz):
-        best_mz = mz_mean
-
-    best_ppm_error = _ppm_error(best_mz, atlas_mz)
-    best_rt_error = _rt_delta(best_rt, atlas_rt_peak)
-    mz_error = _ppm_error(mz_mean, atlas_mz)
-    rt_error = _rt_delta(rt_peak, atlas_rt_peak)
-
+    mz_mean = float(np.mean(all_win_mzs))
+    rt_peak = float(best_point["rt"])
+    
     return {
         "rt_peak": rt_peak,
         "mz": mz_mean,
-        "rt_error": float(rt_error) if np.isfinite(rt_error) else np.nan,
-        "mz_error": float(mz_error) if np.isfinite(mz_error) else np.nan,
-        "best_ms1_file": "" if best_file is None else str(best_file),
-        "best_ms1_rt": float(best_rt),
-        "best_ms1_mz": float(best_mz) if np.isfinite(best_mz) else np.nan,
-        "best_ms1_intensity": float(best_intensity),
-        "best_ms1_ppm_error": float(best_ppm_error) if np.isfinite(best_ppm_error) else np.nan,
-        "best_ms1_rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+        "rt_error": _rt_delta(rt_peak, atlas_rt_peak),
+        "mz_error": _ppm_error(mz_mean, atlas_mz),
+        "best_ms1_file": best_point["file"],
+        "best_ms1_rt": best_point["rt"],
+        "best_ms1_mz": best_point["mz"],
+        "best_ms1_intensity": float(global_max_int),
+        "best_ms1_ppm_error": _ppm_error(best_point["mz"], atlas_mz),
+        "best_ms1_rt_error": _rt_delta(best_point["rt"], atlas_rt_peak),
     }
-
 
 def backfill_manual_curation_ms1_metrics(summary_obj: "AnalysisSummary") -> None:
     """Backfill GUI-derived MS1 window metrics in-memory before summary outputs."""
@@ -396,29 +317,6 @@ def backfill_manual_curation_ms1_metrics(summary_obj: "AnalysisSummary") -> None
         len(manual_curation_df),
     )
 
-
-def _get_top3_ms2_hits(ms2_hits_df: pd.DataFrame) -> pd.DataFrame:
-    """Return top-3 score-ranked MS2 hits, keeping at most one hit per file."""
-    if ms2_hits_df is None or ms2_hits_df.empty:
-        return pd.DataFrame()
-    return (
-        ms2_hits_df
-        .sort_values("score", ascending=False)
-        .drop_duplicates("file_path")
-        .head(3)
-        .reset_index(drop=True)
-    )
-
-
-def _top3_measured_mz_mean(top3_hits_df: pd.DataFrame) -> float:
-    """Return mean measured m/z for top-3 hits (prefers mz_measured, falls back to mz)."""
-    if top3_hits_df is None or top3_hits_df.empty:
-        return np.nan
-    mz_series = pd.to_numeric(top3_hits_df.get("mz_measured", top3_hits_df.get("mz")), errors="coerce")
-    mz_series = mz_series[np.isfinite(mz_series)]
-    if len(mz_series) == 0:
-        return np.nan
-    return float(np.mean(mz_series))
 
 def _get_compound_info_batch(
     main_db_path: str,
@@ -467,7 +365,8 @@ def _plot_mirror(
         frag_colors = ["tomato"] * len(qry_mz)
 
     if qry_mz and qry_int:
-        for mz, intensity, color in zip(qry_mz, qry_int, frag_colors):
+        q_data = [(mz, i, c) for mz, i, c in zip(qry_mz, qry_int, frag_colors) if not np.isnan(mz)]
+        for mz, intensity, color in q_data:
             ax.bar(mz, intensity, color=color, width=1.1, alpha=0.85)
 
     scale = 1.0
@@ -701,13 +600,19 @@ def _plot_eic(
         ax.axvline(rt_peak, color="black", linestyle=":", linewidth=1.5, alpha=0.7, label="_atlas_peak")
 
     for file_idx, row in ms1_compound_df.iterrows():
-        rt_arr, i_arr = _parse_spectrum(row["raw_spectrum"])
-        if not rt_arr:
+        rt_arr = row.get("rt", [])
+        i_arr = row.get("i", [])
+        
+        if not rt_arr or not i_arr:
             continue
-        color = _get_file_color(row["file_path"], color_map)
+            
+        color = _get_file_color(row.get("file_path", ""), color_map)
         if log_scale:
-            i_arr = [np.log10(max(v, 1)) for v in i_arr]
-        ax.plot(rt_arr, i_arr, color=color, linewidth=1.0, alpha=0.7, label="_nolegend_")
+            i_vals = np.log10(np.maximum(i_arr, 1))
+        else:
+            i_vals = i_arr
+            
+        ax.plot(rt_arr, i_vals, color=color, linewidth=1.0, alpha=0.7, label="_nolegend_")
 
     ax.set_xlabel("Retention Time (min)", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=14, weight="bold")
@@ -909,60 +814,31 @@ def _plot_hit_info_table(
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
-def _plot_ms2(
-    ax,
-    panel_idx: int,
-    top3: pd.DataFrame,
-    ms2_raw_df: pd.DataFrame,
-) -> None:
-    """Populate one MS2 panel (mirror, raw, or empty) on *ax*.
-
-    Parameters
-    ----------
-    panel_idx:
-        0, 1, or 2 — which of the three top-hit panels to render.
-    top3:
-        Up to three best MS2 hits for the compound, sorted descending by score.
-    ms2_raw_df:
-        Raw MS2 scans for the compound (used as fallback when there are no hits).
-    """
+def _plot_ms2(ax, panel_idx: int, top3: List[dict], ms2_raw_df: pd.DataFrame) -> None:
+    """Populate one MS2 panel using pre-aligned wide-format hit data."""
     _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
     title = _MIRROR_TITLES[panel_idx]
 
     if panel_idx < len(top3):
-        hit = top3.iloc[panel_idx]
-        qry_mz, qry_int = _parse_spectrum(hit.get("qry_spectrum"))
-        ref_mz, ref_int = _parse_spectrum(hit.get("ref_spectrum"))
-
-        raw_colors = hit.get("aligned_fragment_colors")
-        parsed = json.loads(raw_colors)
-        frag_colors = parsed
-
-        if qry_mz and ref_mz:
-            _plot_mirror(
-                ax, qry_mz, qry_int, ref_mz, ref_int,
-                frag_colors=frag_colors,
-                score=float(hit.get("score", np.nan)),
-                rt=float(hit.get("rt", np.nan)),
-                title=title,
-            )
-        elif qry_mz:
-            _plot_raw_ms2(
-                ax, qry_mz, qry_int,
-                rt=float(hit.get("rt", np.nan)),
-                title=title,
-            )
-        else:
-            _plot_empty_ms2(ax, title=title)
+        hit = top3[panel_idx] # top3 is now a list of dicts
+        q_mz, q_int = hit["query_aligned"]
+        r_mz, r_int = hit["ref_aligned"]
+        frag_colors = hit.get("fragment_colors", [])
+        
+        _plot_mirror(
+            ax, q_mz, q_int, r_mz, r_int,
+            frag_colors=frag_colors,
+            score=float(hit.get("score", np.nan)),
+            rt=float(hit.get("rt", np.nan)),
+            title=title,
+        )
 
     elif panel_idx == 0 and not ms2_raw_df.empty:
         raw_row = ms2_raw_df.iloc[0]
-        mz_arr, int_arr = _parse_spectrum(raw_row.get("raw_spectrum"))
-        _plot_raw_ms2(
-            ax, mz_arr, int_arr,
-            rt=float(raw_row.get("rt", np.nan)),
-            title=title,
-        )
+        # Use wide format columns if available
+        mz = raw_row.get("frag_mzs", [])
+        ints = raw_row.get("frag_ints", [])
+        _plot_raw_ms2(ax, mz, ints, rt=float(raw_row.get("rt", np.nan)), title=title)
     else:
         _plot_empty_ms2(ax, title=title)
 
@@ -983,7 +859,22 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ms2_raw_df = kwargs["ms2_raw_df"]
     ms2_hits_df = kwargs["ms2_hits_df"]
 
-    top3 = _get_top3_ms2_hits(ms2_hits_df)
+    top3 = []
+    if not ms2_hits_df.empty:
+        # Find the scan in the group with the highest-scoring hit
+        best_scan_idx = -1
+        max_score = -1.0
+        
+        for idx, row in ms2_hits_df.iterrows():
+            hits = row.get('hits', [])
+            if hits:
+                score = hits[0].get('score', 0)
+                if score > max_score:
+                    max_score = score
+                    best_scan_idx = idx
+        
+        if best_scan_idx != -1:
+            top3 = ms2_hits_df.iloc[best_scan_idx].get('hits', [])[:3]
 
     fig = plt.figure(figsize=(25, 15))
     gs = fig.add_gridspec(
@@ -1323,19 +1214,24 @@ def make_final_id_sheet(
         ik: v[4] for ik, v in batch_info.items()  # mono_isotopic_molecular_weight
     }
 
+    ms2_best = {}
+    ms2_top3_mz_avg = {}
+    
     if not ms2_hits_all_df.empty:
-        ms2_best: dict[str, pd.Series] = {}
-        ms2_top3_mz_avg: dict[str, float] = {}
+        # Group by uid to ensure we have one 'best' per compound
         for key, grp in ms2_hits_all_df.groupby(["mz_rt_uid"], sort=False):
-            grp_sorted = grp.sort_values("score", ascending=False)
-            ms2_best[key] = grp_sorted.iloc[0]
-            top3 = _get_top3_ms2_hits(grp_sorted)
-            top3_mz_mean = _top3_measured_mz_mean(top3)
-            if np.isfinite(top3_mz_mean):
-                ms2_top3_mz_avg[key] = float(top3_mz_mean)
-    else:
-        ms2_best = {}
-        ms2_top3_mz_avg = {}
+            best_scan = grp.iloc[0]
+            hits_list = best_scan.get('hits', [])
+            
+            if hits_list:
+                ms2_best[key] = hits_list[0] # Top hit
+                
+                # Calculate top 3 average m/z from the hits list
+                top3_hits = hits_list[:3]
+                mzs = [h.get('mz_measured', np.nan) for h in top3_hits]
+                valid_mzs = [m for m in mzs if np.isfinite(m)]
+                if valid_mzs:
+                    ms2_top3_mz_avg[key] = float(np.mean(valid_mzs))
 
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
 
@@ -1411,11 +1307,8 @@ def make_final_id_sheet(
             ref_frags = int(best_hit.get("ref_frags", 0))
             msms_num_ions = f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches)
 
-            try:
-                mf = json.loads(best_hit.get("matched_fragments", "[]"))
-                msms_matching_ions = ",".join(f"{m:.3f}" for m in mf)
-            except Exception:
-                msms_matching_ions = ""
+            mf = best_hit.get("matched_fragments", [])
+            msms_matching_ions = ",".join(f"{m:.3f}" for m in mf) if mf else "N/A"
 
             if num_matches == 1 and not np.isnan(msms_score):
                 try:
@@ -2094,16 +1987,16 @@ def make_eic_thumbnails(
         if ms1_cmp is None or ms1_cmp.empty:
             file_items = [{"file_path": "", "rt_arr": [], "i_arr": [], "group_name": "unknown"}]
         else:
-            file_items = [
-                {
-                    "file_path": (file_path := str(file_row.get("file_path", ""))),
-                    "rt_arr": rt_arr,
-                    "i_arr": i_arr,
-                    "group_name": _file_group(file_path),
-                }
-                for _, file_row in ms1_cmp.iterrows()
-                for rt_arr, i_arr in (_parse_spectrum(file_row.get("raw_spectrum")),)
-            ]
+            # Extract directly from Wide format columns
+            file_items = []
+            for _, file_row in ms1_cmp.iterrows():
+                f_path = str(file_row.get("file_path", ""))
+                file_items.append({
+                    "file_path": f_path,
+                    "rt_arr": file_row.get("rt", []),
+                    "i_arr": file_row.get("i", []),
+                    "group_name": _file_group(f_path),
+                })
 
             def _alphanum_key(text: str):
                 return [int(tok) if tok.isdigit() else tok.lower() for tok in re.split(r"(\d+)", text or "")]
@@ -2206,7 +2099,11 @@ def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
 
     records = []
     for _, row in ms1_all_df.iterrows():
-        rt_arr, i_arr = _parse_spectrum(row.get("raw_spectrum"))
+        # 1. Direct array access (Wide Format)
+        rt_arr = np.asarray(row.get("rt", []), dtype=float)
+        i_arr = np.asarray(row.get("i", []), dtype=float)
+        mz_arr = np.asarray(row.get("mz", []), dtype=float)
+        
         fp = str(row.get("file_path", ""))
         group = _file_group(fp)
         base = {
@@ -2216,33 +2113,27 @@ def extract_per_file_metrics(ms1_all_df: pd.DataFrame) -> pd.DataFrame:
             "file_group": group,
         }
 
-        if not i_arr or max(i_arr) <= 0:
+        if i_arr.size == 0 or np.nanmax(i_arr) <= 0:
             records.append({**base,
                             "peak_height": np.nan, "peak_area": np.nan,
                             "rt_peak": np.nan, "rt_centroid": np.nan,
                             "mz_peak": np.nan, "mz_centroid": np.nan})
             continue
 
-        i_np = np.array(i_arr, dtype=float)
-        rt_np = np.array(rt_arr, dtype=float)
-        idx_max = int(np.argmax(i_np))
-        peak_height = float(i_np[idx_max])
-        rt_peak_val = float(rt_np[idx_max])
-        total_i = i_np.sum()
-        rt_centroid_val = float((rt_np * i_np).sum() / total_i)
-        peak_area_val = float(np.trapz(i_np, rt_np))
+        # 2. Compute Metrics using NumPy
+        idx_max = np.argmax(i_arr)
+        peak_height = float(i_arr[idx_max])
+        rt_peak_val = float(rt_arr[idx_max])
+        
+        total_i = i_arr.sum()
+        rt_centroid_val = float((rt_arr * i_arr).sum() / total_i) if total_i > 0 else np.nan
+        peak_area_val = float(np.trapz(i_arr, rt_arr))
 
         mz_centroid = np.nan
         mz_peak_val = np.nan
-        mz_json = row.get("mz")
-        if mz_json is not None and not (isinstance(mz_json, float) and np.isnan(mz_json)):
-            try:
-                mz_np = np.array(json.loads(mz_json), dtype=float)
-                if len(mz_np) == len(i_np) and total_i > 0:
-                    mz_centroid = float((mz_np * i_np).sum() / total_i)
-                    mz_peak_val = float(mz_np[idx_max])
-            except Exception:
-                pass
+        if mz_arr.size == i_arr.size:
+            mz_centroid = float((mz_arr * i_arr).sum() / total_i) if total_i > 0 else np.nan
+            mz_peak_val = float(mz_arr[idx_max])
 
         records.append({**base,
                         "peak_height": peak_height,
@@ -2604,16 +2495,27 @@ def make_best_ms2_hit_fragment_ions_csv(
         if best_hit is None:
             continue
 
-        raw_spectrum = best_hit.get("qry_spectrum", json.dumps([[], []]))
+        # Use the aligned query data
+        q_mz_all, q_int_all = best_hit.get("query_aligned", ([], []))
+        
+        # Remove NaNs for the CSV output
+        if q_mz_all:
+            valid = ~np.isnan(q_mz_all)
+            mz_vals = q_mz_all[valid].tolist()
+            int_vals = q_int_all[valid].tolist()
+        else:
+            mz_vals, int_vals = [], []
+
         if min_fragment_intensity is not None:
-            mz_arr, int_arr = _parse_spectrum(raw_spectrum)
-            if mz_arr and int_arr:
-                filtered = [(mz, i) for mz, i in zip(mz_arr, int_arr) if i > min_fragment_intensity]
-                if filtered:
-                    fmz, fint = zip(*filtered)
-                    raw_spectrum = json.dumps([list(fmz), list(fint)])
-                else:
-                    raw_spectrum = json.dumps([[], []])
+            filtered = [(mz, i) for mz, i in zip(mz_vals, int_vals) if i > min_fragment_intensity]
+            if filtered:
+                fmz, fint = zip(*filtered)
+                mz_vals, int_vals = list(fmz), list(fint)
+            else:
+                mz_vals, int_vals = [], []
+
+        # Store as JSON string for the CSV
+        raw_spectrum_output = json.dumps([mz_vals, int_vals])
 
         rows.append({
             "compound_index": cmp_idx_display,
@@ -2622,7 +2524,7 @@ def make_best_ms2_hit_fragment_ions_csv(
             "file_name": os.path.basename(str(best_hit.get("file_path", ""))),
             "rt_peak": best_hit.get("rt", np.nan),
             "mz_peak": best_hit.get("mz_measured", np.nan),
-            "spectrum": raw_spectrum,
+            "spectrum": raw_spectrum_output,
         })
 
     result_df = pd.DataFrame(rows)

@@ -47,7 +47,7 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> List[Dict]:
                 lcmsruns.append({
                     "file_path": str(file_path),
                     "filename": file_path.name,
-                    "file_format": ext.lower(),
+                    "file_format": ext,
                     "file_type": analysis_type.lower(),
                     "chromatography": fields.get("chromatography", "Unknown").lower(),
                     "ms_level": fields.get("ms_level", "Unknown").lower(),
@@ -87,7 +87,7 @@ def filter_lcmsruns_list(
     # Normalize and lowercase all filter inputs
     if chromatography:
         chromatography = chromatography.lower()
-        # Accept both 'hilic' and 'hilicz' as equivalent if either is requested
+        # Accept both 'hilic' and 'hilicz'
         if chromatography in ["hilic", "hilicz"]:
             chromatography_set = {"hilic", "hilicz"}
         else:
@@ -95,7 +95,8 @@ def filter_lcmsruns_list(
     else:
         chromatography_set = None
 
-    file_format = file_format.lower() if file_format else None
+    # Do not lower file_format, keep as is for case-sensitive matching
+    # file_format = file_format.lower() if file_format else None
 
     pol_set = set()
     if polarity:

@@ -72,13 +72,10 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
         "gui_lcmsruns_colors",
         "gui_require_all_evaluated",
         "gui_top_n_hits",
-        "apply_suggested_bounds",
         "note_options_overrides",
         "remove_unided_compounds",
         "remove_flagged_compounds",
         "apply_istd_to_ema",
-        "upload_to_gdrive",
-        "skip_outputs",
     ]
     src = "# Parameters to override for GUI analysis\n"
     src += "OVERRIDE_PARAMS = {\n"

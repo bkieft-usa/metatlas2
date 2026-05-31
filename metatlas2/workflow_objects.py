@@ -581,47 +581,11 @@ class RTAlign:
             logger.info(f"No existing aligned atlases file found at {self.paths['aligned_atlases_store_file']} for RT alignment number {self.rt_alignment_number}. Aligned atlases will be generated.")
 
 @dataclass
-class ManualCuration:
-    mz_rt_uid: str
-    compound_uid: str
-    inchi_key: str = ""
-    adduct: str = ""
-    data: dict = field(default=None, compare=False)
-    # data keys: compound_uid, inchi_key, adduct, rt_alignment_number, analysis_number,
-    #   compound_name, auto_ided, polarity, chromatography, mz_tolerance, atlas_mz,
-    #   atlas_rt_peak, atlas_rt_min, atlas_rt_max,
-    #   mz, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
-    #   identification_notes, analyst_notes, best_ms1_file, best_ms1_rt, best_ms1_mz,
-    #   best_ms1_intensity, best_ms1_ppm_error, best_ms1_rt_error, max_eic_rt, max_eic_intensity, isomers,
-    #   suggested_rt_min, suggested_rt_max, suggested_rt_peak, rt_suggestion_confidence
-
-@dataclass
-class _SpecData:
-    mz_rt_uid: str
-    inchi_key: str = ""
-    adduct: str = ""
-    filename: str = ""
-    data: pd.DataFrame = field(default=None, compare=False)
-
-MS1Data = _SpecData
-# data columns: rt, mz, i, in_feature
-
-MS2Data = _SpecData
-# data columns: rt, mz, i, precursor_MZ, precursor_intensity, collision_energy, in_feature
-
-MS2Hit = _SpecData
-# data columns: mz_rt_uid, inchi_key, database, ref_id, ref_name, score, num_matches,
-#   mz_theoretical, mz_measured, ppm_error, rt, qry_intensity_peak,
-#   ref_frags, data_frags, matched_fragments, aligned_fragment_colors,
-#   qry_spectrum, ref_spectrum
-
-
-@dataclass
 class ExperimentalData:
-    manual_curation: List[ManualCuration] = field(default_factory=list)
-    ms1_data: List[_SpecData] = field(default_factory=list)
-    ms2_data: List[_SpecData] = field(default_factory=list)
-    ms2_hits: List[_SpecData] = field(default_factory=list)
+    def __init__(self):
+        self.ms1_df = pd.DataFrame() 
+        self.ms2_df = pd.DataFrame() 
+        self.curation_df = pd.DataFrame()
 
 @dataclass
 class AutoIdentification:
@@ -665,6 +629,7 @@ class AutoIdentification:
         self.config_path = config_path
         self.image_tag = image_tag
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
+        self.msms_refs_db_filter = self.config['WORKFLOWS']['PATHS'].get('msms_refs_db_filter', None)
 
 @dataclass
 class AnalysisGUI:
@@ -715,12 +680,12 @@ class AnalysisGUI:
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
         if override_parameters is not None:
             self.override_parameters = override_parameters
-
+        dbi.validate_override_parameters(self.override_parameters)
+        
     def get_note_options(self):
         """Get note options from config for manual curation."""
         
         ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=self.owner)
-        dbi.validate_override_parameters(self.override_parameters)
         ms1_options, ms1_hotkeys = gno.get_note_options_and_hotkeys(
             self.override_parameters["note_options_overrides"].get("ms1_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
             ms1_notes_opts,
@@ -836,10 +801,6 @@ class AnalysisSummary:
             atlas_compounds=atlas_compounds, analysis_type=analysis_type,
         )
         self.ms2_raw_all_df = dbi.get_ms2_data_for_compound(
-            project_db_path, rt_alignment_num, analysis_num,
-            atlas_compounds=atlas_compounds, analysis_type=analysis_type,
-        )
-        self.ms2_hits_all_df = dbi.get_ms2_hits_for_compound(
             project_db_path, rt_alignment_num, analysis_num,
             atlas_compounds=atlas_compounds, analysis_type=analysis_type,
         )

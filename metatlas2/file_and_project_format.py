@@ -44,6 +44,9 @@ def parse_project_name(project_name: str):
     match = PROJECT_PATTERN.match(project_name)
     if not match:
         raise Exception(f"Project name '{project_name}' does not match the expected format.")
-    if match.group(8):
-        print(f"Warning: Project name '{project_name}' has a suffix '{match.group(8)}'.")
+    num_fields = project_name.count('_') + 1
+    if num_fields > 9:
+        suffix = match.group('suffix')
+        if suffix:
+            print(f"Warning: Project name '{project_name}' has a suffix '{suffix}'.")
     return project_name

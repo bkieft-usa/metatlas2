@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import numpy as np
 import sys
@@ -18,165 +19,210 @@ def should_disable_tqdm():
         or not sys.stdout.isatty()
     )
 
-def create_manual_curation_obj(auto_id_obj: "AutoIdentification") -> "ManualCuration":
-    from metatlas2.workflow_objects import ManualCuration
-
+def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
+    """
+    Builds the manual curation metadata table using the Tidy DataFrame architecture.
+    Returns a DataFrame where each row is a compound's curation metadata.
+    """
     logger.info("Building indices and isomer map...")
+    # The atlas is already a DataFrame in the new architecture
+    dataset = auto_id_obj.experimental_data
+    atlas_df = auto_id_obj.pre_autoid_atlas_obj.to_dataframe()
     isomer_dict = _build_isomer_dict(auto_id_obj.pre_autoid_atlas_obj)
-    ms1_index = _build_ms1_index(auto_id_obj.experimental_data)
     
-    wp = auto_id_obj.workflow_params
-    apply_bounds = wp.get('apply_suggested_bounds', False)
+    # Wide format: group by mz_rt_uid, aggregate across all files
+    ms1_df = dataset.ms1_df
+    if ms1_df.empty:
+        logger.warning("No MS1 data found in experimental_data.ms1_df.")
+        ms1_groups = {}
+    else:
+        ms1_groups = ms1_df.groupby("mz_rt_uid")
 
-    logger.info("Processing compounds...")
-    for atlas_compound_mzrt in tqdm(auto_id_obj.pre_autoid_atlas_obj.compound_mzrts.values(), desc="Creating manual curation objects", disable=should_disable_tqdm()):
-        
-        # 1. Start with a dictionary instead of a 1-row DataFrame
-        # This is 100x faster than pd.DataFrame([{}])
+    apply_bounds_cutoff = auto_id_obj.workflow_params.get('apply_suggested_min_score', None)
+    remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', False)
+
+    curation_records = []
+    logger.info("Starting iteration through atlas compounds...")
+    
+    # Iterate through atlas compounds
+    for uid, atlas_row in tqdm(atlas_df.set_index("mz_rt_uid").iterrows(), total=len(atlas_df), desc="Creating curation metadata", disable=should_disable_tqdm()):
+        # 1. Initial Metadata setup
         meta = {
-            'mz_rt_uid': atlas_compound_mzrt.mz_rt_uid,
-            'compound_uid': atlas_compound_mzrt.compound_uid,
-            'inchi_key': atlas_compound_mzrt.inchi_key,
-            'adduct': atlas_compound_mzrt.adduct,
-            'rt_alignment_number': auto_id_obj.rt_alignment_number,
-            'analysis_number': auto_id_obj.analysis_number,
-            'compound_name': getattr(atlas_compound_mzrt, 'compound_name', ''),
+            'mz_rt_uid': uid,
+            'compound_uid': atlas_row.get('compound_uid', ''),
+            'inchi_key': atlas_row.get('inchi_key', ''),
+            'adduct': atlas_row.get('adduct', ''),
+            'compound_name': atlas_row.get('compound_name', ''),
             'auto_ided': False,
-            'polarity': getattr(atlas_compound_mzrt, 'polarity', ''),
-            'chromatography': getattr(atlas_compound_mzrt, 'chromatography', ''),
-            'mz_tolerance': getattr(atlas_compound_mzrt, 'mz_tolerance', 5.0),
-            'atlas_mz': getattr(atlas_compound_mzrt, 'mz', 0.0),
-            'mz': 0.0,
-            'atlas_rt_peak': getattr(atlas_compound_mzrt, 'rt_peak', 0.0),
-            'atlas_rt_min': getattr(atlas_compound_mzrt, 'rt_min', 0.0),
-            'atlas_rt_max': getattr(atlas_compound_mzrt, 'rt_max', 0.0),
-            'rt_peak': getattr(atlas_compound_mzrt, 'rt_peak', 0.0),
-            'rt_min': getattr(atlas_compound_mzrt, 'rt_min', 0.0),
-            'rt_max': getattr(atlas_compound_mzrt, 'rt_max', 0.0),
-            'initial_rt_min': 0.0,
+            'polarity': atlas_row.get('polarity', ''),
+            'chromatography': atlas_row.get('chromatography', ''),
+            'mz_tolerance': atlas_row.get('mz_tolerance', 5.0),
+            'atlas_mz': atlas_row.get('mz', 0.0),
+            'atlas_rt_peak': atlas_row.get('rt_peak', 0.0),
+            'atlas_rt_min': atlas_row.get('rt_min', 0.0),
+            'atlas_rt_max': atlas_row.get('rt_max', 0.0),
+            'mz': 0.0, 
+            'rt_peak': 0.0, 
+            'rt_min': 0.0, 
+            'rt_max': 0.0,
+            'initial_rt_min': 0.0, 
             'initial_rt_max': 0.0,
-            'rt_error': 0.0,
+            'rt_error': 0.0, 
             'mz_error': 0.0,
-            'ms1_notes': '', 'ms2_notes': '', 'other_notes': '',
-            'identification_notes': getattr(atlas_compound_mzrt, 'identification_notes', ''),
+            'ms1_notes': '', 
+            'ms2_notes': '', 
+            'other_notes': '',
+            'identification_notes': atlas_row.get('identification_notes', ''),
             'analyst_notes': '',
-            'best_ms1_file': '', 'best_ms1_rt': 0.0, 'best_ms1_mz': 0.0,
-            'best_ms1_intensity': 0.0, 'best_ms1_ppm_error': 0.0, 'best_ms1_rt_error': 0.0,
-            'max_eic_rt': [], 'max_eic_intensity': [],
-            'isomers': isomer_dict.get(atlas_compound_mzrt.mz_rt_uid, []),
-            'suggested_rt_min': 0.0, 'suggested_rt_max': 0.0, 'suggested_rt_peak': 0.0,
+            'best_ms1_file': '', 
+            'best_ms1_rt': 0.0, 
+            'best_ms1_mz': 0.0,
+            'best_ms1_intensity': 0.0, 
+            'best_ms1_ppm_error': 0.0, 
+            'best_ms1_rt_error': 0.0,
+            'max_eic_rt': [], 
+            'max_eic_intensity': [],
+            'isomers': isomer_dict.get(uid, []),
+            'suggested_rt_min': 0.0, 
+            'suggested_rt_max': 0.0, 
+            'suggested_rt_peak': 0.0,
             'rt_suggestion_confidence': 0.0
         }
 
-        # Finds best MS1 data and creates suggested rt bounds
-        ms1_results = _analyze_ms1_full(
-            atlas_compound_mzrt, 
-            ms1_index.get(atlas_compound_mzrt.mz_rt_uid, []), 
-            apply_bounds=apply_bounds
+        # 2. MS1 Analysis (wide format)
+        try:
+            compound_ms1 = ms1_groups.get_group(uid)
+        except (KeyError, AttributeError):
+            compound_ms1 = pd.DataFrame()
+
+        ms1_summary = _analyze_ms1(
+            atlas_row,
+            compound_ms1,
+            apply_bounds_cutoff=apply_bounds_cutoff
         )
-        if ms1_results:
-            meta.update(ms1_results)
+
+        if ms1_summary:
+            meta.update(ms1_summary)
             meta['auto_ided'] = True
 
-        # Create object
-        manual_curation_obj = ManualCuration(
-            mz_rt_uid=atlas_compound_mzrt.mz_rt_uid,
-            compound_uid=atlas_compound_mzrt.compound_uid,
-            inchi_key=atlas_compound_mzrt.inchi_key,
-            adduct=atlas_compound_mzrt.adduct,
-            data=meta
-        )
-        auto_id_obj.experimental_data.manual_curation.append(manual_curation_obj)
-
-    return auto_id_obj.experimental_data.manual_curation
-
-def _analyze_ms1_full(atlas_mzrt, ms1_list, apply_bounds=False) -> Dict:
-    """Consolidated function to handle all MS1-based metadata extraction."""
-    if not ms1_list:
-        return {}
-
-    # State for best file, RT suggestion, and EIC
-    best_file = None
-    max_height = -np.inf
-    
-    rt_arrays, int_arrays, mz_arrays = [], [], []
-    window_mz, window_int, window_rt = [], [], []
-    
-    atlas_mz = getattr(atlas_mzrt, 'mz', 0.0)
-    atlas_rt_peak = getattr(atlas_mzrt, 'rt_peak', 0.0)
-    atlas_rt_min = getattr(atlas_mzrt, 'rt_min', 0.0)
-    atlas_rt_max = getattr(atlas_mzrt, 'rt_max', 0.0)
-
-    # One single loop over MS1 files
-    for ms1 in ms1_list:
-        if ms1.data is None or ms1.data.empty:
+        if not meta['auto_ided'] and remove_unided:
             continue
-        
-        # Convert to numpy once
-        df = ms1.data
-        rts, ints, mzs = df['rt'].to_numpy(), df['i'].to_numpy(), df['mz'].to_numpy()
-        
-        # A. Track Best File
-        sum_int = ints.sum()
-        if sum_int > 0:
-            idx = np.argmax(ints)
-            h = ints[idx]
-            if h > max_height:
-                max_height = h
-                centroid = (ints * mzs).sum() / sum_int
-                best_file = {
-                    'best_ms1_file': ms1.filename,
-                    'best_ms1_rt': float(rts[idx]),
-                    'best_ms1_mz': float(centroid),
-                    'best_ms1_intensity': float(h),
-                    'best_ms1_ppm_error': float((centroid - atlas_mz) / atlas_mz * 1e6) if atlas_mz else 0.0,
-                    'best_ms1_rt_error': float(rts[idx] - atlas_rt_peak)
-                }
 
-        # B. Collect for EIC and Window Metrics
-        rt_arrays.append(rts)
-        int_arrays.append(ints)
-        
-        mask = (rts >= atlas_rt_min) & (rts <= atlas_rt_max) & np.isfinite(rts) & np.isfinite(ints)
-        if np.any(mask):
-            window_mz.extend(mzs[mask])
-            window_int.extend(ints[mask])
-            window_rt.extend(rts[mask])
+        curation_records.append(meta)
 
-    if not rt_arrays:
+    manual_curation_df = pd.DataFrame(curation_records)
+    manual_curation_df['isomers'] = manual_curation_df['isomers'].apply(json.dumps)
+    n_unique_uids = manual_curation_df['mz_rt_uid'].nunique() if not manual_curation_df.empty else 0
+    logger.info(f"Summary: manual_curation_df contains {n_unique_uids} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
+    logger.info(f"Manual curation df:\n{manual_curation_df[['compound_name', 'mz', 'atlas_rt_peak', 'rt_peak', 'suggested_rt_min', 'suggested_rt_max']].head(10)}")
+    auto_id_obj.experimental_data.manual_curation_df = manual_curation_df
+
+    return
+
+def _analyze_ms1(atlas_row, compound_ms1_df, apply_bounds_cutoff=None) -> dict:
+    """
+    Analyzes MS1 data using wide format (one row per file, lists of rts, intensities, mzs, in_feature).
+    Aggregates across all files for the compound.
+    """
+    if compound_ms1_df.empty:
         return {}
 
-    # Calculate EIC
+    # Setup variables
+    best_file_info = None
+    max_height = -np.inf
+    atlas_mz = atlas_row.get('mz', 0.0)
+    atlas_rt_peak = atlas_row.get('rt_peak', 0.0)
+    atlas_rt_min = atlas_row.get('rt_min', 0.0)
+    atlas_rt_max = atlas_row.get('rt_max', 0.0)
+
+    # 1. Per-file analysis for Best File and EIC (wide format)
+    rt_arrays, int_arrays = [], []  # For all data (for EIC)
+    in_feature_mz, in_feature_int, in_feature_rt = [], [], []  # For in_feature only
+
+    # Each row is one file for this compound, with lists in columns
+    for _, row in compound_ms1_df.iterrows():
+        filename = row.get('filename', None)
+        # Wide format columns: spec_rts, spec_ints, spec_mzs, in_feature
+        rt_list = row.get('spec_rts', [])
+        intensity_list = row.get('spec_ints', [])
+        mz_list = row.get('spec_mzs', [])
+        in_feature_mask = row.get('in_feature', [True]*len(rt_list))
+
+        # Convert to numpy arrays for easier indexing
+        rt_arr = np.asarray(rt_list)
+        int_arr = np.asarray(intensity_list)
+        mz_arr = np.asarray(mz_list)
+        mask = np.asarray(in_feature_mask, dtype=bool)
+
+        # Store for EIC calculation (all data)
+        if len(rt_arr) > 0 and len(int_arr) == len(rt_arr):
+            rt_arrays.append(rt_arr)
+            int_arrays.append(int_arr)
+
+        # Store for in_feature calculations
+        if np.any(mask):
+            in_feature_ints = int_arr[mask]
+            in_feature_rts = rt_arr[mask]
+            in_feature_mzs = mz_arr[mask]
+            in_feature_mz.extend(in_feature_mzs.tolist())
+            in_feature_int.extend(in_feature_ints.tolist())
+            in_feature_rt.extend(in_feature_rts.tolist())
+            sum_int = in_feature_ints.sum()
+            if sum_int > 0:
+                idx = np.argmax(in_feature_ints)
+                h = in_feature_ints[idx]
+                if h > max_height:
+                    max_height = h
+                    centroid = (in_feature_ints * in_feature_mzs).sum() / sum_int
+                    best_file_info = {
+                        'best_ms1_file': filename,
+                        'best_ms1_rt': float(in_feature_rts[idx]),
+                        'best_ms1_mz': float(centroid),
+                        'best_ms1_intensity': float(h),
+                        'best_ms1_ppm_error': float((centroid - atlas_mz) / atlas_mz * 1e6) if atlas_mz else 0.0,
+                        'best_ms1_rt_error': float(in_feature_rts[idx] - atlas_rt_peak)
+                    }
+
+    if not rt_arrays or not in_feature_rt:
+        return {}
+
+    # 2. EIC Calculation (Vectorized, all data)
     all_rts = np.unique(np.concatenate(rt_arrays))
-    # Use a generator expression inside np.max for memory efficiency
-    max_eic_intensity = np.max([np.interp(all_rts, r, i, left=0, right=0) 
-                                 for r, i in zip(rt_arrays, int_arrays)], axis=0)
+    max_eic_intensity = np.max([
+        np.interp(all_rts, r, i, left=0, right=0)
+        for r, i in zip(rt_arrays, int_arrays)
+    ], axis=0)
 
-    # Calculate Window Metrics
-    if window_int:
-        idx_max = np.argmax(window_int)
-        win_rt_peak = float(window_rt[idx_max])
-        win_mz_mean = float(np.mean(window_mz))
-        rt_err = win_rt_peak - atlas_rt_peak
-        mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if atlas_mz else 0.0
-    else:
-        win_rt_peak, win_mz_mean, rt_err, mz_err = atlas_rt_peak, atlas_mz, 0.0, 0.0
+    # 3. Window Metrics (in_feature only)
+    idx_max = np.argmax(in_feature_int)
+    win_rt_peak = float(in_feature_rt[idx_max])
+    win_mz_mean = float(np.mean(in_feature_mz))
+    rt_err = win_rt_peak - atlas_rt_peak
+    mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if atlas_mz else 0.0
 
-    # RT Suggestion logic (uses the best trace found)
-    # Find the trace that provided 'best_file' to avoid another loop
+    # 4. RT Suggestion (using the best trace found)
     best_trace_data = None
-    if best_file:
-        for ms1 in ms1_list:
-            if ms1.filename == best_file['best_ms1_file']:
-                best_trace_data = {'rt': ms1.data['rt'].values, 'i': ms1.data['i'].values}
-                break
+    if best_file_info:
+        # Find the row for the best file
+        best_row = compound_ms1_df[compound_ms1_df['filename'] == best_file_info['best_ms1_file']]
+        if not best_row.empty:
+            best_rt_list = best_row.iloc[0].get('spec_rts', [])
+            best_int_list = best_row.iloc[0].get('spec_ints', [])
+            best_in_feature = best_row.iloc[0].get('in_feature', [True]*len(best_rt_list))
+            best_rt_arr = np.asarray(best_rt_list)
+            best_int_arr = np.asarray(best_int_list)
+            best_in_feature_mask = np.asarray(best_in_feature, dtype=bool)
+            best_trace_data = {
+                'rt': best_rt_arr[best_in_feature_mask],
+                'i': best_int_arr[best_in_feature_mask]
+            }
 
     suggestion = _suggest_rt_bounds_from_ms1(
         best_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max
     ) if best_trace_data else None
 
-    # Assemble result dictionary
-    res = best_file.copy() if best_file else {}
+    # Assemble result
+    res = best_file_info.copy() if best_file_info else {}
     res.update({
         'mz': win_mz_mean,
         'rt_peak': win_rt_peak,
@@ -186,6 +232,18 @@ def _analyze_ms1_full(atlas_mzrt, ms1_list, apply_bounds=False) -> Dict:
         'max_eic_intensity': max_eic_intensity.tolist(),
     })
 
+    # Always set rt_min and rt_max based on atlas bounds and rt_peak
+    atlas_rt_peak = atlas_row.get('rt_peak', 0.0)
+    atlas_rt_min = atlas_row.get('rt_min', 0.0)
+    atlas_rt_max = atlas_row.get('rt_max', 0.0)
+    rt_peak = win_rt_peak
+    rt_min = max(0.0, rt_peak - (atlas_rt_peak - atlas_rt_min))
+    rt_max = rt_peak + (atlas_rt_max - atlas_rt_peak)
+    res['rt_min'] = rt_min
+    res['rt_max'] = rt_max
+    res['initial_rt_min'] = rt_min
+    res['initial_rt_max'] = rt_max
+
     if suggestion:
         res.update({
             'suggested_rt_min': suggestion['rt_min'],
@@ -193,17 +251,22 @@ def _analyze_ms1_full(atlas_mzrt, ms1_list, apply_bounds=False) -> Dict:
             'suggested_rt_peak': suggestion['rt_peak'],
             'rt_suggestion_confidence': suggestion['confidence'],
         })
-        if suggestion['confidence'] > 0.75 and apply_bounds:
-            res['rt_min'] = suggestion['rt_min']
-            res['rt_max'] = suggestion['rt_max']
-            res['rt_peak'] = 0.5 * (suggestion['rt_min'] + suggestion['rt_max'])
-            res['initial_rt_min'] = res['rt_min']
-            res['initial_rt_max'] = res['rt_max']
+        if apply_bounds_cutoff is not None and suggestion['confidence'] > apply_bounds_cutoff:
+            res.update({
+                'rt_min': suggestion['rt_min'],
+                'rt_max': suggestion['rt_max'],
+                'rt_peak': win_rt_peak,
+                'initial_rt_min': suggestion['rt_min'],
+                'initial_rt_max': suggestion['rt_max']
+            })
     else:
         res.update({
-            'suggested_rt_min': atlas_rt_min, 'suggested_rt_max': atlas_rt_max,
-            'suggested_rt_peak': atlas_rt_peak, 'rt_suggestion_confidence': 0.0,
-            'initial_rt_min': atlas_rt_min, 'initial_rt_max': atlas_rt_max
+            'suggested_rt_min': atlas_rt_min, 
+            'suggested_rt_max': atlas_rt_max,
+            'suggested_rt_peak': atlas_rt_peak, 
+            'rt_suggestion_confidence': 0.0,
+            'initial_rt_min': atlas_rt_min,
+            'initial_rt_max': atlas_rt_max
         })
 
     return res
@@ -241,14 +304,6 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> Dict[str, List[Dict[str, Any]]]:
             isomer_dict[uids[i]] = []
             
     return isomer_dict
-
-def _build_ms1_index(exp_data_obj: "ExperimentalData") -> Dict[str, List]:
-    ms1_index = {}
-    for ms1 in exp_data_obj.ms1_data:
-        uid = getattr(ms1, 'mz_rt_uid', None)
-        if uid:
-            ms1_index.setdefault(uid, []).append(ms1)
-    return ms1_index
 
 def _suggest_rt_bounds_from_ms1(best_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max):
     if not best_trace_data:

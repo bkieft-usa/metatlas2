@@ -25,7 +25,7 @@ def build_dash_app(
     logger.debug("Starting the app factory for the Analysis GUI...")
 
     # Set up basic GUI params
-    manual_curation_df = analysis_gui_obj.manual_curation_df
+    manual_curation_df = analysis_gui_obj.experimental_data.curation_df
     logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
@@ -33,6 +33,7 @@ def build_dash_app(
         top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
 
     # Extract metadata for display
+    project_shortname = analysis_gui_obj.project_name.split("_")[4]
     chrom = analysis_gui_obj.post_autoid_atlas_obj.chromatography
     pol = analysis_gui_obj.post_autoid_atlas_obj.polarity
     analysis_type = analysis_gui_obj.post_autoid_atlas_obj.analysis_type
@@ -57,6 +58,7 @@ def build_dash_app(
             requests_pathname_prefix=requests_prefix,
             suppress_callback_exceptions=True,
         )
+        app.title = f"{project_shortname} | {chrom} | {pol} | {analysis_type} | RTA{rta} | TGA{tga}"
         logger.debug("App built successfully")
         app.config.prevent_initial_callbacks = "initial_duplicate"
     except Exception as e:
@@ -73,22 +75,6 @@ def build_dash_app(
     figure_cache = {}
     figure_cache_lock = threading.Lock()
     isomer_string_cache = {}
-    
-    # # Async database writes to avoid blocking UI
-    # db_write_queue = []
-    # db_write_lock = threading.Lock()
-    
-    # def _async_db_write(db_path, curation_uid, updates):
-    #     """Non-blocking database write using thread pool."""
-    #     def _write():
-    #         try:
-    #             dbi.write_gui_updates_to_db(db_path, curation_uid, updates)
-    #         except Exception as e:
-    #             logger.error(f"Async DB write failed: {e}")
-        
-    #     # Execute in separate thread to not block UI
-    #     thread = threading.Thread(target=_write, daemon=True)
-    #     thread.start()
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
     logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
@@ -97,22 +83,16 @@ def build_dash_app(
     ms2_hits_by_compound = {}
 
     # Index MS1 data
-    for mz_rt_uid, group in analysis_gui_obj.ms1_df.groupby(["mz_rt_uid"], observed=True):
+    for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms1_df.groupby(["mz_rt_uid"], observed=True):
         if isinstance(mz_rt_uid, tuple) and len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
         ms1_by_compound[mz_rt_uid] = group
 
     # Index MS2 data
-    for mz_rt_uid, group in analysis_gui_obj.ms2_df.groupby(["mz_rt_uid"], observed=True):
+    for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms2_df.groupby(["mz_rt_uid"], observed=True):
         if isinstance(mz_rt_uid, tuple) and len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
         ms2_by_compound[mz_rt_uid] = group
-
-    # Index MS2 hits data
-    for mz_rt_uid, group in analysis_gui_obj.ms2_hits_df.groupby(["mz_rt_uid"], observed=True):
-        if isinstance(mz_rt_uid, tuple) and len(mz_rt_uid) == 1:
-            mz_rt_uid = mz_rt_uid[0]
-        ms2_hits_by_compound[mz_rt_uid] = group
 
     def _compound_row(idx):
         return manual_curation_df.iloc[idx]
@@ -233,7 +213,7 @@ def build_dash_app(
                     dbc.Col(
                         [
                             html.Div(
-                                f"{chrom}  |  {pol}  |  {analysis_type}  |  RTA{rta}  |  TGA{tga}",
+                                f"{project_shortname}  |  {chrom}  |  {pol}  |  {analysis_type}  |  RTA{rta}  |  TGA{tga}",
                                 style={"fontSize": "1rem", "fontWeight": "bold", "marginBottom": "0.5rem", "color": "#333"}
                             ),
                             dbc.Row(
@@ -425,25 +405,9 @@ def build_dash_app(
 
     logger.debug("Layout constructed successfully")
 
-    def _parse_isomers(isomers_val):
-        if isinstance(isomers_val, list):
-            return isomers_val
-        # Accept JSON string representation of a list
-        if isinstance(isomers_val, str):
-            try:
-                parsed = json.loads(isomers_val)
-                if isinstance(parsed, list):
-                    return parsed
-                else:
-                    raise ValueError(f"Isomers string did not decode to a list: {isomers_val!r}")
-            except Exception as exc:
-                raise ValueError(f"Isomers string could not be parsed as JSON list: {isomers_val!r} ({exc})")
-        raise ValueError(f"Unexpected isomers format (not an empty list or list of dicts): {isomers_val!r}")
-
     def _get_sorted_isomer_rt_bounds(row):
         """Return list of (rt_min, rt_max) for isomers, sorted by rt_min."""
-        isomers_val = row.get("isomers") if "isomers" in row.index else []
-        isomers = _parse_isomers(isomers_val)
+        isomers = json.loads(row.get("isomers", "[]"))
         if not isomers:
             return []
         bounds = []
@@ -463,44 +427,26 @@ def build_dash_app(
         Returns a dict: {collision_energy: DataFrame} with top N hits from each collision energy.
         Results are cached by (inchi_key, adduct, top_n_hits, rt_min, rt_max).
         """
-        mz_rt_uid = None
-        if isinstance(row, dict):
-            mz_rt_uid = row.get("mz_rt_uid", None)
-        elif hasattr(row, "__getitem__") and "mz_rt_uid" in row:
-            mz_rt_uid = row["mz_rt_uid"]
-        if mz_rt_uid is None:
-            logger.error(f"[get_ms2_scans] No mz_rt_uid found for row: {row}")
-            return {}
-        key = (mz_rt_uid, int(top_n_hits),
-               round(rt_min, 4) if rt_min is not None else None,
-               round(rt_max, 4) if rt_max is not None else None)
+        mz_rt_uid = row["mz_rt_uid"]
+        # Round RTs to 3 decimal places for the cache key to prevent memory bloat
+        rt_min_key = round(rt_min, 3) if rt_min is not None else None
+        rt_max_key = round(rt_max, 3) if rt_max is not None else None
+        key = (mz_rt_uid, int(top_n_hits), rt_min_key, rt_max_key)
+        
         with cache_lock:
             if key in ms2_scans_cache:
                 return ms2_scans_cache[key]
 
         ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
         if not ms2_sub.empty and rt_min is not None and rt_max is not None:
-            ms2_sub = ms2_sub[(ms2_sub["rt"] >= rt_min) & (ms2_sub["rt"] <= rt_max)]
-        
-        hits_sub = ms2_hits_by_compound.get(mz_rt_uid, pd.DataFrame())
-        if not hits_sub.empty and rt_min is not None and rt_max is not None:
-            hits_sub = hits_sub[(hits_sub["rt"] >= rt_min) & (hits_sub["rt"] <= rt_max)]
+            ms2_sub = ms2_sub[(ms2_sub["scan_rt"] >= rt_min) & (ms2_sub["scan_rt"] <= rt_max)]
 
         # Group by collision energy and get top N from each
         scans_by_energy = {}
         if ms2_sub.empty:
-            pass  # Return empty dict
-        elif hits_sub.empty:
-            # No hits - group by collision energy and sort by RT
-            for ce, group in ms2_sub.groupby("collision_energy"):
-                scans_by_energy[ce] = group.sort_values("rt").head(top_n_hits)
-        else:
-            # Merge with hits and group by collision energy
-            merged = pd.merge(ms2_sub, hits_sub, on=["mz_rt_uid", "file_path", "rt"], how="left")
-            merged["score"] = merged["score"].fillna(0)
-            for ce, group in merged.groupby("collision_energy"):
-                scans_by_energy[ce] = group.sort_values(["score", "rt"], ascending=[False, True]).head(top_n_hits)
-
+            pass
+        for ce, group in ms2_sub.groupby("collision_energy"):
+            scans_by_energy[ce] = group.sort_values("scan_rt").head(top_n_hits)
         with cache_lock:
             if key not in ms2_scans_cache:
                 ms2_scans_cache[key] = scans_by_energy
@@ -508,212 +454,88 @@ def build_dash_app(
 
     def _count_ms2_scans(row, rt_min=None, rt_max=None):
         scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
-        # Return max count across all collision energies for navigation
         return max((len(df) for df in scans_by_energy.values()), default=0)
 
-    def _clean_spectrum(val_arr, int_arr):
-        out_i = [0 if (isinstance(i, float) and np.isnan(i)) else i for i in int_arr]
-        return val_arr, out_i
-
-    @functools.lru_cache(maxsize=5000)
-    def _parse_spectrum_cached(raw_spectrum):
-        val, ints = json.loads(raw_spectrum)
-        # Ensure all RT values are floats
-        val = [float(x) for x in val]
-        val, ints = _clean_spectrum(val, ints)
-        return val, ints
-
-    @functools.lru_cache(maxsize=1000)
-    def _parse_mz_cached(raw_mz):
-        if raw_mz is None or (isinstance(raw_mz, float) and np.isnan(raw_mz)):
-            return []
-        if isinstance(raw_mz, str):
-            return json.loads(raw_mz)
-        if isinstance(raw_mz, (list, tuple, np.ndarray)):
-            return list(raw_mz)
-        return []
-
-    # Create memoized wrapper for expensive metric computation
-    @functools.lru_cache(maxsize=200)
-    def _compute_window_ms1_metrics_cached(compound_idx, rt_min_round, rt_max_round):
-        """Cached version of metrics computation with rounded RT values."""
-        row = _compound_row(compound_idx)
+    def _compute_window_ms1_metrics(state):
+        row = _compound_row(state["compound_idx"])
         mz_rt_uid = row["mz_rt_uid"]
-        rt_min = float(rt_min_round)
-        rt_max = float(rt_max_round)
+        rt_min = float(state["rt_min"])
+        rt_max = float(state["rt_max"])
         
-        def _ppm_error(measured_mz, atlas_mz):
-            if pd.notnull(atlas_mz) and float(atlas_mz) != 0 and np.isfinite(measured_mz):
-                return (float(measured_mz) - float(atlas_mz)) / float(atlas_mz) * 1e6
-            return np.nan
-
-        def _rt_delta(measured_rt, atlas_rt_peak):
-            if pd.notnull(atlas_rt_peak) and np.isfinite(measured_rt):
-                return float(measured_rt) - float(atlas_rt_peak)
-            return np.nan
-
-        if rt_max < rt_min:
-            raise ValueError(f"Invalid RT window, rt_min={rt_min} cannot be larger than rt_max={rt_max}")
-
-        fallback_rt_peak = (rt_min + rt_max) / 2.0
-        fallback_mz = row.get("best_ms1_mz", np.nan)
-        if pd.isna(fallback_mz):
-            fallback_mz = row.get("atlas_mz", np.nan)
-
         sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
-        
+        if sub.empty:
+            return None
+
         atlas_mz = row.get("atlas_mz", np.nan)
         atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
-        if sub.empty:
-            fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
-            fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
-            fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
-            return {
-                "rt_peak": fallback_rt_peak,
-                "mz": fallback_mz_val,
-                "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
-                "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
-                "best_ms1_file": row.get("best_ms1_file", ""),
-                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
-                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
-                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
-                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
-                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
-            }
 
-        has_file_path = "file_path" in sub.columns
-        has_mz = "mz" in sub.columns
-        best_by_file = {}
+        global_max_int = -np.inf
+        best_point = None
+        all_win_mzs = []
+        all_win_ints = []
+        all_win_rts = []
 
-        cols = []
-        if has_file_path:
-            cols.append("file_path")
-        cols.append("raw_spectrum")
-        if has_mz:
-            cols.append("mz")
-        iter_rows = sub[cols].itertuples(index=False, name=None)
+        for _, r in sub.iterrows():
+            # Extract lists and convert to arrays
+            rt_arr = np.asarray(r.get("spec_rts", []), dtype=np.float32)
+            int_arr = np.asarray(r.get("spec_ints", []), dtype=np.float32)
+            mz_arr = np.asarray(r.get("spec_mzs", []), dtype=np.float32)
+            feat_mask = np.asarray(r.get("in_feature", []), dtype=bool)
 
-        for row_vals in iter_rows:
-            if has_file_path and has_mz:
-                file_path, raw_spectrum, raw_mz = row_vals
-            elif has_file_path:
-                file_path, raw_spectrum = row_vals
-                raw_mz = None
-            elif has_mz:
-                raw_spectrum, raw_mz = row_vals
-                file_path = None
-            else:
-                (raw_spectrum,) = row_vals
-                file_path = None
-                raw_mz = None
+            if len(rt_arr) == 0: continue
 
-            try:
-                rt_vals, intensities = _parse_spectrum_cached(raw_spectrum)
-            except Exception:
+            # Apply feature mask AND RT window mask
+            if len(feat_mask) != len(rt_arr):
+                feat_mask = np.ones(len(rt_arr), dtype=bool)
+                
+            win_mask = (feat_mask) & (rt_arr >= rt_min) & (rt_arr <= rt_max)
+            
+            if not np.any(win_mask):
                 continue
 
-            rt_arr = np.asarray(rt_vals, dtype=float)
-            int_arr = np.asarray(intensities, dtype=float)
-            if rt_arr.size == 0 or int_arr.size == 0:
-                continue
+            # Collect data for window averages
+            all_win_mzs.extend(mz_arr[win_mask])
+            all_win_ints.extend(int_arr[win_mask])
+            all_win_rts.extend(rt_arr[win_mask])
 
-            n = min(rt_arr.size, int_arr.size)
-            rt_arr = rt_arr[:n]
-            int_arr = int_arr[:n]
+            # Find max in this file
+            masked_ints = int_arr[win_mask]
+            local_idx = np.argmax(masked_ints)
+            local_max = masked_ints[local_idx]
+            
+            if local_max > global_max_int:
+                global_max_int = local_max
+                abs_idx = np.where(win_mask)[0][local_idx]
+                best_point = {
+                    "rt": rt_arr[abs_idx],
+                    "mz": mz_arr[abs_idx],
+                    "int": local_max,
+                    "file": r.get("filename", "")
+                }
 
-            mz_arr = np.asarray([], dtype=float)
-            if raw_mz is not None:
-                try:
-                    mz_list = _parse_mz_cached(raw_mz)
-                    mz_arr = np.asarray(mz_list, dtype=float)
-                    if mz_arr.size > n:
-                        mz_arr = mz_arr[:n]
-                except Exception:
-                    pass
+        if best_point is None:
+            return None
 
-            mask = (
-                (rt_arr >= rt_min)
-                & (rt_arr <= rt_max)
-                & np.isfinite(rt_arr)
-                & np.isfinite(int_arr)
-            )
-            if not np.any(mask):
-                continue
-
-            masked_int = np.where(mask, int_arr, -np.inf)
-            local_idx = int(np.argmax(masked_int))
-            local_intensity = float(masked_int[local_idx])
-            if not np.isfinite(local_intensity):
-                continue
-
-            local_rt = float(rt_arr[local_idx])
-            local_mz = np.nan
-            # Only index if mz_arr is at least 1-dimensional and has the expected size
-            if (
-                isinstance(mz_arr, np.ndarray)
-                and mz_arr.ndim == 1
-                and mz_arr.size == n
-                and local_idx < mz_arr.size
-            ):
-                mz_val = mz_arr[local_idx]
-                if np.isfinite(mz_val):
-                    local_mz = float(mz_val)
-
-            prev = best_by_file.get(file_path)
-            if prev is None or local_intensity > prev[0]:
-                best_by_file[file_path] = (local_intensity, local_rt, local_mz)
-
-        if not best_by_file:
-            fallback_mz_val = float(fallback_mz) if pd.notnull(fallback_mz) else np.nan
-            fallback_rt_error = _rt_delta(fallback_rt_peak, atlas_rt_peak)
-            fallback_mz_error = _ppm_error(fallback_mz_val, atlas_mz)
-            return {
-                "rt_peak": fallback_rt_peak,
-                "mz": fallback_mz_val,
-                "rt_error": float(fallback_rt_error) if np.isfinite(fallback_rt_error) else np.nan,
-                "mz_error": float(fallback_mz_error) if np.isfinite(fallback_mz_error) else np.nan,
-                "best_ms1_file": row.get("best_ms1_file", ""),
-                "best_ms1_rt": float(row.get("best_ms1_rt", np.nan)),
-                "best_ms1_mz": float(row.get("best_ms1_mz", np.nan)),
-                "best_ms1_intensity": float(row.get("best_ms1_intensity", np.nan)),
-                "best_ms1_ppm_error": float(row.get("best_ms1_ppm_error", np.nan)),
-                "best_ms1_rt_error": float(row.get("best_ms1_rt_error", np.nan)),
-            }
-
-        rt_peak = float(np.mean([rt for _, rt, _ in best_by_file.values()]))
-        mz_vals = [mz for _, _, mz in best_by_file.values() if np.isfinite(mz)]
-        mz_mean = float(np.mean(mz_vals)) if mz_vals else (float(fallback_mz) if pd.notnull(fallback_mz) else np.nan)
-
-        best_file, best_triplet = max(best_by_file.items(), key=lambda kv: kv[1][0])
-        best_intensity, best_rt, best_mz = best_triplet
-        if not np.isfinite(best_mz):
-            best_mz = mz_mean
-
-        best_ppm_error = _ppm_error(best_mz, atlas_mz)
-        best_rt_error = _rt_delta(best_rt, atlas_rt_peak)
-        mz_error = _ppm_error(mz_mean, atlas_mz)
-        rt_error = _rt_delta(rt_peak, atlas_rt_peak)
+        # Compute centroid for the best file's window (matching legacy behavior)
+        # This is a simplification: using the average of all points in the window
+        win_mz_mean = float(np.mean(all_win_mzs))
+        win_rt_peak = float(best_point["rt"])
+        
+        rt_err = win_rt_peak - atlas_rt_peak if pd.notnull(atlas_rt_peak) else float("nan")
+        mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if pd.notnull(atlas_mz) and atlas_mz != 0 else float("nan")
 
         return {
-            "rt_peak": rt_peak,
-            "mz": mz_mean,
-            "rt_error": float(rt_error) if np.isfinite(rt_error) else np.nan,
-            "mz_error": float(mz_error) if np.isfinite(mz_error) else np.nan,
-            "best_ms1_file": "" if best_file is None else str(best_file),
-            "best_ms1_rt": float(best_rt),
-            "best_ms1_mz": float(best_mz) if np.isfinite(best_mz) else np.nan,
-            "best_ms1_intensity": float(best_intensity),
-            "best_ms1_ppm_error": float(best_ppm_error) if np.isfinite(best_ppm_error) else np.nan,
-            "best_ms1_rt_error": float(best_rt_error) if np.isfinite(best_rt_error) else np.nan,
+            "rt_peak": win_rt_peak,
+            "mz": win_mz_mean,
+            "rt_error": rt_err,
+            "mz_error": mz_err,
+            "best_ms1_file": best_point["file"],
+            "best_ms1_rt": win_rt_peak,
+            "best_ms1_mz": float(np.mean(all_win_mzs)),
+            "best_ms1_intensity": float(global_max_int),
+            "best_ms1_ppm_error": mz_err,
+            "best_ms1_rt_error": rt_err,
         }
-
-    def _compute_window_ms1_metrics(state):
-        """Compute all window-based MS1 metrics in one pass across file spectra.
-        """
-        # Round RT values to 3 decimal places for cache key (0.001 min = 0.06 sec resolution)
-        rt_min_round = round(float(state["rt_min"]), 3)
-        rt_max_round = round(float(state["rt_max"]), 3)
-        return _compute_window_ms1_metrics_cached(state["compound_idx"], rt_min_round, rt_max_round)
 
     def _flush_to_db(state):
         sid = state.get("session_id", "unknown")
@@ -731,7 +553,6 @@ def build_dash_app(
         # Instead of blocking UI, compute metrics and write DB in background
         def _async_flush_worker():
             try:
-                # Check if RT window matches the initial RT window (after suggestions)
                 tol = 1e-4
                 initial_rt_min = row.get("initial_rt_min", None)
                 initial_rt_max = row.get("initial_rt_max", None)
@@ -763,27 +584,36 @@ def build_dash_app(
                     }
                 else:
                     window_metrics = _compute_window_ms1_metrics(state)
-                    updates = {
-                        "mz": window_metrics["mz"],
-                        "rt_min": state["rt_min"],
-                        "rt_max": state["rt_max"],
-                        "rt_peak": window_metrics["rt_peak"],
-                        "rt_error": window_metrics["rt_error"],
-                        "mz_error": window_metrics["mz_error"],
-                        "best_ms1_file": window_metrics["best_ms1_file"],
-                        "best_ms1_rt": window_metrics["best_ms1_rt"],
-                        "best_ms1_mz": window_metrics["best_ms1_mz"],
-                        "best_ms1_intensity": window_metrics["best_ms1_intensity"],
-                        "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
-                        "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
-                        "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
-                        "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
-                        "other_notes": " // ".join(state.get("other_note", [])),
-                        "analyst_notes": state.get("analyst_notes", ""),
-                        "identification_notes": state.get("id_notes", ""),
-                    }
+                    if window_metrics is None:
+                        updates = {}
+                    else:
+                        updates = {
+                            "mz": window_metrics["mz"],
+                            "rt_min": state["rt_min"],
+                            "rt_max": state["rt_max"],
+                            "rt_peak": window_metrics["rt_peak"],
+                            "rt_error": window_metrics["rt_error"],
+                            "mz_error": window_metrics["mz_error"],
+                            "best_ms1_file": window_metrics["best_ms1_file"],
+                            "best_ms1_rt": window_metrics["best_ms1_rt"],
+                            "best_ms1_mz": window_metrics["best_ms1_mz"],
+                            "best_ms1_intensity": window_metrics["best_ms1_intensity"],
+                            "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
+                            "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
+                            "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+                            "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                            "other_notes": " // ".join(state.get("other_note", [])),
+                            "analyst_notes": state.get("analyst_notes", ""),
+                            "identification_notes": state.get("id_notes", ""),
+                        }
                 # DB write
-                dbi.write_gui_updates_to_db(analysis_gui_obj.paths["project_db_path"], row["curation_uid"], updates)
+                dbi.write_gui_updates_to_db(
+                    analysis_gui_obj.paths["project_db_path"],
+                    row["mz_rt_uid"],
+                    int(row["rt_alignment_number"]),
+                    int(row["analysis_number"]),
+                    updates
+                )
                 
                 # Update in-memory DataFrame
                 idx = state["compound_idx"]
@@ -822,12 +652,12 @@ def build_dash_app(
         
         y_bottom = 0.0
 
+        lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
-            lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
-        else:
-            lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
+            lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']            
     
         row = _compound_row(state["compound_idx"])
+        compound_display_idx = state["compound_idx"]+1
         mz_rt_uid = row["mz_rt_uid"]
         adduct = row.get("adduct", "")
         inchi_key = row.get("inchi_key", "")
@@ -836,13 +666,31 @@ def build_dash_app(
 
         sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
 
+        if sub.empty:
+
+            ms1_title_text = (
+                f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
+                f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: N/A  |  RT Δ: N/A<br>"
+                f"Atlas m/z: {row['atlas_mz']:.4f}  |  Meas M/Z: N/A  |  M/Z ppm Δ: N/A<br>"
+                f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
+            )
+            fig = go.Figure()
+            fig.update_layout(
+                title=f"No MS1 data available for {row.get('compound_name', 'Unknown')} ({adduct})",
+                xaxis_title="Retention Time (min)",
+                yaxis_title="Intensity",
+                xaxis_range=[x_window_min, x_window_max],
+                yaxis_type=yaxis_scale,
+                yaxis_range=[0, 1],
+            )
+            return fig
+
         # Determine y_max as the highest intensity point of all files within the current window
         y_min_positive_data = None
-        max_eic_rt = json.loads(row, "max_eic_rt", default=[])
-        max_eic_intensity = json.loads(row, "max_eic_intensity", default=[])
+        max_eic_rt = row.get("max_eic_rt", [])
+        max_eic_intensity = row.get("max_eic_intensity", [])
         # Use only EIC points within the current RT window
-        if max_eic_rt and max_eic_intensity and len(max_eic_rt) == len(max_eic_intensity):
-            # Use expanded_rt_min/max for consistency with trace plotting
+        if len(max_eic_rt) > 0 and len(max_eic_intensity) > 0 and len(max_eic_rt) == len(max_eic_intensity):
             expanded_rt_min = state["rt_min"] - 1
             expanded_rt_max = state["rt_max"] + 1
             filtered_intensity = [y for x, y in zip(max_eic_rt, max_eic_intensity) if expanded_rt_min <= x <= expanded_rt_max]
@@ -877,12 +725,13 @@ def build_dash_app(
 
         # Cache isomer metadata, draw rectangles separately
         compound_idx = state["compound_idx"]
+        print(row.get("isomers"))
         if compound_idx in isomer_string_cache:
             resolved_isomers = isomer_string_cache[compound_idx]
         else:
             resolved_isomers = []
             try:
-                isomers = _parse_isomers(row.get("isomers"))
+                isomers = json.loads(row.get("isomers", "[]"))
                 if isomers:
                     # Build resolved_isomers list (cache this part)
                     for iso in isomers:
@@ -957,7 +806,7 @@ def build_dash_app(
         # Add max EIC trace after isomer rectangles so it appears in the rangeslider
         max_eic_rt = row.get("max_eic_rt", [])
         max_eic_intensity = row.get("max_eic_intensity", [])
-        if max_eic_rt and max_eic_intensity and len(max_eic_rt) == len(max_eic_intensity):
+        if len(max_eic_rt) > 0 and len(max_eic_intensity) > 0 and len(max_eic_rt) == len(max_eic_intensity):
             # Filter to only points above 5% of max intensity
             try:
                 max_int = max(max_eic_intensity)
@@ -988,57 +837,46 @@ def build_dash_app(
                     [" // ".join(isomer_list[i:i+3]) for i in range(0, len(isomer_list), 3)]
                 )
 
-        # Now add MS1 data traces (they will appear on top of isomer rectangles)
+        # Now add MS1 data traces
         highlighted_files = state.get("highlighted_files") or []
-
-        # Expand the window for MS1 plotting by x min on each side
         expanded_rt_min = state["rt_min"] - 1
         expanded_rt_max = state["rt_max"] + 1
 
         ms1_trace_count = 0
-        for fn, fn_group in sub.groupby("file_path", observed=True):
+        for _, r in sub.iterrows():
+            fn = r.get("filename", "unknown")
             short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fn).split(".")[0].split("_")[11:]))
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
+            
             is_highlighted = fn in highlighted_files
             line_width = 5.0 if is_highlighted else 1.5
-            opacity = 1.0  # Always fully opaque, no dimming
+            
+            rt_list = r.get("spec_rts", [])
+            int_list = r.get("spec_ints", [])
+            
+            if len(rt_list) == 0: raise ValueError(f"MS1 data for {fn} has no RT points")
+            
+            rt_arr = np.asarray(rt_list)
+            int_arr = np.asarray(int_list)
+            
+            # Filter for RT window
+            mask = (rt_arr >= expanded_rt_min) & (rt_arr <= expanded_rt_max)
+            filt_rt = rt_arr[mask]
+            filt_int = int_arr[mask]
 
-            # Log if there are multiple rows for this file
-            if len(fn_group) > 1:
-                logger.info(f"Multiple rows for file {fn}: {len(fn_group)} rows")
-
-            # Collect all RT/intensity pairs for this file
-            all_rt = []
-            all_intensity = []
-            for _, r in fn_group.iterrows():
-                try:
-                    rt, intensity = _parse_spectrum_cached(r["raw_spectrum"])
-                    filtered = [(x, y) for x, y in zip(rt, intensity) if x is not None and expanded_rt_min <= x <= expanded_rt_max]
-                    if filtered:
-                        frt, fint = zip(*filtered)
-                        all_rt.extend(frt)
-                        all_intensity.extend(fint)
-                except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"MS1 parse error {fn}: {e}")
-
-            # Sort by RT
-            if all_rt:
-                customdata = [fn] * len(all_rt)
+            if len(filt_rt) > 0:
                 fig.add_trace(go.Scattergl(
-                    x=all_rt,
-                    y=all_intensity,
+                    x=filt_rt,
+                    y=filt_int,
                     mode="lines",
-                    #name=short_name,
                     line=dict(color=color, width=line_width),
-                    opacity=opacity,
-                    customdata=customdata,
+                    customdata=[fn] * len(filt_rt),
                     hovertemplate=f"%{{x:.3f}} min<br>%{{y:.2e}}<br>File: {short_name}",
                     showlegend=False,
                 ))
                 ms1_trace_count += 1
 
-        logger.debug(f"MS1 traces created: {ms1_trace_count} individual traces from {len(sub['file_path'].unique())} files")
+        logger.debug(f"MS1 traces created: {ms1_trace_count} individual traces from {len(sub['filename'].unique())} files")
 
         # Atlas RT peak line (black, static)
         fig.add_trace(go.Scatter(
@@ -1086,12 +924,10 @@ def build_dash_app(
             name="RT max", editable=True,
         )
 
-        compound_display_idx = state["compound_idx"]+1
-
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
             f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['best_ms1_rt']:.4f}  |  RT Δ: {row['best_ms1_rt_error']:.3f}<br>"
-            f"Atlas m/z: {row['atlas_mz']:.4f}  |  ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
+            f"Atlas m/z: {row['atlas_mz']:.4f}  |  Meas M/Z: {row['best_ms1_mz']:.4f}  |  M/Z ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
             f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
         )
 
@@ -1147,22 +983,23 @@ def build_dash_app(
         return fig
 
     def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, row_idx, col_idx, colors=None, default_color="red", line_width_px=3):
-        """Add MS2 peak sticks with fixed pixel width regardless of x-axis range."""
-        if not mz_vals or not intensities:
+        """Add MS2 peak sticks with fixed pixel width. Handles NaNs by ignoring them."""
+        if mz_vals is None or intensities is None:
             return
 
-        # Group segments by color so each trace can keep a single line color.
         grouped = {}
+        # Use provided colors if available, otherwise everything gets the default_color
         if colors is not None and len(colors) == len(mz_vals):
             for mz, intensity, color in zip(mz_vals, intensities, colors):
+                if np.isnan(mz): continue # Skip NaNs in aligned data
                 grouped.setdefault(color or default_color, []).append((mz, intensity))
         else:
-            grouped[default_color] = list(zip(mz_vals, intensities))
+            # Filter out NaNs for raw spectra plotting
+            pairs = [(mz, i) for mz, i in zip(mz_vals, intensities) if not np.isnan(mz)]
+            grouped[default_color] = pairs
 
         for color, pairs in grouped.items():
-            x_vals = []
-            y_vals = []
-            custom_vals = []
+            x_vals, y_vals, custom_vals = [], [], []
             for mz, intensity in pairs:
                 x_vals.extend([mz, mz, None])
                 y_vals.extend([0.0, intensity, None])
@@ -1170,16 +1007,13 @@ def build_dash_app(
 
             fig.add_trace(
                 go.Scatter(
-                    x=x_vals,
-                    y=y_vals,
-                    customdata=custom_vals,
+                    x=x_vals, y=y_vals, customdata=custom_vals,
                     mode="lines",
                     line=dict(color=color, width=line_width_px),
                     showlegend=False,
                     hovertemplate=f"m/z: %{{x:.4f}}<br>Int: %{{customdata:.2e}}<extra>{hover_label}</extra>",
                 ),
-                row=row_idx,
-                col=col_idx,
+                row=row_idx, col=col_idx,
             )
 
     def _make_ms2_figure(state):
@@ -1193,251 +1027,135 @@ def build_dash_app(
             fig.add_annotation(text=f"{row['compound_name']} - No MS2 data",
                                xref="paper", yref="paper", x=0.5, y=0.5,
                                showarrow=False, font=dict(size=14))
-            fig.update_layout(
-                margin=dict(l=50, r=20, t=80, b=40),
-                plot_bgcolor="white",
-                xaxis=dict(showgrid=False, zeroline=False),
-                yaxis=dict(showgrid=False, zeroline=False),
-            )
+            fig.update_layout(margin=dict(l=50, r=20, t=80, b=40), plot_bgcolor="white",
+                               xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False))
             return fig
 
-        # Convert collision energy float to string format
         def _format_ce(ce_float):
-            """Convert collision energy float to string format like CE102040."""
-            if abs(ce_float - 23.333) < 0.01:
-                return "CE102040"
-            elif abs(ce_float - 43.333) < 0.01:
-                return "CE205060"
-            else:
-                # Fallback: round to nearest integer
-                return f"CE{int(round(ce_float))}"
+            if abs(ce_float - 23.333) < 0.01: return "CE102040"
+            elif abs(ce_float - 43.333) < 0.01: return "CE205060"
+            else: return f"CE{int(round(ce_float))}"
 
-        # Sort collision energies for consistent ordering
         collision_energies = sorted(scans_by_energy.keys())
         n_energies = len(collision_energies)
-        
-        # Create subplots (side by side) without titles (will add to x-axis instead)
-        fig = make_subplots(
-            rows=1, cols=n_energies,
-            horizontal_spacing=0.08
-        )
+        fig = make_subplots(rows=1, cols=n_energies, horizontal_spacing=0.08)
 
-        ms2_idx = state["ms2_idx"]
+        ms2_idx = state["ms2_idx"] # Now represents the index within the 'hits' list
 
-        # Process each collision energy subplot
         for col_idx, ce in enumerate(collision_energies, start=1):
             scans = scans_by_energy[ce]
-            
             if len(scans) == 0:
-                # Plotly uses "x", "y" for first subplot, "x2", "y2", etc. for others
-                xref_coord = "x" if col_idx == 1 else f"x{col_idx}"
-                yref_coord = "y" if col_idx == 1 else f"y{col_idx}"
-                fig.add_annotation(
-                    text="No scans",
-                    xref=xref_coord, yref=yref_coord,
-                    x=0.5, y=0.5,
-                    showarrow=False,
-                    font=dict(size=12),
-                    row=1, col=col_idx
-                )
+                xref = "x" if col_idx == 1 else f"x{col_idx}"
+                yref = "y" if col_idx == 1 else f"y{col_idx}"
+                fig.add_annotation(text="No scans", xref=xref, yref=yref, x=0.5, y=0.5, showarrow=False, row=1, col=col_idx)
                 continue
 
-            # Clamp index to available scans
-            scan_idx = max(0, min(ms2_idx, len(scans) - 1))
-            scan = scans.iloc[scan_idx]
-
+            scan = scans.iloc[max(0, min(ms2_idx, len(scans) - 1))]
+            
+            # --- DATA EXTRACTION FROM HITS LIST ---
+            hits = scan.get('hits', [])
+            hit = hits[max(0, min(ms2_idx, len(hits) - 1))] if hits else None
+            
             label_points = []
             scale = 1.0
             stick_width_px = 3
-            
-            qry = scan.get("qry_spectrum") if "qry_spectrum" in scan.index else None
-            ref = scan.get("ref_spectrum") if "ref_spectrum" in scan.index else None
             num_ref_fragments = 0
             num_matching_fragments = 0
-            
-            if pd.notnull(qry) and pd.notnull(ref):
-                mz_q, int_q = _parse_spectrum_cached(scan["qry_spectrum"])
-                mz_r, int_r = _parse_spectrum_cached(scan["ref_spectrum"])
-                scale = (max(int_q) / max(int_r)) if int_q and int_r and max(int_r) > 0 else 1.0
-                ref_y = [-i * scale for i in int_r]
 
-                raw_colors = scan.get("aligned_fragment_colors") if "aligned_fragment_colors" in scan.index else None
-                frag_colors = None
-                num_ref_fragments = len(mz_r)
-                if pd.notnull(raw_colors) and raw_colors:
-                    frag_colors = json.loads(raw_colors)
-                    if len(frag_colors) != len(mz_q):
-                        raise ValueError(f"color length mismatch: {len(frag_colors)} != {len(mz_q)}")
-                    num_matching_fragments = sum(1 for c in frag_colors if c == "green")
+            if hit:
+                # Extract pre-aligned arrays from the hit dictionary
+                q_mz, q_int = hit['query_aligned']
+                r_mz, r_int = hit['ref_aligned']
+                frag_colors = hit['fragment_colors']
+                
+                # Handle scaling for the mirror plot
+                q_max = np.nanmax(q_int) if q_int else 0
+                r_max = np.nanmax(r_int) if r_int else 0
+                scale = (q_max / r_max) if r_max > 0 else 1.0
+                
+                # Scale the reference intensities and invert for mirror
+                ref_y = [-float(i) * scale for i in r_int]
 
-                _add_ms2_stick_traces(
-                    fig,
-                    mz_q,
-                    int_q,
-                    hover_label="Query",
-                    row_idx=1,
-                    col_idx=col_idx,
-                    colors=frag_colors,
-                    default_color="red",
-                    line_width_px=stick_width_px,
-                )
+                # Plot Query (Top)
+                _add_ms2_stick_traces(fig, q_mz, q_int, "Query", 1, col_idx, 
+                                     colors=frag_colors, default_color="red", line_width_px=stick_width_px)
 
-                ref_colors = frag_colors if frag_colors is not None and len(frag_colors) == len(mz_r) else None
-                _add_ms2_stick_traces(
-                    fig,
-                    mz_r,
-                    ref_y,
-                    hover_label="Reference",
-                    row_idx=1,
-                    col_idx=col_idx,
-                    colors=ref_colors,
-                    default_color="blue",
-                    line_width_px=stick_width_px,
-                )
+                # Plot Reference (Bottom)
+                _add_ms2_stick_traces(fig, r_mz, ref_y, "Reference", 1, col_idx, 
+                                     colors=frag_colors, default_color="blue", line_width_px=stick_width_px)
 
-                label_points.extend(zip(mz_q, int_q))
-                label_points.extend(zip(mz_r, ref_y))
+                # # --- DRAW CONNECTING LINES ---
+                # match_lines_x, match_lines_y = [], []
+                # for i, color in enumerate(frag_colors):
+                #     if color == "green" and not np.isnan(q_mz[i]) and not np.isnan(r_mz[i]):
+                #         match_lines_x.extend([q_mz[i], r_mz[i], None])
+                #         match_lines_y.extend([q_int[i], -r_int[i] * scale, None])
+                
+                # if match_lines_x:
+                #     fig.add_trace(go.Scatter(
+                #         x=match_lines_x, y=match_lines_y, mode='lines',
+                #         line=dict(color='rgba(150,150,150,0.4)', width=1),
+                #         hoverinfo='skip', showlegend=False
+                #     ), row=1, col=col_idx)
+
+                num_ref_fragments = hit.get('ref_frags', 0)
+                num_matching_fragments = len(hit.get('matched_fragments', []))
+                label_points.extend(zip(q_mz, q_int))
+                label_points.extend(zip(r_mz, ref_y))
             else:
-                mz, ints = _parse_spectrum_cached(scan["raw_spectrum"])
-                _add_ms2_stick_traces(
-                    fig,
-                    mz,
-                    ints,
-                    hover_label="MS2",
-                    row_idx=1,
-                    col_idx=col_idx,
-                    default_color="red",
-                    line_width_px=stick_width_px,
-                )
+                # Fallback to raw spectrum if no hit is selected/available
+                mz = scan.get('frag_mzs', [])
+                ints = scan.get('frag_ints', [])
+                _add_ms2_stick_traces(fig, mz, ints, "MS2", 1, col_idx, default_color="red", line_width_px=stick_width_px)
                 label_points.extend(zip(mz, ints))
 
-            # Add horizontal line at y=0
+            # --- ANNOTATION & STYLING (Same as your legacy code) ---
             fig.add_hline(y=0, line=dict(color="black", width=1.5), row=1, col=col_idx)
-
-            # Calculate y-axis range and label positions
-            y_vals = [y for _, y in label_points] or [0]
+            
+            y_vals = [y for _, y in label_points if not np.isnan(y)] or [0]
             y_min, y_max = min(y_vals), max(y_vals)
             y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
-            label_pad = y_span * 0.01
-            y_pad = y_span * 0.01
-            TEXT_HEIGHT_OFFSET = y_span * 0.01
+            label_pad, y_pad, TEXT_HEIGHT_OFFSET = y_span * 0.01, y_span * 0.01, y_span * 0.01
 
-            top_label_idxs = {
-                idx
-                for idx, _ in sorted(
-                    enumerate(label_points),
-                    key=lambda item: abs(item[1][1]),
-                    reverse=True,
-                )[:7]
-            }
+            top_label_idxs = {idx for idx, _ in sorted(enumerate(label_points), key=lambda item: abs(item[1][1] if not np.isnan(item[1][1]) else 0), reverse=True)[:7]}
+            top_labels_sorted = sorted([(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs and not np.isnan(mz_val)], key=lambda item: item[1])
 
-            # Sort top labels by x-position for overlap detection
-            top_labels_sorted = sorted(
-                [(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs],
-                key=lambda item: item[1]
-            )
-
-            MIN_MZ_GAP = 5.0
-            prev_mz = None
-            stagger_level = 0
-
-            # Batch annotations to reduce overhead
-            annotations_batch = []
+            prev_mz, stagger_level = None, 0
             for idx, mz_val, y_val in top_labels_sorted:
                 y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
-                
-                if prev_mz is not None and abs(mz_val - prev_mz) < MIN_MZ_GAP:
-                    stagger_level += 1
-                else:
-                    stagger_level = 0
-                
-                y_position = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
-                
-                # Plotly uses "x", "y" for first subplot, "x2", "y2", etc. for others
-                xref_coord = "x" if col_idx == 1 else f"x{col_idx}"
-                yref_coord = "y" if col_idx == 1 else f"y{col_idx}"
-                
-                annotations_batch.append(dict(
-                    x=mz_val,
-                    y=y_position,
-                    text=f"{mz_val:.4f}",
-                    showarrow=False,
-                    xanchor="center",
-                    yanchor="bottom" if y_val >= 0 else "top",
-                    font=dict(size=12, color="black"),
-                    textangle=0,
-                    xref=xref_coord,
-                    yref=yref_coord,
-                ))
+                if prev_mz is not None and abs(mz_val - prev_mz) < 5.0: stagger_level += 1
+                else: stagger_level = 0
+                y_pos = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
+                xref_coord, yref_coord = ("x" if col_idx == 1 else f"x{col_idx}"), ("y" if col_idx == 1 else f"y{col_idx}")
+                fig.add_annotation(x=mz_val, y=y_pos, text=f"{mz_val:.4f}", showarrow=False, xanchor="center", 
+                                   yanchor="bottom" if y_val >= 0 else "top", font=dict(size=12), xref=xref_coord, yref=yref_coord)
                 prev_mz = mz_val
-            
-            # Add all annotations at once (more efficient than one-by-one)
-            for ann in annotations_batch:
-                fig.add_annotation(ann)
 
-            # Update axes for this subplot
-            xaxis_name = "xaxis" if col_idx == 1 else f"xaxis{col_idx}"
-            yaxis_name = "yaxis" if col_idx == 1 else f"yaxis{col_idx}"
-            
-            ce_label = _format_ce(ce)
-            fig.update_xaxes(
-                title_text=f"m/z ({ce_label})",
-                showgrid=False,
-                zeroline=False,
-                title_font=dict(size=18),
-                tickfont=dict(size=15),
-                row=1, col=col_idx
-            )
-            fig.update_yaxes(
-                title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "",
-                showgrid=False,
-                zeroline=False,
-                range=[y_min - y_pad, y_max + y_pad],
-                title_font=dict(size=18),
-                tickfont=dict(size=15),
-                row=1, col=col_idx
-            )
+            fig.update_xaxes(title_text=f"m/z ({_format_ce(ce)})", showgrid=False, zeroline=False, title_font=dict(size=18), tickfont=dict(size=15), row=1, col=col_idx)
+            fig.update_yaxes(title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "", showgrid=False, zeroline=False,
+                             range=[y_min - y_pad, y_max + y_pad], title_font=dict(size=18), tickfont=dict(size=15), row=1, col=col_idx)
 
-            # Add subtitle with scan info
-            fname = "_".join(os.path.basename(scan.get("file_path", "")).split(".")[0].split("_")[11:])
-            # Handle potential column name variations after merge
-            prec_mz = scan.get('precursor_MZ', scan.get('precursor_MZ_x', 0))
-            scan_info = (
-                f"<span style='font-size:1.2em'>"
-                f"<b>CoS.: {scan.get('score', 0):.4f}</b>  |  "
-                f"Ions: {num_matching_fragments}q/{num_ref_fragments}r  |  "
-                f"RT: {scan.get('rt', 0):.4f} min | "
-                f"Exp. m/z: {prec_mz:.4f}  |  "
-                f"Ref. m/z: {scan.get('mz_theoretical', 0):.4f}  |  "
-                f"ppm Δ: {scan.get('ppm_error', 0):.2f}"
-                f"</span><br>"
-                f"{scan.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
-            )
-            # Add as annotation below the subplot title
-            # Plotly uses "x domain" for first subplot, "x2 domain", "x3 domain" for others
-            xref_str = "x domain" if col_idx == 1 else f"x{col_idx} domain"
-            yref_str = "y domain" if col_idx == 1 else f"y{col_idx} domain"
-            fig.add_annotation(
-                text=scan_info,
-                xref=xref_str,
-                yref=yref_str,
-                x=0.5,
-                y=1.02,
-                showarrow=False,
-                font=dict(size=14),
-                xanchor="center",
-                yanchor="bottom",
-            )
+            # Updated Scan Info using Hit metadata
+            fname = "_".join(os.path.basename(scan.get("filename", "")).split(".")[0].split("_")[11:])
+            if hit:
+                scan_info = (
+                    f"<span style='font-size:1.2em'>"
+                    f"<b>CoS.: {hit.get('score', 0):.4f}</b>  |  "
+                    f"Ions: {num_matching_fragments}q/{num_ref_fragments}r  |  "
+                    f"RT: {scan.get('rt', 0):.4f} min | "
+                    f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
+                    f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
+                    f"ppm Δ: {hit.get('ppm_error', 0):.2f}"
+                    f"</span><br>"
+                    f"{hit.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
+                )
+            else:
+                scan_info = f"No Hit Selected | {fname}<br><br>"
 
-        fig.update_layout(
-            barmode="overlay",
-            hovermode="closest",
-            margin=dict(l=50, r=20, t=120, b=40),
-            plot_bgcolor="white",
-            height=550,
-            showlegend=False,  # Disable legend for speed
-        )
+            xref_str, yref_str = ("x domain" if col_idx == 1 else f"x{col_idx} domain"), ("y domain" if col_idx == 1 else f"y{col_idx} domain")
+            fig.add_annotation(text=scan_info, xref=xref_str, yref=yref_str, x=0.5, y=1.02, showarrow=False, font=dict(size=14), xanchor="center", yanchor="bottom")
 
+        fig.update_layout(barmode="overlay", hovermode="closest", margin=dict(l=50, r=20, t=120, b=40), plot_bgcolor="white", height=550, showlegend=False)
         return fig
 
     logger.debug("App helpers defined successfully")

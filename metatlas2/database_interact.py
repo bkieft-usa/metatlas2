@@ -190,17 +190,7 @@ def create_new_atlas_from_dataframe(
         confidence_level = row.get('confidence_level', None)
         identification_notes = row.get('identification_notes', '')
 
-        mz_rt_uid, _ = get_or_create_compound_mz_rt_uid(
-            main_db_path,
-            compound_uid,
-            chromatography,
-            polarity,
-            adduct,
-            rt_peak,
-            mz,
-            mz_tolerance,
-            decorator="ref"
-        )
+        mz_rt_uid = _generate_uid("mz_rt", decorator="ref")
         compound_mzrt = CompoundMZRT(
             mz_rt_uid=mz_rt_uid,
             compound_uid=compound_uid,
@@ -924,7 +914,7 @@ def get_lcmsruns_from_db(
         # This avoids the overhead of creating a DataFrame and iterating via Series
         lcmsruns_list = [LCMSRun(*row) for row in cursor.fetchall()]
 
-    logger.info(f"Retrieved {len(lcmsruns_list)} runs from DB.")
+    logger.info(f"Retrieved {len(lcmsruns_list)} {file_format}-formatted runs from DB.")
     return lcmsruns_list
 
 def batch_save_compounds(
@@ -1259,122 +1249,90 @@ def _create_database_tables(conn, db_type: str = "main"):
         
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ms1_data (
-                ms1_data_uid TEXT PRIMARY KEY,
-                compound_uid TEXT,
-                mz_rt_uid TEXT,
-                inchi_key TEXT,
-                adduct TEXT,
+                mz_rt_uid VARCHAR,
+                filename VARCHAR,
+                inchi_key VARCHAR,
+                adduct VARCHAR,
+                spec_rts REAL[],           
+                spec_ints REAL[],   
+                spec_mzs REAL[],  
+                in_feature BOOLEAN[],
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
-                analysis_type TEXT,
-                file_path TEXT,
-                mz TEXT,
-                raw_spectrum TEXT,
-                created_by TEXT,
-                created_date TEXT,
+                analysis_type VARCHAR,      
+                created_by VARCHAR,
+                created_date VARCHAR
             )
         """)
         
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ms2_data (
-                ms2_data_uid TEXT PRIMARY KEY,
-                compound_uid TEXT,
-                mz_rt_uid TEXT,
-                inchi_key TEXT,
-                adduct TEXT,
-                rt_alignment_number INTEGER,
-                analysis_number INTEGER,
-                analysis_type TEXT,
-                file_path TEXT,
-                rt REAL,
-                raw_spectrum TEXT,
+                mz_rt_uid VARCHAR,
+                filename VARCHAR,
+                inchi_key VARCHAR,
+                adduct VARCHAR,
+                scan_rt REAL,
+                frag_mzs REAL[],           
+                frag_ints REAL[],          
                 precursor_MZ REAL,
                 precursor_intensity REAL,
                 collision_energy REAL,
-                created_by TEXT,
-                created_date TEXT,
-            )
-        """)
-        
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ms2_hits (
-                ms2_hit_uid TEXT PRIMARY KEY,
-                compound_uid TEXT,
-                mz_rt_uid TEXT,
-                inchi_key TEXT,
-                adduct TEXT,
+                in_feature BOOLEAN,
+                hits VARCHAR,
                 rt_alignment_number INTEGER,
                 analysis_number INTEGER,
-                analysis_type TEXT,
-                file_path TEXT,
-                database TEXT,
-                ref_id TEXT,
-                ref_name TEXT,
-                score REAL,
-                num_matches INTEGER,
-                mz_theoretical REAL,
-                mz_measured REAL,
-                ppm_error REAL,
-                rt REAL,
-                qry_intensity_peak REAL,
-                ref_frags INTEGER,
-                data_frags INTEGER,
-                matched_fragments TEXT,
-                aligned_fragment_colors TEXT,
-                qry_spectrum TEXT,
-                ref_spectrum TEXT,
-                created_by TEXT,
-                created_date TEXT,
+                analysis_type VARCHAR,
+                created_by VARCHAR,
+                created_date VARCHAR
             )
         """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS manual_curation (
-            curation_uid TEXT PRIMARY KEY,
-            compound_uid TEXT,
-            mz_rt_uid TEXT,
-            inchi_key TEXT,
-            adduct TEXT,
-            rt_alignment_number INTEGER,
-            analysis_number INTEGER,
-            compound_name TEXT,
-            auto_ided BOOLEAN,
-            polarity TEXT,
-            chromatography TEXT,
-            analysis_type TEXT,
-            mz_tolerance REAL,
-            atlas_mz REAL,
-            atlas_rt_peak REAL,
-            atlas_rt_min REAL,
-            atlas_rt_max REAL,
-            mz REAL,
-            rt_peak REAL,
-            rt_min REAL,
-            rt_max REAL,
-            initial_rt_min REAL,
-            initial_rt_max REAL,
-            rt_error REAL,
-            mz_error REAL,
-            ms1_notes TEXT,
-            ms2_notes TEXT,
-            other_notes TEXT,
-            identification_notes TEXT,
-            analyst_notes TEXT,
-            best_ms1_file TEXT,
-            best_ms1_rt REAL,
-            best_ms1_mz REAL,
-            best_ms1_intensity REAL,
-            best_ms1_ppm_error REAL,
-            best_ms1_rt_error REAL,
-            max_eic_rt TEXT,
-            max_eic_intensity TEXT,
-            isomers TEXT,
-            suggested_rt_min REAL,
-            suggested_rt_max REAL,
-            suggested_rt_peak REAL,
-            rt_suggestion_confidence REAL,
-            created_by TEXT,
-            created_date TEXT
+                mz_rt_uid VARCHAR,
+                compound_uid VARCHAR,
+                inchi_key VARCHAR,
+                adduct VARCHAR,
+                compound_name VARCHAR,
+                auto_ided BOOLEAN,
+                polarity VARCHAR,
+                chromatography VARCHAR,
+                mz_tolerance REAL,
+                atlas_mz REAL,
+                atlas_rt_peak REAL,
+                atlas_rt_min REAL,
+                atlas_rt_max REAL,
+                mz REAL,
+                rt_peak REAL,
+                rt_min REAL,
+                rt_max REAL,
+                initial_rt_min REAL,
+                initial_rt_max REAL,
+                rt_error REAL,
+                mz_error REAL,
+                ms1_notes VARCHAR,
+                ms2_notes VARCHAR,
+                other_notes VARCHAR,
+                identification_notes VARCHAR,
+                analyst_notes VARCHAR,
+                best_ms1_file VARCHAR,
+                best_ms1_rt REAL,
+                best_ms1_mz REAL,
+                best_ms1_intensity REAL,
+                best_ms1_ppm_error REAL,
+                best_ms1_rt_error REAL,
+                max_eic_rt REAL[],
+                max_eic_intensity REAL[],
+                isomers VARCHAR,
+                suggested_rt_min REAL,
+                suggested_rt_max REAL,
+                suggested_rt_peak REAL,
+                rt_suggestion_confidence REAL,
+                rt_alignment_number INTEGER,
+                analysis_number INTEGER,
+                analysis_type VARCHAR,
+                created_by VARCHAR,
+                created_date VARCHAR,
             )
         """)
 
@@ -1598,36 +1556,6 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
             return {}
         return {row[0]: row[1] for row in rows}
 
-def get_or_create_compound_mz_rt_uid(
-    db_path: str,
-    compound_uid: str,
-    chromatography: str,
-    polarity: str,
-    adduct: str,
-    rt_peak: float,
-    mz: float,
-    mz_tolerance: float,
-    decorator: str = None
-) -> tuple[str, bool]:
-    """
-    Return (mz_rt_uid, reused_flag). If not found, generate a new UID (do not insert).
-    """
-    with get_db_connection(db_path, read_only=True) as conn:
-        existing = conn.execute("""
-            SELECT mz_rt_uid FROM compound_mzrt
-            WHERE compound_uid = ?
-            AND chromatography = ? AND polarity = ? AND adduct = ?
-            AND rt_peak = ? AND mz = ?
-            AND mz_tolerance = ?
-        """, [
-            compound_uid, chromatography, polarity, adduct,
-            rt_peak, mz, mz_tolerance
-        ]).fetchone()
-        if existing:
-            return existing[0], True
-        else:
-            return _generate_uid("mz_rt", decorator), False
-
 def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> None:
     """
     Check for existing AutoIdentification results in the project database for the given
@@ -1665,361 +1593,6 @@ def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> Non
         )
     else:
         logger.info(f"No existing AutoIdentification results found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}. Proceeding.")
-
-def get_istd_curation_for_polarity(
-    project_db_path: str,
-    polarity: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-) -> pd.DataFrame:
-    """
-    Retrieve manual_curation entries for the ISTD analysis matching polarity,
-    rt_alignment_number, and analysis_number.
-
-    Returns a DataFrame with columns: inchi_key, adduct, rt_peak, rt_min, rt_max,
-    ms1_notes, ms2_notes, other_notes, analyst_notes.  Returns an empty DataFrame (no error) when
-    no matching ISTD run is found.
-    """
-    try:
-        with get_db_connection(project_db_path, read_only=True) as conn:
-            df = conn.execute("""
-                SELECT inchi_key, adduct, rt_peak, rt_min, rt_max,
-                       ms1_notes, ms2_notes, other_notes, analyst_notes
-                FROM manual_curation
-                WHERE analysis_type = 'ISTD'
-                  AND polarity = ?
-                  AND rt_alignment_number = ?
-                  AND analysis_number = ?
-            """, [polarity, rt_alignment_number, analysis_number]).df()
-    except Exception as e:
-        logger.warning(f"Could not retrieve ISTD curation entries: {e}")
-        df = pd.DataFrame()
-    if df.empty:
-        logger.info(f"No ISTD curation found for polarity={polarity}, RTA{rt_alignment_number}, TGA{analysis_number}.")
-    else:
-        logger.info(f"Found {len(df)} ISTD curation entries for polarity={polarity}, RTA{rt_alignment_number}, TGA{analysis_number}.")
-    return df
-
-
-def apply_istd_curation_to_ema(
-    manual_curation_df: pd.DataFrame,
-    istd_df: pd.DataFrame,
-    post_autoid_atlas_obj,
-) -> tuple:
-    """
-    Apply ISTD curation (RT bounds + notes) to matching EMA compounds.
-
-    Only updates EMA rows where ms1_notes equals default_ms1_note (i.e. the row
-    has not yet been manually curated).  Matching is on (inchi_key, adduct).
-
-    Also updates RT bounds on the post_autoid_atlas_obj CompoundMZRT objects so
-    that EIC plot windows reflect the curated values when the GUI opens.
-
-    Returns (updated_manual_curation_df, n_transferred).
-    """
-    if istd_df.empty:
-        return manual_curation_df, 0
-
-    istd_lookup = {
-        (row["inchi_key"], row["adduct"]): row
-        for _, row in istd_df.iterrows()
-    }
-
-    atlas_lookup = {
-        (cmzrt.inchi_key, cmzrt.adduct): cmzrt
-        for cmzrt in post_autoid_atlas_obj.compound_mzrts.values()
-    }
-
-    df = manual_curation_df.copy()
-    n_transferred = 0
-
-    for idx, row in df.iterrows():
-        pair = (row["inchi_key"], row["adduct"])
-        if pair not in istd_lookup:
-            continue
-        
-        ms2_note_val = row.get("ms2_notes", "")
-        if ms2_note_val != "":
-            logger.info(f"Skipping ISTD info transfer to EMA for {pair} because ms2_notes already has value: '{ms2_note_val}'")
-            continue  # already curated — do not overwrite
-
-        istd_row = istd_lookup[pair]
-        df.at[idx, "rt_peak"]    = istd_row["rt_peak"]
-        df.at[idx, "rt_min"]     = istd_row["rt_min"]
-        df.at[idx, "rt_max"]     = istd_row["rt_max"]
-        df.at[idx, "ms1_notes"]  = istd_row["ms1_notes"]
-        df.at[idx, "ms2_notes"]  = istd_row["ms2_notes"]
-        df.at[idx, "analyst_notes"] = istd_row["analyst_notes"]
-        df.at[idx, "other_notes"] = istd_row["other_notes"]
-
-        if pair in atlas_lookup:
-            atlas_lookup[pair].rt_peak = float(istd_row["rt_peak"])
-            atlas_lookup[pair].rt_min  = float(istd_row["rt_min"])
-            atlas_lookup[pair].rt_max  = float(istd_row["rt_max"])
-
-        n_transferred += 1
-
-    return df, n_transferred
-
-
-def filter_experimental_data_in_memory(
-    exp_data: "ExperimentalData",
-    ms1_min_pts: int = None,
-    ms1_min_int: float = None,
-    ms2_min_score: float = None,
-    ms2_min_frags: int = None,
-    remove_unided: bool = False,
-) -> tuple["ExperimentalData", int]:
-    """
-    Lightweight in-memory filter for GUI overrides.
-    Expects ManualCuration.data as a dictionary.
-    """
-    from metatlas2.workflow_objects import ExperimentalData
-
-    # 1. Identify compounds that pass MS1 thresholds across ANY of their files
-    passing_ms1 = set()
-    for ms1 in exp_data.ms1_data:
-        # Fast check on the DataFrame
-        pts_ok = (ms1_min_pts is None) or (len(ms1.data) >= ms1_min_pts)
-        int_ok = (ms1_min_int is None) or (ms1.data['i'].max() >= ms1_min_int)
-        if pts_ok and int_ok:
-            passing_ms1.add(ms1.mz_rt_uid)
-
-    # 2. Identify compounds that pass MS2 thresholds
-    # We must filter the actual hit rows within the MS2Hit objects
-    passing_ms2 = set()
-    for hit_obj in exp_data.ms2_hits:
-        df = hit_obj.data
-        if df.empty: continue
-        
-        # Apply stricter score/frag filters to the existing hits
-        mask = np.ones(len(df), dtype=bool)
-        if ms2_min_score is not None:
-            mask &= (df['score'] >= ms2_min_score)
-        if ms2_min_frags is not None:
-            mask &= (df['num_matches'] >= ms2_min_frags)
-        
-        filtered_df = df[mask].reset_index(drop=True)
-        if not filtered_df.empty:
-            hit_obj.data = filtered_df # Update the object in-place
-            passing_ms2.add(hit_obj.mz_rt_uid)
-        else:
-            hit_obj.data = pd.DataFrame(columns=df.columns)
-
-    # 3. Determine which compounds survive the "Funnel"
-    kept_uids = set()
-    new_mc = []
-    
-    for mc in exp_data.manual_curation:
-        uid = mc.mz_rt_uid
-        row = mc.data # Now a dictionary
-        
-        # Filter: Unidentified
-        if remove_unided and not bool(row.get('auto_ided', True)):
-            continue
-            
-        # Filter: Must pass either MS1 or MS2 (Standard Funnel Logic)
-        # If thresholds are provided, check against our passing sets
-        has_ms1 = (ms1_min_pts is None and ms1_min_int is None) or (uid in passing_ms1)
-        has_ms2 = (ms2_min_score is None and ms2_min_frags is None) or (uid in passing_ms2)
-        
-        if not (has_ms1 or has_ms2):
-            continue
-            
-        new_mc.append(mc)
-        kept_uids.add(uid)
-
-    # 4. Propagate removals to all data lists
-    filtered_exp = ExperimentalData()
-    filtered_exp.manual_curation = new_mc
-    filtered_exp.ms1_data = [obj for obj in exp_data.ms1_data if obj.mz_rt_uid in kept_uids]
-    filtered_exp.ms2_data = [obj for obj in exp_data.ms2_data if obj.mz_rt_uid in kept_uids]
-    filtered_exp.ms2_hits = [obj for obj in exp_data.ms2_hits if obj.mz_rt_uid in kept_uids]
-
-    return filtered_exp, (len(exp_data.manual_curation) - len(new_mc))
-
-def load_and_filter_gui_inputs(analysis_gui_obj):
-    _overrides = analysis_gui_obj.override_parameters or {}
-    
-    apply_istd_to_ema = (
-        _overrides.get("apply_istd_to_ema")
-        if _overrides.get("apply_istd_to_ema") is not None
-        else analysis_gui_obj.workflow_params.get("apply_istd_to_ema", True)
-    )
-
-    # Create atlas_compounds DataFrame to scope queries to this specific atlas using mz_rt_uid
-    atlas_compounds = pd.DataFrame([
-        {"mz_rt_uid": cmzrt.mz_rt_uid}
-        for cmzrt in analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.values()
-    ])
-
-    # Load pre-filtered data from database (first-stage filtering already applied)
-    exp_data = load_experimental_data_from_db(
-        project_db_path=analysis_gui_obj.paths["project_db_path"],
-        rt_alignment_number=analysis_gui_obj.rt_alignment_number,
-        analysis_number=analysis_gui_obj.analysis_number,
-        atlas_compounds=atlas_compounds,
-        analysis_type=analysis_gui_obj.post_autoid_atlas_obj.analysis_type,
-    )
-    
-    # Apply second-stage filtering if override parameters differ from workflow params
-    if analysis_gui_obj.override_parameters:
-        # Check if overrides differ from workflow params
-        wp = analysis_gui_obj.workflow_params
-        params_to_check = ["ms1_min_peak_intensity", "ms1_min_num_points", 
-                           "ms2_min_score", "ms2_min_matching_frags", "remove_unided_compounds"]
-        
-        if any(_overrides.get(p) is not None and _overrides.get(p) != wp.get(p) for p in params_to_check):
-            logger.info("Applying stricter second-stage in-memory filtering...")
-            
-            exp_data, n_removed = filter_experimental_data_in_memory(
-                exp_data,
-                ms1_min_pts=_overrides.get("ms1_min_num_points", wp.get("ms1_min_num_points")),
-                ms1_min_int=_overrides.get("ms1_min_peak_intensity", wp.get("ms1_min_peak_intensity")),
-                ms2_min_score=_overrides.get("ms2_min_score", wp.get("ms2_min_score")),
-                ms2_min_frags=_overrides.get("ms2_min_matching_frags", wp.get("ms2_min_matching_frags")),
-                remove_unided=_overrides.get("remove_unided_compounds", wp.get("remove_unided_compounds", True)),
-            )
-            
-            # Trim the atlas to match survivors
-            surviving_uids = {mc.mz_rt_uid for mc in exp_data.manual_curation}
-            analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts = {
-                uid: cmzrt for uid, cmzrt in analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.items()
-                if uid in surviving_uids
-            }
-            logger.info(f"Filtered {n_removed} compounds from GUI view.")
-    
-    # Convert to flat DataFrames for GUI
-    manual_curation_df, ms1_df, ms2_df, ms2_hits_df = experimental_data_to_dataframes(exp_data)
-
-    if analysis_gui_obj.post_autoid_atlas_obj.analysis_type == "EMA":
-        if apply_istd_to_ema:
-            logger.info("EMA analysis detected — checking for matching ISTD curation to pre-populate...")
-            istd_df = get_istd_curation_for_polarity(
-                project_db_path=analysis_gui_obj.paths["project_db_path"],
-                polarity=analysis_gui_obj.post_autoid_atlas_obj.polarity,
-                rt_alignment_number=analysis_gui_obj.rt_alignment_number,
-                analysis_number=analysis_gui_obj.analysis_number,
-            )
-            if not istd_df.empty:
-                manual_curation_df, n_transferred = apply_istd_curation_to_ema(
-                    manual_curation_df=manual_curation_df,
-                    istd_df=istd_df,
-                    post_autoid_atlas_obj=analysis_gui_obj.post_autoid_atlas_obj,
-                )
-                logger.info(f"Transferred ISTD curation to {n_transferred} EMA compounds (inchi_key+adduct matches).")
-            else:
-                logger.info("No matching ISTD curation found — loading EMA data without pre-population.")
-
-    analysis_gui_obj.experimental_data = exp_data
-    analysis_gui_obj.manual_curation_df = manual_curation_df
-    analysis_gui_obj.ms1_df = ms1_df
-    analysis_gui_obj.ms2_df = ms2_df
-    analysis_gui_obj.ms2_hits_df = ms2_hits_df
-    
-    return
-
-def validate_override_parameters(override_parameters):
-    if not isinstance(override_parameters, dict):
-        raise ValueError("override_parameters must be a dict")
-    if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
-        raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
-    # if not isinstance(override_parameters["apply_suggested_bounds"], (type(None), bool)):
-    #     raise ValueError("override_parameters['apply_suggested_bounds'] must be a boolean or None")
-    if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
-        raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
-    if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
-        raise ValueError("override_parameters['ms1_min_peak_intensity'] must be a number or None")
-    if not isinstance(override_parameters["ms1_min_num_points"], (type(None), int)):
-        raise ValueError("override_parameters['ms1_min_num_points'] must be an integer or None")
-    if not isinstance(override_parameters["ms2_min_score"], (type(None), (int, float))):
-        raise ValueError("override_parameters['ms2_min_score'] must be a number or None")
-    if not isinstance(override_parameters["ms2_min_matching_frags"], (type(None), int)):
-        raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
-    if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
-        raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("apply_istd_to_ema"), (type(None), bool)):
-        raise ValueError("override_parameters['apply_istd_to_ema'] must be a boolean or None")
-    if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
-        raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
-        raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
-    if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
-        raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
-    if isinstance(override_parameters["note_options_overrides"], dict):
-        for note_type, options in override_parameters["note_options_overrides"].items():
-            if note_type not in ["ms1_notes", "ms2_notes", "other_notes"]:
-                raise ValueError(f"Invalid note type in note_options_overrides: {note_type}")
-            if not isinstance(options, dict):
-                raise ValueError(f"Options for {note_type} in note_options_overrides must be a dict mapping option text to hotkeys")
-            for opt_text, hotkey in options.items():
-                if not isinstance(opt_text, str) or not isinstance(hotkey, str):
-                    raise ValueError(f"Invalid option in note_options_overrides for {note_type}: {opt_text}: {hotkey}")
-
-
-def _ensure_df_columns(df, required_cols):
-    if not isinstance(df, pd.DataFrame):
-        return pd.DataFrame(columns=required_cols)
-    out = df.copy()
-    if out.empty and len(out.columns) == 0:
-        return pd.DataFrame(columns=required_cols)
-    for col in required_cols:
-        if col not in out.columns:
-            out[col] = pd.Series(dtype="object")
-    return out
-
-def experimental_data_to_dataframes(
-    exp_data: "ExperimentalData",
-) -> tuple:
-    """Convert a (filtered) ExperimentalData object to four flat DataFrames.
-
-    This is the inverse of :func:`load_experimental_data_from_db`.  Each
-    attribute list is concatenated back into the same column format that the
-    individual ``get_*`` DB query helpers return, so existing GUI and summary
-    code that consumes those DataFrames continues to work without modification.
-
-    Returns
-    -------
-    tuple of (manual_curation_df, ms1_df, ms2_df, ms2_hits_df)
-    """
-    mc_df = (
-        pd.concat([mc.data for mc in exp_data.manual_curation], ignore_index=True)
-        if exp_data.manual_curation
-        else pd.DataFrame()
-    )
-    ms1_df = (
-        pd.concat([obj.data for obj in exp_data.ms1_data], ignore_index=True)
-        if exp_data.ms1_data
-        else pd.DataFrame()
-    )
-    ms2_df = (
-        pd.concat([obj.data for obj in exp_data.ms2_data], ignore_index=True)
-        if exp_data.ms2_data
-        else pd.DataFrame()
-    )
-    ms2_hits_df = (
-        pd.concat([obj.data for obj in exp_data.ms2_hits], ignore_index=True)
-        if exp_data.ms2_hits
-        else pd.DataFrame()
-    )
-
-    ms1_df = _ensure_df_columns(
-        ms1_df,
-        ["inchi_key", "adduct", "file_path", "raw_spectrum", "mz"],
-    )
-    ms2_df = _ensure_df_columns(
-        ms2_df,
-        ["inchi_key", "adduct", "file_path", "rt", "collision_energy",
-         "raw_spectrum", "precursor_MZ", "precursor_intensity"],
-    )
-    ms2_hits_df = _ensure_df_columns(
-        ms2_hits_df,
-        ["inchi_key", "adduct", "file_path", "rt", "score", "num_matches",
-         "mz_theoretical", "ppm_error", "qry_spectrum", "ref_spectrum",
-         "aligned_fragment_colors", "ref_name"],
-    )
-
-    return mc_df, ms1_df, ms2_df, ms2_hits_df
 
 
 def create_new_atlas_after_manual_curation(
@@ -2130,7 +1703,7 @@ def create_new_atlas_after_auto_id(
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
 
     # 1. Get the set of surviving UIDs
-    surviving_uids = {mc.mz_rt_uid for mc in auto_id_obj.experimental_data.manual_curation}
+    surviving_uids = auto_id_obj.experimental_data.manual_curation_df['mz_rt_uid'].unique().tolist()
 
     # 2. Filter and copy surviving compounds using a dictionary comprehension.
     new_compound_mzrts = {
@@ -2258,7 +1831,9 @@ def to_python_type(val):
  
 def write_gui_updates_to_db(
     project_db_path: str,
-    curation_uid: str,
+    mz_rt_uid: str,
+    rt_alignment_number: int,
+    analysis_number: int,
     updated_fields: dict
 ) -> None:
     """
@@ -2266,24 +1841,28 @@ def write_gui_updates_to_db(
     
     Args:
         project_db_path: Path to the project database
-        curation_uid: UID of the manual curation entry to update
+        mz_rt_uid: mz_rt_uid of the manual curation entry to update
+        rt_alignment_number: RT alignment number
+        analysis_number: Analysis number
         updated_fields: Dictionary of fields to update with their new values
     """
     if not updated_fields:
-        logger.warning("No fields provided for update.")
         return
 
     try:
-        curation_uid = to_python_type(curation_uid)
+        mz_rt_uid = to_python_type(mz_rt_uid)
+        rt_alignment_number = to_python_type(rt_alignment_number)
+        analysis_number = to_python_type(analysis_number)
         set_clause = ", ".join([f"{k} = ?" for k in updated_fields])
-        params = [to_python_type(v) for v in updated_fields.values()] + [curation_uid]
-        # Reduced retries for GUI operations - fail faster to avoid blocking user
-        # With 5 retries and 0.5s initial delay: 0.5s + 1s + 2s + 4s = ~8s max wait
+        params = [to_python_type(v) for v in updated_fields.values()] + [mz_rt_uid, rt_alignment_number, analysis_number]
         with get_db_connection(project_db_path, max_retries=5, initial_retry_delay=0.5) as conn:
-            conn.execute(f"UPDATE manual_curation SET {set_clause} WHERE curation_uid = ?", params)
+            conn.execute(
+                f"UPDATE manual_curation SET {set_clause} WHERE mz_rt_uid = ? AND rt_alignment_number = ? AND analysis_number = ?",
+                params
+            )
     except Exception as e:
-        logger.error(f"Error updating manual curation entry {curation_uid}: {e}")
-        raise ValueError(f"Failed to update manual curation entry {curation_uid}. See logs for details.")
+        logger.error(f"Error updating manual curation entry {mz_rt_uid}, RTA{rt_alignment_number}, TGA{analysis_number}: {e}")
+        raise ValueError(f"Failed to update manual curation entry {mz_rt_uid}, RTA{rt_alignment_number}, TGA{analysis_number}. See logs for details.")
 
 def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
     """
@@ -2292,7 +1871,7 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
     """
 
     summary_rows = []
-    for ci in auto_id_obj.experimental_data.manual_curation:
+    for ci in auto_id_obj.experimental_data.manual_curation_df:
         mz_rt_uid = ci.mz_rt_uid
 
         ms1_count = sum(
@@ -2318,207 +1897,220 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
 
     return
 
+
 ########################################################
 ############## Saving ExperimentalData to the database
 ########################################################
-def vectorize_manual_curation(df, constants, prov):
-    if df.empty: return df
-    df = df.copy()
-    df.insert(0, 'uid', [_generate_uid("manual_curation") for _ in range(len(df))])
-    
-    # Vectorized JSON dumps
-    for col in ['max_eic_rt', 'max_eic_intensity', 'isomers']:
-        if col in df.columns:
-            df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (list, dict)) else '[]')
 
-    # Vectorized numeric casting
-    float_cols = [
-        'mz_tolerance', 'atlas_mz', 'atlas_rt_peak', 'atlas_rt_min', 'atlas_rt_max',
-        'mz', 'rt_peak', 'rt_min', 'rt_max', 'initial_rt_min', 'initial_rt_max',
-        'rt_error', 'mz_error', 'best_ms1_rt', 'best_ms1_mz', 'best_ms1_intensity',
-        'best_ms1_ppm_error', 'best_ms1_rt_error', 'suggested_rt_min', 
-        'suggested_rt_max', 'suggested_rt_peak', 'rt_suggestion_confidence'
-    ]
-    for col in float_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
-
-    # Add constants and provenance
-    for k, v in constants.items(): df[k] = v
-    df['analyst'] = prov["analyst"]
-    df['timestamp'] = prov["timestamp"]
-
-    column_order = [
-        'uid', 'compound_uid', 'mz_rt_uid', 'inchi_key', 'adduct', 'rt_alignment_number', 
-        'analysis_number', 'compound_name', 'auto_ided', 'polarity', 'chromatography', 
-        'analysis_type', 'mz_tolerance', 'atlas_mz', 'atlas_rt_peak', 'atlas_rt_min', 
-        'atlas_rt_max', 'mz', 'rt_peak', 'rt_min', 'rt_max', 'initial_rt_min', 
-        'initial_rt_max', 'rt_error', 'mz_error', 'ms1_notes', 'ms2_notes', 
-        'analyst_notes', 'other_notes', 'identification_notes', 'best_ms1_file', 
-        'best_ms1_rt', 'best_ms1_mz', 'best_ms1_intensity', 'best_ms1_ppm_error', 
-        'best_ms1_rt_error', 'max_eic_rt', 'max_eic_intensity', 'isomers', 
-        'suggested_rt_min', 'suggested_rt_max', 'suggested_rt_peak', 
-        'rt_suggestion_confidence', 'analyst', 'timestamp'
-    ]
-    return df.reindex(columns=column_order).fillna('')
-
-def vectorize_ms1_data(df, constants, prov):
-    if df.empty: return df
-    df = df.copy()
-    df.insert(0, 'uid', [_generate_uid("ms1_data") for _ in range(len(df))])
-    
-    # Vectorized spectrum tuple creation: (list(rt), list(i))
-    df['raw_spectrum'] = df.apply(lambda row: json.dumps((row['rt'], row['i'])), axis=1)
-    df['mz'] = df['mz'].apply(json.dumps)
-    
-    for k, v in constants.items(): df[k] = v
-    df['analyst'] = prov["analyst"]
-    df['timestamp'] = prov["timestamp"]
-    
-    column_order = [
-        'uid', 'compound_uid', 'mz_rt_uid', 'inchi_key', 'adduct', 'rt_alignment_number',
-        'analysis_number', 'analysis_type', 'filename', 'mz', 'raw_spectrum', 'analyst', 'timestamp'
-    ]
-    return df.reindex(columns=column_order).fillna('')
-
-def vectorize_ms2_data(df, constants, prov):
-    if df.empty: return df
-    df = df.copy()
-    df.insert(0, 'uid', [_generate_uid("ms2_data") for _ in range(len(df))])
-    df['raw_spectrum'] = df['raw_spectrum'].apply(json.dumps)
-    
-    float_cols = ['rt', 'precursor_MZ', 'precursor_intensity', 'collision_energy']
-    for col in float_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
-
-    for k, v in constants.items(): df[k] = v
-    df['analyst'] = prov["analyst"]
-    df['timestamp'] = prov["timestamp"]
-    
-    column_order = [
-        'uid', 'compound_uid', 'mz_rt_uid', 'inchi_key', 'adduct', 'rt_alignment_number',
-        'analysis_number', 'analysis_type', 'filename', 'rt', 'raw_spectrum', 
-        'precursor_MZ', 'precursor_intensity', 'collision_energy', 'analyst', 'timestamp'
-    ]
-    return df.reindex(columns=column_order).fillna('')
-
-def vectorize_ms2_hits(df, constants, prov):
-    if df.empty: return df
-    df = df.copy()
-    df.insert(0, 'uid', [_generate_uid("ms2_hits") for _ in range(len(df))])
-    
-    json_cols = ['matched_fragments', 'aligned_fragment_colors', 'qry_spectrum', 'ref_spectrum']
-    for col in json_cols:
-        df[col] = df[col].apply(lambda x: json.dumps(x) if x is not None else '[]')
-
-    float_cols = ['score', 'mz_theoretical', 'mz_measured', 'ppm_error', 'rt', 'qry_intensity_peak']
-    for col in float_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
-        
-    int_cols = ['num_matches', 'ref_frags', 'data_frags']
-    for col in int_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-
-    for k, v in constants.items(): df[k] = v
-    df['analyst'] = prov["analyst"]
-    df['timestamp'] = prov["timestamp"]
-    
-    column_order = [
-        'uid', 'compound_uid', 'mz_rt_uid', 'inchi_key', 'adduct', 'rt_alignment_number',
-        'analysis_number', 'analysis_type', 'filename', 'database', 'ref_id', 'ref_name',
-        'score', 'num_matches', 'mz_theoretical', 'mz_measured', 'ppm_error', 'rt',
-        'qry_intensity_peak', 'ref_frags', 'data_frags', 'matched_fragments', 
-        'aligned_fragment_colors', 'qry_spectrum', 'ref_spectrum', 'analyst', 'timestamp'
-    ]
-    return df.reindex(columns=column_order).fillna('')
-
-def save_auto_identification_results_to_db(auto_id_obj: "AutoIdentification") -> None:
-    """Save complete analysis results to project database using vectorized DataFrame operations."""
-    logger.info("Preparing AutoIdentification results for database save...")
-
-    # Setup and Metadata
+def save_auto_identification_results_to_db(auto_id_obj):
+    """
+    Saves Tidy DataFrames directly to pre-defined DuckDB tables.
+    """
+    logger.info("Saving results to database...")
     project_db_path = auto_id_obj.paths['project_db_path']
+    dataset = auto_id_obj.experimental_data
+    curation_df = dataset.manual_curation_df
+    ms1_df = dataset.ms1_df
+    ms2_df = dataset.ms2_df
     prov = get_provenance()
-    exp_data_obj = auto_id_obj.experimental_data
     
     constants = {
         'rt_alignment_number': auto_id_obj.rt_alignment_number,
         'analysis_number': auto_id_obj.analysis_number,
         'analysis_type': auto_id_obj.pre_autoid_atlas_obj.analysis_type,
+        'created_by': prov["analyst"],
+        'created_date': prov["timestamp"]
     }
 
-    # Create metadata mapping DataFrame for inner joins
-    meta_list = [{'mz_rt_uid': ci.mz_rt_uid, 'compound_uid': getattr(ci, 'compound_uid', None), 
-                  'inchi_key': ci.inchi_key, 'adduct': ci.adduct} for ci in exp_data_obj.manual_curation]
-    df_meta = pd.DataFrame(meta_list).drop_duplicates('mz_rt_uid')
+    # Add constants to all DataFrames
+    for df in [ms1_df, ms2_df, curation_df]:
+        if not df.empty:
+            for k, v in constants.items():
+                df[k] = v
 
-    # Manual Curation
-    df_manual = pd.DataFrame([mc.data for mc in exp_data_obj.manual_curation])
+    # write ms1_df, ms2_df, and curation_df to a file on disk for debugging
+    debug_dir = Path(project_db_path).parent / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    ms1_df.to_csv(debug_dir / f"ms1_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
+    ms2_df.to_csv(debug_dir / f"ms2_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
+    curation_df.to_csv(debug_dir / f"manual_curation_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
 
-    # MS1 Data
-    ms1_dfs = []
-    for ms1 in tqdm(exp_data_obj.ms1_data, desc="Saving MS1 data", disable=should_disable_tqdm()):
-        if ms1.data.empty: continue
-        ms1_dfs.append(pd.DataFrame({
-            'mz_rt_uid': [ms1.mz_rt_uid], 'filename': [ms1.filename],
-            'rt': [ms1.data['rt'].tolist()], 'i': [ms1.data['i'].tolist()], 'mz': [ms1.data['mz'].tolist()]
-        }))
-    df_ms1 = pd.concat(ms1_dfs) if ms1_dfs else pd.DataFrame()
-
-    # MS2 Data
-    ms2_dfs = []
-    for ms2 in tqdm(exp_data_obj.ms2_data, desc="Saving MS2 data", disable=should_disable_tqdm()):
-        if ms2.data.empty: continue
-        grouped = ms2.data.groupby('rt', sort=False).agg({
-            'precursor_MZ': 'first', 'precursor_intensity': 'first', 'collision_energy': 'first',
-            'mz': list, 'i': list,
-        }).reset_index()
-        grouped['raw_spectrum'] = [ (m, i) for m, i in zip(grouped['mz'], grouped['i']) ]
-        grouped['mz_rt_uid'] = ms2.mz_rt_uid
-        grouped['filename'] = ms2.filename
-        ms2_dfs.append(grouped[['rt', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'raw_spectrum', 'mz_rt_uid', 'filename']])
-    df_ms2 = pd.concat(ms2_dfs) if ms2_dfs else pd.DataFrame()
-
-    # MS2 Hits
-    hit_dfs = [hit_obj.data.assign(mz_rt_uid=hit_obj.mz_rt_uid, filename=hit_obj.filename)
-               for hit_obj in tqdm(exp_data_obj.ms2_hits, desc="Saving MS2 hits", disable=should_disable_tqdm()) if not hit_obj.data.empty]
-    df_hits = pd.concat(hit_dfs) if hit_dfs else pd.DataFrame()
-
-    # Join Metadata and Vectorize
-    def process_table(df, vec_func):
-        if df.empty: return df
-        df = df.merge(df_meta, on='mz_rt_uid', how='inner')
-        return vec_func(df, constants, prov)
-
-    df_manual_final = process_table(df_manual, vectorize_manual_curation)
-    df_ms1_final = process_table(df_ms1, vectorize_ms1_data)
-    df_ms2_final = process_table(df_ms2, vectorize_ms2_data)
-    df_hits_final = process_table(df_hits, vectorize_ms2_hits)
-
-    # Bulk Database Insert
-    logger.info("Performing high-speed bulk inserts via DuckDB DataFrame API...")
     with get_db_connection(project_db_path) as conn:
-        if not df_manual_final.empty:
-            conn.execute("INSERT INTO manual_curation SELECT * FROM df_manual_final")
-        if not df_ms1_final.empty:
-            conn.execute("INSERT INTO ms1_data SELECT * FROM df_ms1_final")
-        if not df_ms2_final.empty:
-            conn.execute("INSERT INTO ms2_data SELECT * FROM df_ms2_final")
-        if not df_hits_final.empty:
-            conn.execute("INSERT INTO ms2_hits SELECT * FROM df_hits_final")
+        if not curation_df.empty:
+            conn.execute("INSERT INTO manual_curation SELECT * FROM curation_df")
+        
+        if not ms1_df.empty:
+            conn.execute("INSERT INTO ms1_data SELECT * FROM ms1_df")
+            
+        if not ms2_df.empty:
+            conn.execute("INSERT INTO ms2_data SELECT * FROM ms2_df")
 
-    logger.info(f"Final record counts for database insert:")
-    logger.info(f"  Manual Curation: {len(df_manual_final)} rows")
-    logger.info(f"  MS1 Data: {len(df_ms1_final)} rows")
-    logger.info(f"  MS2 Data: {len(df_ms2_final)} rows")
-    logger.info(f"  MS2 Hits: {len(df_hits_final)} rows")
     logger.info("Database save complete.")
-
-    return
 
 ################################################################
 ############## Re-extracting ExperimentalData from the database
 ################################################################
+
+
+def get_istd_curation_for_polarity(
+    project_db_path: str,
+    polarity: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+) -> pd.DataFrame:
+    """
+    Retrieve manual_curation entries for the ISTD analysis matching polarity,
+    rt_alignment_number, and analysis_number.
+
+    Returns a DataFrame with columns: inchi_key, adduct, rt_peak, rt_min, rt_max,
+    ms1_notes, ms2_notes, other_notes, analyst_notes.  Returns an empty DataFrame (no error) when
+    no matching ISTD run is found.
+    """
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            df = conn.execute("""
+                SELECT inchi_key, adduct, rt_peak, rt_min, rt_max,
+                       ms1_notes, ms2_notes, other_notes, analyst_notes
+                FROM manual_curation
+                WHERE analysis_type = 'ISTD'
+                  AND polarity = ?
+                  AND rt_alignment_number = ?
+                  AND analysis_number = ?
+            """, [polarity, rt_alignment_number, analysis_number]).df()
+    except Exception as e:
+        logger.warning(f"Could not retrieve ISTD curation entries: {e}")
+        df = pd.DataFrame()
+    if df.empty:
+        logger.info(f"No ISTD curation found for polarity={polarity}, RTA{rt_alignment_number}, TGA{analysis_number}.")
+    else:
+        logger.info(f"Found {len(df)} ISTD curation entries for polarity={polarity}, RTA{rt_alignment_number}, TGA{analysis_number}.")
+    return df
+
+
+def apply_istd_curation_to_ema(
+    manual_curation_df: pd.DataFrame,
+    istd_df: pd.DataFrame,
+    post_autoid_atlas_obj,
+) -> tuple:
+    """
+    Apply ISTD curation (RT bounds + notes) to matching EMA compounds.
+
+    Only updates EMA rows where ms1_notes equals default_ms1_note (i.e. the row
+    has not yet been manually curated).  Matching is on (inchi_key, adduct).
+
+    Also updates RT bounds on the post_autoid_atlas_obj CompoundMZRT objects so
+    that EIC plot windows reflect the curated values when the GUI opens.
+
+    Returns (updated_manual_curation_df, n_transferred).
+    """
+    if istd_df.empty:
+        return manual_curation_df, 0
+
+    istd_lookup = {
+        (row["inchi_key"], row["adduct"]): row
+        for _, row in istd_df.iterrows()
+    }
+
+    atlas_lookup = {
+        (cmzrt.inchi_key, cmzrt.adduct): cmzrt
+        for cmzrt in post_autoid_atlas_obj.compound_mzrts.values()
+    }
+
+    df = manual_curation_df.copy()
+    n_transferred = 0
+
+    for idx, row in df.iterrows():
+        pair = (row["inchi_key"], row["adduct"])
+        if pair not in istd_lookup:
+            continue
+        
+        ms2_note_val = row.get("ms2_notes", "")
+        if ms2_note_val != "":
+            logger.info(f"Skipping ISTD info transfer to EMA for {pair} because ms2_notes already has value: '{ms2_note_val}'")
+            continue  # already curated — do not overwrite
+
+        istd_row = istd_lookup[pair]
+        df.at[idx, "rt_peak"]    = istd_row["rt_peak"]
+        df.at[idx, "rt_min"]     = istd_row["rt_min"]
+        df.at[idx, "rt_max"]     = istd_row["rt_max"]
+        df.at[idx, "ms1_notes"]  = istd_row["ms1_notes"]
+        df.at[idx, "ms2_notes"]  = istd_row["ms2_notes"]
+        df.at[idx, "analyst_notes"] = istd_row["analyst_notes"]
+        df.at[idx, "other_notes"] = istd_row["other_notes"]
+
+        if pair in atlas_lookup:
+            atlas_lookup[pair].rt_peak = float(istd_row["rt_peak"])
+            atlas_lookup[pair].rt_min  = float(istd_row["rt_min"])
+            atlas_lookup[pair].rt_max  = float(istd_row["rt_max"])
+
+        n_transferred += 1
+
+    return df, n_transferred
+
+def _transfer_istd_curation(ema_df, db_path, gui_obj, atlas_obj):
+    """Vectorized ISTD -> EMA transfer."""
+    with get_db_connection(db_path, read_only=True) as conn:
+        istd_df = conn.execute("""
+            SELECT inchi_key, adduct, rt_peak, rt_min, rt_max, 
+                   ms1_notes, ms2_notes, other_notes, analyst_notes
+            FROM manual_curation 
+            WHERE analysis_type = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ?
+        """, [atlas_obj.polarity, gui_obj.rt_alignment_number, gui_obj.analysis_number]).df()
+
+    if istd_df.empty: return ema_df
+
+    # Merge ISTD values onto EMA based on (inchi_key, adduct)
+    # Only update if EMA notes are empty (not yet curated)
+    merged = ema_df.merge(istd_df, on=['inchi_key', 'adduct'], how='left', suffixes=('', '_istd'))
+    
+    for col in ['rt_peak', 'rt_min', 'rt_max', 'ms1_notes', 'ms2_notes', 'analyst_notes', 'other_notes']:
+        istd_col = f"{col}_istd"
+        if istd_col in merged.columns:
+            # Update EMA value only if original is empty/default
+            merged[col] = np.where(
+                (merged[col] == '') | (merged[col] == 0.0), 
+                merged[istd_col], 
+                merged[col]
+            )
+    
+    # Drop the temporary _istd columns
+    return merged[[c for c in merged.columns if not c.endswith('_istd')]]
+
+def validate_override_parameters(override_parameters):
+    if not isinstance(override_parameters, dict):
+        raise ValueError("override_parameters must be a dict")
+    if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
+        raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
+    if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
+        raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
+    if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
+        raise ValueError("override_parameters['ms1_min_peak_intensity'] must be a number or None")
+    if not isinstance(override_parameters["ms1_min_num_points"], (type(None), int)):
+        raise ValueError("override_parameters['ms1_min_num_points'] must be an integer or None")
+    if not isinstance(override_parameters["ms2_min_score"], (type(None), (int, float))):
+        raise ValueError("override_parameters['ms2_min_score'] must be a number or None")
+    if not isinstance(override_parameters["ms2_min_matching_frags"], (type(None), int)):
+        raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
+    if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
+        raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
+    if not isinstance(override_parameters.get("apply_istd_to_ema"), (type(None), bool)):
+        raise ValueError("override_parameters['apply_istd_to_ema'] must be a boolean or None")
+    if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
+        raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
+    if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
+        raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
+    if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
+        raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
+    if isinstance(override_parameters["note_options_overrides"], dict):
+        for note_type, options in override_parameters["note_options_overrides"].items():
+            if note_type not in ["ms1_notes", "ms2_notes", "other_notes"]:
+                raise ValueError(f"Invalid note type in note_options_overrides: {note_type}")
+            if not isinstance(options, dict):
+                raise ValueError(f"Options for {note_type} in note_options_overrides must be a dict mapping option text to hotkeys")
+            for opt_text, hotkey in options.items():
+                if not isinstance(opt_text, str) or not isinstance(hotkey, str):
+                    raise ValueError(f"Invalid option in note_options_overrides for {note_type}: {opt_text}: {hotkey}")
+
 def get_manual_curation_entries(
     project_db_path: str,
     rt_alignment_number: int,
@@ -2634,68 +2226,6 @@ def get_ms1_data_for_compound(
 
     return df
 
-def get_ms2_hits_for_compound(
-    project_db_path: str,
-    rt_alignment_number: int = None,
-    analysis_number: int = None,
-    atlas_compounds: pd.DataFrame = None,
-    analysis_type: str = None,
-) -> pd.DataFrame:
-    """
-    Get MS2 hits for a compound (inchi_key+adduct), ordered by score descending.
-    If inchi_key or adduct is None, do not filter on that field.
-    If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
-    only rows matching those pairs are returned.
-    If analysis_type is provided, only rows matching that analysis_type are returned.
-    """
-    query = """
-        SELECT *
-        FROM ms2_hits
-        WHERE 1=1
-    """
-    try:
-        params = []
-        if rt_alignment_number is not None:
-            query += " AND rt_alignment_number = ?"
-            params.append(rt_alignment_number)
-        if analysis_number is not None:
-            query += " AND analysis_number = ?"
-            params.append(analysis_number)
-        if analysis_type is not None:
-            query += " AND analysis_type = ?"
-            params.append(analysis_type)
-        if atlas_compounds is not None and not atlas_compounds.empty:
-            mz_rt_uids = list(atlas_compounds["mz_rt_uid"].drop_duplicates())
-            placeholders = ", ".join(["?"] * len(mz_rt_uids))
-            query += f" AND mz_rt_uid IN ({placeholders})"
-            params.extend(mz_rt_uids)
-        query += " ORDER BY score DESC"
-        with get_db_connection(project_db_path, read_only=True) as conn:
-            df = conn.execute(query, params).df()
-    except Exception as e:
-        logger.error(f"Error retrieving MS2 hits: {e}")
-        df = pd.DataFrame()
-
-    if df.empty:
-        logger.warning(f"No MS2 hits found for RT alignment number {rt_alignment_number}, and analysis number {analysis_number}.")
-    else:
-        # Ensure critical fields have default values if missing/NULL
-        default_fields = {
-            'mz_theoretical': 0.0,
-            'mz_measured': 0.0,
-            'ppm_error': 0.0,
-            'rt': 0.0,
-            'score': 0.0,
-            'precursor_MZ': 0.0
-        }
-        for field, default_val in default_fields.items():
-            if field in df.columns:
-                df[field] = df[field].fillna(default_val)
-            else:
-                df[field] = default_val
-
-    return df
-
 def get_ms2_data_for_compound(
     project_db_path: str,
     rt_alignment_number: int = None,
@@ -2743,91 +2273,123 @@ def get_ms2_data_for_compound(
 
     return df
 
-def load_experimental_data_from_db(
-    project_db_path: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    atlas_compounds: pd.DataFrame = None,
-    analysis_type: str = None,
-    remove_unidentified_compounds: bool = False,
-) -> "ExperimentalData":
-    from metatlas2.workflow_objects import ExperimentalData, ManualCuration, MS1Data, MS2Data, MS2Hit
+def _get_max_score(hits_data):
+    """Helper to find max score in a JSON string or list of dicts."""
+    if isinstance(hits_data, str):
+        try: hits_list = json.loads(hits_data)
+        except: return -1.0
+    else: hits_list = hits_data
+    
+    if not hits_list: return -1.0
+    return max([h.get('score', -1.0) for h in hits_list])
 
-    # Bulk fetch all dataframes
-    mc_flat = get_manual_curation_entries(
-        project_db_path, rt_alignment_number, analysis_number,
-        remove_unidentified_compounds=remove_unidentified_compounds,
-        atlas_compounds=atlas_compounds,
-        analysis_type=analysis_type,
-    )
-    ms1_flat = get_ms1_data_for_compound(
-        project_db_path, rt_alignment_number, analysis_number,
-        atlas_compounds=atlas_compounds, analysis_type=analysis_type,
-    )
-    ms2_flat = get_ms2_data_for_compound(
-        project_db_path, rt_alignment_number, analysis_number,
-        atlas_compounds=atlas_compounds, analysis_type=analysis_type,
-    )
-    ms2_hits_flat = get_ms2_hits_for_compound(
-        project_db_path, rt_alignment_number, analysis_number,
-        atlas_compounds=atlas_compounds, analysis_type=analysis_type,
-    )
+def _get_max_frags(hits_data):
+    """Helper to find max fragments in a JSON string or list of dicts."""
+    if isinstance(hits_data, str):
+        try: hits_list = json.loads(hits_data)
+        except: return -1
+    else: hits_list = hits_data
+    
+    if not hits_list: return -1
+    return max([h.get('num_matches', -1) for h in hits_list])
 
-    exp_data = ExperimentalData()
+def load_and_filter_for_gui(analysis_gui_obj):
+    """
+    THE NEW ENTRY POINT FOR THE GUI.
+    Replaces load_experimental_data_from_db and filter_experimental_data_in_memory.
+    """
+    from metatlas2.workflow_objects import ExperimentalData
 
-    # Reconstruct ManualCuration (convert to list of dicts for fast iteration)
-    mc_records = mc_flat.to_dict('records')
-    for row in mc_records:
-        exp_data.manual_curation.append(
-            ManualCuration(
-                inchi_key=row["inchi_key"],
-                adduct=row["adduct"],
-                mz_rt_uid=row["mz_rt_uid"],
-                compound_uid=row["compound_uid"],
-                # Slice the original df instead of creating a new one from a dict
-                data=pd.DataFrame([row]), 
+    with get_db_connection(analysis_gui_obj.paths["project_db_path"], read_only=True) as conn:
+        atlas_uids = list(analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.keys())
+        uid_filter = f"mz_rt_uid IN {tuple(atlas_uids)}" if atlas_uids else "1=0"
+        
+        curation_df = conn.execute(f"""
+            SELECT * FROM manual_curation 
+            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
+            AND analysis_number = {analysis_gui_obj.analysis_number}
+            AND {uid_filter}
+        """).df()
+        
+        ms1_df = conn.execute(f"""
+            SELECT * FROM ms1_data 
+            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
+            AND analysis_number = {analysis_gui_obj.analysis_number}
+            AND {uid_filter}
+        """).df()
+        
+        ms2_df = conn.execute(f"""
+            SELECT * FROM ms2_data 
+            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
+            AND analysis_number = {analysis_gui_obj.analysis_number}
+            AND {uid_filter}
+        """).df()
+
+    logger.info(f"Loaded {len(curation_df)} manual curation entries, {len(ms1_df)} MS1 rows, and {len(ms2_df)} MS2 rows for GUI display.")
+
+    # check if the user has provided any override parameters, and if so, validate them
+    _overrides = analysis_gui_obj.override_parameters or {}
+    wp = analysis_gui_obj.workflow_params
+    ms1_min_pts = _overrides.get("ms1_min_num_points")
+    ms1_min_int = _overrides.get("ms1_min_peak_intensity")
+    ms2_min_score = _overrides.get("ms2_min_score")
+    ms2_min_frags = _overrides.get("ms2_min_matching_frags")
+
+    # Determine if any MS1/MS2 filter is set
+    ms1_filter = ms1_min_pts is not None or ms1_min_int is not None
+    ms2_filter = ms2_min_score is not None or ms2_min_frags is not None
+
+    # MS1 filtering
+    if not ms1_df.empty and ms1_filter:
+        max_ints = ms1_df['spec_ints'].apply(lambda x: np.max(x) if (isinstance(x, list) and len(x)>0) else 0)
+        num_pts = ms1_df['spec_ints'].apply(lambda x: len(x) if isinstance(x, list) else 0)
+        mask = pd.Series([True] * len(ms1_df))
+        if ms1_min_pts is not None:
+            mask &= num_pts >= ms1_min_pts
+        if ms1_min_int is not None:
+            mask &= max_ints >= ms1_min_int
+        passing_ms1 = set(ms1_df.loc[mask, "mz_rt_uid"])
+    else:
+        passing_ms1 = set(ms1_df["mz_rt_uid"])
+
+    # MS2 filtering
+    if not ms2_df.empty and ms2_filter:
+        max_scores = ms2_df['hits'].apply(_get_max_score)
+        max_frags = ms2_df['hits'].apply(_get_max_frags)
+        mask = pd.Series([True] * len(ms2_df))
+        if ms2_min_score is not None:
+            mask &= max_scores >= ms2_min_score
+        if ms2_min_frags is not None:
+            mask &= max_frags >= ms2_min_frags
+        passing_ms2 = set(ms2_df.loc[mask, "mz_rt_uid"])
+    else:
+        passing_ms2 = set(ms2_df["mz_rt_uid"])
+
+    # check whether to remove ids with no MS1 or MS2 data from curation df
+    remove_unided = analysis_gui_obj.workflow_params.get("remove_unided_compounds", True)
+    if _overrides.get("remove_unided_compounds") is not None:
+        remove_unided = _overrides.get("remove_unided_compounds", None)
+    if remove_unided:
+        keep_mask = (curation_df['mz_rt_uid'].isin(passing_ms1) | curation_df['mz_rt_uid'].isin(passing_ms2))
+        curation_df = curation_df[keep_mask].copy()
+        surviving_uids = set(curation_df['mz_rt_uid'])
+        ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(surviving_uids)]
+        ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(surviving_uids)]    
+
+    # ISTD transfer
+    apply_istd_override = analysis_gui_obj.workflow_params.get("apply_istd_to_ema", True)
+    if _overrides.get("apply_istd_to_ema") is not None:
+        apply_istd_override = _overrides.get("apply_istd_to_ema", None)
+    if apply_istd_override:
+        if analysis_gui_obj.post_autoid_atlas_obj.analysis_type == "EMA":
+            curation_df = _transfer_istd_curation(
+                curation_df, analysis_gui_obj.paths["project_db_path"],
+                analysis_gui_obj, analysis_gui_obj.post_autoid_atlas_obj
             )
-        )
 
-    # Reconstruct MS1Data
-    ms1_records = ms1_flat.to_dict('records')
-    for row in ms1_records:
-        exp_data.ms1_data.append(
-            MS1Data(
-                inchi_key=row["inchi_key"],
-                adduct=row["adduct"],
-                mz_rt_uid=row["mz_rt_uid"],
-                filename=row["file_path"],
-                data=pd.DataFrame([row]),
-            )
-        )
-
-    # Reconstruct MS2Data
-    if not ms2_flat.empty:
-        for (mz_rt_uid, fp), grp in ms2_flat.groupby(["mz_rt_uid", "file_path"], sort=False):
-            first_row = grp.iloc[0]
-            exp_data.ms2_data.append(
-                MS2Data(
-                    inchi_key=first_row["inchi_key"],
-                    adduct=first_row["adduct"],
-                    mz_rt_uid=mz_rt_uid,
-                    filename=fp,
-                    data=grp.reset_index(drop=True),
-                )
-            )
-
-    # Reconstruct MS2Hit
-    if not ms2_hits_flat.empty:
-        for (mz_rt_uid, fp), grp in ms2_hits_flat.groupby(["mz_rt_uid", "file_path"], sort=False):
-            first_row = grp.iloc[0]
-            exp_data.ms2_hits.append(
-                MS2Hit(
-                    inchi_key=first_row["inchi_key"],
-                    adduct=first_row["adduct"],
-                    mz_rt_uid=mz_rt_uid,
-                    filename=fp,
-                    data=grp.reset_index(drop=True),
-                )
-            )
-
-    return exp_data
+    # Assign to GUI
+    analysis_gui_obj.experimental_data = ExperimentalData()
+    analysis_gui_obj.experimental_data.curation_df = curation_df
+    analysis_gui_obj.experimental_data.ms1_df = ms1_df
+    analysis_gui_obj.experimental_data.ms2_df = ms2_df
+    return
