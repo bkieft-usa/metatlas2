@@ -101,6 +101,7 @@ def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
 def load_msms_refs_file(
     file_path: str,
     database_filter: str | None = None,
+    polarity: str | None = None,
     inchi_keys: list[str] | None = None,
 ) -> dict[str, list[Spectrum]]:
     """
@@ -112,6 +113,7 @@ def load_msms_refs_file(
     Args:
         file_path: Path to the msms_refs.jsonl file
         database_filter: If provided, only load spectra where database == this string
+        polarity: If provided, only load spectra for the specified polarity
         inchi_keys: If provided, only load spectra for the specified inchi_keys
     Returns:
         dict mapping inchi_key (str) -> list of matchms Spectrum objects
@@ -121,6 +123,7 @@ def load_msms_refs_file(
     logger.info(
         f"Loading reference spectra from {file_path}"
         + (f" (database='{database_filter}')" if database_filter else "")
+        + (f" (polarity='{polarity}')" if polarity else "")
         + (f" (filtered to {len(inchi_keys)} inchi_keys)" if inchi_keys is not None else "")
         + "..."
     )
@@ -147,6 +150,9 @@ def load_msms_refs_file(
             if database_filter and rec.get('database') != database_filter:
                 continue
 
+            if polarity and rec.get('polarity') != polarity:
+                continue
+
             rec_inchi_key = rec.get('inchi_key', '')
             if inchi_key_set is not None and rec_inchi_key not in inchi_key_set:
                 continue
@@ -157,7 +163,7 @@ def load_msms_refs_file(
                 n_skipped += 1
                 continue
 
-            # Direct construction from JSON arrays — no eval, no string parsing
+            # Direct construction from JSON arrays
             mz = np.array(mz_list, dtype=np.float32)
             intensities = np.array(int_list, dtype=np.float32)
 
@@ -519,8 +525,8 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
     
     return df
 
-def save_atlas_data_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
-    """Save Atlas data to CSV file."""
+def save_atlas_metadata_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
+    """Save Atlas metadata to CSV file."""
     logger.info(f"Saving Atlas data to {output_path}...")
     atlas_info = atlas_obj.to_dict()
     file_exists = os.path.isfile(output_path)
@@ -529,6 +535,11 @@ def save_atlas_data_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerow(atlas_info)
+
+def save_atlas_data_to_tsv(atlas_obj: "Atlas", output_path: str) -> None:
+    atlas_df = atlas_obj.to_dataframe()
+    output_file = f"{atlas_obj.atlas_uid}.tsv"
+    atlas_df.to_csv(f"{output_path}/{output_file}", index=False, sep='\t')
 
 def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
     """Load Atlas data from CSV file."""

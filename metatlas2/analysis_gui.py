@@ -26,7 +26,7 @@ def build_dash_app(
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.experimental_data.curation_df
-    logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
+    #logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
     if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
@@ -69,15 +69,12 @@ def build_dash_app(
     flush_lock = threading.RLock()
     cache_lock = threading.Lock()
     latest_flushed_seq_by_session = {}
-    ms2_scans_cache = {}
-    
-    # Add figure caching to avoid regeneration
-    figure_cache = {}
-    figure_cache_lock = threading.Lock()
+    db_write_lock = threading.Lock()
+    ms2_scan_stats_cache = {}
     isomer_string_cache = {}
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
-    logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
+    #logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
     ms1_by_compound = {}
     ms2_by_compound = {}
     ms2_hits_by_compound = {}
@@ -141,6 +138,7 @@ def build_dash_app(
             "edit_seq": int(edit_seq),
             "compound_idx": compound_idx,
             "ms2_idx": ms2_idx,
+            "ms2_idx_by_ce": {},
             "rt_min": rt_min,
             "rt_max": rt_max,
             "ms1_note": ms1_note,
@@ -157,14 +155,29 @@ def build_dash_app(
     def _patch_with_seq(state, **changes):
         new_state = dict(state)
         new_state.update(changes)
-        new_state["edit_seq"] = int(state.get("edit_seq", 0)) + 1
+        old_seq = int(state.get("edit_seq", 0))
+        new_state["edit_seq"] = old_seq + 1
+        #logger.info(f"_patch_with_seq: edit_seq {old_seq} -> {new_state['edit_seq']}, changes={list(changes.keys())}")
         return new_state
+
+    def _ensure_valid_state(state):
+        if isinstance(state, dict) and "compound_idx" in state:
+            if not isinstance(state.get("ms2_idx_by_ce"), dict):
+                patched = dict(state)
+                patched["ms2_idx_by_ce"] = {}
+                return patched
+            return state
+        logger.warning(
+            "Malformed session-store state (%s). Resetting to starting compound.",
+            type(state).__name__,
+        )
+        return _load_state(starting_compound_idx)
 
     def _patch_rt_change(state, new_min, new_max):
         rt_min = max(0.0, min(new_min, new_max))
         rt_max = max(rt_min, new_max)
         logger.debug(f"[_patch_rt_change] Called with new_min={new_min}, new_max={new_max} -> rt_min={rt_min}, rt_max={rt_max}")
-        new_state = _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4))
+        new_state = _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4), ms2_idx=0, ms2_idx_by_ce={})
         logger.debug(f"[_patch_rt_change] Returning new_state with edit_seq={new_state.get('edit_seq')}, rt_min={new_state.get('rt_min')}, rt_max={new_state.get('rt_max')}")
         if "cached_y_max" in state:
             new_state["cached_y_max"] = state["cached_y_max"]
@@ -185,12 +198,17 @@ def build_dash_app(
         first_blank_idx = blank_positions[0]
         return manual_curation_df.index.get_loc(first_blank_idx)
 
-    starting_compound_idx = _find_starting_compound_idx()
-    if starting_compound_idx > 0:
-        logger.info(f"Resuming analysis at compound {starting_compound_idx+1}: "
-                   f"{manual_curation_df.iloc[starting_compound_idx]['compound_name']}")
+    use_starting_index_finder = False
+    if use_starting_index_finder is True:
+        starting_compound_idx = _find_starting_compound_idx()
+        if starting_compound_idx > 0:
+            logger.info(f"Resuming analysis at compound {starting_compound_idx+1}: "
+                    f"{manual_curation_df.iloc[starting_compound_idx]['compound_name']}")
+        else:
+            logger.info("Starting new analysis at compound 1")
     else:
-        logger.info("Starting new analysis at compound 1")
+        starting_compound_idx = 0
+        logger.info("Starting analysis at compound 1 (starting index finder disabled)")
 
     keyboard_listener = EventListener(
         id="keyboard",
@@ -260,7 +278,7 @@ def build_dash_app(
                                     dcc.RadioItems(
                                         id="ms2-radio",
                                         options=[{"label": f"[{analysis_gui_obj.notes['ms2_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["ms2_notes"]],
-                                        value="",
+                                        value=analysis_gui_obj.notes["ms2_notes"][0],
                                         labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
                                         inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
                                     ),
@@ -384,9 +402,12 @@ def build_dash_app(
                             ),
                             dbc.Row(
                                 [
-                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(html.Div(id="ms2-counter", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2-1  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(html.Div(id="ms2-counter-1", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2-1 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2-2  [>]", id="ms2-prev-2", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(html.Div(id="ms2-counter-2", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2-2 ▶  [/]", id="ms2-next-2", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
                                 ],
                                 className="my-2 align-items-center",
                                 style={"width": "100%"},
@@ -421,21 +442,23 @@ def build_dash_app(
             bounds.append((float(isomer_match.iloc[0]["rt_min"]), float(isomer_match.iloc[0]["rt_max"])))
         return sorted(bounds, key=lambda x: x[0])
 
+    def _sanitize_numeric_list(vals):
+        if vals is None:
+            return []
+        out = []
+        for v in vals:
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                out.append(np.nan)
+        return out
+
     def _get_ms2_scans(row, rt_min=None, rt_max=None):
         """Return dictionary of sorted, capped scans DataFrames grouped by collision energy.
 
         Returns a dict: {collision_energy: DataFrame} with top N hits from each collision energy.
-        Results are cached by (inchi_key, adduct, top_n_hits, rt_min, rt_max).
         """
         mz_rt_uid = row["mz_rt_uid"]
-        # Round RTs to 3 decimal places for the cache key to prevent memory bloat
-        rt_min_key = round(rt_min, 3) if rt_min is not None else None
-        rt_max_key = round(rt_max, 3) if rt_max is not None else None
-        key = (mz_rt_uid, int(top_n_hits), rt_min_key, rt_max_key)
-        
-        with cache_lock:
-            if key in ms2_scans_cache:
-                return ms2_scans_cache[key]
 
         ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
         if not ms2_sub.empty and rt_min is not None and rt_max is not None:
@@ -444,17 +467,218 @@ def build_dash_app(
         # Group by collision energy and get top N from each
         scans_by_energy = {}
         if ms2_sub.empty:
-            pass
+            return scans_by_energy
+        if "collision_energy" not in ms2_sub.columns:
+            logger.warning(
+                "MS2 subset for %s is missing 'collision_energy'. Available columns: %s",
+                mz_rt_uid,
+                list(ms2_sub.columns),
+            )
+            return scans_by_energy
+
+        def _score_hit_entry(hit):
+            if not isinstance(hit, dict):
+                return float("-inf")
+            try:
+                return float(hit.get("score", float("-inf")))
+            except (TypeError, ValueError):
+                return float("-inf")
+
+        def _normalize_and_best_score(raw_hits):
+            if not isinstance(raw_hits, list) or len(raw_hits) == 0:
+                return [], float("-inf")
+            sorted_hits = sorted(raw_hits, key=_score_hit_entry, reverse=True)
+            return sorted_hits, _score_hit_entry(sorted_hits[0])
+
         for ce, group in ms2_sub.groupby("collision_energy"):
-            scans_by_energy[ce] = group.sort_values("scan_rt").head(top_n_hits)
+            group_sorted = group.copy()
+            if "hits" in group_sorted.columns:
+                normalized_hits_and_scores = group_sorted["hits"].apply(_normalize_and_best_score)
+                group_sorted["hits"] = normalized_hits_and_scores.apply(lambda x: x[0])
+                group_sorted["_best_hit_score"] = normalized_hits_and_scores.apply(lambda x: x[1])
+                group_sorted = group_sorted.sort_values(["_best_hit_score", "scan_rt"], ascending=[False, True])
+                group_sorted = group_sorted.drop(columns=["_best_hit_score"])
+            else:
+                group_sorted = group_sorted.sort_values("scan_rt")
+
+            scans_by_energy[ce] = group_sorted.head(top_n_hits)
+        return scans_by_energy
+
+    def _get_ms2_scan_stats(row):
+        """Return per-scan MS2 extrema (m/z and intensity) cached by compound."""
+        mz_rt_uid = row["mz_rt_uid"]
+
         with cache_lock:
-            if key not in ms2_scans_cache:
-                ms2_scans_cache[key] = scans_by_energy
-        return ms2_scans_cache[key]
+            if mz_rt_uid in ms2_scan_stats_cache:
+                return ms2_scan_stats_cache[mz_rt_uid]
+
+        ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
+        if ms2_sub.empty:
+            empty_stats = pd.DataFrame(columns=["x_min", "x_max", "y_absmax"])
+            with cache_lock:
+                ms2_scan_stats_cache[mz_rt_uid] = empty_stats
+            return ms2_scan_stats_cache[mz_rt_uid]
+
+        x_mins = []
+        x_maxs = []
+        y_absmax_vals = []
+
+        for _, scan in ms2_sub.iterrows():
+            mz_values = []
+            max_abs_intensity = 0.0
+
+            hits = scan.get("hits", [])
+            if isinstance(hits, list) and hits:
+                for hit in hits:
+                    if not isinstance(hit, dict):
+                        continue
+
+                    q_aligned = hit.get("query_aligned", [[], []])
+                    r_aligned = hit.get("ref_aligned", [[], []])
+                    if not isinstance(q_aligned, (list, tuple)) or len(q_aligned) != 2:
+                        q_aligned = [[], []]
+                    if not isinstance(r_aligned, (list, tuple)) or len(r_aligned) != 2:
+                        r_aligned = [[], []]
+
+                    q_mz = _sanitize_numeric_list(q_aligned[0])
+                    q_int = _sanitize_numeric_list(q_aligned[1])
+                    r_mz = _sanitize_numeric_list(r_aligned[0])
+
+                    mz_values.extend([v for v in q_mz if np.isfinite(v)])
+                    mz_values.extend([v for v in r_mz if np.isfinite(v)])
+
+                    if q_int and np.any(np.isfinite(q_int)):
+                        max_abs_intensity = max(max_abs_intensity, float(np.nanmax(np.abs(q_int))))
+            else:
+                mz = _sanitize_numeric_list(scan.get("frag_mzs", []))
+                ints = _sanitize_numeric_list(scan.get("frag_ints", []))
+                mz_values.extend([v for v in mz if np.isfinite(v)])
+                if ints and np.any(np.isfinite(ints)):
+                    max_abs_intensity = max(max_abs_intensity, float(np.nanmax(np.abs(ints))))
+
+            if mz_values:
+                x_mins.append(float(np.nanmin(mz_values)))
+                x_maxs.append(float(np.nanmax(mz_values)))
+            else:
+                x_mins.append(np.nan)
+                x_maxs.append(np.nan)
+
+            if np.isfinite(max_abs_intensity) and max_abs_intensity > 0:
+                y_absmax_vals.append(float(max_abs_intensity))
+            else:
+                y_absmax_vals.append(np.nan)
+
+        stats_df = pd.DataFrame(
+            {
+                "x_min": x_mins,
+                "x_max": x_maxs,
+                "y_absmax": y_absmax_vals,
+            },
+            index=ms2_sub.index,
+        )
+
+        with cache_lock:
+            if mz_rt_uid not in ms2_scan_stats_cache:
+                ms2_scan_stats_cache[mz_rt_uid] = stats_df
+        return ms2_scan_stats_cache[mz_rt_uid]
+
+    def _get_ms2_axis_ranges(row, rt_min=None, rt_max=None):
+        """Return stable x/y axis ranges per collision energy for the current RT window."""
+        scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
+        scan_stats = _get_ms2_scan_stats(row)
+        axis_ranges = {}
+
+        for ce, scans in scans_by_energy.items():
+            if scans.empty or scan_stats.empty:
+                axis_ranges[ce] = {"x": [0.0, 1.0], "y": [-1.08, 1.08]}
+                continue
+
+            stats_sub = scan_stats.reindex(scans.index)
+            x_min_vals = stats_sub["x_min"].to_numpy(dtype=float)
+            x_max_vals = stats_sub["x_max"].to_numpy(dtype=float)
+            y_abs_vals = stats_sub["y_absmax"].to_numpy(dtype=float)
+
+            finite_x_min = x_min_vals[np.isfinite(x_min_vals)]
+            finite_x_max = x_max_vals[np.isfinite(x_max_vals)]
+
+            if finite_x_min.size > 0 and finite_x_max.size > 0:
+                x_min = float(np.nanmin(finite_x_min))
+                x_max = float(np.nanmax(finite_x_max))
+                x_span = max(x_max - x_min, 1.0)
+                x_pad = x_span * 0.02
+                x_range = [x_min - x_pad, x_max + x_pad]
+            else:
+                x_range = [0.0, 1.0]
+
+            finite_y_abs = y_abs_vals[np.isfinite(y_abs_vals)]
+            max_abs_intensity = float(np.nanmax(finite_y_abs)) if finite_y_abs.size > 0 else 0.0
+            if max_abs_intensity <= 0:
+                max_abs_intensity = 1.0
+            y_pad = max_abs_intensity * 0.08
+            y_range = [-(max_abs_intensity + y_pad), max_abs_intensity + y_pad]
+            axis_ranges[ce] = {"x": x_range, "y": y_range}
+
+        return axis_ranges
 
     def _count_ms2_scans(row, rt_min=None, rt_max=None):
         scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
         return max((len(df) for df in scans_by_energy.values()), default=0)
+
+    def _ce_state_key(ce):
+        try:
+            return f"{float(ce):.6f}"
+        except Exception:
+            return str(ce)
+
+    def _format_collision_energy_label(ce_float):
+        if abs(ce_float - 23.333) < 0.01:
+            return "CE102040"
+        if abs(ce_float - 43.333) < 0.01:
+            return "CE205060"
+        return f"CE{int(round(ce_float))}"
+
+    def _get_ms2_idx_for_ce(state, ce):
+        idx_by_ce = state.get("ms2_idx_by_ce") if isinstance(state, dict) else None
+        fallback = state.get("ms2_idx", 0) if isinstance(state, dict) else 0
+        try:
+            fallback = int(fallback)
+        except Exception:
+            fallback = 0
+        if not isinstance(idx_by_ce, dict):
+            return max(0, fallback)
+        raw_val = idx_by_ce.get(_ce_state_key(ce), fallback)
+        try:
+            return max(0, int(raw_val))
+        except Exception:
+            return max(0, fallback)
+
+    def _move_ms2_idx_for_ce_position(state, ce_position, delta):
+        row = _compound_row(state["compound_idx"])
+        scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
+        collision_energies = sorted(scans_by_energy.keys())
+        #logger.info(f"_move_ms2_idx_for_ce_position: ce_position={ce_position}, delta={delta}, found {len(collision_energies)} CEs")
+        if ce_position < 0 or ce_position >= len(collision_energies):
+            logger.warning(f"_move_ms2_idx_for_ce_position: ce_position {ce_position} out of range (0-{len(collision_energies)-1})")
+            raise dash.exceptions.PreventUpdate
+        ce = collision_energies[ce_position]
+        scans = scans_by_energy.get(ce)
+        n_scans = len(scans) if scans is not None else 0
+        if n_scans <= 0:
+            logger.warning(f"_move_ms2_idx_for_ce_position: No scans for CE={ce}")
+            raise dash.exceptions.PreventUpdate
+        current_idx = _get_ms2_idx_for_ce(state, ce)
+        new_idx = max(0, min(current_idx + delta, n_scans - 1))
+        #logger.info(f"_move_ms2_idx_for_ce_position: CE={ce}, current_idx={current_idx}, new_idx={new_idx}, n_scans={n_scans}")
+        if new_idx == current_idx:
+            logger.warning(f"_move_ms2_idx_for_ce_position: new_idx same as current_idx ({current_idx}), no update")
+            raise dash.exceptions.PreventUpdate
+        idx_by_ce = dict(state.get("ms2_idx_by_ce") or {})
+        idx_by_ce[_ce_state_key(ce)] = int(new_idx)
+        changes = {"ms2_idx_by_ce": idx_by_ce}
+        if ce_position == 0:
+            changes["ms2_idx"] = int(new_idx)
+        #logger.info(f"_move_ms2_idx_for_ce_position: Returning updated state with changes={changes}")
+        return _patch_with_seq(state, **changes)
 
     def _compute_window_ms1_metrics(state):
         row = _compound_row(state["compound_idx"])
@@ -549,6 +773,20 @@ def build_dash_app(
             latest_flushed_seq_by_session[flush_key] = seq
 
         row = _compound_row(state["compound_idx"])
+
+        # Optimistically reflect user-edited RT bounds in memory immediately.
+        # Async DB writes can finish after navigation, but the UI should still
+        # show the latest local edits when loading related compounds/isomers.
+        try:
+            idx = state["compound_idx"]
+            df_idx = manual_curation_df.index[idx]
+            with flush_lock:
+                if "rt_min" in manual_curation_df.columns:
+                    manual_curation_df.at[df_idx, "rt_min"] = state["rt_min"]
+                if "rt_max" in manual_curation_df.columns:
+                    manual_curation_df.at[df_idx, "rt_max"] = state["rt_max"]
+        except Exception as exc:
+            logger.warning(f"Optimistic in-memory RT update failed: {exc}")
         
         # Instead of blocking UI, compute metrics and write DB in background
         def _async_flush_worker():
@@ -562,6 +800,7 @@ def build_dash_app(
                     rt_max = float(state["rt_max"])
                     if abs(rt_min - float(initial_rt_min)) < tol and abs(rt_max - float(initial_rt_max)) < tol:
                         use_precomputed = True
+
                 if use_precomputed:
                     updates = {
                         "mz": row.get("mz", None),
@@ -606,22 +845,34 @@ def build_dash_app(
                             "analyst_notes": state.get("analyst_notes", ""),
                             "identification_notes": state.get("id_notes", ""),
                         }
-                # DB write
-                dbi.write_gui_updates_to_db(
-                    analysis_gui_obj.paths["project_db_path"],
-                    row["mz_rt_uid"],
-                    int(row["rt_alignment_number"]),
-                    int(row["analysis_number"]),
-                    updates
-                )
-                
-                # Update in-memory DataFrame
-                idx = state["compound_idx"]
-                df_idx = manual_curation_df.index[idx]
+
+                # DB write — serialize to prevent DuckDB CHECKPOINT race conditions.
+                # Re-check sequence inside the lock so a faster thread that already
+                # wrote a newer edit cannot be overwritten by this stale worker.
+                with db_write_lock:
+                    with flush_lock:
+                        current_latest = latest_flushed_seq_by_session.get(flush_key, -1)
+                    if seq < current_latest:
+                        #logger.info(
+                        #    f"Skipping stale flush for compound {state['compound_idx']} "
+                        #    f"seq={seq} (current latest={current_latest})"
+                        #)
+                        return
+                    dbi.write_gui_updates_to_db(
+                        analysis_gui_obj.paths["project_db_path"],
+                        row["mz_rt_uid"],
+                        int(row["rt_alignment_number"]),
+                        int(row["analysis_number"]),
+                        updates,
+                    )
+
+                # Update in-memory DataFrame to reflect what was written.
+                df_idx = manual_curation_df.index[state["compound_idx"]]
                 with flush_lock:
                     for col, val in updates.items():
                         if col in manual_curation_df.columns:
                             manual_curation_df.at[df_idx, col] = val
+
             except Exception as e:
                 logger.error(f"Async flush worker failed: {e}")
                 traceback.print_exc()
@@ -725,7 +976,6 @@ def build_dash_app(
 
         # Cache isomer metadata, draw rectangles separately
         compound_idx = state["compound_idx"]
-        print(row.get("isomers"))
         if compound_idx in isomer_string_cache:
             resolved_isomers = isomer_string_cache[compound_idx]
         else:
@@ -747,7 +997,7 @@ def build_dash_app(
                         )
                         isomer_match = manual_curation_df[mask]
                         if len(isomer_match) > 1:
-                            raise ValueError(f"Multiple isomer matches for {iso_name} {iso_adduct}")
+                            logger.warning(f"Multiple isomer matches for {iso_name} {iso_adduct}")
                         if isomer_match.empty:
                             continue
                         if "remove" in isomer_match.iloc[0]["ms1_notes"].lower():
@@ -758,8 +1008,6 @@ def build_dash_app(
                             "display_idx": iso_pos_idx + 1,  # 1-based for display
                             "name": iso_name,
                             "adduct": iso_adduct,
-                            "rt_min": float(isomer_match.iloc[0]["rt_min"]),
-                            "rt_max": float(isomer_match.iloc[0]["rt_max"]),
                             "rt": iso_rt,
                             "mz": iso_mz,
                             "df_idx": iso_df_idx,
@@ -778,15 +1026,32 @@ def build_dash_app(
             current_rt_min = state["rt_min"]
             current_rt_max = state["rt_max"]
             for i, iso in enumerate(resolved_isomers):
-                overlaps = _window_overlaps(iso["rt_min"], iso["rt_max"], current_rt_min, current_rt_max)
+                # Read RT bounds live from manual_curation_df so edits made to an
+                # isomer are reflected immediately, even when metadata is cached.
+                try:
+                    iso_row = manual_curation_df.loc[iso["df_idx"]]
+                    iso_rt_min = float(iso_row["rt_min"])
+                    iso_rt_max = float(iso_row["rt_max"])
+                except Exception:
+                    continue
+
+                overlaps = _window_overlaps(iso_rt_min, iso_rt_max, current_rt_min, current_rt_max)
                 if not overlaps:
                     for j, other in enumerate(resolved_isomers):
-                        if i != j and _window_overlaps(iso["rt_min"], iso["rt_max"], other["rt_min"], other["rt_max"]):
+                        if i == j:
+                            continue
+                        try:
+                            other_row = manual_curation_df.loc[other["df_idx"]]
+                            other_rt_min = float(other_row["rt_min"])
+                            other_rt_max = float(other_row["rt_max"])
+                        except Exception:
+                            continue
+                        if _window_overlaps(iso_rt_min, iso_rt_max, other_rt_min, other_rt_max):
                             overlaps = True
                             break
                 fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"
                 fig.add_trace(go.Scatter(
-                    x=[iso["rt_min"], iso["rt_min"], iso["rt_max"], iso["rt_max"], iso["rt_min"]],
+                    x=[iso_rt_min, iso_rt_min, iso_rt_max, iso_rt_max, iso_rt_min],
                     y=[y_bottom, y_upper_bound, y_upper_bound, y_bottom, y_bottom],
                     mode="lines",
                     fill="toself",
@@ -952,7 +1217,7 @@ def build_dash_app(
             margin=dict(l=50, r=20, t=125, b=40), 
             dragmode="zoom",
             plot_bgcolor="white",
-            uirevision=f"ms1-{state['compound_idx']}-{yaxis_scale}",
+            #uirevision=f"ms1-{state['compound_idx']}-{yaxis_scale}",
             xaxis=dict(
                 rangeslider=dict(
                     visible=True,
@@ -987,15 +1252,29 @@ def build_dash_app(
         if mz_vals is None or intensities is None:
             return
 
+        def _as_float_or_nan(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return np.nan
+
         grouped = {}
         # Use provided colors if available, otherwise everything gets the default_color
         if colors is not None and len(colors) == len(mz_vals):
             for mz, intensity, color in zip(mz_vals, intensities, colors):
+                mz = _as_float_or_nan(mz)
+                intensity = _as_float_or_nan(intensity)
                 if np.isnan(mz): continue # Skip NaNs in aligned data
                 grouped.setdefault(color or default_color, []).append((mz, intensity))
         else:
             # Filter out NaNs for raw spectra plotting
-            pairs = [(mz, i) for mz, i in zip(mz_vals, intensities) if not np.isnan(mz)]
+            pairs = []
+            for mz, i in zip(mz_vals, intensities):
+                mz = _as_float_or_nan(mz)
+                i = _as_float_or_nan(i)
+                if np.isnan(mz):
+                    continue
+                pairs.append((mz, i))
             grouped[default_color] = pairs
 
         for color, pairs in grouped.items():
@@ -1017,10 +1296,15 @@ def build_dash_app(
             )
 
     def _make_ms2_figure(state):
-        row = _compound_row(state["compound_idx"])
+        compound_idx = state["compound_idx"]
+        row = _compound_row(compound_idx)
         rt_min, rt_max = state["rt_min"], state["rt_max"]
+        
+        # Debug logging to verify we're using the correct compound
+        #logger.info(f"_make_ms2_figure: compound_idx={compound_idx}, mz_rt_uid={row['mz_rt_uid']}, compound_name={row['compound_name']}")
 
         scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
+        #logger.info(f"_make_ms2_figure: Got {len(scans_by_energy)} collision energies with scans")
 
         if len(scans_by_energy) == 0:
             fig = go.Figure()
@@ -1031,16 +1315,11 @@ def build_dash_app(
                                xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False))
             return fig
 
-        def _format_ce(ce_float):
-            if abs(ce_float - 23.333) < 0.01: return "CE102040"
-            elif abs(ce_float - 43.333) < 0.01: return "CE205060"
-            else: return f"CE{int(round(ce_float))}"
+        axis_ranges_by_energy = _get_ms2_axis_ranges(row, rt_min, rt_max)
 
         collision_energies = sorted(scans_by_energy.keys())
         n_energies = len(collision_energies)
         fig = make_subplots(rows=1, cols=n_energies, horizontal_spacing=0.08)
-
-        ms2_idx = state["ms2_idx"] # Now represents the index within the 'hits' list
 
         for col_idx, ce in enumerate(collision_energies, start=1):
             scans = scans_by_energy[ce]
@@ -1050,11 +1329,17 @@ def build_dash_app(
                 fig.add_annotation(text="No scans", xref=xref, yref=yref, x=0.5, y=0.5, showarrow=False, row=1, col=col_idx)
                 continue
 
-            scan = scans.iloc[max(0, min(ms2_idx, len(scans) - 1))]
+            ce_ms2_idx = _get_ms2_idx_for_ce(state, ce)
+            actual_idx = max(0, min(ce_ms2_idx, len(scans) - 1))
+            scan = scans.iloc[actual_idx]
+            
+            # Debug logging to verify correct scan selection
+            scan_rt = scan.get('scan_rt', 'N/A')
+            #logger.info(f"_make_ms2_figure: CE={ce}, showing scan {actual_idx+1}/{len(scans)}, scan_rt={scan_rt}")
             
             # --- DATA EXTRACTION FROM HITS LIST ---
             hits = scan.get('hits', [])
-            hit = hits[max(0, min(ms2_idx, len(hits) - 1))] if hits else None
+            hit = hits[0] if hits else None  # best hit of this scan (hits are pre-sorted by score)
             
             label_points = []
             scale = 1.0
@@ -1064,17 +1349,21 @@ def build_dash_app(
 
             if hit:
                 # Extract pre-aligned arrays from the hit dictionary
-                q_mz, q_int = hit['query_aligned']
-                r_mz, r_int = hit['ref_aligned']
+                q_mz_raw, q_int_raw = hit['query_aligned']
+                r_mz_raw, r_int_raw = hit['ref_aligned']
+                q_mz = _sanitize_numeric_list(q_mz_raw)
+                q_int = _sanitize_numeric_list(q_int_raw)
+                r_mz = _sanitize_numeric_list(r_mz_raw)
+                r_int = _sanitize_numeric_list(r_int_raw)
                 frag_colors = hit['fragment_colors']
                 
                 # Handle scaling for the mirror plot
-                q_max = np.nanmax(q_int) if q_int else 0
-                r_max = np.nanmax(r_int) if r_int else 0
+                q_max = np.nanmax(q_int) if q_int and np.any(np.isfinite(q_int)) else 0
+                r_max = np.nanmax(r_int) if r_int and np.any(np.isfinite(r_int)) else 0
                 scale = (q_max / r_max) if r_max > 0 else 1.0
                 
                 # Scale the reference intensities and invert for mirror
-                ref_y = [-float(i) * scale for i in r_int]
+                ref_y = [(-i * scale) if np.isfinite(i) else np.nan for i in r_int]
 
                 # Plot Query (Top)
                 _add_ms2_stick_traces(fig, q_mz, q_int, "Query", 1, col_idx, 
@@ -1082,7 +1371,7 @@ def build_dash_app(
 
                 # Plot Reference (Bottom)
                 _add_ms2_stick_traces(fig, r_mz, ref_y, "Reference", 1, col_idx, 
-                                     colors=frag_colors, default_color="blue", line_width_px=stick_width_px)
+                                     colors=frag_colors, default_color="red", line_width_px=stick_width_px)
 
                 # # --- DRAW CONNECTING LINES ---
                 # match_lines_x, match_lines_y = [], []
@@ -1104,8 +1393,8 @@ def build_dash_app(
                 label_points.extend(zip(r_mz, ref_y))
             else:
                 # Fallback to raw spectrum if no hit is selected/available
-                mz = scan.get('frag_mzs', [])
-                ints = scan.get('frag_ints', [])
+                mz = _sanitize_numeric_list(scan.get('frag_mzs', []))
+                ints = _sanitize_numeric_list(scan.get('frag_ints', []))
                 _add_ms2_stick_traces(fig, mz, ints, "MS2", 1, col_idx, default_color="red", line_width_px=stick_width_px)
                 label_points.extend(zip(mz, ints))
 
@@ -1131,18 +1420,43 @@ def build_dash_app(
                                    yanchor="bottom" if y_val >= 0 else "top", font=dict(size=12), xref=xref_coord, yref=yref_coord)
                 prev_mz = mz_val
 
-            fig.update_xaxes(title_text=f"m/z ({_format_ce(ce)})", showgrid=False, zeroline=False, title_font=dict(size=18), tickfont=dict(size=15), row=1, col=col_idx)
-            fig.update_yaxes(title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "", showgrid=False, zeroline=False,
-                             range=[y_min - y_pad, y_max + y_pad], title_font=dict(size=18), tickfont=dict(size=15), row=1, col=col_idx)
-
+            fig.update_xaxes(
+                title_text=f"m/z ({_format_collision_energy_label(ce)})",
+                showgrid=False,
+                zeroline=False,
+                title_font=dict(size=18),
+                tickfont=dict(size=15),
+                row=1,
+                col=col_idx,
+            )
+            axis_ranges = axis_ranges_by_energy.get(ce, {})
+            if axis_ranges.get("x"):
+                fig.update_xaxes(
+                    range=axis_ranges["x"],
+                    autorange=False,
+                    row=1,
+                    col=col_idx,
+                )
+            fig.update_yaxes(
+                title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "",
+                showgrid=False,
+                zeroline=False,
+                range=axis_ranges.get("y", [y_min - y_pad, y_max + y_pad]),
+                title_font=dict(size=18),
+                tickfont=dict(size=15),
+                autorange=False,
+                row=1,
+                col=col_idx,
+            )
             # Updated Scan Info using Hit metadata
             fname = "_".join(os.path.basename(scan.get("filename", "")).split(".")[0].split("_")[11:])
             if hit:
                 scan_info = (
                     f"<span style='font-size:1.2em'>"
+                    #f"<b>Scan {actual_idx + 1}/{len(scans)}</b>  |  "
                     f"<b>CoS.: {hit.get('score', 0):.4f}</b>  |  "
                     f"Ions: {num_matching_fragments}q/{num_ref_fragments}r  |  "
-                    f"RT: {scan.get('rt', 0):.4f} min | "
+                    f"RT: {scan.get('scan_rt', 0):.4f} min | "
                     f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
                     f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
                     f"ppm Δ: {hit.get('ppm_error', 0):.2f}"
@@ -1150,17 +1464,68 @@ def build_dash_app(
                     f"{hit.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
                 )
             else:
-                scan_info = f"No Hit Selected | {fname}<br><br>"
+                scan_info = f"<b>Scan {actual_idx + 1}/{len(scans)}</b>  |  No Hit Selected | {fname}<br><br>"
 
             xref_str, yref_str = ("x domain" if col_idx == 1 else f"x{col_idx} domain"), ("y domain" if col_idx == 1 else f"y{col_idx} domain")
             fig.add_annotation(text=scan_info, xref=xref_str, yref=yref_str, x=0.5, y=1.02, showarrow=False, font=dict(size=14), xanchor="center", yanchor="bottom")
-
-        fig.update_layout(barmode="overlay", hovermode="closest", margin=dict(l=50, r=20, t=120, b=40), plot_bgcolor="white", height=550, showlegend=False)
+        
+        fig.update_layout(
+            barmode="overlay",
+            hovermode="closest",
+            margin=dict(l=50, r=20, t=120, b=40),
+            plot_bgcolor="white",
+            showlegend=False,
+        )
+        
+        #logger.info(f"_make_ms2_figure: Completed for compound {compound_idx} ({row['compound_name']})")
         return fig
 
     logger.debug("App helpers defined successfully")
 
     # all app callbacks that fire when GUI is interacted with
+    def _flush_and_load_compound(old_state, new_idx, delta=None):
+        """Single canonical path for all compound navigation.
+
+        Flushes the current compound to the DB (async), then builds and returns
+        the initial state for new_idx.  delta is only used for the force-eval
+        warning check; pass None when navigating via dropdown (no direction).
+        """
+        old_state = dict(old_state)
+    
+        flush_error = None
+        ms2_warning = None
+        ms1_warning = None
+
+        if delta is not None:
+            ms2_warning, ms1_warning = _get_force_eval_and_warnings(old_state, delta)
+
+        try:
+            old_state = _flush_to_db(old_state)
+        except Exception as exc:
+            traceback.print_exc()
+            logger.error(f"_flush_and_load_compound: _flush_to_db failed: {exc}")
+            flush_error = f"Save failed: {type(exc).__name__}: {exc}"
+
+        new_state = _load_state(
+            new_idx,
+            session_id=old_state.get("session_id"),
+            edit_seq=old_state.get("edit_seq", 0),
+        )
+        new_state["last_saved"] = old_state.get("last_saved")
+        new_state["flush_error"] = flush_error
+
+        if ms2_warning:
+            new_state["ms2_warning"] = ms2_warning
+        else:
+            new_state.pop("ms2_warning", None)
+
+        if ms1_warning:
+            new_state["ms1_warning"] = ms1_warning
+        else:
+            new_state.pop("ms1_warning", None)
+
+        return new_state
+
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
         Input("compound-dd", "value"),
@@ -1168,46 +1533,17 @@ def build_dash_app(
         prevent_initial_call=True,
     )
     def init_store(compound_idx, old_state):
-        """Handles compound changes initiated directly from the dropdown widget.
-
-        Button and keyboard navigation now flush+load atomically inside their own
-        callbacks (navigate_compound / handle_keyboard), so by the time compound-dd
-        is updated by those callbacks, session-store already holds the new compound's
-        state.  The guard below (compound_idx == old_state.compound_idx) detects
-        that case and short-circuits to prevent a double-flush.
-
-        This callback only does real work when the analyst picks a compound directly
-        from the dropdown.
-        """
         if compound_idx is None:
             raise dash.exceptions.PreventUpdate
 
         compound_idx = int(compound_idx)
+        old_state = _ensure_valid_state(old_state)
 
-        if old_state is not None and int(old_state.get("compound_idx", -1)) == compound_idx:
+        # Direct dropdown pick — guard against spurious re-fires.
+        if int(old_state.get("compound_idx", -1)) == compound_idx:
             raise dash.exceptions.PreventUpdate
 
-        flush_error = None
-        if old_state is not None:
-            try:
-                old_state = _flush_to_db(old_state)
-            except Exception as exc:
-                traceback.print_exc()
-                logger.error(f"init_store: _flush_to_db failed: {exc}")
-                flush_error = f"Save failed: {type(exc).__name__}: {exc}"
-
-        # Only clear if cache gets too large (> 1000 entries)
-        if len(ms2_scans_cache) > 1000:
-            ms2_scans_cache.clear()
-        
-        new_state = _load_state(
-            compound_idx,
-            session_id=(old_state or {}).get("session_id"),
-            edit_seq=(old_state or {}).get("edit_seq", 0),
-        )
-        new_state["last_saved"] = (old_state or {}).get("last_saved")
-        new_state["flush_error"] = flush_error
-        return new_state
+        return _flush_and_load_compound(old_state, compound_idx, delta=None)
 
     def _get_force_eval_and_warnings(state, delta):
         """Return warning messages for required-evaluation navigation logic."""
@@ -1241,72 +1577,52 @@ def build_dash_app(
         prevent_initial_call=True,
     )
     def navigate_compound(prev, nxt, state):
-        """Atomic navigation: flush current compound to DB, then load the next.
-
-        Writing both session-store and compound-dd in a single callback output
-        eliminates the 2-hop race (button → compound-dd → init_store) where an
-        in-flight Patch from a UI-change callback could be flushed with stale data.
-        init_store guards against re-firing via its compound_idx == old_idx check.
-        """
+        """Atomic navigation via Prev/Next buttons."""
         trigger = ctx.triggered_id
-        if trigger not in ("prev-btn", "next-btn") or state is None:
+        if trigger not in ("prev-btn", "next-btn"):
             raise dash.exceptions.PreventUpdate
 
+        state = _ensure_valid_state(state)
         delta = -1 if trigger == "prev-btn" else 1
         new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
+
         if new_idx == int(state["compound_idx"]):
             raise dash.exceptions.PreventUpdate
 
-        flush_error = None
-        ms2_warning, ms1_warning = _get_force_eval_and_warnings(state, delta)
-
-        try:
-            state = _flush_to_db(state)
-        except Exception as exc:
-            traceback.print_exc()
-            logger.error(f"navigate_compound: _flush_to_db failed: {exc}")
-            flush_error = f"Save failed: {type(exc).__name__}: {exc}"
-
-        # Only clear if cache gets too large (> 1000 entries)
-        if len(ms2_scans_cache) > 1000:
-            ms2_scans_cache.clear()
-        
-        new_state = _load_state(
-            new_idx,
-            session_id=state.get("session_id"),
-            edit_seq=state.get("edit_seq", 0),
-        )
-        new_state["last_saved"] = state.get("last_saved")
-        new_state["flush_error"] = flush_error
-        new_state["_nav_programmatic"] = True
-        if ms2_warning:
-            new_state["ms2_warning"] = ms2_warning
-        else:
-            new_state.pop("ms2_warning", None)
-        if ms1_warning:
-            new_state["ms1_warning"] = ms1_warning
-        else:
-            new_state.pop("ms1_warning", None)
+        new_state = _flush_and_load_compound(state, new_idx, delta=delta)
         return new_state, new_idx
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
-        Input("ms2-prev", "n_clicks"),
-        Input("ms2-next", "n_clicks"),
+        Input("ms2-prev-1", "n_clicks"),
+        Input("ms2-next-1", "n_clicks"),
+        Input("ms2-prev-2", "n_clicks"),
+        Input("ms2-next-2", "n_clicks"),
         State("session-store", "data"),
         prevent_initial_call=True,
     )
-    def navigate_ms2(prev, nxt, state):
+    def navigate_ms2(prev1, nxt1, prev2, nxt2, state):
         if state is None:
             raise dash.exceptions.PreventUpdate
         trigger = ctx.triggered_id
-        row = _compound_row(state["compound_idx"])
-        n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
-        if n_scans == 0:
-            raise dash.exceptions.PreventUpdate
-        delta = -1 if trigger == "ms2-prev" else 1
-        new_idx = max(0, min(state["ms2_idx"] + delta, n_scans - 1))
-        return _patch_with_seq(state, ms2_idx=new_idx)
+        #logger.info(f"navigate_ms2 called: trigger={trigger}, current ms2_idx={state.get('ms2_idx', 0)}")
+        if trigger == "ms2-prev-1":
+            new_state = _move_ms2_idx_for_ce_position(state, ce_position=0, delta=-1)
+            #logger.info(f"navigate_ms2: MS2-1 prev -> new ms2_idx={new_state.get('ms2_idx', 0)}")
+            return new_state
+        if trigger == "ms2-next-1":
+            new_state = _move_ms2_idx_for_ce_position(state, ce_position=0, delta=1)
+            #logger.info(f"navigate_ms2: MS2-1 next -> new ms2_idx={new_state.get('ms2_idx', 0)}")
+            return new_state
+        if trigger == "ms2-prev-2":
+            new_state = _move_ms2_idx_for_ce_position(state, ce_position=1, delta=-1)
+            #logger.info(f"navigate_ms2: MS2-2 prev -> new ms2_idx={new_state.get('ms2_idx', 0)}")
+            return new_state
+        if trigger == "ms2-next-2":
+            new_state = _move_ms2_idx_for_ce_position(state, ce_position=1, delta=1)
+            #logger.info(f"navigate_ms2: MS2-2 next -> new ms2_idx={new_state.get('ms2_idx', 0)}")
+            return new_state
+        raise dash.exceptions.PreventUpdate
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -1315,13 +1631,14 @@ def build_dash_app(
         prevent_initial_call=True,
     )
     def accept_suggestions(_, state):
+        state = _ensure_valid_state(state)
         row = _compound_row(state["compound_idx"])
         if pd.notnull(row.get("suggested_rt_min")):
             return _patch_rt_change(
                 state,
                 float(row["suggested_rt_min"]),
                 float(row["suggested_rt_max"]),
-            ), dash.no_update
+            )
         raise dash.exceptions.PreventUpdate
 
     @app.callback(
@@ -1331,8 +1648,7 @@ def build_dash_app(
         prevent_initial_call=True,
     )
     def snap_to_isomer(_, state):
-        if state is None:
-            raise dash.exceptions.PreventUpdate
+        state = _ensure_valid_state(state)
         row = _compound_row(state["compound_idx"])
         bounds = _get_sorted_isomer_rt_bounds(row)
         if not bounds:
@@ -1403,6 +1719,7 @@ def build_dash_app(
         
         rt_min_shape_idx = 0
         rt_max_shape_idx = 1
+        assert rt_min_shape_idx == 0 and rt_max_shape_idx == 1, "Shape order changed"
         
         new_min, new_max = state["rt_min"], state["rt_max"]
         updated = False
@@ -1476,17 +1793,18 @@ def build_dash_app(
     def handle_keyboard(n_events, event, state):
         if not event or state is None:
             raise dash.exceptions.PreventUpdate
+
         tag = (event.get("target.tagName") or "").upper()
         key = event.get("key", "")
         if not key:
             raise dash.exceptions.PreventUpdate
 
-
         ALL_HOTKEYS = (
             set(analysis_gui_obj.notes["ms2_key_to_label"])
             | set(analysis_gui_obj.notes["ms1_key_to_label"])
             | set(analysis_gui_obj.notes["other_key_to_label"])
-            | {"a", "s", "d", "f", "j", "k", "l", ";", "n", "m", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
+            | {"a", "s", "d", "f", "j", "k", "l", ";", ">", "/", "n", "m",
+            "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
         )
 
         if key not in ALL_HOTKEYS:
@@ -1501,11 +1819,15 @@ def build_dash_app(
             raise
         except Exception as exc:
             traceback.print_exc()
-            logger.error(f"handle_keyboard error (key={key}, compound={state.get('compound_idx')}, tag={tag}): {exc}")
+            logger.error(
+                f"handle_keyboard error (key={key}, compound={state.get('compound_idx')}, tag={tag}): {exc}"
+            )
             raise dash.exceptions.PreventUpdate
 
-    def _handle_keyboard_inner(event, state, key):  # noqa: ARG001
+    def _handle_keyboard_inner(event, state, key):
         rt_min, rt_max = state["rt_min"], state["rt_max"]
+
+        # --- RT nudge keys ---
         changed = False
         if key == "a":
             rt_min = round(rt_min - 0.05, 4); changed = True
@@ -1517,23 +1839,20 @@ def build_dash_app(
             rt_max = round(rt_max + 0.05, 4); changed = True
 
         if changed:
-            logger.debug(f"[_handle_keyboard_inner] RT nudge key={key}, new rt_min={rt_min}, new rt_max={rt_max}")
+            logger.debug(f"[_handle_keyboard_inner] RT nudge key={key}, rt_min={rt_min}, rt_max={rt_max}")
             return _patch_rt_change(state, rt_min, rt_max), dash.no_update
 
+        # --- MS2 navigation keys ---
         if key in ("l", "ArrowUp"):
-            row = _compound_row(state["compound_idx"])
-            n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
-            if n_scans == 0:
-                raise dash.exceptions.PreventUpdate
-            return _patch_with_seq(state, ms2_idx=max(state["ms2_idx"] - 1, 0)), dash.no_update
-
+            return _move_ms2_idx_for_ce_position(state, ce_position=0, delta=-1), dash.no_update
         if key in (";", "ArrowDown"):
-            row = _compound_row(state["compound_idx"])
-            n_scans = _count_ms2_scans(row, state["rt_min"], state["rt_max"])
-            if n_scans == 0:
-                raise dash.exceptions.PreventUpdate
-            return _patch_with_seq(state, ms2_idx=min(state["ms2_idx"] + 1, n_scans - 1)), dash.no_update
+            return _move_ms2_idx_for_ce_position(state, ce_position=0, delta=1), dash.no_update
+        if key == ">":
+            return _move_ms2_idx_for_ce_position(state, ce_position=1, delta=-1), dash.no_update
+        if key == "/":
+            return _move_ms2_idx_for_ce_position(state, ce_position=1, delta=1), dash.no_update
 
+        # --- Accept suggestions ---
         if key == "n":
             row = _compound_row(state["compound_idx"])
             if pd.notnull(row.get("suggested_rt_min")):
@@ -1544,6 +1863,7 @@ def build_dash_app(
                 ), dash.no_update
             raise dash.exceptions.PreventUpdate
 
+        # --- Snap to isomer ---
         if key == "m":
             row = _compound_row(state["compound_idx"])
             bounds = _get_sorted_isomer_rt_bounds(row)
@@ -1555,44 +1875,22 @@ def build_dash_app(
             new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
             return new_state, dash.no_update
 
+        # --- Compound navigation ---
         if key in ("j", "k", "ArrowLeft", "ArrowRight"):
-            if key == "k" or key == "ArrowRight":
-                delta = 1
-            elif key == "j" or key == "ArrowLeft":
-                delta = -1
+            delta = 1 if key in ("k", "ArrowRight") else -1
             new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
             if new_idx == int(state["compound_idx"]):
                 raise dash.exceptions.PreventUpdate
-            flush_error = None
-            ms2_warning, ms1_warning = _get_force_eval_and_warnings(state, delta)
-            try:
-                state = _flush_to_db(state)
-            except Exception as exc:
-                traceback.print_exc()
-                logger.error(f"handle_keyboard navigation _flush_to_db failed: {exc}")
-                flush_error = f"Save failed: {type(exc).__name__}: {exc}"
-            # Only clear if cache gets too large (> 1000 entries)
-            if len(ms2_scans_cache) > 1000:
-                ms2_scans_cache.clear()
-            
-            new_state = _load_state(
-                new_idx,
-                session_id=state.get("session_id"),
-                edit_seq=state.get("edit_seq", 0),
-            )
-            new_state["last_saved"] = state.get("last_saved")
-            new_state["flush_error"] = flush_error
-            new_state["_nav_programmatic"] = True
-            if ms2_warning:
-                new_state["ms2_warning"] = ms2_warning
-            if ms1_warning:
-                new_state["ms1_warning"] = ms1_warning
+            new_state = _flush_and_load_compound(state, new_idx, delta=delta)
             return new_state, new_idx
 
+    # --- Note hotkeys ---
         if key in analysis_gui_obj.notes["ms2_key_to_label"]:
             return _patch_with_seq(state, ms2_note=analysis_gui_obj.notes["ms2_key_to_label"][key]), dash.no_update
+
         if key in analysis_gui_obj.notes["ms1_key_to_label"]:
             return _patch_with_seq(state, ms1_note=analysis_gui_obj.notes["ms1_key_to_label"][key]), dash.no_update
+
         if key in analysis_gui_obj.notes["other_key_to_label"]:
             current = state.get("other_note")
             if not isinstance(current, list):
@@ -1615,98 +1913,36 @@ def build_dash_app(
         prevent_initial_call=False,
     )
     def update_figures(state, yaxis_scale):
-        if state is None:
-            raise dash.exceptions.PreventUpdate
+        state = _ensure_valid_state(state)
         
         import time
         update_start = time.time()
         
-        # Cache key includes only fields that affect DATA (not RT lines which are fast to update)
+        # Debug logging to track what's being rendered
         compound_idx = state.get("compound_idx")
-        rt_min = state.get("rt_min", 0)
-        rt_max = state.get("rt_max", 0)
         ms2_idx = state.get("ms2_idx", 0)
-        highlighted_files = tuple(sorted(state.get("highlighted_files") or []))
-        
-        # For MS1: INCLUDE RT bounds in cache key so figure is regenerated when window changes
-        rt_min_rounded = round(float(rt_min) * 100) / 100  # 0.01 min resolution
-        rt_max_rounded = round(float(rt_max) * 100) / 100
-
-        ms1_cache_key = (compound_idx, yaxis_scale, highlighted_files, rt_min_rounded, rt_max_rounded)
-        ms2_cache_key = (compound_idx, rt_min_rounded, rt_max_rounded, ms2_idx)
-        
-        # Debug logging to identify cache misses
-        logger.debug(f"Cache keys - MS1: {ms1_cache_key}, MS2: {ms2_cache_key}")
-        
-        with figure_cache_lock:
-            ms1_cached = ms1_cache_key in figure_cache
-            ms2_cached = ms2_cache_key in figure_cache
-            
-            if ms1_cached and ms2_cached:
-                cached_ms1 = figure_cache[ms1_cache_key]
-                cached_ms2 = figure_cache[ms2_cache_key]
-                cache_time = time.time() - update_start
-                logger.debug(f"Figure cache FULL HIT for compound {compound_idx} ({cache_time:.3f}s)")
-                # Return cached figures with current banner state
-                flush_err = state.get("flush_error")
-                ms2_warning = state.get("ms2_warning")
-                ms1_warning = state.get("ms1_warning")
-                banners = []
-                if flush_err:
-                    banners.append(html.Div(
-                        f"⚠ {flush_err}",
-                        style={"color": "red", "fontSize": "14px", "fontWeight": "bold", "marginBottom": "8px"},
-                    ))
-                if ms2_warning:
-                    banners.append(html.Div(
-                        ms2_warning,
-                        style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
-                    ))
-                if ms1_warning:
-                    banners.append(html.Div(
-                        ms1_warning,
-                        style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
-                    ))
-                return cached_ms1, cached_ms2, banners
-        
-        # Partial or full cache miss - regenerate as needed
-        logger.debug(f"Figure cache MISS for compound {compound_idx} (MS1={'HIT' if ms1_cached else 'MISS'}, MS2={'HIT' if ms2_cached else 'MISS'}), regenerating...")
+        edit_seq = state.get("edit_seq", 0)
+        #logger.info(f"update_figures called: compound_idx={compound_idx}, ms2_idx={ms2_idx}, edit_seq={edit_seq}")
         
         flush_err = state.get("flush_error")
         ms2_warning = state.get("ms2_warning")
         ms1_warning = state.get("ms1_warning")
         try:
-            # Generate only what's not cached
-            if not ms1_cached:
-                ms1_start = time.time()
-                ms1_fig = _make_ms1_figure(state, yaxis_scale)
-                ms1_time = time.time() - ms1_start
-                logger.debug(f"MS1 figure generated in {ms1_time:.3f}s")
-                with figure_cache_lock:
-                    figure_cache[ms1_cache_key] = ms1_fig
-            else:
-                ms1_fig = figure_cache[ms1_cache_key]
+            # Generate figures (no caching)
+            ms1_start = time.time()
+            ms1_fig = _make_ms1_figure(state, yaxis_scale)
+            ms1_time = time.time() - ms1_start
+            #logger.info(f"MS1 figure generated in {ms1_time:.3f}s")
             
-            if not ms2_cached:
-                ms2_start = time.time()
-                ms2_fig = _make_ms2_figure(state)
-                ms2_time = time.time() - ms2_start
-                logger.debug(f"MS2 figure generated in {ms2_time:.3f}s")
-                with figure_cache_lock:
-                    figure_cache[ms2_cache_key] = ms2_fig
-            else:
-                ms2_fig = figure_cache[ms2_cache_key]
+            ms2_start = time.time()
+            ms2_fig = _make_ms2_figure(state)
+            #logger.info(f"MS2 fig data traces: {len(ms2_fig.data)}, layout title: {ms2_fig.layout.title}")
+            #logger.info(f"MS2 fig first trace type: {ms2_fig.data[0].type if ms2_fig.data else 'NO TRACES'}")
+            ms2_time = time.time() - ms2_start
+            #logger.info(f"MS2 figure generated in {ms2_time:.3f}s")
             
             total_time = time.time() - update_start
-            logger.debug(f"Total update_figures time: {total_time:.3f}s")
-            
-            # Limit cache size
-            with figure_cache_lock:
-                if len(figure_cache) > 100:  # Increased from 50
-                    # Remove oldest entries (keep last 80)
-                    keys_to_remove = list(figure_cache.keys())[:20]
-                    for key in keys_to_remove:
-                        figure_cache.pop(key, None)
+            #logger.info(f"Total update_figures time: {total_time:.3f}s")
             
             banners = []
             if flush_err:
@@ -1741,25 +1977,32 @@ def build_dash_app(
         Output("status-current", "children"),
         Output("status-previous", "children"),
         Output("compound-counter", "children"),
-        Output("ms2-counter", "children"),
+        Output("ms2-counter-1", "children"),
+        Output("ms2-counter-2", "children"),
         Input("session-store", "data"),
         prevent_initial_call=False,
     )
     def update_status(state):
-        if state is None:
-            raise dash.exceptions.PreventUpdate
+        state = _ensure_valid_state(state)
         row = _compound_row(state["compound_idx"])
         comp_txt = f"Compound {state['compound_idx']+1} of {len(compound_options)}"
         
         # Get scans by collision energy for detailed count
         scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
+        ms2_txt_1 = "No CE1"
+        ms2_txt_2 = "No CE2"
         if scans_by_energy:
-            ce_counts = {ce: len(df) for ce, df in scans_by_energy.items()}
-            max_scans = max(ce_counts.values())
-            ce_info = ", ".join([f"CE {ce}: {count}" for ce, count in sorted(ce_counts.items())])
-            ms2_txt = f"MS2 Scan {state['ms2_idx']+1} of {max_scans}"
-        else:
-            ms2_txt = "No MS2 data"
+            collision_energies = sorted(scans_by_energy.keys())
+            if len(collision_energies) > 0:
+                ce1 = collision_energies[0]
+                n1 = len(scans_by_energy.get(ce1, []))
+                idx1 = min(_get_ms2_idx_for_ce(state, ce1), max(n1 - 1, 0)) if n1 > 0 else 0
+                ms2_txt_1 = f"{_format_collision_energy_label(ce1)}: {idx1 + 1}/{n1}" if n1 > 0 else f"{_format_collision_energy_label(ce1)}: 0/0"
+            if len(collision_energies) > 1:
+                ce2 = collision_energies[1]
+                n2 = len(scans_by_energy.get(ce2, []))
+                idx2 = min(_get_ms2_idx_for_ce(state, ce2), max(n2 - 1, 0)) if n2 > 0 else 0
+                ms2_txt_2 = f"{_format_collision_energy_label(ce2)}: {idx2 + 1}/{n2}" if n2 > 0 else f"{_format_collision_energy_label(ce2)}: 0/0"
         
         pending = html.Span(
             ["Unsaved (current): ", html.I(row["compound_name"]),
@@ -1780,7 +2023,7 @@ def build_dash_app(
             )
         else:
             saved = html.Span("Previous: NA", style={"color": "#888", "fontSize": "11px"})
-        return pending, saved, comp_txt, ms2_txt
+        return pending, saved, comp_txt, ms2_txt_1, ms2_txt_2
 
     @app.callback(
         Output("analyst-notes", "value"),
@@ -1793,9 +2036,7 @@ def build_dash_app(
         prevent_initial_call=False,  # Always fire, including on initial load
     )
     def sync_controls(state):
-        if state is None:
-            # Return default values if state is missing
-            return "", "No identification notes", analysis_gui_obj.notes["ms1_notes"][0], analysis_gui_obj.notes["ms2_notes"][0], [], 0
+        state = _ensure_valid_state(state)
         ms2_val = state["ms2_note"] if state["ms2_note"] in analysis_gui_obj.notes["ms2_notes"] else analysis_gui_obj.notes["ms2_notes"][0]
         ms1_val = state["ms1_note"] if state["ms1_note"] in analysis_gui_obj.notes["ms1_notes"] else analysis_gui_obj.notes["ms1_notes"][0]
         other_val = [v for v in state["other_note"] if v in analysis_gui_obj.notes["other_notes"]] if isinstance(state["other_note"], list) else []

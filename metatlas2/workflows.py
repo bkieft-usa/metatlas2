@@ -136,9 +136,13 @@ def run_rt_alignment(
             db_path=rt_align_obj.paths['project_db_path'],
             main_db_path=rt_align_obj.paths['main_db_path']
         )
-        ldt.save_atlas_data_to_csv(
+        ldt.save_atlas_metadata_to_csv(
             atlas_obj=aligned_atlas_obj,
             output_path=rt_align_obj.paths['aligned_atlases_store_file']
+        )
+        ldt.save_atlas_data_to_tsv(
+            atlas_obj=aligned_atlas_obj,
+            output_path=rt_align_obj.paths['rt_alignment_output_dir']
         )
 
     logger.info("Passing RTAlign object to RT alignment summary generator...")
@@ -255,10 +259,14 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-        logger.info("Saving post-autoid Atlas data to CSV...")
-        ldt.save_atlas_data_to_csv(
+        logger.info("Saving post-autoid Atlas metadata and data to CSV...")
+        ldt.save_atlas_metadata_to_csv(
             atlas_obj=auto_id_obj.post_autoid_atlas_obj,
             output_path=auto_id_obj.paths['auto_ided_atlases_store_file']
+        )
+        ldt.save_atlas_data_to_tsv(
+            atlas_obj=auto_id_obj.post_autoid_atlas_obj,
+            output_path=auto_id_obj.paths['analysis_output_dir']
         )
 
         logger.info("Passing Atlas object to curation notebook generator...")

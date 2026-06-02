@@ -145,11 +145,20 @@ def _process_compound_batch(job):
         candidate_mask = np.abs(q_mzs_np - ref_precursor_mzs) <= tol_matrix
 
     # 3. Scoring
-    with _suppress_tqdm():
-        score_matrix = CosineHungarian(tolerance=frag_mz_tolerance).matrix(references=ref_spectra, queries=queries)
-    scores = score_matrix['score'].T
-    matches = score_matrix['matches'].T
-    
+    cosine_hungarian = CosineHungarian(tolerance=frag_mz_tolerance)
+    hit_method = "matrix"
+    if hit_method == "matrix":
+        with _suppress_tqdm():
+            # Use matrix method
+            score_matrix = cosine_hungarian.matrix(references=ref_spectra, queries=queries)
+            scores = score_matrix['score'].T
+            matches = score_matrix['matches'].T
+    elif hit_method == "pair":
+        pair_results = np.array([
+            cosine_hungarian.pair(r, q) for q in queries for r in ref_spectra
+        ])
+        scores = pair_results['score'].reshape(len(queries), len(ref_spectra))
+        matches = pair_results['matches'].reshape(len(queries), len(ref_spectra))
     passing = candidate_mask & (scores >= min_score) & (matches >= min_frags)
 
     # 4. Build Rich Metadata Hits
@@ -204,12 +213,21 @@ def _process_compound_batch(job):
         
     return uid, filename, all_scan_results
 
-def _filter_out_ms2_data(ms2_df):
-    logger.info("Filtering out compounds with no passing hits. Starting with %d scans.", len(ms2_df))
+def _filter_out_ms2_data(ms2_df, min_score, min_frags):
+    starting_scans = len(ms2_df)
+    starting_uids = ms2_df['mz_rt_uid'].nunique()
+    logger.info("Filtering out compounds from MS2 data with hits that did not pass filters (min_score: %f, min_frags: %d). Starting with %d scans across %d compounds.", min_score, min_frags, starting_scans, starting_uids)
     compounds_with_hits_mask = ms2_df.groupby('mz_rt_uid')['hits'].apply(lambda x: any(isinstance(h, list) and len(h) > 0 for h in x))
     keep_uids = set(compounds_with_hits_mask[compounds_with_hits_mask].index)
     ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(keep_uids)].reset_index(drop=True)
-    logger.info(f"MS2 data after filtering out compounds with no passing hits: {len(ms2_df)} scans remain.")
+    ending_scans = len(ms2_df)
+    ending_uids = ms2_df['mz_rt_uid'].nunique()
+    scan_pct = 100.0 * ending_scans / starting_scans if starting_scans > 0 else 0.0
+    uid_pct = 100.0 * ending_uids / starting_uids if starting_uids > 0 else 0.0
+    logger.info(
+        "MS2 data after filtering out compounds with no passing hits: %d scans remain (%.1f%% retained) across %d compounds (%.1f%% retained).",
+        ending_scans, scan_pct, ending_uids, uid_pct
+    )
     final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
     ms2_df = ms2_df.reindex(columns=final_columns)
     return ms2_df
@@ -222,6 +240,7 @@ def _assign_hits(group, results_map, **kwargs):
 def find_ms2_hits(auto_id_obj):
     dataset = auto_id_obj.experimental_data
     wp = auto_id_obj.workflow_params
+    polarity = auto_id_obj.polarity
     
     ms2_df = dataset.ms2_df
     if ms2_df.empty:
@@ -233,11 +252,12 @@ def find_ms2_hits(auto_id_obj):
     refs_by_inchi_key = ldt.load_msms_refs_file(
         file_path=Path(auto_id_obj.paths['msms_refs_path']),
         database_filter=auto_id_obj.msms_refs_db_filter,
+        polarity=polarity,
         inchi_keys=unique_ms2_inchi_keys
     )
     ms2_inchi_keys_without_refs = set(unique_ms2_inchi_keys) - set(refs_by_inchi_key.keys())
     if ms2_inchi_keys_without_refs:
-        logger.warning(f"No reference spectra found for {len(ms2_inchi_keys_without_refs)} inchi_keys: {', '.join(list(ms2_inchi_keys_without_refs))}...")
+        logger.warning(f"No reference spectra found for {len(ms2_inchi_keys_without_refs)} inchi_keys: {', '.join(list(ms2_inchi_keys_without_refs))}")
 
     jobs = []
     for (uid, filename), group in groups:
@@ -254,7 +274,7 @@ def find_ms2_hits(auto_id_obj):
             wp.get('limit_to_n_hits', 20)
         ))
 
-    logger.info(f"Processing {len(jobs)} compound-file groups...")
+    logger.info(f"Finding reference hits for {len(jobs)} compound-file groups...")
     
     results_map = {}
     with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 10)) as executor:
@@ -270,7 +290,7 @@ def find_ms2_hits(auto_id_obj):
     ms2_df = ms2_df.reset_index(drop=True)
 
     # remove compounds with no passing hits
-    ms2_df = _filter_out_ms2_data(ms2_df)
+    ms2_df = _filter_out_ms2_data(ms2_df, wp.get('ms2_min_score', 0), wp.get('ms2_min_matching_frags', 0))
 
     dataset.ms2_df = ms2_df
     auto_id_obj.experimental_data = dataset

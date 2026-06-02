@@ -30,15 +30,23 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     atlas_df = auto_id_obj.pre_autoid_atlas_obj.to_dataframe()
     isomer_dict = _build_isomer_dict(auto_id_obj.pre_autoid_atlas_obj)
     
-    # Wide format: group by mz_rt_uid, aggregate across all files
+    # find ms2 mz_rt_uids (that passed) to further filter ms1_df
+    ms2_df = dataset.ms2_df
+    mz_rt_uids_with_ms2 = set(ms2_df['mz_rt_uid'].unique()) if not ms2_df.empty else set()
+    logger.info(f"Identified {len(mz_rt_uids_with_ms2)} mz_rt_uids with passing MS2 hits to filter MS1 data...")
+
+    # group by mz_rt_uid, aggregate across all files
     ms1_df = dataset.ms1_df
+    logger.info(f"Starting MS1 analysis with {len(ms1_df)} total MS1 rows, grouped by mz_rt_uid.")
+    ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(mz_rt_uids_with_ms2)] if not ms1_df.empty else pd.DataFrame()
+    logger.info(f"After filtering MS1 data to only mz_rt_uids with MS2 hits, {len(ms1_df)} total MS1 rows remain for analysis.")
     if ms1_df.empty:
         logger.warning("No MS1 data found in experimental_data.ms1_df.")
         ms1_groups = {}
     else:
         ms1_groups = ms1_df.groupby("mz_rt_uid")
 
-    apply_bounds_cutoff = auto_id_obj.workflow_params.get('apply_suggested_min_score', None)
+    apply_bounds_cutoff = auto_id_obj.workflow_params.get('apply_suggested_min_conf', None)
     remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', False)
 
     curation_records = []

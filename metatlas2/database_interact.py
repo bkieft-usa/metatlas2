@@ -1928,22 +1928,32 @@ def save_auto_identification_results_to_db(auto_id_obj):
             for k, v in constants.items():
                 df[k] = v
 
+    # Ensure hits are persisted as JSON strings for the VARCHAR ms2_data.hits column.
+    logger.info("Serializing MS2 hits for database storage...")
+    ms2_df_to_save = ms2_df
+    if not ms2_df.empty and "hits" in ms2_df.columns:
+        ms2_df_to_save = ms2_df.copy()
+        ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
+
     # write ms1_df, ms2_df, and curation_df to a file on disk for debugging
     debug_dir = Path(project_db_path).parent / "debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
     ms1_df.to_csv(debug_dir / f"ms1_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
-    ms2_df.to_csv(debug_dir / f"ms2_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
+    ms2_df_to_save.to_csv(debug_dir / f"ms2_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
     curation_df.to_csv(debug_dir / f"manual_curation_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
 
     with get_db_connection(project_db_path) as conn:
         if not curation_df.empty:
+            logger.info("Saving manual curation entries to database...")
             conn.execute("INSERT INTO manual_curation SELECT * FROM curation_df")
         
         if not ms1_df.empty:
+            logger.info("Saving MS1 data entries to database...")
             conn.execute("INSERT INTO ms1_data SELECT * FROM ms1_df")
             
         if not ms2_df.empty:
-            conn.execute("INSERT INTO ms2_data SELECT * FROM ms2_df")
+            logger.info("Saving MS2 data entries to database...")
+            conn.execute("INSERT INTO ms2_data SELECT * FROM ms2_df_to_save")
 
     logger.info("Database save complete.")
 
@@ -2273,25 +2283,74 @@ def get_ms2_data_for_compound(
 
     return df
 
+def _deserialize_hits_value(hits_value):
+    """Convert strict JSON hits values into Python hit objects."""
+    if hits_value is None:
+        return []
+    if isinstance(hits_value, float) and np.isnan(hits_value):
+        return []
+    if isinstance(hits_value, list):
+        return hits_value
+    if isinstance(hits_value, tuple):
+        return list(hits_value)
+    if isinstance(hits_value, dict):
+        return [hits_value]
+    if isinstance(hits_value, str):
+        text = hits_value.strip()
+        if not text or text.lower() in {"none", "null"}:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            return []
+    return []
+
+
+def _to_json_safe(value):
+    """Recursively convert objects to strict-JSON-safe values."""
+    if isinstance(value, dict):
+        return {str(k): _to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        return _to_json_safe(value.item())
+    if isinstance(value, np.ndarray):
+        return [_to_json_safe(v) for v in value.tolist()]
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+        return value
+    return value
+
+
+def _serialize_hits_value(hits_value):
+    """Serialize hit objects for storage in VARCHAR columns."""
+    normalized = _to_json_safe(_deserialize_hits_value(hits_value))
+    try:
+        return json.dumps(normalized, allow_nan=False)
+    except Exception:
+        logger.warning("Failed to serialize hits value. Saving empty list instead.")
+        return "[]"
+
+
 def _get_max_score(hits_data):
-    """Helper to find max score in a JSON string or list of dicts."""
-    if isinstance(hits_data, str):
-        try: hits_list = json.loads(hits_data)
-        except: return -1.0
-    else: hits_list = hits_data
-    
-    if not hits_list: return -1.0
-    return max([h.get('score', -1.0) for h in hits_list])
+    """Helper to find max score from serialized or in-memory hits."""
+    hits_list = _deserialize_hits_value(hits_data)
+    if not hits_list:
+        return -1.0
+    return max((float(h.get('score', -1.0)) for h in hits_list if isinstance(h, dict)), default=-1.0)
+
 
 def _get_max_frags(hits_data):
-    """Helper to find max fragments in a JSON string or list of dicts."""
-    if isinstance(hits_data, str):
-        try: hits_list = json.loads(hits_data)
-        except: return -1
-    else: hits_list = hits_data
-    
-    if not hits_list: return -1
-    return max([h.get('num_matches', -1) for h in hits_list])
+    """Helper to find max fragment count from serialized or in-memory hits."""
+    hits_list = _deserialize_hits_value(hits_data)
+    if not hits_list:
+        return -1
+    return max((int(h.get('num_matches', -1)) for h in hits_list if isinstance(h, dict)), default=-1)
 
 def load_and_filter_for_gui(analysis_gui_obj):
     """
@@ -2324,6 +2383,10 @@ def load_and_filter_for_gui(analysis_gui_obj):
             AND analysis_number = {analysis_gui_obj.analysis_number}
             AND {uid_filter}
         """).df()
+
+    if not ms2_df.empty and "hits" in ms2_df.columns:
+        ms2_df = ms2_df.copy()
+        ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
 
     logger.info(f"Loaded {len(curation_df)} manual curation entries, {len(ms1_df)} MS1 rows, and {len(ms2_df)} MS2 rows for GUI display.")
 
