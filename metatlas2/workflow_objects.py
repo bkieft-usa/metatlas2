@@ -731,10 +731,7 @@ class AnalysisSummary:
     summary_data: Optional[pd.DataFrame] = None
 
     # Pre-loaded data tables (populated by load_data())
-    manual_curation_df:  Optional[pd.DataFrame] = None
-    ms1_all_df:          Optional[pd.DataFrame] = None
-    ms2_raw_all_df:      Optional[pd.DataFrame] = None
-    ms2_hits_all_df:     Optional[pd.DataFrame] = None
+    experimental_data: Optional[ExperimentalData] = None
     per_file_metrics_df: Optional[pd.DataFrame] = None
 
     # Paths and config
@@ -761,55 +758,3 @@ class AnalysisSummary:
         self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
         self.project_name = project_name
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
-
-    def load_data(self) -> None:
-        """Load all analysis data tables from the project database and cache them as attributes.
-        """
-        if self.manual_curation_df is not None:
-            logger.debug("AnalysisSummary.load_data: data already loaded, skipping.")
-            return
-
-        project_db_path  = self.paths["project_db_path"]
-        rt_alignment_num = self.rt_alignment_number
-        analysis_num     = self.analysis_number
-        analysis_type    = self.post_curation_atlas_obj.analysis_type
-
-        logger.info(
-            "AnalysisSummary.load_data: loading RT alignment %d, analysis %d, analysis_type %s…",
-            rt_alignment_num, analysis_num, analysis_type,
-        )
-
-        atlas_compounds = None
-        if self.post_curation_atlas_obj and self.post_curation_atlas_obj.compound_mzrts:
-            atlas_compounds = pd.DataFrame([
-                {'mz_rt_uid': c.mz_rt_uid}
-                for c in self.post_curation_atlas_obj.compound_mzrts.values()
-            ])
-
-        self.manual_curation_df = dbi.get_manual_curation_entries(
-            project_db_path, rt_alignment_num, analysis_num,
-            remove_unidentified_compounds=None,
-            atlas_compounds=atlas_compounds,
-            analysis_type=analysis_type,
-        )
-        if self.manual_curation_df.empty:
-            logger.error("load_data: no manual curation entries found.")
-            return
-
-        self.ms1_all_df = dbi.get_ms1_data_for_compound(
-            project_db_path, rt_alignment_num, analysis_num,
-            atlas_compounds=atlas_compounds, analysis_type=analysis_type,
-        )
-        self.ms2_raw_all_df = dbi.get_ms2_data_for_compound(
-            project_db_path, rt_alignment_num, analysis_num,
-            atlas_compounds=atlas_compounds, analysis_type=analysis_type,
-        )
-        self.per_file_metrics_df = asm.extract_per_file_metrics(self.ms1_all_df)
-
-        logger.info(
-            "load_data complete: %d compounds, %d MS1 rows, %d MS2 raw rows, %d MS2 hit rows.",
-            len(self.manual_curation_df),
-            len(self.ms1_all_df),
-            len(self.ms2_raw_all_df),
-            len(self.ms2_hits_all_df),
-        )

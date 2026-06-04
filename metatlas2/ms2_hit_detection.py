@@ -216,27 +216,65 @@ def _process_compound_batch(job):
 def _filter_out_ms2_data(ms2_df, min_score, min_frags):
     starting_scans = len(ms2_df)
     starting_uids = ms2_df['mz_rt_uid'].nunique()
-    logger.info("Filtering out compounds from MS2 data with hits that did not pass filters (min_score: %f, min_frags: %d). Starting with %d scans across %d compounds.", min_score, min_frags, starting_scans, starting_uids)
-    compounds_with_hits_mask = ms2_df.groupby('mz_rt_uid')['hits'].apply(lambda x: any(isinstance(h, list) and len(h) > 0 for h in x))
-    keep_uids = set(compounds_with_hits_mask[compounds_with_hits_mask].index)
+    # When both thresholds are 0, treat as "no filter": retain all compounds
+    if min_score == 0 and min_frags == 0:
+        logger.info(
+            "ms2_min_score=0 and ms2_min_matching_frags=0: skipping MS2 compound filter. "
+            "Retaining all %d scans across %d compounds.",
+            starting_scans, starting_uids
+        )
+        final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
+        return ms2_df.reindex(columns=final_columns)
+    logger.info(
+        "Filtering out compounds with no in-feature passing hits (min_score: %f, min_frags: %d). "
+        "Starting with %d scans across %d compounds.",
+        min_score, min_frags, starting_scans, starting_uids
+    )
+    # Only in_feature=True scans count toward compound retention.
+    in_feature_df = ms2_df[ms2_df['in_feature'] == True]
+    if in_feature_df.empty:
+        keep_uids = set()
+    else:
+        compounds_with_hits_mask = in_feature_df.groupby('mz_rt_uid')['hits'].apply(
+            lambda x: any(isinstance(h, list) and len(h) > 0 for h in x)
+        )
+        keep_uids = set(compounds_with_hits_mask[compounds_with_hits_mask].index)
     ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(keep_uids)].reset_index(drop=True)
     ending_scans = len(ms2_df)
     ending_uids = ms2_df['mz_rt_uid'].nunique()
     scan_pct = 100.0 * ending_scans / starting_scans if starting_scans > 0 else 0.0
     uid_pct = 100.0 * ending_uids / starting_uids if starting_uids > 0 else 0.0
     logger.info(
-        "MS2 data after filtering out compounds with no passing hits: %d scans remain (%.1f%% retained) across %d compounds (%.1f%% retained).",
+        "MS2 data after filtering: %d scans remain (%.1f%% retained) across %d compounds (%.1f%% retained).",
         ending_scans, scan_pct, ending_uids, uid_pct
     )
     final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
     ms2_df = ms2_df.reindex(columns=final_columns)
     return ms2_df
 
-def _assign_hits(group, results_map, **kwargs):
-    uid, filename = group.name
-    group['hits'] = results_map.get((uid, filename), [[] for _ in range(len(group))])
-    return group
+def _assign_hits(ms2_df, results_map):
+    """Assign scored hits back to every row of ms2_df in a single O(n) pass.
     
+    results_map[(uid, filename)] is a list of hit lists, one per scan in the
+    order they appear in ms2_df for that group (all scans, in_feature or not).
+    Compound retention is decided separately by _filter_out_ms2_data.
+    """
+    logger.info("Assigning hits back to MS2 dataframe...")
+    hits_col = [[] for _ in range(len(ms2_df))]
+    uid_col = ms2_df['mz_rt_uid'].tolist()
+    filename_col = ms2_df['filename'].tolist()
+    group_counter: Dict[tuple, int] = {}
+    for row_idx in range(len(ms2_df)):
+        key = (uid_col[row_idx], filename_col[row_idx])
+        hits_list = results_map.get(key, [])
+        scan_idx = group_counter.get(key, 0)
+        if scan_idx < len(hits_list):
+            hits_col[row_idx] = hits_list[scan_idx]
+        group_counter[key] = scan_idx + 1
+    ms2_df = ms2_df.copy()
+    ms2_df['hits'] = hits_col
+    return ms2_df
+
 def find_ms2_hits(auto_id_obj):
     dataset = auto_id_obj.experimental_data
     wp = auto_id_obj.workflow_params
@@ -275,7 +313,6 @@ def find_ms2_hits(auto_id_obj):
         ))
 
     logger.info(f"Finding reference hits for {len(jobs)} compound-file groups...")
-    
     results_map = {}
     with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 10)) as executor:
         futures = [executor.submit(_process_compound_batch, job) for job in jobs]
@@ -283,15 +320,11 @@ def find_ms2_hits(auto_id_obj):
             uid, filename, hits_list = fut.result()
             results_map[(uid, filename)] = hits_list
 
-    # assign hits back to the original DataFrame (future-proof: include_group=True)
-    ms2_df = ms2_df.groupby(['mz_rt_uid', 'filename'], group_keys=True).apply(
-        _assign_hits, results_map=results_map, include_group=True
-    )
-    ms2_df = ms2_df.reset_index(drop=True)
+    ms2_df = _assign_hits(ms2_df, results_map)
 
-    # remove compounds with no passing hits
     ms2_df = _filter_out_ms2_data(ms2_df, wp.get('ms2_min_score', 0), wp.get('ms2_min_matching_frags', 0))
 
+    logger.info("Attaching MS2 data to AutoID object...")
     dataset.ms2_df = ms2_df
     auto_id_obj.experimental_data = dataset
 

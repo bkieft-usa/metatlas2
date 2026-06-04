@@ -20,6 +20,7 @@ from tqdm.auto import tqdm
 import metatlas2.rt_align_tools as rat
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
+import metatlas2.manual_curation_summarizer as mcs
 logger = lcf.get_logger('database_interact')
 
 def should_disable_tqdm():
@@ -512,172 +513,6 @@ def get_rt_alignment_model_from_db(
     
     return model_dict
 
-# def add_compounds_to_db(input_df: pd.DataFrame, db_path: str, pubchem_cache_path: str, input_file_path: str = ""):
-#     """Add compounds and RT/MZ references to database using batch operations."""
-
-#     if not os.path.exists(db_path):
-#         logger.error(f"Database not found at {db_path}. Check path or create it first!")
-#         raise FileNotFoundError(f"Database not found at {db_path}")
-
-#     unique_inchi_keys = input_df['inchi_key'].dropna().unique()
-#     logger.info(f"Adding {len(unique_inchi_keys)} compounds to database: {db_path}")
-    
-#     pubchem_cache = pcr.load_or_create_pubchem_cache(pubchem_cache_path)
-#     prov = get_provenance()
-
-#     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
-#         # Get existing compounds in one query
-#         existing_inchi_keys = set()
-#         existing_compounds_map = {}
-#         existing_result = conn.execute("SELECT inchi_key, compound_uid FROM compounds").fetchall()
-#         existing_inchi_keys = {row[0] for row in existing_result}
-#         existing_compounds_map = {row[0]: row[1] for row in existing_result}
-#         if existing_inchi_keys:
-#             logger.warning(f"Found {len(existing_inchi_keys)} existing compounds in database. Not creating duplicates.")
-
-#         # Prepare batch data
-#         compound_records = []
-#         reference_records = []
-#         compounds_created = 0
-#         compounds_skipped = 0
-
-#         logger.info("Preparing batch data...")
-#         for idx, row in input_df.iterrows():
-#             inchi_key = row.get('inchi_key')
-#             if pd.isna(inchi_key):
-#                 continue
-            
-#             chromatography = str(row.get('chromatography', 'Unknown'))
-#             polarity = str(row.get('polarity', 'Unknown'))
-#             compound_uid = None
-            
-#             # Check if compound exists
-#             if inchi_key in existing_inchi_keys:
-#                 compounds_skipped += 1
-#                 compound_uid = existing_compounds_map.get(inchi_key)
-#             else:
-#                 # Prepare new compound record
-#                 compound_uid = _generate_uid("compound")
-#                 compound_record = _prepare_compound_record(row, compound_uid, pubchem_cache, prov)
-#                 compound_records.append(compound_record)
-#                 compounds_created += 1
-                
-#                 # Add to existing sets for future duplicate checking in this session
-#                 existing_inchi_keys.add(inchi_key)
-#                 existing_compounds_map[inchi_key] = compound_uid
-            
-#             # Prepare RT/MZ reference if data available and compound_uid exists
-#             if compound_uid and pd.notna(row.get('rt_peak')) and pd.notna(row.get('mz')):
-#                 reference_record = _prepare_reference_record(
-#                     row, compound_uid, chromatography, polarity, input_file_path, prov
-#                 )
-#                 if reference_record:
-#                     reference_records.append(reference_record)
-
-#         # Batch insert compounds
-#         mzrts_created = 0
-#         if compound_records:
-#             logger.info(f"Batch inserting {len(compound_records)} compounds...")
-#             conn.executemany("""
-#                 INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-#             """, compound_records)
-
-#         # Check for existing references and batch insert if necessary
-#         if reference_records:
-#             logger.info(f"Checking for existing references and batch inserting if necessary...")
-#             # Get existing references to check for duplicates
-#             existing_refs = set()
-#             existing_ref_result = conn.execute("""
-#                 SELECT compound_uid, chromatography, polarity, adduct 
-#                 FROM compound_mzrt
-#             """).fetchall()
-#             existing_refs = {(row[0], row[1], row[2], row[3]) for row in existing_ref_result}
-
-#             # Filter out duplicates
-#             filtered_reference_records = []
-#             mzrts_skipped = 0
-            
-#             for record in reference_records:
-#                 # Extract compound_uid, chromatography, polarity, adduct from record
-#                 compound_uid = record[1]
-#                 chromatography = record[8]
-#                 polarity = record[9]
-#                 adduct = record[7]
-                
-#                 ref_key = (compound_uid, chromatography, polarity, adduct)
-#                 if ref_key not in existing_refs:
-#                     filtered_reference_records.append(record)
-#                     existing_refs.add(ref_key)  # Add to set to prevent duplicates within this batch
-#                     mzrts_created += 1
-#                 else:
-#                     mzrts_skipped += 1
-
-#             # Batch insert filtered references
-#             if filtered_reference_records:
-#                 conn.executemany("""
-#                     INSERT INTO compound_mzrt VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-#                 """, filtered_reference_records)
-        
-#         # Get final counts
-#         compounds_count = conn.execute("SELECT COUNT(*) FROM compounds").fetchone()[0]
-#         mzrts_count = conn.execute("SELECT COUNT(*) FROM compound_mzrt").fetchone()[0]
-    
-#     logger.info("Compounds added successfully!")
-#     logger.info(f"   Total compounds in database: {compounds_count}")
-#     logger.info(f"   New compounds created: {compounds_created}")
-#     if compounds_skipped > 0:
-#         logger.info(f"   Compounds skipped (already existed): {compounds_skipped}")
-#     logger.info(f"   Total RT/MZ references in database: {mzrts_count}")
-#     logger.info(f"   New RT/MZ references created: {mzrts_created}")
-#     if 'mzrts_skipped' in locals() and mzrts_skipped > 0:
-#         logger.info(f"   RT/MZ references skipped (duplicates): {mzrts_skipped}")
-    
-#     return
-
-def _prepare_compound_record(row: pd.Series, compound_uid: str, pubchem_cache: Dict, prov: Dict) -> tuple:
-    """Prepare a compound record tuple for batch insertion."""
-    # Extract compound data from row
-    compound_name = str(row.get('compound_name', 'Unknown Compound'))
-    inchi_key = str(row.get('inchi_key', ''))
-    pubchem_cache_data = pubchem_cache.get(inchi_key, {})
-
-    inchi = str(pubchem_cache_data.get('inchi', '')) if pd.notna(pubchem_cache_data.get('inchi')) else None
-    smiles = str(pubchem_cache_data.get('smiles', '')) if pd.notna(pubchem_cache_data.get('smiles')) else None
-    formula = str(pubchem_cache_data.get('formula', '')) if pd.notna(pubchem_cache_data.get('formula')) else None
-    mono_isotopic_molecular_weight = pubchem_cache_data.get('mono_isotopic_molecular_weight') if pd.notna(pubchem_cache_data.get('mono_isotopic_molecular_weight')) else None
-    iupac_name = str(pubchem_cache_data.get('iupac_name', '')) if pd.notna(pubchem_cache_data.get('iupac_name')) else None
-    pubchem_cid = str(pubchem_cache_data.get('pubchem_cid', '')) if pd.notna(pubchem_cache_data.get('pubchem_cid')) else None
-    cas_number = str(pubchem_cache_data.get('cas_number', '')) if pd.notna(pubchem_cache_data.get('cas_number')) else None
-    synonyms_val = pubchem_cache_data.get('synonyms', '')
-    if synonyms_val is None or synonyms_val == '':
-        synonyms = None
-    elif isinstance(synonyms_val, (list, tuple, np.ndarray)):
-        synonyms = '; '.join(map(str, synonyms_val))
-    else:
-        synonyms = str(synonyms_val)
-    classes = str(row.get('classes', '')) if pd.notna(row.get('classes')) else None
-    pathways = str(row.get('pathways', '')) if pd.notna(row.get('pathways')) else None
-    tags = str(row.get('tags', '')) if pd.notna(row.get('tags')) else None
-
-    return (
-        compound_uid,
-        compound_name,
-        inchi_key,
-        inchi,
-        smiles,
-        formula,
-        classes,
-        pathways,
-        tags,
-        mono_isotopic_molecular_weight,
-        iupac_name,
-        pubchem_cid,
-        cas_number,
-        synonyms,
-        prov["analyst"],
-        prov["timestamp"]
-    )
-
 def _prepare_compound_record_from_dict(compound_data: Dict) -> Optional[Tuple]:
     """Prepare compound record from dictionary data."""
     try:
@@ -715,72 +550,6 @@ def _prepare_compound_record_from_dict(compound_data: Dict) -> Optional[Tuple]:
         )
     except Exception as e:
         logger.error(f"Error preparing compound record: {e}")
-        return None
-
-def _prepare_reference_record(row: pd.Series, compound_uid: str, chromatography: str, 
-                            polarity: str, input_file_path: str, prov: Dict) -> tuple:
-    """Prepare a reference record tuple for batch insertion."""
-    try:
-        uid = _generate_uid("mz_rt")
-        
-        # Extract RT/MZ data
-        rt_peak = float(row.get('rt_peak'))
-        rt_min = float(row.get('rt_min', rt_peak - 0.5))
-        rt_max = float(row.get('rt_max', rt_peak + 0.5))
-        mz = float(row.get('mz'))
-        mz_tolerance = float(row.get('mz_tolerance', 5.0))
-        adduct = str(row.get('adduct', ''))
-        
-        confidence = str(row.get('confidence', 'Unknown')) if pd.notna(row.get('confidence')) else 'Unknown'
-        source = input_file_path if input_file_path else 'Unknown'
-        
-        return (
-            uid,
-            compound_uid,
-            rt_peak,
-            rt_min,
-            rt_max,
-            mz,
-            mz_tolerance,
-            adduct,
-            chromatography,
-            polarity,
-            confidence,
-            source,
-            prov["analyst"],
-            prov["timestamp"]
-        )
-    except (ValueError, TypeError) as e:
-        # Skip records with invalid data
-        return None
-
-def _prepare_reference_record_from_dict(reference_data: Dict) -> Optional[Tuple]:
-    """Prepare reference record from dictionary data."""
-    try:
-        prov = get_provenance()
-        
-        return (
-            _generate_uid("mz_rt", decorator="ref"),
-            reference_data.get('compound_uid'),
-            reference_data.get('compound_name'),
-            reference_data.get('inchi_key'),
-            reference_data.get('adduct'),
-            reference_data.get('rt_space'),
-            float(reference_data.get('rt_peak')),
-            float(reference_data.get('rt_min')),
-            float(reference_data.get('rt_max')),
-            float(reference_data.get('mz')),
-            float(reference_data.get('mz_tolerance', 5.0)),
-            reference_data.get('chromatography'),
-            reference_data.get('polarity'),
-            reference_data.get('confidence', 'Unknown'),
-            reference_data.get('source', 'Unknown'),
-            reference_data.get('identification_notes', ''),
-            prov["analyst"],
-            prov["timestamp"]
-        )
-    except (ValueError, TypeError) as e:
-        logger.error(f"Error preparing reference record: {e}")
         return None
 
 def save_project_to_main_db(
@@ -1170,27 +939,6 @@ def _create_database_tables(conn, db_type: str = "main"):
             )
         """)
         
-        # conn.execute("""
-        #     CREATE TABLE IF NOT EXISTS compounds (
-        #         compound_uid TEXT PRIMARY KEY,
-        #         compound_name TEXT,
-        #         inchi_key TEXT,
-        #         inchi TEXT,
-        #         smiles TEXT,
-        #         formula TEXT,
-        #         classes TEXT,
-        #         pathways TEXT,
-        #         tags TEXT,
-        #         mono_isotopic_molecular_weight REAL,
-        #         iupac_name TEXT,
-        #         pubchem_cid TEXT,
-        #         cas_number TEXT,
-        #         synonyms TEXT,
-        #         created_by TEXT,
-        #         created_date TEXT
-        #     )
-        # """)
-        
         conn.execute("""
             CREATE TABLE IF NOT EXISTS compound_mzrt (
                 mz_rt_uid TEXT PRIMARY KEY,
@@ -1295,6 +1043,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 adduct VARCHAR,
                 compound_name VARCHAR,
                 auto_ided BOOLEAN,
+                curated BOOLEAN,
                 polarity VARCHAR,
                 chromatography VARCHAR,
                 mz_tolerance REAL,
@@ -1690,7 +1439,8 @@ def create_new_atlas_after_manual_curation(
     save_atlas_to_database(new_atlas, summary_obj.paths['project_db_path'], summary_obj.paths['main_db_path'])
 
     logger.info(f"Saved curated atlas {new_atlas_uid} with {len(new_compound_mzrts)} compounds.")
-    return new_atlas
+    summary_obj.post_curation_atlas_obj = new_atlas
+    return
 
 def create_new_atlas_after_auto_id(
     auto_id_obj: "AutoIdentification"
@@ -1703,7 +1453,7 @@ def create_new_atlas_after_auto_id(
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
 
     # 1. Get the set of surviving UIDs
-    surviving_uids = auto_id_obj.experimental_data.manual_curation_df['mz_rt_uid'].unique().tolist()
+    surviving_uids = auto_id_obj.experimental_data.curation_df['mz_rt_uid'].unique().tolist()
 
     # 2. Filter and copy surviving compounds using a dictionary comprehension.
     new_compound_mzrts = {
@@ -1829,40 +1579,54 @@ def to_python_type(val):
         return val.item()
     return val
  
-def write_gui_updates_to_db(
+def write_curation_updates_to_db(
     project_db_path: str,
-    mz_rt_uid: str,
     rt_alignment_number: int,
     analysis_number: int,
-    updated_fields: dict
+    rows: list[dict],  # Each dict must have 'mz_rt_uid' and the fields to update
+    updated_field_keys: list[str]  # Ordered list of field names to update
 ) -> None:
     """
-    Update a manual curation entry with new values for specified fields.
-    
+    Batch update multiple manual curation entries in a single transaction.
+    All rows must share the same set of fields to update.
+
     Args:
         project_db_path: Path to the project database
-        mz_rt_uid: mz_rt_uid of the manual curation entry to update
         rt_alignment_number: RT alignment number
         analysis_number: Analysis number
-        updated_fields: Dictionary of fields to update with their new values
+        rows: List of dicts, each containing 'mz_rt_uid' and values for updated_field_keys
+        updated_field_keys: Ordered list of field names to update (must be consistent across all rows)
     """
-    if not updated_fields:
+    if not rows or not updated_field_keys:
         return
 
+    rt_alignment_number = to_python_type(rt_alignment_number)
+    analysis_number = to_python_type(analysis_number)
+    set_clause = ", ".join([f"{k} = ?" for k in updated_field_keys])
+    sql = (
+        f"UPDATE manual_curation SET {set_clause} "
+        f"WHERE mz_rt_uid = ? AND rt_alignment_number = ? AND analysis_number = ?"
+    )
+
     try:
-        mz_rt_uid = to_python_type(mz_rt_uid)
-        rt_alignment_number = to_python_type(rt_alignment_number)
-        analysis_number = to_python_type(analysis_number)
-        set_clause = ", ".join([f"{k} = ?" for k in updated_fields])
-        params = [to_python_type(v) for v in updated_fields.values()] + [mz_rt_uid, rt_alignment_number, analysis_number]
+        params_list = []
+        for row in rows:
+            mz_rt_uid = to_python_type(row["mz_rt_uid"])
+            field_values = [to_python_type(row[k]) for k in updated_field_keys]
+            params_list.append(field_values + [mz_rt_uid, rt_alignment_number, analysis_number])
+
         with get_db_connection(project_db_path, max_retries=5, initial_retry_delay=0.5) as conn:
-            conn.execute(
-                f"UPDATE manual_curation SET {set_clause} WHERE mz_rt_uid = ? AND rt_alignment_number = ? AND analysis_number = ?",
-                params
-            )
+            conn.executemany(sql, params_list)
+
     except Exception as e:
-        logger.error(f"Error updating manual curation entry {mz_rt_uid}, RTA{rt_alignment_number}, TGA{analysis_number}: {e}")
-        raise ValueError(f"Failed to update manual curation entry {mz_rt_uid}, RTA{rt_alignment_number}, TGA{analysis_number}. See logs for details.")
+        logger.error(
+            f"Error batch updating manual curation entries "
+            f"RTA{rt_alignment_number}, TGA{analysis_number}: {e}"
+        )
+        raise ValueError(
+            f"Failed to batch update manual curation entries "
+            f"RTA{rt_alignment_number}, TGA{analysis_number}. See logs for details."
+        )
 
 def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
     """
@@ -1871,7 +1635,7 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
     """
 
     summary_rows = []
-    for ci in auto_id_obj.experimental_data.manual_curation_df:
+    for ci in auto_id_obj.experimental_data.curation_df:
         mz_rt_uid = ci.mz_rt_uid
 
         ms1_count = sum(
@@ -1909,7 +1673,7 @@ def save_auto_identification_results_to_db(auto_id_obj):
     logger.info("Saving results to database...")
     project_db_path = auto_id_obj.paths['project_db_path']
     dataset = auto_id_obj.experimental_data
-    curation_df = dataset.manual_curation_df
+    curation_df = dataset.curation_df
     ms1_df = dataset.ms1_df
     ms2_df = dataset.ms2_df
     prov = get_provenance()
@@ -1972,14 +1736,16 @@ def get_istd_curation_for_polarity(
     Retrieve manual_curation entries for the ISTD analysis matching polarity,
     rt_alignment_number, and analysis_number.
 
-    Returns a DataFrame with columns: inchi_key, adduct, rt_peak, rt_min, rt_max,
-    ms1_notes, ms2_notes, other_notes, analyst_notes.  Returns an empty DataFrame (no error) when
-    no matching ISTD run is found.
+    Returns a DataFrame with columns: compound_name, inchi_key, adduct,
+    atlas_rt_peak, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
+    analyst_notes.  Returns an empty DataFrame (no error) when no matching ISTD
+    run is found.
     """
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute("""
-                SELECT inchi_key, adduct, rt_peak, rt_min, rt_max,
+                SELECT compound_name, inchi_key, adduct, atlas_rt_peak,
+                       rt_peak, rt_min, rt_max,
                        ms1_notes, ms2_notes, other_notes, analyst_notes
                 FROM manual_curation
                 WHERE analysis_type = 'ISTD'
@@ -1997,6 +1763,121 @@ def get_istd_curation_for_polarity(
     return df
 
 
+def get_opposite_polarity_curation(
+    project_db_path: str,
+    analysis_type: str,
+    polarity: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+) -> pd.DataFrame:
+    """
+    Retrieve manual_curation entries for the *opposite* polarity that have been
+    manually curated (curated = 1), matching the same analysis_type,
+    rt_alignment_number, and analysis_number.
+
+    Matching across polarities is done on (compound_name, inchi_key, atlas_rt_peak)
+    since adducts differ between positive and negative mode.  Returns a DataFrame
+    with columns: compound_name, inchi_key, atlas_rt_peak, rt_peak, rt_min, rt_max,
+    ms1_notes, ms2_notes, other_notes, analyst_notes.  Returns an empty DataFrame
+    (no error) when no matching entries are found.
+    """
+    opposite = "negative" if polarity.lower() == "positive" else "positive"
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            df = conn.execute("""
+                SELECT compound_name, inchi_key, atlas_rt_peak,
+                       rt_peak, rt_min, rt_max,
+                       ms1_notes, ms2_notes, other_notes, analyst_notes
+                FROM manual_curation
+                WHERE analysis_type = ?
+                  AND polarity = ?
+                  AND rt_alignment_number = ?
+                  AND analysis_number = ?
+                  AND curated = 1
+            """, [analysis_type, opposite, rt_alignment_number, analysis_number]).df()
+    except Exception as e:
+        logger.warning(f"Could not retrieve opposite-polarity curation entries: {e}")
+        df = pd.DataFrame()
+    if df.empty:
+        logger.info(
+            f"No curated {opposite}-polarity {analysis_type} entries found for "
+            f"RTA{rt_alignment_number}, TGA{analysis_number}."
+        )
+    else:
+        logger.info(
+            f"Found {len(df)} curated {opposite}-polarity {analysis_type} entries for "
+            f"RTA{rt_alignment_number}, TGA{analysis_number}."
+        )
+    return df
+
+
+def apply_cross_polarity_curation(
+    manual_curation_df: pd.DataFrame,
+    opposite_polarity_df: pd.DataFrame,
+    post_autoid_atlas_obj,
+) -> tuple:
+    """
+    Apply RT bounds (and notes) from opposite-polarity curated entries to
+    matching compounds in the current analysis.
+
+    Matching is on (compound_name, inchi_key, atlas_rt_peak) since adducts
+    differ across polarities.  Only updates rows that have not yet been manually
+    curated (ms2_notes == '').  Also updates RT bounds on the
+    post_autoid_atlas_obj CompoundMZRT objects (keyed by mz_rt_uid) so that EIC
+    plot windows reflect the transferred values when the GUI opens.
+
+    Returns (updated_manual_curation_df, n_transferred).
+    """
+    if opposite_polarity_df.empty:
+        return manual_curation_df, 0
+
+    # Build lookup keyed on (compound_name, inchi_key, atlas_rt_peak).
+    # Adducts differ across polarities so they are excluded from the key.
+    opp_lookup = {}
+    for _, row in opposite_polarity_df.iterrows():
+        key = (row["compound_name"], row["inchi_key"], row["atlas_rt_peak"])
+        if key not in opp_lookup:
+            opp_lookup[key] = row
+
+    # Atlas is keyed by mz_rt_uid — use that as the unique identifier.
+    compound_mzrts = post_autoid_atlas_obj.compound_mzrts
+
+    df = manual_curation_df.copy()
+    n_transferred = 0
+
+    for idx, row in df.iterrows():
+        key = (row.get("compound_name"), row["inchi_key"], row.get("atlas_rt_peak"))
+        if key not in opp_lookup:
+            continue
+
+        ms2_note_val = row.get("ms2_notes", "")
+        if ms2_note_val != "":
+            logger.info(
+                f"Skipping cross-polarity RT transfer for {row['inchi_key']} / {row.get('adduct')} "
+                f"because ms2_notes already has value: '{ms2_note_val}'"
+            )
+            continue  # already curated — do not overwrite
+
+        opp_row = opp_lookup[key]
+        df.at[idx, "rt_peak"]       = opp_row["rt_peak"]
+        df.at[idx, "rt_min"]        = opp_row["rt_min"]
+        df.at[idx, "rt_max"]        = opp_row["rt_max"]
+        df.at[idx, "ms1_notes"]     = opp_row["ms1_notes"]
+        df.at[idx, "ms2_notes"]     = opp_row["ms2_notes"]
+        df.at[idx, "analyst_notes"] = opp_row["analyst_notes"]
+        df.at[idx, "other_notes"]   = opp_row["other_notes"]
+
+        uid = row.get("mz_rt_uid")
+        if uid and uid in compound_mzrts:
+            compound_mzrts[uid].rt_peak = float(opp_row["rt_peak"])
+            compound_mzrts[uid].rt_min  = float(opp_row["rt_min"])
+            compound_mzrts[uid].rt_max  = float(opp_row["rt_max"])
+
+        n_transferred += 1
+
+    return df, n_transferred
+
+
 def apply_istd_curation_to_ema(
     manual_curation_df: pd.DataFrame,
     istd_df: pd.DataFrame,
@@ -2005,53 +1886,56 @@ def apply_istd_curation_to_ema(
     """
     Apply ISTD curation (RT bounds + notes) to matching EMA compounds.
 
-    Only updates EMA rows where ms1_notes equals default_ms1_note (i.e. the row
-    has not yet been manually curated).  Matching is on (inchi_key, adduct).
+    Only updates EMA rows that have not yet been manually curated
+    (ms2_notes == '').  Matching is on (compound_name, inchi_key, adduct,
+    atlas_rt_peak) — a composite key that uniquely identifies the same compound
+    entry across ISTD and EMA atlases within the same polarity.
 
-    Also updates RT bounds on the post_autoid_atlas_obj CompoundMZRT objects so
-    that EIC plot windows reflect the curated values when the GUI opens.
+    Also updates RT bounds on the post_autoid_atlas_obj CompoundMZRT objects
+    (keyed by mz_rt_uid) so that EIC plot windows reflect the curated values
+    when the GUI opens.
 
     Returns (updated_manual_curation_df, n_transferred).
     """
     if istd_df.empty:
         return manual_curation_df, 0
 
+    # Source lookup: ISTD rows keyed by (compound_name, inchi_key, adduct, atlas_rt_peak).
     istd_lookup = {
-        (row["inchi_key"], row["adduct"]): row
+        (row["compound_name"], row["inchi_key"], row["adduct"], row["atlas_rt_peak"]): row
         for _, row in istd_df.iterrows()
     }
 
-    atlas_lookup = {
-        (cmzrt.inchi_key, cmzrt.adduct): cmzrt
-        for cmzrt in post_autoid_atlas_obj.compound_mzrts.values()
-    }
+    # Atlas is keyed by mz_rt_uid — use that as the unique identifier.
+    compound_mzrts = post_autoid_atlas_obj.compound_mzrts
 
     df = manual_curation_df.copy()
     n_transferred = 0
 
     for idx, row in df.iterrows():
-        pair = (row["inchi_key"], row["adduct"])
-        if pair not in istd_lookup:
+        key = (row.get("compound_name"), row["inchi_key"], row["adduct"], row.get("atlas_rt_peak"))
+        if key not in istd_lookup:
             continue
         
         ms2_note_val = row.get("ms2_notes", "")
         if ms2_note_val != "":
-            logger.info(f"Skipping ISTD info transfer to EMA for {pair} because ms2_notes already has value: '{ms2_note_val}'")
+            logger.info(f"Skipping ISTD info transfer to EMA for {key} because ms2_notes already has value: '{ms2_note_val}'")
             continue  # already curated — do not overwrite
 
-        istd_row = istd_lookup[pair]
-        df.at[idx, "rt_peak"]    = istd_row["rt_peak"]
-        df.at[idx, "rt_min"]     = istd_row["rt_min"]
-        df.at[idx, "rt_max"]     = istd_row["rt_max"]
-        df.at[idx, "ms1_notes"]  = istd_row["ms1_notes"]
-        df.at[idx, "ms2_notes"]  = istd_row["ms2_notes"]
+        istd_row = istd_lookup[key]
+        df.at[idx, "rt_peak"]       = istd_row["rt_peak"]
+        df.at[idx, "rt_min"]        = istd_row["rt_min"]
+        df.at[idx, "rt_max"]        = istd_row["rt_max"]
+        df.at[idx, "ms1_notes"]     = istd_row["ms1_notes"]
+        df.at[idx, "ms2_notes"]     = istd_row["ms2_notes"]
         df.at[idx, "analyst_notes"] = istd_row["analyst_notes"]
-        df.at[idx, "other_notes"] = istd_row["other_notes"]
+        df.at[idx, "other_notes"]   = istd_row["other_notes"]
 
-        if pair in atlas_lookup:
-            atlas_lookup[pair].rt_peak = float(istd_row["rt_peak"])
-            atlas_lookup[pair].rt_min  = float(istd_row["rt_min"])
-            atlas_lookup[pair].rt_max  = float(istd_row["rt_max"])
+        uid = row.get("mz_rt_uid")
+        if uid and uid in compound_mzrts:
+            compound_mzrts[uid].rt_peak = float(istd_row["rt_peak"])
+            compound_mzrts[uid].rt_min  = float(istd_row["rt_min"])
+            compound_mzrts[uid].rt_max  = float(istd_row["rt_max"])
 
         n_transferred += 1
 
@@ -2059,19 +1943,21 @@ def apply_istd_curation_to_ema(
 
 def _transfer_istd_curation(ema_df, db_path, gui_obj, atlas_obj):
     """Vectorized ISTD -> EMA transfer."""
+    logger.info("Finding ISTD curation entries to transfer to EMA...")
     with get_db_connection(db_path, read_only=True) as conn:
         istd_df = conn.execute("""
-            SELECT inchi_key, adduct, rt_peak, rt_min, rt_max, 
-                   ms1_notes, ms2_notes, other_notes, analyst_notes
+            SELECT mz_rt_uid, inchi_key, adduct, rt_peak, rt_min, rt_max, 
+                   curated, ms1_notes, ms2_notes, other_notes, analyst_notes
             FROM manual_curation 
-            WHERE analysis_type = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ?
+            WHERE analysis_type = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND curated = 1
         """, [atlas_obj.polarity, gui_obj.rt_alignment_number, gui_obj.analysis_number]).df()
 
-    if istd_df.empty: return ema_df
+    if istd_df.empty: 
+        logger.info("No ISTD curation entries found to transfer to EMA.")
+        return ema_df
 
-    # Merge ISTD values onto EMA based on (inchi_key, adduct)
-    # Only update if EMA notes are empty (not yet curated)
-    merged = ema_df.merge(istd_df, on=['inchi_key', 'adduct'], how='left', suffixes=('', '_istd'))
+    logger.info(f"Merging ISTD curation with EMA for {len(istd_df)} compounds...")
+    merged = ema_df.merge(istd_df, on='mz_rt_uid', how='left', suffixes=('', '_istd'))
     
     for col in ['rt_peak', 'rt_min', 'rt_max', 'ms1_notes', 'ms2_notes', 'analyst_notes', 'other_notes']:
         istd_col = f"{col}_istd"
@@ -2103,12 +1989,16 @@ def validate_override_parameters(override_parameters):
         raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
     if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
         raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("apply_istd_to_ema"), (type(None), bool)):
-        raise ValueError("override_parameters['apply_istd_to_ema'] must be a boolean or None")
+    if not isinstance(override_parameters.get("apply_istd_curation_to_ema"), (type(None), bool)):
+        raise ValueError("override_parameters['apply_istd_curation_to_ema'] must be a boolean or None")
+    if not isinstance(override_parameters.get("apply_cross_polarity_curation"), (type(None), bool)):
+        raise ValueError("override_parameters['apply_cross_polarity_curation'] must be a boolean or None")
     if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
         raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
     if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
         raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
+    if not isinstance(override_parameters.get("upload_to_gdrive"), (type(None), bool)):
+        raise ValueError("override_parameters['upload_to_gdrive'] must be a boolean or None")
     if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
         raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
     if isinstance(override_parameters["note_options_overrides"], dict):
@@ -2352,35 +2242,116 @@ def _get_max_frags(hits_data):
         return -1
     return max((int(h.get('num_matches', -1)) for h in hits_list if isinstance(h, dict)), default=-1)
 
-def load_and_filter_for_gui(analysis_gui_obj):
+def _update_manual_curation_with_best_data(summary_obj, curation_df):
     """
-    THE NEW ENTRY POINT FOR THE GUI.
-    Replaces load_experimental_data_from_db and filter_experimental_data_in_memory.
+    Recalculates best MS1 metrics for each mz_rt_uid based on the current
+    in_feature-filtered ms1_df, updates the in-memory manual_curation_df,
+    and writes all changes to the database in a single batched transaction.
     """
+    ms1_df = summary_obj.experimental_data.ms1_df
+    if ms1_df.empty:
+        logger.warning("No MS1 data found in experimental_data.ms1_df.")
+        ms1_groups = {}
+    else:
+        ms1_groups = ms1_df.groupby("mz_rt_uid")
+
+    atlas_df = summary_obj.post_curation_atlas_obj.to_dataframe()
+
+    update_field_keys = [
+        "best_ms1_file",
+        "best_ms1_rt",
+        "best_ms1_mz",
+        "best_ms1_intensity",
+        "best_ms1_ppm_error",
+        "best_ms1_rt_error",
+        "mz",
+        "rt_peak",
+        "mz_error",
+        "rt_error",
+    ]
+
+    uid_to_idx = {uid: idx for idx, uid in curation_df['mz_rt_uid'].items()}
+
+    batch_rows = []
+
+    for uid, atlas_row in tqdm(
+        atlas_df.set_index("mz_rt_uid").iterrows(),
+        total=len(atlas_df),
+        desc="Creating curation metadata",
+        disable=should_disable_tqdm()
+    ):
+        try:
+            compound_ms1 = ms1_groups.get_group(uid)
+        except (KeyError, AttributeError):
+            compound_ms1 = pd.DataFrame()
+
+        updated_mc_data = mcs.analyze_ms1(
+            atlas_row,
+            compound_ms1,
+            stage="post_curation_summary"
+        )
+
+        if not updated_mc_data:
+            continue
+
+        # Update in-memory manual_curation_df
+        if uid in uid_to_idx:
+            row_idx = uid_to_idx[uid]
+            for col, val in updated_mc_data.items():
+                if col in curation_df.columns:
+                    curation_df.at[row_idx, col] = val
+
+        # Accumulate only the expected update fields for the batch write,
+        # falling back to the current in-memory value if a key is missing
+        # from the analysis result (e.g. compound had no MS1 data)
+        current_row = curation_df.loc[uid_to_idx[uid]] if uid in uid_to_idx else {}
+        row_update = {"mz_rt_uid": uid}
+        for key in update_field_keys:
+            if key in updated_mc_data:
+                row_update[key] = updated_mc_data[key]
+            elif hasattr(current_row, "__getitem__"):
+                row_update[key] = current_row[key]
+
+        batch_rows.append(row_update)
+
+    logger.info(f"Updating {len(batch_rows)} manual curation entries in database with best MS1 data...")
+    write_curation_updates_to_db(
+        project_db_path=summary_obj.paths["project_db_path"],
+        rt_alignment_number=summary_obj.rt_alignment_number,
+        analysis_number=summary_obj.analysis_number,
+        rows=batch_rows,
+        updated_field_keys=update_field_keys,
+    )
+
+    logger.info(f"Added updated manual curation df with {len(curation_df)} compounds back to summary object.")
+    summary_obj.experimental_data.curation_df = curation_df
+
+def load_and_filter_for_summary(summary_obj):
+
     from metatlas2.workflow_objects import ExperimentalData
 
-    with get_db_connection(analysis_gui_obj.paths["project_db_path"], read_only=True) as conn:
-        atlas_uids = list(analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.keys())
+    atlas_uids = list(summary_obj.post_curation_atlas_obj.compound_mzrts.keys())
+    with get_db_connection(summary_obj.paths["project_db_path"], read_only=True) as conn:
         uid_filter = f"mz_rt_uid IN {tuple(atlas_uids)}" if atlas_uids else "1=0"
         
         curation_df = conn.execute(f"""
             SELECT * FROM manual_curation 
-            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
-            AND analysis_number = {analysis_gui_obj.analysis_number}
+            WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+            AND analysis_number = {summary_obj.analysis_number}
             AND {uid_filter}
         """).df()
         
         ms1_df = conn.execute(f"""
             SELECT * FROM ms1_data 
-            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
-            AND analysis_number = {analysis_gui_obj.analysis_number}
+            WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+            AND analysis_number = {summary_obj.analysis_number}
             AND {uid_filter}
         """).df()
         
         ms2_df = conn.execute(f"""
             SELECT * FROM ms2_data 
-            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
-            AND analysis_number = {analysis_gui_obj.analysis_number}
+            WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+            AND analysis_number = {summary_obj.analysis_number}
             AND {uid_filter}
         """).df()
 
@@ -2388,7 +2359,140 @@ def load_and_filter_for_gui(analysis_gui_obj):
         ms2_df = ms2_df.copy()
         ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
 
-    logger.info(f"Loaded {len(curation_df)} manual curation entries, {len(ms1_df)} MS1 rows, and {len(ms2_df)} MS2 rows for GUI display.")
+    logger.info(f"Loaded {len(curation_df)} manual curation entries ({curation_df['mz_rt_uid'].nunique()} unique compounds),"
+                f" {len(ms1_df)} MS1 data points ({ms1_df['mz_rt_uid'].nunique()} unique compounds),"
+                f" and {len(ms2_df)} MS2 data points ({ms2_df['mz_rt_uid'].nunique()} unique compounds) for summary.")
+
+    # Create RT bounds lookup for efficient access
+    rt_bounds = {
+        row['mz_rt_uid']: (row['rt_min'], row['rt_max'])
+        for _, row in curation_df.iterrows()
+    }
+
+    # Update in_feature for MS1 data
+    logger.info(f"Updating in_feature for MS1 data based on manual curation RT bounds...")
+    def update_ms1_in_feature(row):
+        bounds = rt_bounds.get(row['mz_rt_uid'])
+        if bounds is None:
+            return row['in_feature']
+        rt_min, rt_max = bounds
+        return [bool(rt_min <= rt <= rt_max) for rt in row['spec_rts']]
+
+    ms1_df['in_feature'] = ms1_df.apply(update_ms1_in_feature, axis=1)
+
+    # Update in_feature for MS2 data
+    logger.info(f"Updating in_feature for MS2 data based on manual curation RT bounds...")
+    if not ms2_df.empty:
+        rt_min_series = ms2_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[0])
+        rt_max_series = ms2_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[1])
+        has_bounds = rt_min_series.notna()
+        ms2_df['in_feature'] = np.where(
+            has_bounds,
+            (ms2_df['scan_rt'] >= rt_min_series) & (ms2_df['scan_rt'] <= rt_max_series),
+            ms2_df['in_feature']
+        )
+        ms2_df['in_feature'] = ms2_df['in_feature'].astype(bool)
+    
+    # Save updated dataframes back to database
+    logger.info(f"Saving updated data back to database after updating in_feature values from manual curation object...")
+    with get_db_connection(summary_obj.paths["project_db_path"]) as conn:
+        # Delete old entries and insert updated ones for MS1
+        if not ms1_df.empty:
+            logger.info("  Saving MS1 data entries to database...")
+            conn.execute(f"""
+                DELETE FROM ms1_data 
+                WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+                AND analysis_number = {summary_obj.analysis_number}
+                AND {uid_filter}
+            """)
+            conn.execute("INSERT INTO ms1_data SELECT * FROM ms1_df")
+        
+        # Delete old entries and insert updated ones for MS2
+        if not ms2_df.empty:
+            logger.info("  Saving MS2 data entries to database...")
+            # Re-serialize hits for database storage
+            ms2_df_to_save = ms2_df.copy()
+            ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
+            
+            conn.execute(f"""
+                DELETE FROM ms2_data 
+                WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+                AND analysis_number = {summary_obj.analysis_number}
+                AND {uid_filter}
+            """)
+            conn.execute("INSERT INTO ms2_data SELECT * FROM ms2_df_to_save")
+
+    logger.info(f"Updated in_feature values saved to database.")
+
+    # Create filtered copies with only in_feature=True data
+    logger.info(f"Creating filtered copies with only in_feature=True data...")
+    
+    # Filter MS1 data: subset lists based on in_feature
+    if not ms1_df.empty:
+        def filter_ms1_row(row):
+            mask = row['in_feature']
+            if isinstance(mask, list) and isinstance(row['spec_rts'], list):
+                filtered = {k: row[k] for k in ms1_df.columns}
+                filtered['spec_rts'] = [v for v, m in zip(row['spec_rts'], mask) if m]
+                filtered['spec_mzs'] = [v for v, m in zip(row['spec_mzs'], mask) if m]
+                filtered['spec_ints'] = [v for v, m in zip(row['spec_ints'], mask) if m]
+                filtered['in_feature'] = [True] * len(filtered['spec_rts'])
+                return filtered
+            return row.to_dict()
+
+        ms1_df_filtered = pd.DataFrame(ms1_df.apply(filter_ms1_row, axis=1).tolist())
+
+    # Filter MS2 data: keep only rows with in_feature=True
+    if not ms2_df.empty:
+        ms2_df_filtered = ms2_df[ms2_df['in_feature'] == True].copy()
+    else:
+        ms2_df_filtered = ms2_df.copy()    
+
+    # Store filtered dataframes in experimental_data object
+    summary_obj.experimental_data = ExperimentalData()
+    summary_obj.experimental_data.ms1_df = ms1_df_filtered
+    summary_obj.experimental_data.ms2_df = ms2_df_filtered
+    logger.info(f"Added {len(ms1_df_filtered)} MS1 rows and {len(ms2_df_filtered)} MS2 rows with in_feature=True to the summary object.")
+
+    _update_manual_curation_with_best_data(summary_obj, curation_df)
+
+def load_and_filter_for_gui(analysis_gui_obj):
+
+    from metatlas2.workflow_objects import ExperimentalData
+
+    with get_db_connection(analysis_gui_obj.paths["project_db_path"], read_only=True) as conn:
+        atlas_uids = list(analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.keys())
+        uid_filter = f"mz_rt_uid IN {tuple(atlas_uids)}" if atlas_uids else "1=0"
+        
+        logger.info("Loading manual curation table from database...")
+        curation_df = conn.execute(f"""
+            SELECT * FROM manual_curation 
+            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
+            AND analysis_number = {analysis_gui_obj.analysis_number}
+            AND {uid_filter}
+        """).df()
+        logger.info(f"Loaded {len(curation_df)} manual curation entries ({curation_df['mz_rt_uid'].nunique()}) unique compounds) for GUI display.")
+        
+        logger.info("Loading MS1 data from database...")
+        ms1_df = conn.execute(f"""
+            SELECT * FROM ms1_data 
+            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
+            AND analysis_number = {analysis_gui_obj.analysis_number}
+            AND {uid_filter}
+        """).df()
+        logger.info(f"Loaded {len(ms1_df)} MS1 data points ({ms1_df['mz_rt_uid'].nunique()} unique compounds) for GUI display.")
+        
+        logger.info("Loading MS2 data from database...")
+        ms2_df = conn.execute(f"""
+            SELECT * FROM ms2_data 
+            WHERE rt_alignment_number = {analysis_gui_obj.rt_alignment_number} 
+            AND analysis_number = {analysis_gui_obj.analysis_number}
+            AND {uid_filter}
+        """).df()
+        if not ms2_df.empty and "hits" in ms2_df.columns:
+            ms2_df = ms2_df.copy()
+            ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
+        logger.info(f"Loaded {len(ms2_df)} MS2 data points ({ms2_df['mz_rt_uid'].nunique()} unique compounds) for GUI display.")
 
     # check if the user has provided any override parameters, and if so, validate them
     _overrides = analysis_gui_obj.override_parameters or {}
@@ -2404,6 +2508,7 @@ def load_and_filter_for_gui(analysis_gui_obj):
 
     # MS1 filtering
     if not ms1_df.empty and ms1_filter:
+        logger.info(f"Applying MS1 override filters: min_num_points={ms1_min_pts}, min_peak_intensity={ms1_min_int}...")
         max_ints = ms1_df['spec_ints'].apply(lambda x: np.max(x) if (isinstance(x, list) and len(x)>0) else 0)
         num_pts = ms1_df['spec_ints'].apply(lambda x: len(x) if isinstance(x, list) else 0)
         mask = pd.Series([True] * len(ms1_df))
@@ -2417,6 +2522,7 @@ def load_and_filter_for_gui(analysis_gui_obj):
 
     # MS2 filtering
     if not ms2_df.empty and ms2_filter:
+        logger.info(f"Applying MS2 override filters: min_score={ms2_min_score}, min_matching_frags={ms2_min_frags}...")
         max_scores = ms2_df['hits'].apply(_get_max_score)
         max_frags = ms2_df['hits'].apply(_get_max_frags)
         mask = pd.Series([True] * len(ms2_df))
@@ -2433,6 +2539,7 @@ def load_and_filter_for_gui(analysis_gui_obj):
     if _overrides.get("remove_unided_compounds") is not None:
         remove_unided = _overrides.get("remove_unided_compounds", None)
     if remove_unided:
+        logger.info(f"Removing unidentified compounds from curation object (those that do not have passing MS1 or MS2 data)...")
         keep_mask = (curation_df['mz_rt_uid'].isin(passing_ms1) | curation_df['mz_rt_uid'].isin(passing_ms2))
         curation_df = curation_df[keep_mask].copy()
         surviving_uids = set(curation_df['mz_rt_uid'])
@@ -2440,19 +2547,53 @@ def load_and_filter_for_gui(analysis_gui_obj):
         ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(surviving_uids)]    
 
     # ISTD transfer
-    apply_istd_override = analysis_gui_obj.workflow_params.get("apply_istd_to_ema", True)
-    if _overrides.get("apply_istd_to_ema") is not None:
-        apply_istd_override = _overrides.get("apply_istd_to_ema", None)
+    apply_istd_override = analysis_gui_obj.workflow_params.get("apply_istd_curation_to_ema", True)
+    if _overrides.get("apply_istd_curation_to_ema") is not None:
+        apply_istd_override = _overrides.get("apply_istd_curation_to_ema", None)
     if apply_istd_override:
         if analysis_gui_obj.post_autoid_atlas_obj.analysis_type == "EMA":
+            logger.info("Applying ISTD transfer...")
             curation_df = _transfer_istd_curation(
                 curation_df, analysis_gui_obj.paths["project_db_path"],
                 analysis_gui_obj, analysis_gui_obj.post_autoid_atlas_obj
             )
 
+    # Cross-polarity RT transfer: apply curated RT bounds from the opposite polarity
+    # (same analysis_type, rt_alignment_number, analysis_number) to uncurated compounds.
+    apply_cross_polarity = analysis_gui_obj.workflow_params.get("apply_cross_polarity_curation", True)
+    if _overrides.get("apply_cross_polarity_curation") is not None:
+        apply_cross_polarity = _overrides.get("apply_cross_polarity_curation")
+    if apply_cross_polarity:
+        atlas_obj = analysis_gui_obj.post_autoid_atlas_obj
+        logger.info(
+            f"Checking for curated opposite-polarity {atlas_obj.analysis_type} entries "
+            f"to pre-populate RT bounds..."
+        )
+        opp_polarity_df = get_opposite_polarity_curation(
+            project_db_path=analysis_gui_obj.paths["project_db_path"],
+            analysis_type=atlas_obj.analysis_type,
+            polarity=atlas_obj.polarity,
+            rt_alignment_number=analysis_gui_obj.rt_alignment_number,
+            analysis_number=analysis_gui_obj.analysis_number,
+        )
+        if not opp_polarity_df.empty:
+            curation_df, n_cross = apply_cross_polarity_curation(
+                manual_curation_df=curation_df,
+                opposite_polarity_df=opp_polarity_df,
+                post_autoid_atlas_obj=atlas_obj,
+            )
+            logger.info(
+                f"Transferred opposite-polarity RT bounds to {n_cross} compound(s) "
+                f"(inchi_key matches, ms2_notes was empty)."
+            )
+        else:
+            logger.info("No curated opposite-polarity entries found — skipping cross-polarity RT transfer.")
+
     # Assign to GUI
+    logger.info(f"Assigning filtered data to GUI experimental_data object...")
     analysis_gui_obj.experimental_data = ExperimentalData()
     analysis_gui_obj.experimental_data.curation_df = curation_df
     analysis_gui_obj.experimental_data.ms1_df = ms1_df
     analysis_gui_obj.experimental_data.ms2_df = ms2_df
+
     return

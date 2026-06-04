@@ -358,6 +358,14 @@ def extract_data_from_raw(obj):
     atlas_df = atlas.to_dataframe()
     atlas_expanded = _expand_atlas_windows(atlas_df, wp.get("extra_time", 0.0), wp.get("mz_tolerance_ppm", 5.0), polarity)
     runs = [r for r in lcmsruns if getattr(r, "file_format", "h5") == "h5"]
+
+    # check that all files exist on disk before starting extraction
+    missing_files = [r.file_path for r in runs if not Path(r.file_path).is_file()]
+    if missing_files:
+        logger.error("The following files are missing and cannot be processed:")
+        for f in missing_files:
+            logger.error(f"  {f}")
+        raise FileNotFoundError(f"{len(missing_files)} files are missing. Is the conversion finished?.")
     
     logger.info(f"Extracting data for {len(runs)} files in stage '{stage}' with polarity '{polarity}'...")
 

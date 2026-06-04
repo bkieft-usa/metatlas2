@@ -129,17 +129,20 @@ def run_rt_alignment(
         rt_align_obj=rt_align_obj
     )
 
-    logger.info("Passing aligned Atlases to database saver...")    
+    logger.info("Passing aligned Atlases to savers...")    
     for uid, aligned_atlas_obj in rt_align_obj.rt_aligned_atlases.items():
+        logger.info(f"Saving aligned Atlas {uid} to database...")
         dbi.save_atlas_to_database(
             atlas_obj=aligned_atlas_obj,
             db_path=rt_align_obj.paths['project_db_path'],
             main_db_path=rt_align_obj.paths['main_db_path']
         )
+        logger.info(f"Saving aligned Atlas {uid} metadata to CSV...")
         ldt.save_atlas_metadata_to_csv(
             atlas_obj=aligned_atlas_obj,
             output_path=rt_align_obj.paths['aligned_atlases_store_file']
         )
+        logger.info(f"Saving aligned Atlas {uid} data to TSV...")
         ldt.save_atlas_data_to_tsv(
             atlas_obj=aligned_atlas_obj,
             output_path=rt_align_obj.paths['rt_alignment_output_dir']
@@ -259,11 +262,13 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-        logger.info("Saving post-autoid Atlas metadata and data to CSV...")
+        logger.info("Saving post-autoid Atlas metadata to CSV...")
         ldt.save_atlas_metadata_to_csv(
             atlas_obj=auto_id_obj.post_autoid_atlas_obj,
             output_path=auto_id_obj.paths['auto_ided_atlases_store_file']
         )
+
+        logger.info("Saving post-autoid Atlas data to TSV...")
         ldt.save_atlas_data_to_tsv(
             atlas_obj=auto_id_obj.post_autoid_atlas_obj,
             output_path=auto_id_obj.paths['analysis_output_dir']
@@ -387,17 +392,25 @@ def run_analysis_summary(
     summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
 
     logger.info("Passing AnalysisSummary object to new Atlas generator...")
-    summary_obj.post_curation_atlas_obj = dbi.create_new_atlas_after_manual_curation(
+    dbi.create_new_atlas_after_manual_curation(
         summary_obj=summary_obj
     )
 
     logger.info("Loading analysis data scoped to post-manual-curation atlas...")
-    summary_obj.load_data()
+    dbi.load_and_filter_for_summary(
+        summary_obj=summary_obj,
+    )
 
-    logger.info("Saving post-manual-curation Atlas data to CSV...")
-    ldt.save_atlas_data_to_csv(
+    logger.info("Saving post-manual-curation Atlas metadata to CSV...")
+    ldt.save_atlas_metadata_to_csv(
         atlas_obj=summary_obj.post_curation_atlas_obj,
         output_path=summary_obj.paths['curated_atlases_store_file']
+    )
+
+    logger.info("Saving post-manual-curation Atlas data to TSV...")
+    ldt.save_atlas_data_to_tsv(
+        atlas_obj=summary_obj.post_curation_atlas_obj,
+        output_path=summary_obj.paths['analysis_output_dir']
     )
 
     logger.info("Creating and saving summary files and figures to output directory...")

@@ -28,9 +28,11 @@ def build_dash_app(
     manual_curation_df = analysis_gui_obj.experimental_data.curation_df
     #logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
+    # Set some params
     top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
     if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
         top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
+    async_flush_errors: dict = {}
 
     # Extract metadata for display
     project_shortname = analysis_gui_obj.project_name.split("_")[4]
@@ -42,7 +44,7 @@ def build_dash_app(
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
-        {"label": f"{i+1}: {row['compound_name']}", "value": i}
+        {"label": f"{i+1}: {row['compound_name']} ({row['adduct']})", "value": i}
         for i, row in manual_curation_df.reset_index(drop=True).iterrows()
     ]
 
@@ -67,17 +69,14 @@ def build_dash_app(
 
     # Set up some caching to help with race conditions
     flush_lock = threading.RLock()
-    cache_lock = threading.Lock()
     latest_flushed_seq_by_session = {}
     db_write_lock = threading.Lock()
-    ms2_scan_stats_cache = {}
     isomer_string_cache = {}
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
     #logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
     ms1_by_compound = {}
     ms2_by_compound = {}
-    ms2_hits_by_compound = {}
 
     # Index MS1 data
     for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms1_df.groupby(["mz_rt_uid"], observed=True):
@@ -217,7 +216,7 @@ def build_dash_app(
 
     # format of the app itself
     all_notes_len = len(analysis_gui_obj.notes["ms1_notes"]) + len(analysis_gui_obj.notes["ms2_notes"]) + len(analysis_gui_obj.notes["other_notes"])
-    total_plot_height = all_notes_len*60
+    total_plot_height = all_notes_len*70
     ms1_height = total_plot_height*0.6
     ms2_height = total_plot_height*0.4
     app.layout = dbc.Container(
@@ -238,7 +237,7 @@ def build_dash_app(
                                 [
                                     dbc.Col(
                                         dcc.Dropdown(id="compound-dd", options=compound_options, value=starting_compound_idx, clearable=False, style={"width": "100%", "fontSize": "1.5rem"}),
-                                        width=12, className="mb-3",
+                                        width=11, className="mb-3",
                                     ),
                                 ],
                             ),
@@ -402,19 +401,19 @@ def build_dash_app(
                             ),
                             dbc.Row(
                                 [
-                                    dbc.Col(dbc.Button("◀ Prev MS2-1  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2-CE102040  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
                                     dbc.Col(html.Div(id="ms2-counter-1", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2-1 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("◀ Prev MS2-2  [>]", id="ms2-prev-2", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2-CE102040 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2-CE205060  [>]", id="ms2-prev-2", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
                                     dbc.Col(html.Div(id="ms2-counter-2", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2-2 ▶  [/]", id="ms2-next-2", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2-CE205060 ▶  [/]", id="ms2-next-2", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
                                 ],
                                 className="my-2 align-items-center",
                                 style={"width": "100%"},
                                 justify="start",
                             ),
                         ],
-                        width=9,
+                        width=8,
                     ),
                 ],
                 className="mt-1",
@@ -504,126 +503,6 @@ def build_dash_app(
             scans_by_energy[ce] = group_sorted.head(top_n_hits)
         return scans_by_energy
 
-    def _get_ms2_scan_stats(row):
-        """Return per-scan MS2 extrema (m/z and intensity) cached by compound."""
-        mz_rt_uid = row["mz_rt_uid"]
-
-        with cache_lock:
-            if mz_rt_uid in ms2_scan_stats_cache:
-                return ms2_scan_stats_cache[mz_rt_uid]
-
-        ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
-        if ms2_sub.empty:
-            empty_stats = pd.DataFrame(columns=["x_min", "x_max", "y_absmax"])
-            with cache_lock:
-                ms2_scan_stats_cache[mz_rt_uid] = empty_stats
-            return ms2_scan_stats_cache[mz_rt_uid]
-
-        x_mins = []
-        x_maxs = []
-        y_absmax_vals = []
-
-        for _, scan in ms2_sub.iterrows():
-            mz_values = []
-            max_abs_intensity = 0.0
-
-            hits = scan.get("hits", [])
-            if isinstance(hits, list) and hits:
-                for hit in hits:
-                    if not isinstance(hit, dict):
-                        continue
-
-                    q_aligned = hit.get("query_aligned", [[], []])
-                    r_aligned = hit.get("ref_aligned", [[], []])
-                    if not isinstance(q_aligned, (list, tuple)) or len(q_aligned) != 2:
-                        q_aligned = [[], []]
-                    if not isinstance(r_aligned, (list, tuple)) or len(r_aligned) != 2:
-                        r_aligned = [[], []]
-
-                    q_mz = _sanitize_numeric_list(q_aligned[0])
-                    q_int = _sanitize_numeric_list(q_aligned[1])
-                    r_mz = _sanitize_numeric_list(r_aligned[0])
-
-                    mz_values.extend([v for v in q_mz if np.isfinite(v)])
-                    mz_values.extend([v for v in r_mz if np.isfinite(v)])
-
-                    if q_int and np.any(np.isfinite(q_int)):
-                        max_abs_intensity = max(max_abs_intensity, float(np.nanmax(np.abs(q_int))))
-            else:
-                mz = _sanitize_numeric_list(scan.get("frag_mzs", []))
-                ints = _sanitize_numeric_list(scan.get("frag_ints", []))
-                mz_values.extend([v for v in mz if np.isfinite(v)])
-                if ints and np.any(np.isfinite(ints)):
-                    max_abs_intensity = max(max_abs_intensity, float(np.nanmax(np.abs(ints))))
-
-            if mz_values:
-                x_mins.append(float(np.nanmin(mz_values)))
-                x_maxs.append(float(np.nanmax(mz_values)))
-            else:
-                x_mins.append(np.nan)
-                x_maxs.append(np.nan)
-
-            if np.isfinite(max_abs_intensity) and max_abs_intensity > 0:
-                y_absmax_vals.append(float(max_abs_intensity))
-            else:
-                y_absmax_vals.append(np.nan)
-
-        stats_df = pd.DataFrame(
-            {
-                "x_min": x_mins,
-                "x_max": x_maxs,
-                "y_absmax": y_absmax_vals,
-            },
-            index=ms2_sub.index,
-        )
-
-        with cache_lock:
-            if mz_rt_uid not in ms2_scan_stats_cache:
-                ms2_scan_stats_cache[mz_rt_uid] = stats_df
-        return ms2_scan_stats_cache[mz_rt_uid]
-
-    def _get_ms2_axis_ranges(row, rt_min=None, rt_max=None):
-        """Return stable x/y axis ranges per collision energy for the current RT window."""
-        scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
-        scan_stats = _get_ms2_scan_stats(row)
-        axis_ranges = {}
-
-        for ce, scans in scans_by_energy.items():
-            if scans.empty or scan_stats.empty:
-                axis_ranges[ce] = {"x": [0.0, 1.0], "y": [-1.08, 1.08]}
-                continue
-
-            stats_sub = scan_stats.reindex(scans.index)
-            x_min_vals = stats_sub["x_min"].to_numpy(dtype=float)
-            x_max_vals = stats_sub["x_max"].to_numpy(dtype=float)
-            y_abs_vals = stats_sub["y_absmax"].to_numpy(dtype=float)
-
-            finite_x_min = x_min_vals[np.isfinite(x_min_vals)]
-            finite_x_max = x_max_vals[np.isfinite(x_max_vals)]
-
-            if finite_x_min.size > 0 and finite_x_max.size > 0:
-                x_min = float(np.nanmin(finite_x_min))
-                x_max = float(np.nanmax(finite_x_max))
-                x_span = max(x_max - x_min, 1.0)
-                x_pad = x_span * 0.02
-                x_range = [x_min - x_pad, x_max + x_pad]
-            else:
-                x_range = [0.0, 1.0]
-
-            finite_y_abs = y_abs_vals[np.isfinite(y_abs_vals)]
-            max_abs_intensity = float(np.nanmax(finite_y_abs)) if finite_y_abs.size > 0 else 0.0
-            if max_abs_intensity <= 0:
-                max_abs_intensity = 1.0
-            y_pad = max_abs_intensity * 0.08
-            y_range = [-(max_abs_intensity + y_pad), max_abs_intensity + y_pad]
-            axis_ranges[ce] = {"x": x_range, "y": y_range}
-
-        return axis_ranges
-
-    def _count_ms2_scans(row, rt_min=None, rt_max=None):
-        scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
-        return max((len(df) for df in scans_by_energy.values()), default=0)
-
     def _ce_state_key(ce):
         try:
             return f"{float(ce):.6f}"
@@ -639,45 +518,34 @@ def build_dash_app(
 
     def _get_ms2_idx_for_ce(state, ce):
         idx_by_ce = state.get("ms2_idx_by_ce") if isinstance(state, dict) else None
-        fallback = state.get("ms2_idx", 0) if isinstance(state, dict) else 0
-        try:
-            fallback = int(fallback)
-        except Exception:
-            fallback = 0
         if not isinstance(idx_by_ce, dict):
-            return max(0, fallback)
-        raw_val = idx_by_ce.get(_ce_state_key(ce), fallback)
+            raise ValueError(f"ms2_idx_by_ce missing or invalid in state: {state}")
+        raw_val = idx_by_ce.get(_ce_state_key(ce), 0)
         try:
             return max(0, int(raw_val))
         except Exception:
-            return max(0, fallback)
+            return 0
 
     def _move_ms2_idx_for_ce_position(state, ce_position, delta):
         row = _compound_row(state["compound_idx"])
         scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
         collision_energies = sorted(scans_by_energy.keys())
-        #logger.info(f"_move_ms2_idx_for_ce_position: ce_position={ce_position}, delta={delta}, found {len(collision_energies)} CEs")
         if ce_position < 0 or ce_position >= len(collision_energies):
-            logger.warning(f"_move_ms2_idx_for_ce_position: ce_position {ce_position} out of range (0-{len(collision_energies)-1})")
             raise dash.exceptions.PreventUpdate
         ce = collision_energies[ce_position]
         scans = scans_by_energy.get(ce)
         n_scans = len(scans) if scans is not None else 0
         if n_scans <= 0:
-            logger.warning(f"_move_ms2_idx_for_ce_position: No scans for CE={ce}")
             raise dash.exceptions.PreventUpdate
         current_idx = _get_ms2_idx_for_ce(state, ce)
         new_idx = max(0, min(current_idx + delta, n_scans - 1))
-        #logger.info(f"_move_ms2_idx_for_ce_position: CE={ce}, current_idx={current_idx}, new_idx={new_idx}, n_scans={n_scans}")
         if new_idx == current_idx:
-            logger.warning(f"_move_ms2_idx_for_ce_position: new_idx same as current_idx ({current_idx}), no update")
             raise dash.exceptions.PreventUpdate
         idx_by_ce = dict(state.get("ms2_idx_by_ce") or {})
         idx_by_ce[_ce_state_key(ce)] = int(new_idx)
         changes = {"ms2_idx_by_ce": idx_by_ce}
         if ce_position == 0:
             changes["ms2_idx"] = int(new_idx)
-        #logger.info(f"_move_ms2_idx_for_ce_position: Returning updated state with changes={changes}")
         return _patch_with_seq(state, **changes)
 
     def _compute_window_ms1_metrics(state):
@@ -766,6 +634,9 @@ def build_dash_app(
         seq = int(state.get("edit_seq", 0))
         flush_key = (sid, state.get("compound_idx"))
 
+        if flush_key in async_flush_errors:
+            state["flush_error"] = async_flush_errors.pop(flush_key)
+
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(flush_key, -1)
             if seq <= latest_seq:
@@ -827,6 +698,7 @@ def build_dash_app(
                         updates = {}
                     else:
                         updates = {
+                            "curated": True,
                             "mz": window_metrics["mz"],
                             "rt_min": state["rt_min"],
                             "rt_max": state["rt_max"],
@@ -858,12 +730,12 @@ def build_dash_app(
                         #    f"seq={seq} (current latest={current_latest})"
                         #)
                         return
-                    dbi.write_gui_updates_to_db(
-                        analysis_gui_obj.paths["project_db_path"],
-                        row["mz_rt_uid"],
-                        int(row["rt_alignment_number"]),
-                        int(row["analysis_number"]),
-                        updates,
+                    dbi.write_curation_updates_to_db(
+                        project_db_path=analysis_gui_obj.paths["project_db_path"],
+                        rt_alignment_number=analysis_gui_obj.rt_alignment_number,
+                        analysis_number=int(row["analysis_number"]),
+                        rows=[{"mz_rt_uid": row["mz_rt_uid"], **updates}],
+                        updated_field_keys=list(updates.keys()),
                     )
 
                 # Update in-memory DataFrame to reflect what was written.
@@ -876,6 +748,7 @@ def build_dash_app(
             except Exception as e:
                 logger.error(f"Async flush worker failed: {e}")
                 traceback.print_exc()
+                async_flush_errors[flush_key] = str(e)
         
         # Launch async worker thread - don't block UI!
         thread = threading.Thread(target=_async_flush_worker, daemon=True)
@@ -884,6 +757,8 @@ def build_dash_app(
         # Return immediately with optimistic state update
         state["last_saved"] = {
             "name": row["compound_name"],
+            "adduct": row["adduct"],
+            "index": state["compound_idx"]+1,
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
             "ms1": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
@@ -1092,10 +967,10 @@ def build_dash_app(
             except Exception:
                 pass
         
-        isomer_str = " // ".join(isomer_lines) if resolved_isomers else "No Isomers Found"
+        isomer_str = " // ".join(isomer_lines) if resolved_isomers else ""
         
         # find number of isomers in isomer_str and add line breaks every 3 isomers for readability
-        if isomer_str != "No Isomers Found":
+        if isomer_str != "":
             isomer_list = isomer_str.split(" // ")
             if len(isomer_list) > 3:
                 isomer_str = " // <br>".join(
@@ -1217,7 +1092,6 @@ def build_dash_app(
             margin=dict(l=50, r=20, t=125, b=40), 
             dragmode="zoom",
             plot_bgcolor="white",
-            #uirevision=f"ms1-{state['compound_idx']}-{yaxis_scale}",
             xaxis=dict(
                 rangeslider=dict(
                     visible=True,
@@ -1315,8 +1189,6 @@ def build_dash_app(
                                xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False))
             return fig
 
-        axis_ranges_by_energy = _get_ms2_axis_ranges(row, rt_min, rt_max)
-
         collision_energies = sorted(scans_by_energy.keys())
         n_energies = len(collision_energies)
         fig = make_subplots(rows=1, cols=n_energies, horizontal_spacing=0.08)
@@ -1332,10 +1204,6 @@ def build_dash_app(
             ce_ms2_idx = _get_ms2_idx_for_ce(state, ce)
             actual_idx = max(0, min(ce_ms2_idx, len(scans) - 1))
             scan = scans.iloc[actual_idx]
-            
-            # Debug logging to verify correct scan selection
-            scan_rt = scan.get('scan_rt', 'N/A')
-            #logger.info(f"_make_ms2_figure: CE={ce}, showing scan {actual_idx+1}/{len(scans)}, scan_rt={scan_rt}")
             
             # --- DATA EXTRACTION FROM HITS LIST ---
             hits = scan.get('hits', [])
@@ -1372,20 +1240,6 @@ def build_dash_app(
                 # Plot Reference (Bottom)
                 _add_ms2_stick_traces(fig, r_mz, ref_y, "Reference", 1, col_idx, 
                                      colors=frag_colors, default_color="red", line_width_px=stick_width_px)
-
-                # # --- DRAW CONNECTING LINES ---
-                # match_lines_x, match_lines_y = [], []
-                # for i, color in enumerate(frag_colors):
-                #     if color == "green" and not np.isnan(q_mz[i]) and not np.isnan(r_mz[i]):
-                #         match_lines_x.extend([q_mz[i], r_mz[i], None])
-                #         match_lines_y.extend([q_int[i], -r_int[i] * scale, None])
-                
-                # if match_lines_x:
-                #     fig.add_trace(go.Scatter(
-                #         x=match_lines_x, y=match_lines_y, mode='lines',
-                #         line=dict(color='rgba(150,150,150,0.4)', width=1),
-                #         hoverinfo='skip', showlegend=False
-                #     ), row=1, col=col_idx)
 
                 num_ref_fragments = hit.get('ref_frags', 0)
                 num_matching_fragments = len(hit.get('matched_fragments', []))
@@ -1429,19 +1283,11 @@ def build_dash_app(
                 row=1,
                 col=col_idx,
             )
-            axis_ranges = axis_ranges_by_energy.get(ce, {})
-            if axis_ranges.get("x"):
-                fig.update_xaxes(
-                    range=axis_ranges["x"],
-                    autorange=False,
-                    row=1,
-                    col=col_idx,
-                )
             fig.update_yaxes(
                 title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "",
                 showgrid=False,
                 zeroline=False,
-                range=axis_ranges.get("y", [y_min - y_pad, y_max + y_pad]),
+                range=[y_min - y_pad, y_max + y_pad],
                 title_font=dict(size=18),
                 tickfont=dict(size=15),
                 autorange=False,
@@ -1453,9 +1299,8 @@ def build_dash_app(
             if hit:
                 scan_info = (
                     f"<span style='font-size:1.2em'>"
-                    #f"<b>Scan {actual_idx + 1}/{len(scans)}</b>  |  "
                     f"<b>CoS.: {hit.get('score', 0):.4f}</b>  |  "
-                    f"Ions: {num_matching_fragments}q/{num_ref_fragments}r  |  "
+                    f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
                     f"RT: {scan.get('scan_rt', 0):.4f} min | "
                     f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
                     f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
@@ -1464,7 +1309,12 @@ def build_dash_app(
                     f"{hit.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
                 )
             else:
-                scan_info = f"<b>Scan {actual_idx + 1}/{len(scans)}</b>  |  No Hit Selected | {fname}<br><br>"
+                scan_info = (
+                    f"<span style='font-size:1.2em'>"
+                    f"<b>No Hit</b>"
+                    f"</span><br>"
+                    f"{fname}<br><br>"
+                )
 
             xref_str, yref_str = ("x domain" if col_idx == 1 else f"x{col_idx} domain"), ("y domain" if col_idx == 1 else f"y{col_idx} domain")
             fig.add_annotation(text=scan_info, xref=xref_str, yref=yref_str, x=0.5, y=1.02, showarrow=False, font=dict(size=14), xanchor="center", yanchor="bottom")
@@ -1847,9 +1697,9 @@ def build_dash_app(
             return _move_ms2_idx_for_ce_position(state, ce_position=0, delta=-1), dash.no_update
         if key in (";", "ArrowDown"):
             return _move_ms2_idx_for_ce_position(state, ce_position=0, delta=1), dash.no_update
-        if key == ">":
+        if key == "o":
             return _move_ms2_idx_for_ce_position(state, ce_position=1, delta=-1), dash.no_update
-        if key == "/":
+        if key == "p":
             return _move_ms2_idx_for_ce_position(state, ce_position=1, delta=1), dash.no_update
 
         # --- Accept suggestions ---
@@ -1915,39 +1765,18 @@ def build_dash_app(
     def update_figures(state, yaxis_scale):
         state = _ensure_valid_state(state)
         
-        import time
-        update_start = time.time()
-        
-        # Debug logging to track what's being rendered
-        compound_idx = state.get("compound_idx")
-        ms2_idx = state.get("ms2_idx", 0)
-        edit_seq = state.get("edit_seq", 0)
-        #logger.info(f"update_figures called: compound_idx={compound_idx}, ms2_idx={ms2_idx}, edit_seq={edit_seq}")
-        
         flush_err = state.get("flush_error")
         ms2_warning = state.get("ms2_warning")
         ms1_warning = state.get("ms1_warning")
         try:
             # Generate figures (no caching)
-            ms1_start = time.time()
             ms1_fig = _make_ms1_figure(state, yaxis_scale)
-            ms1_time = time.time() - ms1_start
-            #logger.info(f"MS1 figure generated in {ms1_time:.3f}s")
-            
-            ms2_start = time.time()
             ms2_fig = _make_ms2_figure(state)
-            #logger.info(f"MS2 fig data traces: {len(ms2_fig.data)}, layout title: {ms2_fig.layout.title}")
-            #logger.info(f"MS2 fig first trace type: {ms2_fig.data[0].type if ms2_fig.data else 'NO TRACES'}")
-            ms2_time = time.time() - ms2_start
-            #logger.info(f"MS2 figure generated in {ms2_time:.3f}s")
-            
-            total_time = time.time() - update_start
-            #logger.info(f"Total update_figures time: {total_time:.3f}s")
             
             banners = []
             if flush_err:
                 banners.append(html.Div(
-                    f"⚠ {flush_err}",
+                    f"{flush_err}",
                     style={"color": "red", "fontSize": "14px", "fontWeight": "bold", "marginBottom": "8px"},
                 ))
             if ms2_warning:
@@ -1966,7 +1795,7 @@ def build_dash_app(
             traceback.print_exc()
             logger.error(f"update_figures error: {exc}")
             err_html = html.Span(
-                f"⚠ Figure error: {type(exc).__name__}: {exc}",
+                f"Figure error: {type(exc).__name__}: {exc}",
                 style={"color": "red", "fontSize": "11px", "fontWeight": "bold"},
             )
             empty = go.Figure()
@@ -1989,8 +1818,8 @@ def build_dash_app(
         
         # Get scans by collision energy for detailed count
         scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
-        ms2_txt_1 = "No CE1"
-        ms2_txt_2 = "No CE2"
+        ms2_txt_1 = "No CE102040"
+        ms2_txt_2 = "No CE205060"
         if scans_by_energy:
             collision_energies = sorted(scans_by_energy.keys())
             if len(collision_energies) > 0:
@@ -2005,24 +1834,26 @@ def build_dash_app(
                 ms2_txt_2 = f"{_format_collision_energy_label(ce2)}: {idx2 + 1}/{n2}" if n2 > 0 else f"{_format_collision_energy_label(ce2)}: 0/0"
         
         pending = html.Span(
-            ["Unsaved (current): ", html.I(row["compound_name"]),
-             f"  |  RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
-             f"  |  MS1: {state['ms1_note']}  |  MS2: {state['ms2_note']}  |  Other: {state['other_note']}",
-             f"  |  Analyst Notes: {state['analyst_notes'][:30]}{'...' if len(state['analyst_notes']) > 30 else ''}"],
-            style={"color": "#b8860b", "fontSize": "11px", "fontWeight": "bold"},
+            [
+                "Working analysis: ", html.I(f"{row['compound_name']} ({row['adduct']}) [{state['compound_idx']+1}]"),
+                html.Br(), f"RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
+                html.Br(), f"MS1: {state['ms1_note']}",
+                html.Br(), f"MS2: {state['ms2_note']}",
+                html.Br(), f"Other: {state['other_note']}",
+                html.Br(), f"Analyst Notes: {state['analyst_notes'][:50]}{'...' if len(state['analyst_notes']) > 50 else ''}",
+            ],
+            style={"color": "#b8860b", "fontSize": "16px", "fontWeight": "bold"},
         )
         if state.get("last_saved"):
             s = state["last_saved"]
-            saved_analyst = s.get("analyst_notes", "")
             saved = html.Span(
-                ["Saved (previous): ", html.I(s["name"]),
-                 f"  |  RT [{s['rt_min']:.4f}, {s['rt_max']:.4f}] ",
-                 f"  |  MS1: {s['ms1']}  |  MS2: {s['ms2']}  |  Other: {s['other']}  |  @ {s['timestamp']}",
-                 f"  |  Analyst Notes: {saved_analyst[:30]}{'...' if len(saved_analyst) > 30 else ''}"],
-                style={"color": "#2a7a2a", "fontSize": "11px", "fontWeight": "bold"},
+                [
+                    "Saved: ", html.I(f"{s['name']} ({s['adduct']}) [{s['index']}]"),
+                ],
+                style={"color": "#2a7a2a", "fontSize": "16px", "fontWeight": "bold"},
             )
         else:
-            saved = html.Span("Previous: NA", style={"color": "#888", "fontSize": "11px"})
+            saved = html.Span("Previous: NA", style={"color": "#888", "fontSize": "16px"})
         return pending, saved, comp_txt, ms2_txt_1, ms2_txt_2
 
     @app.callback(

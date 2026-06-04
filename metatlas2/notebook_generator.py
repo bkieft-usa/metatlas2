@@ -75,7 +75,9 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification") -> nbformat.Noteboo
         "note_options_overrides",
         "remove_unided_compounds",
         "remove_flagged_compounds",
-        "apply_istd_to_ema",
+        "apply_istd_curation_to_ema",
+        "apply_cross_polarity_curation",
+        "upload_to_gdrive"
     ]
     src = "# Parameters to override for GUI analysis\n"
     src += "OVERRIDE_PARAMS = {\n"

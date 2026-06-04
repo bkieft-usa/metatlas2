@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+import logging
 from metatlas2.workflow_objects import Compound
 import metatlas2.logging_config as lcf
 
@@ -15,7 +16,7 @@ def add_compounds_to_db(
     if not log_to_stdout:
         config_dir = Path(config_path).parent
         log_file = str(config_dir / "add_compounds_to_db.log")
-    lcf.setup_logging(log_level=None, log_file=log_file, log_to_stdout=log_to_stdout)
+    lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=log_to_stdout)
     logger = lcf.get_logger('workflow_objects')
     logger.info("Adding compounds from config file to database...")
     Compound.create_from_config(

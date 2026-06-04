@@ -62,6 +62,7 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             'adduct': atlas_row.get('adduct', ''),
             'compound_name': atlas_row.get('compound_name', ''),
             'auto_ided': False,
+            'curated': False,
             'polarity': atlas_row.get('polarity', ''),
             'chromatography': atlas_row.get('chromatography', ''),
             'mz_tolerance': atlas_row.get('mz_tolerance', 5.0),
@@ -103,7 +104,7 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
         except (KeyError, AttributeError):
             compound_ms1 = pd.DataFrame()
 
-        ms1_summary = _analyze_ms1(
+        ms1_summary = analyze_ms1(
             atlas_row,
             compound_ms1,
             apply_bounds_cutoff=apply_bounds_cutoff
@@ -123,11 +124,11 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     n_unique_uids = manual_curation_df['mz_rt_uid'].nunique() if not manual_curation_df.empty else 0
     logger.info(f"Summary: manual_curation_df contains {n_unique_uids} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
     logger.info(f"Manual curation df:\n{manual_curation_df[['compound_name', 'mz', 'atlas_rt_peak', 'rt_peak', 'suggested_rt_min', 'suggested_rt_max']].head(10)}")
-    auto_id_obj.experimental_data.manual_curation_df = manual_curation_df
+    auto_id_obj.experimental_data.curation_df = manual_curation_df
 
     return
 
-def _analyze_ms1(atlas_row, compound_ms1_df, apply_bounds_cutoff=None) -> dict:
+def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",apply_bounds_cutoff=None) -> dict:
     """
     Analyzes MS1 data using wide format (one row per file, lists of rts, intensities, mzs, in_feature).
     Aggregates across all files for the compound.
@@ -163,9 +164,10 @@ def _analyze_ms1(atlas_row, compound_ms1_df, apply_bounds_cutoff=None) -> dict:
         mask = np.asarray(in_feature_mask, dtype=bool)
 
         # Store for EIC calculation (all data)
-        if len(rt_arr) > 0 and len(int_arr) == len(rt_arr):
-            rt_arrays.append(rt_arr)
-            int_arrays.append(int_arr)
+        if stage == "manual_curation_creator":
+            if len(rt_arr) > 0 and len(int_arr) == len(rt_arr):
+                rt_arrays.append(rt_arr)
+                int_arrays.append(int_arr)
 
         # Store for in_feature calculations
         if np.any(mask):
@@ -191,15 +193,16 @@ def _analyze_ms1(atlas_row, compound_ms1_df, apply_bounds_cutoff=None) -> dict:
                         'best_ms1_rt_error': float(in_feature_rts[idx] - atlas_rt_peak)
                     }
 
-    if not rt_arrays or not in_feature_rt:
-        return {}
+    if stage == "manual_curation_creator":
+        if not rt_arrays or not in_feature_rt:
+            return {}
 
-    # 2. EIC Calculation (Vectorized, all data)
-    all_rts = np.unique(np.concatenate(rt_arrays))
-    max_eic_intensity = np.max([
-        np.interp(all_rts, r, i, left=0, right=0)
-        for r, i in zip(rt_arrays, int_arrays)
-    ], axis=0)
+        # 2. EIC Calculation (Vectorized, all data)
+        all_rts = np.unique(np.concatenate(rt_arrays))
+        max_eic_intensity = np.max([
+            np.interp(all_rts, r, i, left=0, right=0)
+            for r, i in zip(rt_arrays, int_arrays)
+        ], axis=0)
 
     # 3. Window Metrics (in_feature only)
     idx_max = np.argmax(in_feature_int)
@@ -208,74 +211,85 @@ def _analyze_ms1(atlas_row, compound_ms1_df, apply_bounds_cutoff=None) -> dict:
     rt_err = win_rt_peak - atlas_rt_peak
     mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if atlas_mz else 0.0
 
-    # 4. RT Suggestion (using the best trace found)
-    best_trace_data = None
-    if best_file_info:
-        # Find the row for the best file
-        best_row = compound_ms1_df[compound_ms1_df['filename'] == best_file_info['best_ms1_file']]
-        if not best_row.empty:
-            best_rt_list = best_row.iloc[0].get('spec_rts', [])
-            best_int_list = best_row.iloc[0].get('spec_ints', [])
-            best_in_feature = best_row.iloc[0].get('in_feature', [True]*len(best_rt_list))
-            best_rt_arr = np.asarray(best_rt_list)
-            best_int_arr = np.asarray(best_int_list)
-            best_in_feature_mask = np.asarray(best_in_feature, dtype=bool)
-            best_trace_data = {
-                'rt': best_rt_arr[best_in_feature_mask],
-                'i': best_int_arr[best_in_feature_mask]
-            }
+    if stage == "manual_curation_creator":
+        # 4. RT Suggestion (using the best trace found)
+        best_trace_data = None
+        if best_file_info:
+            # Find the row for the best file
+            best_row = compound_ms1_df[compound_ms1_df['filename'] == best_file_info['best_ms1_file']]
+            if not best_row.empty:
+                best_rt_list = best_row.iloc[0].get('spec_rts', [])
+                best_int_list = best_row.iloc[0].get('spec_ints', [])
+                best_in_feature = best_row.iloc[0].get('in_feature', [True]*len(best_rt_list))
+                best_rt_arr = np.asarray(best_rt_list)
+                best_int_arr = np.asarray(best_int_list)
+                best_in_feature_mask = np.asarray(best_in_feature, dtype=bool)
+                best_trace_data = {
+                    'rt': best_rt_arr[best_in_feature_mask],
+                    'i': best_int_arr[best_in_feature_mask]
+                }
 
-    suggestion = _suggest_rt_bounds_from_ms1(
-        best_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max
-    ) if best_trace_data else None
+        suggestion = _suggest_rt_bounds_from_ms1(
+            best_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max
+        ) if best_trace_data else None
 
     # Assemble result
     res = best_file_info.copy() if best_file_info else {}
-    res.update({
-        'mz': win_mz_mean,
-        'rt_peak': win_rt_peak,
-        'mz_error': mz_err,
-        'rt_error': rt_err,
-        'max_eic_rt': all_rts.tolist(),
-        'max_eic_intensity': max_eic_intensity.tolist(),
-    })
+    if stage == "manual_curation_creator":
+        res.update({
+            'mz': win_mz_mean,
+            'rt_peak': win_rt_peak,
+            'mz_error': mz_err,
+            'rt_error': rt_err,
+            'max_eic_rt': all_rts.tolist(),
+            'max_eic_intensity': max_eic_intensity.tolist(),
+        })
+    elif stage == "post_curation_summary":
+        res.update({
+            'mz': win_mz_mean,
+            'rt_peak': win_rt_peak,
+            'mz_error': mz_err,
+            'rt_error': rt_err,
+        })
 
     # Always set rt_min and rt_max based on atlas bounds and rt_peak
-    atlas_rt_peak = atlas_row.get('rt_peak', 0.0)
-    atlas_rt_min = atlas_row.get('rt_min', 0.0)
-    atlas_rt_max = atlas_row.get('rt_max', 0.0)
-    rt_peak = win_rt_peak
-    rt_min = max(0.0, rt_peak - (atlas_rt_peak - atlas_rt_min))
-    rt_max = rt_peak + (atlas_rt_max - atlas_rt_peak)
-    res['rt_min'] = rt_min
-    res['rt_max'] = rt_max
-    res['initial_rt_min'] = rt_min
-    res['initial_rt_max'] = rt_max
+    if stage == "manual_curation_creator":
+        atlas_rt_peak = atlas_row.get('rt_peak', 0.0)
+        atlas_rt_min = atlas_row.get('rt_min', 0.0)
+        atlas_rt_max = atlas_row.get('rt_max', 0.0)
+        rt_peak = win_rt_peak
+        rt_min = max(0.0, rt_peak - (atlas_rt_peak - atlas_rt_min))
+        rt_max = rt_peak + (atlas_rt_max - atlas_rt_peak)
+        res['rt_min'] = rt_min
+        res['rt_max'] = rt_max
+        res['initial_rt_min'] = rt_min
+        res['initial_rt_max'] = rt_max
 
-    if suggestion:
-        res.update({
-            'suggested_rt_min': suggestion['rt_min'],
-            'suggested_rt_max': suggestion['rt_max'],
-            'suggested_rt_peak': suggestion['rt_peak'],
-            'rt_suggestion_confidence': suggestion['confidence'],
-        })
-        if apply_bounds_cutoff is not None and suggestion['confidence'] > apply_bounds_cutoff:
+    if stage == "manual_curation_creator":
+        if suggestion:
             res.update({
-                'rt_min': suggestion['rt_min'],
-                'rt_max': suggestion['rt_max'],
-                'rt_peak': win_rt_peak,
-                'initial_rt_min': suggestion['rt_min'],
-                'initial_rt_max': suggestion['rt_max']
+                'suggested_rt_min': suggestion['rt_min'],
+                'suggested_rt_max': suggestion['rt_max'],
+                'suggested_rt_peak': suggestion['rt_peak'],
+                'rt_suggestion_confidence': suggestion['confidence'],
             })
-    else:
-        res.update({
-            'suggested_rt_min': atlas_rt_min, 
-            'suggested_rt_max': atlas_rt_max,
-            'suggested_rt_peak': atlas_rt_peak, 
-            'rt_suggestion_confidence': 0.0,
-            'initial_rt_min': atlas_rt_min,
-            'initial_rt_max': atlas_rt_max
-        })
+            if apply_bounds_cutoff is not None and suggestion['confidence'] > apply_bounds_cutoff:
+                res.update({
+                    'rt_min': suggestion['rt_min'],
+                    'rt_max': suggestion['rt_max'],
+                    'rt_peak': win_rt_peak,
+                    'initial_rt_min': suggestion['rt_min'],
+                    'initial_rt_max': suggestion['rt_max']
+                })
+        else:
+            res.update({
+                'suggested_rt_min': atlas_rt_min, 
+                'suggested_rt_max': atlas_rt_max,
+                'suggested_rt_peak': atlas_rt_peak, 
+                'rt_suggestion_confidence': 0.0,
+                'initial_rt_min': atlas_rt_min,
+                'initial_rt_max': atlas_rt_max
+            })
 
     return res
 
