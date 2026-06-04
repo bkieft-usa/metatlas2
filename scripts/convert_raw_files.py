@@ -9,9 +9,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import tables
 
-import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 from pymzml.run import Reader
 
 import metatlas2.logging_config as lcf
@@ -47,15 +44,6 @@ SCHEMA_DEFINITIONS = {
     ]
 }
 
-# Generate PyArrow schemas
-def _create_pa_schema(schema_def):
-    """Convert schema definition to PyArrow schema."""
-    type_map = {
-        'float32': pa.float32(),
-        'int16': pa.int16(),
-    }
-    return pa.schema([(name, type_map[dtype]) for name, dtype in schema_def])
-
 # Generate PyTables classes
 def _create_tables_class(schema_def, base_class=None):
     """Convert schema definition to PyTables description class."""
@@ -71,9 +59,7 @@ def _create_tables_class(schema_def, base_class=None):
         return type(f'Generated{base_class.__name__}', (base_class,), attrs)
     return type('GeneratedDescription', (tables.IsDescription,), attrs)
 
-# Create objects for the two MS levels for each file output type
-parquet_ms1_schema = _create_pa_schema(SCHEMA_DEFINITIONS['MS1'])
-parquet_ms2_schema = _create_pa_schema(SCHEMA_DEFINITIONS['MS2'])
+# Create objects for the two MS levels
 h5_ms1_schema = _create_tables_class(SCHEMA_DEFINITIONS['MS1'])
 h5_ms2_schema = _create_tables_class(SCHEMA_DEFINITIONS['MS2'])
 
@@ -199,97 +185,29 @@ def remove_easyic_signal(spectrum_data, easyic_mzs={1: 202.07770, 0: 202.07880},
     return [peak for peak in spectrum_data if abs(peak[0] - targeted_mz) > mz_tolerance]
 
 
-def parse_filename_for_expected_parquet(filename):
+def mzml_to_h5(mzml_file, filter_easyic=True):
     """
-    Determine which parquet files should exist based on filename conventions.
-    Returns list of expected parquet file suffixes like ['ms1_pos', 'ms2_pos'].
-    
-    Filename format: parts separated by '_', where:
-    - 10th position (index 9): polarity (POS, NEG, FPS)
-    - 11th position (index 10): MS level (MS1, MS2)
-    """
-    parts = Path(filename).stem.split('_')
-    
-    if len(parts) < 14:
-        logger.warning(f"Filename doesn't match expected format: {filename}")
-        return []
-    
-    polarity_str = parts[9]
-    ms_level_str = parts[10]
-    
-    # Determine polarities
-    polarity_map = {
-        'FPS': ['pos', 'neg'],
-        'POS': ['pos'],
-        'NEG': ['neg']
-    }
-    polarities = polarity_map.get(polarity_str, ['pos', 'neg'])
-    if polarity_str not in polarity_map:
-        logger.warning(f"Unknown polarity '{polarity_str}' in {filename}, assuming both")
-    
-    # Determine MS levels (MS2 runs include MS1)
-    ms_level_map = {
-        'MS2': ['ms1', 'ms2'],
-        'MS1': ['ms1']
-    }
-    ms_levels = ms_level_map.get(ms_level_str, ['ms1', 'ms2'])
-    if ms_level_str not in ms_level_map:
-        logger.warning(f"Unknown MS level '{ms_level_str}' in {filename}, assuming both")
-    
-    # Build expected file list
-    return [f"{ms_level}_{polarity}" for ms_level in ms_levels for polarity in polarities]
-
-
-def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
-    """
-    Convert mzML to both HDF5 and Parquet formats in a single pass.
+    Convert mzML to HDF5 format.
     Returns (success, error_messages)
     """
-    #logger.info(f"Converting mzML to H5 and Parquet: {mzml_file}")
-    
     mzml_path = Path(mzml_file)
     
     # Determine project directory (parent of mzML/ subdirectory)
     project_dir = mzml_path.parent.parent
     
-    # Output directories in project
+    # Output directory in project
     h5_dir = project_dir / "h5"
-    parquet_dir = project_dir / "parquet"
     h5_dir.mkdir(parents=True, exist_ok=True)
-    parquet_dir.mkdir(parents=True, exist_ok=True)
     
-    # Output files
+    # Output file
     h5_path = h5_dir / mzml_path.with_suffix('.h5').name
-    base_name = mzml_path.stem
-    output_prefix = str(parquet_dir / base_name)
     
     # Failed file goes to project directory
     failed_path = project_dir / mzml_path.with_suffix('.failed').name
     errors = []
     
-    # Define output files
-    parquet_files = {
-        'ms1_pos': f'{output_prefix}_ms1_pos.parquet',
-        'ms1_neg': f'{output_prefix}_ms1_neg.parquet',
-        'ms2_pos': f'{output_prefix}_ms2_pos.parquet',
-        'ms2_neg': f'{output_prefix}_ms2_neg.parquet',
-    }
-    
-    # Determine expected parquet files from filename
-    expected_parquet = set(parse_filename_for_expected_parquet(str(mzml_file)))
-    
-    if not expected_parquet:
-        error_msg = "Cannot parse filename format - unable to determine expected parquet files"
-        logger.error(error_msg)
-        failed_path.touch()
-        return False, [error_msg]
-    
     # Check what already exists
-    h5_exists = h5_path.exists()
-    existing_parquet = {k for k in expected_parquet if Path(parquet_files[k]).exists()}
-    all_parquet_exist = len(existing_parquet) == len(expected_parquet)
-    
-    if h5_exists and all_parquet_exist:
+    if h5_path.exists():
         logger.info(f"All output files already exist")
         return True, []
     
@@ -302,35 +220,29 @@ def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
         failed_path.touch()
         return False, [error_msg]
     
-    # Setup HDF5 file (if needed)
+    # Setup HDF5 file
     h5_file = None
     h5_tables = {}
     h5_data = {}
-    if not h5_exists:
-        try:
-            FILTERS = tables.Filters(complib='blosc', complevel=1)
-            h5_file = tables.open_file(str(h5_path), "w", filters=FILTERS)
-            h5_tables = {
-                'ms1_neg': h5_file.create_table('/', 'ms1_neg', description=h5_ms1_schema),
-                'ms1_pos': h5_file.create_table('/', 'ms1_pos', description=h5_ms1_schema),
-                'ms2_neg': h5_file.create_table('/', 'ms2_neg', description=h5_ms2_schema),
-                'ms2_pos': h5_file.create_table('/', 'ms2_pos', description=h5_ms2_schema),
-            }
-            h5_data = {k: [] for k in h5_tables}
-        except Exception as e:
-            error_msg = f"Error creating HDF5 file: {e}"
-            logger.error(error_msg)
-            errors.append(error_msg)
-            if h5_file:
-                h5_file.close()
-            h5_file = None
+    try:
+        FILTERS = tables.Filters(complib='blosc', complevel=1)
+        h5_file = tables.open_file(str(h5_path), "w", filters=FILTERS)
+        h5_tables = {
+            'ms1_neg': h5_file.create_table('/', 'ms1_neg', description=h5_ms1_schema),
+            'ms1_pos': h5_file.create_table('/', 'ms1_pos', description=h5_ms1_schema),
+            'ms2_neg': h5_file.create_table('/', 'ms2_neg', description=h5_ms2_schema),
+            'ms2_pos': h5_file.create_table('/', 'ms2_pos', description=h5_ms2_schema),
+        }
+        h5_data = {k: [] for k in h5_tables}
+    except Exception as e:
+        error_msg = f"Error creating HDF5 file: {e}"
+        logger.error(error_msg)
+        errors.append(error_msg)
+        if h5_file:
+            h5_file.close()
+        h5_file = None
     
-    # Setup Parquet buffers (if needed)
-    parquet_buffers = None
-    if not all_parquet_exist:
-        parquet_buffers = {key: [] for key in parquet_files}
-    
-    # Process spectra (single pass through mzML)
+    # Process spectra
     try:
         for spectrum in mzml_reader:
             try:
@@ -350,7 +262,7 @@ def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
                 if not data:
                     continue
             
-            # Determine table/buffer key
+            # Determine table key
             ms_level = info[2]
             polarity = info[1]
             key = f"ms{ms_level}_{'pos' if polarity else 'neg'}"
@@ -358,10 +270,6 @@ def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
             # Accumulate for HDF5
             if h5_file and key in h5_data:
                 h5_data[key].extend(data)
-            
-            # Accumulate for Parquet
-            if parquet_buffers is not None:
-                parquet_buffers[key].extend(data)
 
         # Batch write accumulated HDF5 data
         if h5_file:
@@ -389,82 +297,6 @@ def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
                 if h5_path.exists():
                     h5_path.unlink()
         
-        # Write Parquet files
-        if parquet_buffers is not None:
-            files_created = []
-            for key in expected_parquet:
-                try:
-                    buffer = parquet_buffers[key]
-                    parquet_output_path = parquet_files[key]
-                    
-                    # Prepare data dictionary
-                    if key.startswith('ms1'):
-                        schema = parquet_ms1_schema
-                        if len(buffer) == 0:
-                            data_dict = {'mz': [], 'i': [], 'rt': [], 'polarity': []}
-                            logger.warning(f"No data found for expected file type: {key}")
-                        else:
-                            arr = np.array(buffer, dtype=np.float32)
-                            data_dict = {
-                                'mz': arr[:, 0],
-                                'i': arr[:, 1],
-                                'rt': arr[:, 2],
-                                'polarity': arr[:, 3].astype(np.int16),
-                            }
-                    else:
-                        schema = parquet_ms2_schema
-                        if len(buffer) == 0:
-                            data_dict = {
-                                'mz': [], 'i': [], 'rt': [], 'polarity': [],
-                                'precursor_MZ': [], 'precursor_intensity': [], 'collision_energy': []
-                            }
-                            logger.warning(f"No data found for expected file type: {key}")
-                        else:
-                            arr = np.array(buffer, dtype=np.float32)
-                            data_dict = {
-                                'mz': arr[:, 0],
-                                'i': arr[:, 1],
-                                'rt': arr[:, 2],
-                                'polarity': arr[:, 3].astype(np.int16),
-                                'precursor_MZ': arr[:, 4],
-                                'precursor_intensity': arr[:, 5],
-                                'collision_energy': arr[:, 6],
-                            }
-                    
-                    # Create and sort table
-                    table = pa.Table.from_pydict(data_dict, schema=schema)
-                    
-                    if len(buffer) > 0:
-                        sorted_indices = pa.compute.sort_indices(table, sort_keys=[('mz', 'ascending')])
-                        table = table.take(sorted_indices)
-                    
-                    # Write Parquet file
-                    pq.write_table(
-                        table,
-                        parquet_output_path,
-                        compression='snappy',
-                        use_dictionary=True,
-                        row_group_size=100_000,
-                        write_statistics=True,
-                        data_page_size=1024*1024,
-                    )
-                    
-                    file_size_mb = Path(parquet_output_path).stat().st_size / (1024 * 1024)
-                    logger.info(f"Successfully converted .mzML to Parquet file: {Path(parquet_output_path).name} - {key}: {len(buffer):,} peaks, {file_size_mb:.2f} MB")
-                    files_created.append(key)
-                    
-                except Exception as e:
-                    error_msg = f"Error writing Parquet file {key}: {e}"
-                    logger.error(error_msg)
-                    errors.append(error_msg)
-                    # Cleanup partial file
-                    parquet_output_path = Path(parquet_files[key])
-                    if parquet_output_path.exists():
-                        parquet_output_path.unlink()
-            
-            if not files_created:
-                logger.warning(f"Failed to create any Parquet files for: {mzml_file.name}")
-        
         # Mark as failed if any errors occurred
         if errors:
             failed_path.touch()
@@ -482,10 +314,6 @@ def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
             h5_file.close()
         if h5_path.exists():
             h5_path.unlink()
-        for key in expected_parquet:
-            parquet_output_path = Path(parquet_files[key])
-            if parquet_output_path.exists():
-                parquet_output_path.unlink()
         
         failed_path.touch()
         return False, errors
@@ -494,7 +322,7 @@ def mzml_to_h5_and_parquet(mzml_file, filter_easyic=True):
 def find_unconverted_files(top_dir):
     """
     Find .raw files in all project subdirectories that don't have corresponding 
-    .mzML, .h5, expected .parquet files, or .failed files.
+    .mzML, .h5, or .failed files.
     """
     logger.info(f"Searching for unconverted files in {top_dir}")
     
@@ -514,7 +342,6 @@ def find_unconverted_files(top_dir):
         raw_dir = project_dir / "raw"
         mzml_dir = project_dir / "mzML"
         h5_dir = project_dir / "h5"
-        parquet_dir = project_dir / "parquet"
         
         # Find all .raw files in this project
         raw_files = list(raw_dir.glob("*.raw"))
@@ -522,7 +349,6 @@ def find_unconverted_files(top_dir):
         # Find all existing output files
         mzml_files = set()
         h5_files = set()
-        parquet_files = {}  # base_name -> set of parquet types
         failed_files = set()
         
         # Find mzML files
@@ -534,19 +360,6 @@ def find_unconverted_files(top_dir):
         if h5_dir.exists():
             for h5_file in h5_dir.glob("*.h5"):
                 h5_files.add(h5_file.stem)
-        
-        # Find parquet files
-        if parquet_dir.exists():
-            for parquet_file in parquet_dir.glob("*.parquet"):
-                # Extract base name and parquet type
-                name = parquet_file.stem
-                for parquet_type in ['ms1_pos', 'ms1_neg', 'ms2_pos', 'ms2_neg']:
-                    if name.endswith(f'_{parquet_type}'):
-                        base_name = name[:-len(f'_{parquet_type}')]
-                        if base_name not in parquet_files:
-                            parquet_files[base_name] = set()
-                        parquet_files[base_name].add(parquet_type)
-                        break
         
         # Find failed files in project directory
         for failed_file in project_dir.glob("*.failed"):
@@ -560,19 +373,14 @@ def find_unconverted_files(top_dir):
             if base_name in failed_files:
                 continue
             
-            # Check for mzML, h5, and expected parquet files
+            # Check for mzML and h5 files
             has_mzml = base_name in mzml_files
             has_h5 = base_name in h5_files
             
-            expected_parquet = set(parse_filename_for_expected_parquet(str(raw_file)))
-            existing_parquet = parquet_files.get(base_name, set())
-            has_all_parquet = expected_parquet.issubset(existing_parquet)
-            
             # File needs conversion if missing any output
-            if not (has_mzml and has_h5 and has_all_parquet):
+            if not (has_mzml and has_h5):
                 all_unconverted.append(str(raw_file))
-                logger.debug(f"Need conversion: {raw_file.name} - mzml:{has_mzml}, "
-                            f"h5:{has_h5}, parquet:{existing_parquet} (expected:{expected_parquet})")
+                logger.debug(f"Need conversion: {raw_file.name} - mzml:{has_mzml}, h5:{has_h5}")
     
     all_unconverted = sorted(all_unconverted)
     logger.info(f"Found {len(all_unconverted)} unconverted .raw files across all projects")
@@ -583,7 +391,7 @@ def find_unconverted_files(top_dir):
 def process_single_file(raw_file):
     """
     Process a single .raw file through the complete pipeline:
-    raw -> mzML -> (h5 + parquet)
+    raw -> mzML -> h5
     
     Returns a dictionary with results and any errors.
     """
@@ -592,11 +400,8 @@ def process_single_file(raw_file):
         'success': False,
         'mzml_created': False,
         'h5_created': False,
-        'parquet_created': False,
         'errors': []
     }
-    
-    #logger.info(f"Processing: {raw_file}")
     
     # Step 1: raw to mzML
     success, mzml_file, error = raw_to_mzml(raw_file)
@@ -606,8 +411,8 @@ def process_single_file(raw_file):
     
     result['mzml_created'] = True
     
-    # Step 2: mzML to H5 and Parquet (single pass)
-    success, errors = mzml_to_h5_and_parquet(mzml_file)
+    # Step 2: mzML to H5
+    success, errors = mzml_to_h5(mzml_file)
     
     if not success:
         result['errors'].extend(errors)
@@ -616,24 +421,11 @@ def process_single_file(raw_file):
         mzml_path = Path(mzml_file)
         project_dir = mzml_path.parent.parent
         h5_dir = project_dir / "h5"
-        parquet_dir = project_dir / "parquet"
         
         h5_path = h5_dir / mzml_path.with_suffix('.h5').name
         result['h5_created'] = h5_path.exists()
-        
-        expected_parquet = set(parse_filename_for_expected_parquet(str(mzml_file)))
-        base_name = mzml_path.stem
-        output_prefix = str(parquet_dir / base_name)
-        parquet_files = {
-            'ms1_pos': f'{output_prefix}_ms1_pos.parquet',
-            'ms1_neg': f'{output_prefix}_ms1_neg.parquet',
-            'ms2_pos': f'{output_prefix}_ms2_pos.parquet',
-            'ms2_neg': f'{output_prefix}_ms2_neg.parquet',
-        }
-        existing_parquet = {k for k in expected_parquet if Path(parquet_files[k]).exists()}
-        result['parquet_created'] = len(existing_parquet) == len(expected_parquet)
     
-    result['success'] = result['h5_created'] and result['parquet_created']
+    result['success'] = result['h5_created']
     
     return result
 
@@ -641,7 +433,7 @@ def process_single_file(raw_file):
 def main():
     """Main entry point for the consolidated conversion script."""
     parser = argparse.ArgumentParser(
-        description='Convert .raw files to mzML, HDF5, and Parquet formats'
+        description='Convert .raw files to mzML and HDF5 formats'
     )
     parser.add_argument(
         'directory',
