@@ -6,7 +6,8 @@
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-atlases   --config_path FILE
-#   metatlas2 [--image TAG] [--dev] get-atlases   --atlas_uids UID1,UID2 [--output_path PATH]
+#   metatlas2 [--image TAG] [--dev] get-atlases   fetch  --atlas_uids UID1,UID2 [--output_path PATH]
+#   metatlas2 [--image TAG] [--dev] get-atlases   query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
 #   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):

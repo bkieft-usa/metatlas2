@@ -104,7 +104,8 @@ def run_all_summaries(
     overwrite:
         Passed through to all sub-functions.
     """
-    output_loc = Path(summary_obj.paths.get("analysis_output_dir", None)) / f"{summary_obj.post_autoid_atlas_obj.polarity}-{summary_obj.post_autoid_atlas_obj.analysis_type}"
+    _analysis_name = getattr(summary_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'
+    output_loc = Path(summary_obj.paths.get("analysis_output_dir", None)) / f"{summary_obj.post_autoid_atlas_obj.polarity}-{summary_obj.post_autoid_atlas_obj.analysis_type}-{_analysis_name}"
     os.makedirs(output_loc, exist_ok=True)
     if summary_obj.override_parameters.get("skip_outputs") is not None:
         skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
@@ -199,7 +200,7 @@ def _display_compound_idx(compound_idx: int) -> int:
 
 def _resolve_summary_note_options(summary_obj: "AnalysisSummary") -> tuple[list[str], list[str]]:
     """Resolve MS1/MS2 option lists with the same owner/override logic as the GUI."""
-    owner = (summary_obj.config.get("WORKFLOWS", {}).get("PATHS", {}).get("owner") or "jgi").lower()
+    owner = summary_obj.config.owner
     ms2_defaults, ms1_defaults, _ = get_notes_opts(owner=owner)
 
     overrides = getattr(summary_obj, "override_parameters", {}) or {}
@@ -569,14 +570,19 @@ def _plot_mirror(
 
     if qry_mz and qry_int:
         for mz, intensity, color in zip(qry_mz, qry_int, frag_colors):
-            if not _safe_isnan(mz):
-                ax.bar(mz, intensity, color=color, width=1.1, alpha=0.85)
+            if not _safe_isnan(mz) and not _safe_isnan(intensity):
+                ax.bar(float(mz), float(intensity), color=color, width=1.1, alpha=0.85)
 
     scale = 1.0
     if ref_mz and ref_int:
-        scale = (max(qry_int) / max(ref_int)) if (qry_int and max(ref_int) > 0) else 1.0
+        qry_int_valid = [v for v in qry_int if v is not None and not (isinstance(v, float) and np.isnan(v))]
+        ref_int_valid = [v for v in ref_int if v is not None and not (isinstance(v, float) and np.isnan(v))]
+        max_ref = max(ref_int_valid) if ref_int_valid else 0.0
+        max_qry = max(qry_int_valid) if qry_int_valid else 0.0
+        scale = (max_qry / max_ref) if max_ref > 0 else 1.0
         for mz, intensity, color in zip(ref_mz, ref_int, frag_colors):
-            ax.bar(mz, -intensity * scale, color=color, width=1.1, alpha=0.6)
+            if not _safe_isnan(mz) and not _safe_isnan(intensity):
+                ax.bar(float(mz), -float(intensity) * scale, color=color, width=1.1, alpha=0.6)
 
     if qry_mz and qry_int:
         mz_np = np.array(qry_mz, dtype=float)
@@ -2730,6 +2736,7 @@ def make_metabomap(
     analysis_output_dir = Path(summary_obj.paths.get("analysis_output_dir"))
     current_polarity = summary_obj.post_autoid_atlas_obj.polarity   # e.g. "POS"
     analysis_type    = summary_obj.post_autoid_atlas_obj.analysis_type  # e.g. "EMA"
+    analysis_name    = getattr(summary_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'
 
     if current_polarity.upper() == "POS":
         sibling_polarity = "NEG"
@@ -2743,11 +2750,11 @@ def make_metabomap(
         return
 
     current_csv = (
-        analysis_output_dir / f"{current_polarity}-{analysis_type}"
+        analysis_output_dir / f"{current_polarity}-{analysis_type}-{analysis_name}"
         / "data_sheets" / "peak_height_filtered.csv"
     )
     sibling_csv = (
-        analysis_output_dir / f"{sibling_polarity}-{analysis_type}"
+        analysis_output_dir / f"{sibling_polarity}-{analysis_type}-{analysis_name}"
         / "data_sheets" / "peak_height_filtered.csv"
     )
 

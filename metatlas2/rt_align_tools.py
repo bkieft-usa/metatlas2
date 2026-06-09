@@ -26,7 +26,7 @@ def apply_rt_alignment_to_target_atlases(
 ) -> Tuple[Dict[str, "Atlas"], Dict[str, float]]:
 
     logger.info("Applying RT alignment model to target atlases and generating RT-aligned Atlas objects...")
-    aligned_atlases, all_rt_shifts = dbi.update_atlas_with_rt_alignment(rt_align_obj)
+    aligned_atlases, all_rt_shifts = dbi.create_aligned_atlas_from_template(rt_align_obj)
 
     # Calculate RT shift stats
     rt_shift_stats = {}

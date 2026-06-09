@@ -5,8 +5,9 @@ import sys
 import csv
 import yaml
 import ast
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 import grp
 import subprocess
 import joblib
@@ -21,82 +22,23 @@ import json
 import pandas as pd
 from pathlib import Path
 
-PRECURSOR_FILTER_OFFSET_DA = 2.5  # keep peaks below precursor + 2.5 Da (covers M+2 isotope)
+DEFAULT_EXCLUDE_LCMSRUNS = {
+    'gui': ['INJBL', 'BLANK'],
+    'id_sheet': ['INJBL', 'BLANK', 'REFSTD'],
+    'chromatograms': ['INJBL', 'BLANK'],
+    'id_plots': ['INJBL', 'BLANK', 'REFSTD'],
+    'data_sheets': ['INJBL', 'BLANK'],
+}
+
+DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = ['EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK']
+
+DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['QC']
 
 def should_disable_tqdm():
     return (
         "SLURM_JOB_ID" in os.environ
         or not sys.stdout.isatty()
     )
-
-def tsv_to_jsonl(tsv_path: str, jsonl_path: str) -> None:
-    """Convert a legacy .tab msms refs file to .jsonl format."""
-    
-    input_file_path = Path(tsv_path)
-    output_file_path = Path(jsonl_path)
-
-    col_names = [
-        'ix', 'database', 'id', 'name', 'spectrum', 'decimal', 'precursor_mz', 'polarity', 'adduct', 'fragmentation_method', 
-        'collision_energy', 'instrument', 'instrument_type', 'formula', 'exact_mass', 'inchi_key', 'inchi', 'smiles'
-    ]
-    df = pd.read_csv(input_file_path, sep='\t', header=None, names=col_names, low_memory=False)
-
-    n_written = 0
-    n_skipped = 0
-
-    with output_file_path.open('w') as out:
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Converting spectra to JSONL", disable=should_disable_tqdm()):
-            try:
-                spectrum_data = ast.literal_eval(row['spectrum'])
-                mz_list, int_list = spectrum_data[0], spectrum_data[1]
-                assert len(mz_list) == len(int_list)
-            except Exception:
-                n_skipped += 1
-                continue
-
-            def _float_or_none(val):
-                try:
-                    f = float(val)
-                    return None if pd.isna(f) else f
-                except (TypeError, ValueError):
-                    return None
-
-            def _str_or_none(val):
-                s = str(val).strip()
-                return None if s in ('', 'nan', 'None') else s
-            
-            def _int_or_none(val):
-                try:
-                    i = int(val)
-                    return None if pd.isna(i) else i
-                except (TypeError, ValueError):
-                    return None
-
-            rec = {
-                'ix': _int_or_none(row['ix']),
-                'database': _str_or_none(row['database']),
-                'id': _str_or_none(row['id']),
-                'name': _str_or_none(row['name']),
-                'decimal': _float_or_none(row['decimal']),
-                'inchi_key': _str_or_none(row['inchi_key']),
-                'precursor_mz': _float_or_none(row['precursor_mz']),
-                'polarity': _str_or_none(row['polarity']),
-                'adduct': _str_or_none(row['adduct']),
-                'fragmentation_method': _str_or_none(row['fragmentation_method']),
-                'collision_energy': _str_or_none(row['collision_energy']),
-                'instrument': _str_or_none(row['instrument']),
-                'instrument_type': _str_or_none(row['instrument_type']),
-                'formula': _str_or_none(row['formula']),
-                'mono_isotopic_molecular_weight': _float_or_none(row['exact_mass']),
-                'inchi': _str_or_none(row['inchi']),
-                'smiles': _str_or_none(row['smiles']),
-                'mz': [round(x, 5) for x in mz_list],
-                'intensities': [round(x, 5) for x in int_list],
-            }
-            out.write(json.dumps(rec) + '\n')
-            n_written += 1
-
-    print(f"Wrote {n_written} spectra, skipped {n_skipped}.")
 
 def load_msms_refs_file(
     file_path: str,
@@ -173,7 +115,7 @@ def load_msms_refs_file(
             except (TypeError, ValueError):
                 precursor_mz = None
             if precursor_mz is not None and not np.isnan(precursor_mz):
-                mask = mz < precursor_mz + PRECURSOR_FILTER_OFFSET_DA
+                mask = mz < precursor_mz + 2.5
                 mz = mz[mask]
                 intensities = intensities[mask]
 
@@ -215,227 +157,181 @@ def load_msms_refs_file(
 
     return refs_by_inchi_key
 
-def load_metatlas2_config(config_path: str) -> Dict[str, Any]:
-    """Load and validate new metatlas2 configuration from YAML file with type enforcement."""
+def _validate_rt_alignment_params(params: Dict[str, Any], location: str) -> Dict[str, Any]:
+    """Validate and coerce a single PARAMS block from RT_ALIGNMENT.
+    """
+    params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT
+    params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
+    params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
+    params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', False))
+    params['only_keep_data_in_feature'] = bool(params.get('only_keep_data_in_feature', True))
+    params['atlas_extra_time'] = float(params.get('atlas_extra_time', 2.0))
+    params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 0.0))
+    params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 0))
+    params['ms1_mz_tolerance_ppm'] = float(params.get('ms1_mz_tolerance_ppm', 5.0))
+    params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
+    params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
+    params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
+    params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
+    params['r2_threshold'] = float(params.get('r2_threshold', 0.5))
+    params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
+    return params
+
+
+def _validate_targeted_analysis_params(params: Dict[str, Any], location: str) -> Dict[str, Any]:
+    """Validate and coerce a single PARAMS block from TARGETED_ANALYSES.
+    """
+    params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_ANALYSES
+    excl = params.get('exclude_lcmsruns')
+    if excl is None:
+        params['exclude_lcmsruns'] = {step: list(runs) for step, runs in DEFAULT_EXCLUDE_LCMSRUNS.items()}
+    elif isinstance(excl, dict):
+        params['exclude_lcmsruns'] = {step: list(runs) if runs else [] for step, runs in excl.items()}
+    elif isinstance(excl, list):
+        params['exclude_lcmsruns'] = {'data_extraction': list(excl)}
+    else:
+        raise ValueError(f"{location}: exclude_lcmsruns must be a dict or list")
+    params['do_alignment'] = bool(params.get('do_alignment', True))
+    params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
+    params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
+    params['only_keep_data_in_feature'] = bool(params.get('only_keep_data_in_feature', False))
+    params['apply_istd_curation_to_ema'] = bool(params.get('apply_istd_curation_to_ema', True))
+    params['apply_cross_polarity_curation'] = bool(params.get('apply_cross_polarity_curation', True))
+    params['suggested_min_conf'] = float(params.get('suggested_min_conf', 0.75))
+    params['atlas_extra_time'] = float(params.get('atlas_extra_time', 0.5))
+    params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
+    params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
+    params['ms1_mz_tolerance_ppm'] = float(params.get('ms1_mz_tolerance_ppm', 5.0))
+    params['ms2_min_num_scans'] = int(params.get('ms2_min_num_scans', 1))
+    params['ms2_min_precursor_intensity'] = float(params.get('ms2_min_precursor_intensity', 0.0))
+    params['ms2_min_score'] = float(params.get('ms2_min_score', 0.25))
+    params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
+    params['ms2_mz_tolerance_ppm'] = float(params.get('ms2_mz_tolerance_ppm', 20.0))
+    params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
+    params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
+    params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 10))
+    gui_colors = params.get('gui_lcmsruns_colors')
+    params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
+    note_overrides = params.get('note_options_overrides')
+    if not isinstance(note_overrides, dict):
+        params['note_options_overrides'] = {}
+    else:
+        clean_overrides = {}
+        for note_type in ['ms1_notes', 'ms2_notes', 'other_notes']:
+            val = note_overrides.get(note_type, None)
+            if val is None:
+                continue
+            if isinstance(val, dict):
+                clean_overrides[note_type] = {str(k): str(v) for k, v in val.items()}
+        params['note_options_overrides'] = clean_overrides
+    params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
+    params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
+    # skip_outputs is a free-form field; pass through as-is (None or list)
+    params['skip_outputs'] = params.get('skip_outputs', None)
+    return params
+
+
+def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
+    """Load and validate a metatlas2 YAML config file.
+
+    The config uses ``yaml.safe_load`` with a structure where analysis name
+    is a mapping key, so each unique analysis is unambiguous:
+
+    .. code-block:: yaml
+
+        TARGETED_ANALYSES:
+          HILICZ:
+            POS:
+              EMA:
+                ANALYSIS-NAME-1:
+                  ATLAS:
+                    uid: atl-ref-ema-hilicz-pos-...
+                  PARAMS:
+                    ...
+                ANALYSIS-NAME-2:
+                  ATLAS:
+                    uid: atl-ref-ema-hilicz-pos-...
+                  PARAMS:
+                    ...
+
+    Returns a :class:`~metatlas2.workflow_objects.Metatlas2Config` instance
+    whose ``targeted_analyses`` attribute is a flat list of
+    :class:`~metatlas2.workflow_objects.TargetedAnalysis` objects — one per
+    unique ``chrom/pol/analysis_type/name`` combination.
+    """
+    from metatlas2.workflow_objects import Metatlas2Config, TargetedAnalysis
+
     with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # Define expected top-level structure
-    required_sections = ['WORKFLOWS']
-    required_subsections = ["RT_ALIGNMENT", "TARGETED_ANALYSES"]
-    
-    # Validate required sections exist
-    for section in required_sections:
-        if section not in config:
-            raise ValueError(f"Missing required configuration section: {section}")
-    
-    # Validate required subsections in WORKFLOWS
-    for subsection in required_subsections:
-        if subsection not in config['WORKFLOWS']:
+        raw = yaml.safe_load(f)
+
+    # ── top-level structure ────────────────────────────────────────────────
+    if 'WORKFLOWS' not in raw:
+        raise ValueError("Missing required configuration section: WORKFLOWS")
+    for subsection in ("RT_ALIGNMENT", "TARGETED_ANALYSES"):
+        if subsection not in raw['WORKFLOWS']:
             raise ValueError(f"Missing required WORKFLOWS subsection: {subsection}")
-    
-    # Validate RT_ALIGNMENT section if present
-    if 'RT_ALIGNMENT' in config['WORKFLOWS']:
-        rt_alignment = config['WORKFLOWS']['RT_ALIGNMENT']
-        for chromatography, chrom_config in rt_alignment.items():
-            if 'ATLAS' not in chrom_config:
-                raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS section")
-            
-            if 'uid' not in chrom_config['ATLAS']:
-                raise ValueError(f"RT_ALIGNMENT {chromatography} missing ATLAS uid field")
-            
-            uid = chrom_config['ATLAS']['uid']
-            chrom_config['ATLAS']['uid'] = str(uid) if uid else None
-            
-            if 'PARAMS' in chrom_config:
-                params = chrom_config['PARAMS']
-                params['ppm_error'] = float(params.get('ppm_error', 20.0))
-                params['extra_time'] = float(params.get('extra_time', 5.0))
-                params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
-                params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
-                params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
-                params['r2_threshold'] = float(params.get('r2_threshold', 0.7))
-                params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
-                params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
 
-                params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
-                params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
+    # ── RT_ALIGNMENT ───────────────────────────────────────────────────────
+    rt_alignment_config: Dict[str, Any] = {}
+    for chromatography, chrom_cfg in raw['WORKFLOWS']['RT_ALIGNMENT'].items():
+        location = f"RT_ALIGNMENT {chromatography}"
+        if 'ATLAS' not in chrom_cfg:
+            raise ValueError(f"{location} missing ATLAS section")
+        if 'uid' not in chrom_cfg['ATLAS']:
+            raise ValueError(f"{location} missing ATLAS uid field")
+        uid = chrom_cfg['ATLAS']['uid']
+        chrom_cfg['ATLAS']['uid'] = str(uid) if uid else None
+        chrom_cfg['PARAMS'] = _validate_rt_alignment_params(
+            dict(chrom_cfg.get('PARAMS') or {}), location
+        )
+        rt_alignment_config[chromatography] = chrom_cfg
 
-                params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
+    # ── TARGETED_ANALYSES → flat list of TargetedAnalysis objects ──────────
+    # Structure: chrom -> polarity -> analysis_type -> name -> {ATLAS, PARAMS}
+    targeted_analyses: list = []
+    for chromatography, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
+        for polarity, pol_cfg in chrom_cfg.items():
+            for analysis_type, named_entries in pol_cfg.items():
+                if not isinstance(named_entries, dict):
+                    raise ValueError(
+                        f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_type} "
+                        f"must be a dict mapping analysis name -> {{ATLAS, PARAMS}}"
+                    )
+                for name, entry in named_entries.items():
+                    name = str(name)
+                    location = f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_type}/{name}"
+                    if not isinstance(entry, dict):
+                        raise ValueError(f"{location} must be a dict with ATLAS and PARAMS keys")
+                    if 'ATLAS' not in entry:
+                        raise ValueError(f"{location} missing ATLAS section")
+                    if 'uid' not in entry['ATLAS']:
+                        raise ValueError(f"{location} missing ATLAS uid field")
+                    atlas_uid = entry['ATLAS']['uid']
+                    atlas_uid = str(atlas_uid) if atlas_uid else None
+                    params = _validate_targeted_analysis_params(
+                        dict(entry.get('PARAMS') or {}), location
+                    )
+                    targeted_analyses.append(TargetedAnalysis(
+                        chromatography=chromatography,
+                        polarity=polarity,
+                        analysis_type=analysis_type,
+                        name=name,
+                        atlas_uid=atlas_uid,
+                        params=params,
+                    ))
 
-    if 'TARGETED_ANALYSES' in config['WORKFLOWS']:
-        targeted = config['WORKFLOWS']['TARGETED_ANALYSES']
-        for chromatography, chrom_config in targeted.items():
-            for polarity, pol_config in chrom_config.items():
-                for analysis_name, analysis_config in pol_config.items():
-                    if 'ATLAS' not in analysis_config:
-                        raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS section")
-                    if 'uid' not in analysis_config['ATLAS']:
-                        raise ValueError(f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name} missing ATLAS uid field")
-                    uid = analysis_config['ATLAS']['uid']
-                    analysis_config['ATLAS']['uid'] = str(uid) if uid else None
-                    if 'PARAMS' in analysis_config:
-                        params = analysis_config['PARAMS']
-                        params['do_alignment'] = bool(params.get('do_alignment', True))
-                        params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
-                        params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
-                        params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
-                        params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
-                        params['ppm_error'] = float(params.get('ppm_error', 5.0))
-                        params['extra_time'] = float(params.get('extra_time', 5.0))
-                        params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
-                        params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
-                        params['ms2_min_score'] = float(params.get('ms2_min_score', 0.1))
-                        params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
-                        params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
-                        params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else []
-                        excl = params.get('exclude_lcmsruns')
-                        if excl is None:
-                            params['exclude_lcmsruns'] = {}
-                        elif isinstance(excl, dict):
-                            params['exclude_lcmsruns'] = {
-                                step: list(runs) if runs else []
-                                for step, runs in excl.items()
-                            }
-                        elif isinstance(excl, list):
-                            params['exclude_lcmsruns'] = {'data_extraction': list(excl)}
-                        else:
-                            raise ValueError(
-                                f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_name}: "
-                                f"exclude_lcmsruns must be a dict or list"
-                            )
-                        params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
-                        params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 20))
-                        gui_colors = params.get('gui_lcmsruns_colors')
-                        params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
+    paths_config: Dict[str, Any] = dict(raw['WORKFLOWS'].get('PATHS') or {})
 
-                        # Handle note_options_overrides: allow blank, None, or 'default' to mean use GUI defaults
-                        note_overrides = params.get('note_options_overrides')
-                        if not isinstance(note_overrides, dict):
-                            params['note_options_overrides'] = {}
-                        else:
-                            clean_overrides = {}
-                            for note_type in ['ms1_notes', 'ms2_notes', 'other_notes']:
-                                val = note_overrides.get(note_type, None)
-                                if val is None:
-                                    continue  # No override for this note type
-                                if isinstance(val, dict):
-                                    clean_overrides[note_type] = {str(k): str(v) for k, v in val.items()}
-                                    continue
-                            params['note_options_overrides'] = clean_overrides
-    return config
-
-def load_atlas_config(atlas_config_path: str) -> Dict[str, Any]:
-    """Load and validate atlas configuration from YAML file with type enforcement."""
-    with open(atlas_config_path, 'r') as f:
-        atlas_config = yaml.safe_load(f)
-    
-    # Validate required fields
-    required_fields = ['ATLASES']
-    for field in required_fields:
-        if field not in atlas_config:
-            raise ValueError(f"Missing required atlas configuration field: {field}")
-
-    # Validate ATLASES section structure    
-    for chromatography, chrom_config in atlas_config['ATLASES'].items():
-        if not isinstance(chrom_config, dict):
-            raise ValueError(f"Invalid chromatography configuration for {chromatography}")
-        
-        for polarity, pol_config in chrom_config.items():
-            if not isinstance(pol_config, dict):
-                raise ValueError(f"Invalid polarity configuration for {chromatography}/{polarity}")
-            
-            for atlas_type, atlas_info in pol_config.items():
-                if isinstance(atlas_info, dict):
-                    atlas_entries = [atlas_info]
-                elif isinstance(atlas_info, list):
-                    atlas_entries = atlas_info
-                else:
-                    raise ValueError(f"Invalid atlas configuration for {chromatography}/{polarity}/{atlas_type}")
-
-                normalized_entries = []
-                for atlas_entry in atlas_entries:
-                    if not isinstance(atlas_entry, dict):
-                        raise ValueError(f"Invalid atlas entry for {chromatography}/{polarity}/{atlas_type}")
-
-                    # Check for required atlas fields (path, name, desc) but allow None/empty
-                    required_atlas_fields = ['path', 'name', 'desc']
-                    for field in required_atlas_fields:
-                        if field not in atlas_entry:
-                            raise ValueError(
-                                f"Missing required field '{field}' in {chromatography}/{polarity}/{atlas_type}"
-                            )
-
-                    # Convert to strings and handle None/empty values
-                    atlas_entry['path'] = str(atlas_entry['path']) if atlas_entry['path'] else None
-                    atlas_entry['name'] = str(atlas_entry['name']) if atlas_entry['name'] else None
-                    atlas_entry['desc'] = str(atlas_entry['desc']) if atlas_entry['desc'] else None
-
-                    # # Optional label for logging or downstream filtering
-                    # if 'label' in atlas_entry and atlas_entry['label']:
-                    #     atlas_entry['label'] = str(atlas_entry['label'])
-
-                    # Only check file existence if path is not None
-                    if atlas_entry['path'] and not Path(atlas_entry['path']).exists():
-                        raise FileNotFoundError(
-                            f"Atlas file not found: {atlas_entry['path']} for {chromatography}/{polarity}/{atlas_type}"
-                        )
-
-                    normalized_entries.append(atlas_entry)
-
-                atlas_info = normalized_entries if len(normalized_entries) > 1 else normalized_entries[0]
-                pol_config[atlas_type] = atlas_info
-
-    logger.info(f"Loaded atlas configuration from {atlas_config_path}")
-    
-    return atlas_config
-
-def load_compound_config(compound_config_path: str) -> Dict[str, Any]:
-    """Load and validate compound configuration from YAML file with type enforcement."""
-    with open(compound_config_path, 'r') as f:
-        compound_config = yaml.safe_load(f)
-
-    # Validate required fields
-    required_fields = ['PARAMS', 'COMPOUNDS']
-    for field in required_fields:
-        if field not in compound_config:
-            raise ValueError(f"Missing required compound configuration field: {field}")
-
-    # Validate PARAMS section
-    params = compound_config['PARAMS']
-    params['use_pubchem_cache'] = bool(params.get('use_pubchem_cache', True))
-    params['update_pubchem_cache'] = bool(params.get('update_pubchem_cache', False))
-
-    # Validate COMPOUNDS section
-    for chromatography, chrom_config in compound_config['COMPOUNDS'].items():
-        if not isinstance(chrom_config, dict):
-            raise ValueError(f"Invalid chromatography configuration for {chromatography}")
-
-        for polarity, pol_config in chrom_config.items():
-            if not isinstance(pol_config, dict):
-                raise ValueError(f"Invalid polarity configuration for {chromatography}/{polarity}")
-
-            if 'PATHS' not in pol_config:
-                raise ValueError(f"Missing PATHS in {chromatography}/{polarity}")
-
-            if not isinstance(pol_config['PATHS'], list):
-                raise ValueError(f"PATHS must be a list in {chromatography}/{polarity}")
-
-            # Normalize paths: filter None/empty, convert to strings, warn if missing
-            validated_paths = []
-            for path in pol_config['PATHS']:
-                if not path:
-                    continue
-                path_str = str(path)
-                if not Path(path_str).exists():
-                    raise FileNotFoundError(f"Compound input file not found: {path_str} for {chromatography}/{polarity}")
-                validated_paths.append(path_str)
-
-            pol_config['PATHS'] = validated_paths
-
-    logger.info(f"Loaded compound configuration from {compound_config_path}")
-
-    return compound_config
+    logger.info(
+        f"Loaded config from {config_path}: "
+        f"{len(rt_alignment_config)} RT alignment chromatographies, "
+        f"{len(targeted_analyses)} targeted analyses"
+    )
+    return Metatlas2Config(
+        paths_config=paths_config,
+        rt_alignment_config=rt_alignment_config,
+        targeted_analyses=targeted_analyses,
+    )
 
 def load_compound_input(file_path: str) -> pd.DataFrame:
     """Load compound input file (TSV/CSV) and validate required columns."""
@@ -563,3 +459,34 @@ def change_ownership_to_metatlas_group(project_dir_path: str) -> None:
         logger.info(f"Changed group of {project_dir_path} to {group_name}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to change group: {e}")
+
+
+def log_filter_table(steps, starting_entries, starting_compounds, entries_label="Entries", title=None):
+    """Log a fixed-width summary table of sequential filtering steps.
+
+    Args:
+        steps: list of (label, count, compounds) tuples; first entry should be the 'start' row.
+        starting_entries: row count before any filtering (denominator for % columns).
+        starting_compounds: unique compound count before any filtering (denominator for % columns).
+        entries_label: column header for the row-count column (e.g. 'Entries' or 'Scans').
+        title: optional log message title; defaults to '<entries_label> filtering summary'.
+    """
+    if title is None:
+        title = f"{entries_label} filtering summary"
+    pct_label = f"{entries_label} %"
+    col_w = [25, 10, 12, 10, 12]
+    header = (
+        f"{'Step':<{col_w[0]}} {entries_label:>{col_w[1]}} {pct_label:>{col_w[2]}} "
+        f"{'Compounds':>{col_w[3]}} {'Compounds %':>{col_w[4]}}"
+    )
+    sep = "-" * sum(col_w + [4])  # 4 spaces between 5 columns
+    rows = [header, sep]
+    for label, entries, compounds in steps:
+        pct_e = entries / starting_entries * 100 if starting_entries > 0 else 0.0
+        pct_c = compounds / starting_compounds * 100 if starting_compounds > 0 else 0.0
+        rows.append(
+            f"{label:<{col_w[0]}} {entries:>{col_w[1]}} {pct_e:>{col_w[2] - 1}.1f}% "
+            f"{compounds:>{col_w[3]}} {pct_c:>{col_w[4] - 1}.1f}%"
+        )
+    rows.append(sep)
+    logger.info("%s:\n%s", title, "\n".join(rows))

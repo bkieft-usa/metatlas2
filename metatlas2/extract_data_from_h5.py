@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 
 import metatlas2.logging_config as lcf
+import metatlas2.load_tools as ldt
 logger = lcf.get_logger('extract_data_from_h5')
 
 def should_disable_tqdm():
@@ -36,19 +37,19 @@ def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
         df[float_cols] = df[float_cols].astype(np.float32, copy=False)
     return df
 
-def _expand_atlas_windows(atlas: pd.DataFrame, extra_time: float, mz_tolerance_ppm: float, polarity: str) -> pd.DataFrame:
+def _expand_atlas_windows(atlas: pd.DataFrame, extra_time: float, ms1_mz_tolerance_ppm: float, polarity: str) -> pd.DataFrame:
 
     logger.info(
         "Expanding atlas windows for %d compounds with extra_time=%s and mz_tolerance_ppm=%s",
         len(atlas),
         extra_time,
-        mz_tolerance_ppm,
+        ms1_mz_tolerance_ppm,
     )
 
     out = atlas.copy()
     out["polarity"] = polarity
     mz = out["mz"].to_numpy(dtype=np.float64)
-    tol = mz * mz_tolerance_ppm * 1e-6
+    tol = mz * ms1_mz_tolerance_ppm * 1e-6
     out["mz_min"] = (mz - tol).astype(np.float32)
     out["mz_max"] = (mz + tol).astype(np.float32)
     out["rt_min_pad"] = (out["rt_min"].to_numpy(dtype=np.float64) - extra_time).astype(np.float32)
@@ -242,63 +243,112 @@ def _widen_ms_data(df, type_name, group_cols, list_cols):
         
     return wide
 
-def _filter_ms2_points(ms2_df):
+def _filter_ms2_points(ms2_df, min_scans=None, min_int=None):
+    """Filter MS2 wide-format DataFrame.
+
+    ms2_df structure (post _widen_ms_data):
+      - One row per (mz_rt_uid, filename, rt) — i.e. one row per MS2 scan.
+      - 'in_feature' is a scalar bool per row (not a list).
+      - 'precursor_intensity' is a scalar float per row.
+
+    Filters are applied at the (mz_rt_uid, filename) group level:
+      - min_scans : keep groups where the number of in-feature scans >= min_scans.
+      - min_int   : keep groups where the max precursor_intensity among in-feature
+                    scans >= min_int.
+    Finally, any remaining rows whose own in_feature==False are dropped so that
+    only in-feature scans survive.
+    """
     if ms2_df.empty:
         return ms2_df
-    
+
     starting_scans = len(ms2_df)
     starting_uids = ms2_df['mz_rt_uid'].nunique()
-    logger.info("Filtering out compounds from MS2 data where no scans have in_feature=True. Starting with %d scans across %d compounds.", starting_scans, starting_uids)
-    
-    # Group by mz_rt_uid and keep only compounds that have at least one scan with in_feature=True
-    compounds_with_in_feature = ms2_df.groupby('mz_rt_uid')['in_feature'].apply(
-        lambda x: any(val is True or val == True for val in x)
-    )
-    keep_uids = set(compounds_with_in_feature[compounds_with_in_feature].index)
-    ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(keep_uids)].reset_index(drop=True)
-    
-    ending_scans = len(ms2_df)
-    ending_uids = ms2_df['mz_rt_uid'].nunique()
-    scan_pct = 100.0 * ending_scans / starting_scans if starting_scans > 0 else 0.0
-    uid_pct = 100.0 * ending_uids / starting_uids if starting_uids > 0 else 0.0
-    logger.info(
-        "MS2 data after filtering out compounds with no in-feature scans: %d scans remain (%.1f%% retained) across %d compounds (%.1f%% retained).",
-        ending_scans, scan_pct, ending_uids, uid_pct
-    )
-    
+
+    # Each row is one scan; in_feature is a scalar bool.
+    # Build a per-(mz_rt_uid, filename) summary of in-feature scans.
+    group_cols = ['mz_rt_uid', 'filename']
+    in_feature_mask = ms2_df['in_feature'].astype(bool)
+
+    # Collect per-step stats for the summary table: (step_label, scans_after, compounds_after)
+    steps = [("start", starting_scans, starting_uids)]
+
+    if min_scans is not None and min_scans > 0:
+        # Count in-feature rows per (mz_rt_uid, filename) group.
+        in_feature_counts = (
+            ms2_df[in_feature_mask]
+            .groupby(group_cols)
+            .size()
+            .rename('_in_feature_count')
+        )
+        ms2_df = ms2_df.join(in_feature_counts, on=group_cols)
+        ms2_df = ms2_df[ms2_df['_in_feature_count'].fillna(0) >= min_scans].drop(columns='_in_feature_count')
+        in_feature_mask = ms2_df['in_feature'].astype(bool)  # refresh after filter
+        steps.append((f"min_scans >= {min_scans}", len(ms2_df), ms2_df['mz_rt_uid'].nunique()))
+        if ms2_df.empty:
+            ldt.log_filter_table(steps, starting_scans, starting_uids, entries_label="Scans", title="MS2 point filtering summary")
+            return ms2_df
+
+    if min_int is not None and min_int > 0:
+        # Max precursor_intensity among in-feature rows per (mz_rt_uid, filename) group.
+        int_col = 'precursor_intensity'
+        in_feature_max_int = (
+            ms2_df.loc[in_feature_mask, group_cols + [int_col]]
+            .groupby(group_cols)[int_col]
+            .max()
+            .rename('_max_in_feature_int')
+        )
+        ms2_df = ms2_df.join(in_feature_max_int, on=group_cols)
+        ms2_df = ms2_df[ms2_df['_max_in_feature_int'].fillna(-float('inf')) >= min_int].drop(columns='_max_in_feature_int')
+        in_feature_mask = ms2_df['in_feature'].astype(bool)  # refresh after filter
+        steps.append((f"min_intensity >= {min_int}", len(ms2_df), ms2_df['mz_rt_uid'].nunique()))
+        if ms2_df.empty:
+            ldt.log_filter_table(steps, starting_scans, starting_uids, entries_label="Scans", title="MS2 point filtering summary")
+            return ms2_df
+
+    # Drop any rows that are not in-feature — only in-feature scans are useful downstream.
+    ms2_df = ms2_df[in_feature_mask].reset_index(drop=True)
+    steps.append(("any in-feature", len(ms2_df), ms2_df['mz_rt_uid'].nunique()))
+
+    ldt.log_filter_table(steps, starting_scans, starting_uids, entries_label="Scans", title="MS2 point filtering summary")
+
     return ms2_df
 
 def _filter_ms1_points(ms1_df, min_pts, min_int):
     if ms1_df.empty:
+        logger.warning("No MS1 data found. Skipping point filtering.")
         return ms1_df
-    
+    if min_pts is None and min_int is None:
+        logger.info("No MS1 point filters specified. Retaining all %d entries across %d compounds.", len(ms1_df), ms1_df['mz_rt_uid'].nunique())
+        return ms1_df
+    if min_pts == 0 and min_int == 0:
+        logger.info("ms1_min_pts=0 and ms1_min_intensity=0: skipping MS1 point filter. Retaining all %d entries across %d compounds.", len(ms1_df), ms1_df['mz_rt_uid'].nunique())
+        return ms1_df
+
     starting_compounds = ms1_df['mz_rt_uid'].nunique()
     starting_entries = len(ms1_df)
+
+    # Collect per-step stats for the summary table: (step_label, entries_after, compounds_after)
+    steps = [("start", starting_entries, starting_compounds)]
+
     if min_pts is not None and min_pts > 0:
-        logger.info(f"Filtering out compounds+files with fewer than {min_pts} points in their extracted ion chromatograms. Starting with {starting_entries} entries and {starting_compounds} unique compounds.")
         ms1_df = ms1_df[ms1_df.apply(lambda row: sum(1 for in_f, rt in zip(row['in_feature'], row['spec_rts']) if in_f) >= min_pts, axis=1)]
-        pct_remaining_entries = (len(ms1_df) / starting_entries * 100) if starting_entries > 0 else 0.0
-        pct_remaining_compounds = (ms1_df['mz_rt_uid'].nunique() / starting_compounds * 100) if starting_compounds > 0 else 0.0
-        logger.info(f"  Completed 'points' filter. Ending with {len(ms1_df)} entries ({pct_remaining_entries:.2f}% of initial) and {ms1_df['mz_rt_uid'].nunique()} unique compounds ({pct_remaining_compounds:.2f}% of initial).")
+        steps.append((f"min_pts >= {min_pts}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
         if ms1_df.empty:
+            ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
 
     if min_int is not None and min_int > 0:
-        logger.info(f"Filtering out compounds+files with peak intensity less than {min_int}. Starting with {len(ms1_df)} entries and {ms1_df['mz_rt_uid'].nunique()} unique compounds.")
         ms1_df = ms1_df[ms1_df.apply(lambda row: max((i for in_f, i in zip(row['in_feature'], row['spec_ints']) if in_f), default=-float('inf')) >= min_int, axis=1)]
-        pct_remaining_entries = (len(ms1_df) / starting_entries * 100) if starting_entries > 0 else 0.0
-        pct_remaining_compounds = (ms1_df['mz_rt_uid'].nunique() / starting_compounds * 100) if starting_compounds > 0 else 0.0
-        logger.info(f"  Completed 'intensity' filter. Ending with {len(ms1_df)} entries ({pct_remaining_entries:.2f}% of initial) and {ms1_df['mz_rt_uid'].nunique()} unique compounds ({pct_remaining_compounds:.2f}% of initial).")
+        steps.append((f"min_intensity >= {min_int}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
         if ms1_df.empty:
+            ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
-    
-    logger.info(f"Filtering out compounds+files with no MS1 points in the feature. Starting with {len(ms1_df)} entries and {ms1_df['mz_rt_uid'].nunique()} unique compounds.")
-    no_feature_mask = ~ms1_df["in_feature"].apply(lambda x: isinstance(x, list) and any(x))
-    ms1_df = ms1_df[~(no_feature_mask)]
-    pct_remaining_entries = (len(ms1_df) / starting_entries * 100) if starting_entries > 0 else 0.0
-    pct_remaining_compounds = (ms1_df['mz_rt_uid'].nunique() / starting_compounds * 100) if starting_compounds > 0 else 0.0
-    logger.info(f"  Completed 'in-feature' filter. Ending with {len(ms1_df)} entries ({pct_remaining_entries:.2f}% of initial) and {ms1_df['mz_rt_uid'].nunique()} unique compounds ({pct_remaining_compounds:.2f}% of initial).")
 
+    no_feature_mask = ~ms1_df["in_feature"].apply(lambda x: isinstance(x, list) and any(x))
+    ms1_df = ms1_df[~no_feature_mask]
+    steps.append(("any in-feature", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
+
+    ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
     return ms1_df
 
 def _synchronize_ms2_with_ms1(ms1_df, ms2_df):
@@ -309,15 +359,6 @@ def _synchronize_ms2_with_ms1(ms1_df, ms2_df):
             ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(valid_uids)].copy()
             logger.info(f"  Completed synchronization. Ending with {len(ms2_df)} MS2 entries and {ms2_df['mz_rt_uid'].nunique()} unique compounds.")
     return ms2_df
-
-def _synchronize_ms1_with_ms2(ms1_df, ms2_df):
-    if not ms1_df.empty:
-        if not ms2_df.empty:
-            logger.info(f"Synchronizing MS1 data with MS2 data to remove compounds with no MS2 hits that passed filters. Starting with {len(ms1_df)} MS1 entries and {ms1_df['mz_rt_uid'].nunique()} unique compounds.")
-            valid_uids = ms2_df['mz_rt_uid'].unique()
-            ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(valid_uids)].copy()
-            logger.info(f"  Completed synchronization. Ending with {len(ms1_df)} MS1 entries and {ms1_df['mz_rt_uid'].nunique()} unique compounds.")
-    return ms1_df
 
 def _ensure_in_feature_list_of_bools(df, col="in_feature"):
     if col in df.columns:
@@ -347,16 +388,17 @@ def extract_data_from_raw(obj):
     wp = obj.rt_alignment_params if stage == "rt_alignment" else obj.workflow_params
     
     used_params = [
-        "extra_time", "mz_tolerance_ppm", "only_keep_data_in_feature",
-        "ms1_min_num_points", "ms1_min_peak_intensity"
+        "atlas_extra_time", "ms1_mz_tolerance_ppm", "only_keep_data_in_feature",
+        "ms1_min_num_points", "ms1_min_peak_intensity",
+        "ms2_min_num_scans", "ms2_min_precursor_intensity",
     ]
-    logger.info("Running extraction with the following workflow parameters (used in this script):")
+    logger.info("Running extraction with the following workflow parameters:")
     for k in used_params:
         if k in wp:
             logger.info(f"  {k}: {wp[k]}")
 
     atlas_df = atlas.to_dataframe()
-    atlas_expanded = _expand_atlas_windows(atlas_df, wp.get("extra_time", 0.0), wp.get("mz_tolerance_ppm", 5.0), polarity)
+    atlas_expanded = _expand_atlas_windows(atlas_df, wp.get("atlas_extra_time", 0.0), wp.get("ms1_mz_tolerance_ppm", 5.0), polarity)
     runs = [r for r in lcmsruns if getattr(r, "file_format", "h5") == "h5"]
 
     # check that all files exist on disk before starting extraction
@@ -391,12 +433,19 @@ def extract_data_from_raw(obj):
     final_ms2_df = _widen_ms_data(final_ms2_df, "ms2", ['mz_rt_uid', 'filename', 'rt'], ['mz', 'i', 'in_feature'])
 
     # filter by minimum number of points in MS1 and remove compounds with no MS1 points "in_feature"
-    final_ms1_df = _filter_ms1_points(final_ms1_df, wp.get("ms1_min_num_points", None), wp.get("ms1_min_peak_intensity", None))
-    final_ms2_df = _filter_ms2_points(final_ms2_df)
+    final_ms1_df = _filter_ms1_points(
+        final_ms1_df, 
+        wp.get("ms1_min_num_points", None), 
+        wp.get("ms1_min_peak_intensity", None)
+    )
+    final_ms2_df = _filter_ms2_points(
+        final_ms2_df,
+        min_scans=wp.get("ms2_min_num_scans", None),
+        min_int=wp.get("ms2_min_precursor_intensity", None),
+    )
 
     # remove any "stranded" ms2 data points that don't have a corresponding ms1 feature
     final_ms2_df = _synchronize_ms2_with_ms1(final_ms1_df, final_ms2_df)
-    final_ms1_df = _synchronize_ms1_with_ms2(final_ms1_df, final_ms2_df)
 
     # Final Metadata Join
     final_ms1_df, final_ms2_df = _join_metadata(final_ms1_df, final_ms2_df, atlas_expanded)

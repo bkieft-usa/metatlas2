@@ -108,7 +108,7 @@ def _align_spectra_for_plotting(
 def _process_compound_batch(job):
     (uid, filename, scans_data, ref_spectra, 
      frag_mz_tolerance, min_score, min_frags, 
-     mz_tolerance_ppm, limit_to_n_hits) = job
+     ms2_mz_tolerance_ppm, limit_to_n_hits) = job
     
     if not ref_spectra:
         return uid, filename, [[] for _ in range(len(scans_data))]
@@ -138,10 +138,10 @@ def _process_compound_batch(job):
     ref_precursor_mzs = np.array([float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra])
     q_mzs_np = np.array(q_mzs)[:, None] 
     
-    if mz_tolerance_ppm is None:
+    if ms2_mz_tolerance_ppm is None:
         candidate_mask = np.ones((len(queries), len(ref_spectra)), dtype=bool)
     else:
-        tol_matrix = ref_precursor_mzs * (mz_tolerance_ppm * 1e-6)
+        tol_matrix = ref_precursor_mzs * (ms2_mz_tolerance_ppm * 1e-6)
         candidate_mask = np.abs(q_mzs_np - ref_precursor_mzs) <= tol_matrix
 
     # 3. Scoring
@@ -213,9 +213,11 @@ def _process_compound_batch(job):
         
     return uid, filename, all_scan_results
 
-def _filter_out_ms2_data(ms2_df, min_score, min_frags):
+def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
     starting_scans = len(ms2_df)
     starting_uids = ms2_df['mz_rt_uid'].nunique()
+    final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
+
     # When both thresholds are 0, treat as "no filter": retain all compounds
     if min_score == 0 and min_frags == 0:
         logger.info(
@@ -223,13 +225,11 @@ def _filter_out_ms2_data(ms2_df, min_score, min_frags):
             "Retaining all %d scans across %d compounds.",
             starting_scans, starting_uids
         )
-        final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
-        return ms2_df.reindex(columns=final_columns)
-    logger.info(
-        "Filtering out compounds with no in-feature passing hits (min_score: %f, min_frags: %d). "
-        "Starting with %d scans across %d compounds.",
-        min_score, min_frags, starting_scans, starting_uids
-    )
+        return ms2_df.reindex(columns=final_columns), ms1_df
+
+    # Collect per-step stats for the summary table: (step_label, scans_after, compounds_after)
+    ms2_steps = [("start", starting_scans, starting_uids)]
+
     # Only in_feature=True scans count toward compound retention.
     in_feature_df = ms2_df[ms2_df['in_feature'] == True]
     if in_feature_df.empty:
@@ -240,17 +240,25 @@ def _filter_out_ms2_data(ms2_df, min_score, min_frags):
         )
         keep_uids = set(compounds_with_hits_mask[compounds_with_hits_mask].index)
     ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(keep_uids)].reset_index(drop=True)
-    ending_scans = len(ms2_df)
-    ending_uids = ms2_df['mz_rt_uid'].nunique()
-    scan_pct = 100.0 * ending_scans / starting_scans if starting_scans > 0 else 0.0
-    uid_pct = 100.0 * ending_uids / starting_uids if starting_uids > 0 else 0.0
-    logger.info(
-        "MS2 data after filtering: %d scans remain (%.1f%% retained) across %d compounds (%.1f%% retained).",
-        ending_scans, scan_pct, ending_uids, uid_pct
-    )
-    final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
+    ms2_steps.append((f"hits (score>={min_score}, frags>={min_frags})", len(ms2_df), ms2_df['mz_rt_uid'].nunique()))
+
+    ldt.log_filter_table(ms2_steps, starting_scans, starting_uids, entries_label="Scans", title="MS2 hit filtering summary")
+
     ms2_df = ms2_df.reindex(columns=final_columns)
-    return ms2_df
+
+    # Synchronize MS1: drop compounds with no passing MS2 hits; log its own table
+    if not ms1_df.empty and not ms2_df.empty:
+        ms1_starting_entries = len(ms1_df)
+        ms1_starting_uids = ms1_df['mz_rt_uid'].nunique()
+        valid_uids = ms2_df['mz_rt_uid'].unique()
+        ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(valid_uids)].copy()
+        ms1_steps = [
+            ("start", ms1_starting_entries, ms1_starting_uids),
+            ("pass MS1 & MS2", len(ms1_df), ms1_df['mz_rt_uid'].nunique()),
+        ]
+        ldt.log_filter_table(ms1_steps, ms1_starting_entries, ms1_starting_uids, title="MS1 sync with MS2 hits summary")
+
+    return ms2_df, ms1_df
 
 def _assign_hits(ms2_df, results_map):
     """Assign scored hits back to every row of ms2_df in a single O(n) pass.
@@ -308,7 +316,7 @@ def find_ms2_hits(auto_id_obj):
             wp.get('ms2_frag_mz_tolerance', 0.05),
             wp.get('ms2_min_score', 0),
             wp.get('ms2_min_matching_frags', 0),
-            wp.get('mz_tolerance_ppm', 5.0),
+            wp.get('ms2_mz_tolerance_ppm', 5.0),
             wp.get('limit_to_n_hits', 20)
         ))
 
@@ -322,10 +330,11 @@ def find_ms2_hits(auto_id_obj):
 
     ms2_df = _assign_hits(ms2_df, results_map)
 
-    ms2_df = _filter_out_ms2_data(ms2_df, wp.get('ms2_min_score', 0), wp.get('ms2_min_matching_frags', 0))
+    ms2_df, ms1_df = _filter_out_ms2_data(ms2_df, auto_id_obj.experimental_data.ms1_df, wp.get('ms2_min_score', 0), wp.get('ms2_min_matching_frags', 0))
 
-    logger.info("Attaching MS2 data to AutoID object...")
+    logger.info("Attaching MS2 data (and MS1 data, if MS2 data filtered) to AutoID object...")
     dataset.ms2_df = ms2_df
+    dataset.ms1_df = ms1_df
     auto_id_obj.experimental_data = dataset
 
     logger.info("MS2 hit detection complete.")

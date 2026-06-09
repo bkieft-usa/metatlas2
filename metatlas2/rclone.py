@@ -171,7 +171,7 @@ def copy_outputs_to_google_drive(summary_obj: "AnalysisSummary", overwrite: bool
         return
 
     output_dir = Path(summary_obj.paths.get("analysis_output_dir"))
-    gdrive_subfolder = summary_obj.config.get('WORKFLOWS').get('PATHS').get('gdrive_subfolder', None)
+    gdrive_subfolder = summary_obj.config.gdrive_subfolder
 
     fail_suffix = "skipping upload to Google Drive"
 

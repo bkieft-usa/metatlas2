@@ -188,7 +188,7 @@ def create_new_atlas_from_dataframe(
         rt_space = row.get('rt_space', 'HF_Aug2019')
         if rt_peak is None or mz is None or adduct is None:
             raise ValueError(f"Compound {inchi_key} missing essential data (rt_peak: {rt_peak}, mz: {mz}, adduct: {adduct}), cannot create reference. (mz_rt_uid is the unique identifier for all compounds.)")
-        confidence_level = row.get('confidence_level', None)
+        confidence = row.get('confidence', None)
         identification_notes = row.get('identification_notes', '')
 
         mz_rt_uid = _generate_uid("mz_rt", decorator="ref")
@@ -206,7 +206,7 @@ def create_new_atlas_from_dataframe(
             mz_tolerance=mz_tolerance,
             chromatography=chromatography,
             polarity=polarity,
-            confidence=confidence_level,
+            confidence=confidence,
             source=atlas_file_path,
             identification_notes=identification_notes,
         )
@@ -253,6 +253,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.chromatography,
                         a.polarity,
                         a.analysis_type,
+                        a.analysis_name,
                         a.atlas_type,
                         aca.compound_uid,
                         COALESCE(main_db.compounds.compound_name, '') AS compound_name,
@@ -268,7 +269,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     LEFT JOIN main_db.compounds ON aca.compound_uid = main_db.compounds.compound_uid
-                    LEFT JOIN compound_mzrt mzrt 
+                    LEFT JOIN compound_mzrt mzrt
                         ON aca.mz_rt_uid = mzrt.mz_rt_uid
                     WHERE a.atlas_uid = ?
                     ORDER BY aca.association_order
@@ -283,6 +284,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.chromatography,
                         a.polarity,
                         a.analysis_type,
+                        a.analysis_name,
                         a.atlas_type,
                         c.compound_uid,
                         c.compound_name,
@@ -298,7 +300,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     JOIN compounds c ON aca.compound_uid = c.compound_uid
-                    LEFT JOIN compound_mzrt mzrt 
+                    LEFT JOIN compound_mzrt mzrt
                         ON aca.mz_rt_uid = mzrt.mz_rt_uid
                     WHERE a.atlas_uid = ?
                     ORDER BY aca.association_order
@@ -318,9 +320,86 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
         raise ValueError(f"No compounds found for atlas UID {atlas_uid} in database at {database_path}")
     else:
         df['compound_name'] = df['compound_name'] if 'compound_name' in df.columns else ''
-        logger.info(f"Retrieved {len(df)} compounds for atlas {atlas_uid} ({df['atlas_name'].iloc[0]})")
+        logger.debug(f"Retrieved {len(df)} compounds for atlas {atlas_uid} ({df['atlas_name'].iloc[0]})")
 
     return df
+
+def query_atlases_metadata(
+    database_path: str,
+    chromatography: Optional[str] = None,
+    polarity: Optional[str] = None,
+    analysis_type: Optional[str] = None,
+    analysis_name: Optional[str] = None,
+    created_by: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Query the atlases table and return metadata rows matching the supplied filters.
+
+    All filter arguments are optional.  When provided, matching is
+    case-insensitive and uses SQL ILIKE so partial values (e.g. ``'C18'``)
+    will match any atlas whose field contains that substring.
+
+    Args:
+        database_path: Path to the main (or project) database file.
+        chromatography: Filter by chromatography method (partial match).
+        polarity:       Filter by polarity (partial match).
+        analysis_type:  Filter by analysis type (partial match).
+        analysis_name:  Filter by analysis name (partial match).
+        created_by:     Filter by creator username (partial match).
+
+    Returns:
+        A :class:`pandas.DataFrame` with one row per matching atlas, containing
+        all columns from the ``atlases`` table.  Returns an empty DataFrame
+        when no atlases match.
+    """
+    conditions: List[str] = []
+    params: List[str] = []
+
+    filter_map = {
+        "chromatography": chromatography,
+        "polarity": polarity,
+        "analysis_type": analysis_type,
+        "analysis_name": analysis_name,
+        "created_by": created_by,
+    }
+    for column, value in filter_map.items():
+        if value is not None:
+            conditions.append(f"{column} ILIKE ?")
+            params.append(f"%{value}%")
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    query = f"""
+        SELECT
+            atlas_uid,
+            atlas_name,
+            atlas_description,
+            chromatography,
+            polarity,
+            analysis_type,
+            analysis_name,
+            atlas_type,
+            created_by,
+            created_date,
+            source
+        FROM atlases
+        {where_clause}
+        ORDER BY created_date DESC, atlas_name
+    """
+
+    with get_db_connection(database_path, read_only=True) as conn:
+        try:
+            df = conn.execute(query, params).df()
+        except Exception as e:
+            logger.error(f"Error querying atlases metadata: {e}")
+            return pd.DataFrame()
+
+    logger.info(
+        "Found %d atlas(es) matching filters in %s",
+        len(df),
+        database_path,
+    )
+    return df
+
 
 def create_project_database(
     project_db_path: str, 
@@ -874,6 +953,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 chromatography TEXT,
                 polarity TEXT,
                 analysis_type TEXT,
+                analysis_name TEXT,
                 atlas_type TEXT,
                 created_by TEXT,
                 created_date TEXT,
@@ -929,6 +1009,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 chromatography TEXT,
                 polarity TEXT,
                 analysis_type TEXT,
+                analysis_name TEXT,
                 atlas_type TEXT,
                 source_atlas_uid TEXT,
                 rt_alignment_number INTEGER,
@@ -1105,7 +1186,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
 
             # Create atlas entry
             conn.execute("""
-                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 atlas_obj.atlas_uid,
                 atlas_obj.atlas_name,
@@ -1113,6 +1194,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 atlas_obj.chromatography,
                 atlas_obj.polarity,
                 atlas_obj.analysis_type,
+                atlas_obj.analysis_name,
                 atlas_obj.atlas_type,
                 prov["analyst"],
                 prov["timestamp"],
@@ -1187,7 +1269,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
 
             # Create new atlas entry
             conn.execute("""
-                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 atlas_obj.atlas_uid,
                 atlas_obj.atlas_name,
@@ -1195,6 +1277,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 atlas_obj.chromatography,
                 atlas_obj.polarity,
                 atlas_obj.analysis_type,
+                atlas_obj.analysis_name,
                 atlas_obj.atlas_type,
                 atlas_obj.source_atlas_uid,
                 atlas_obj.rt_alignment_number,
@@ -1423,7 +1506,7 @@ def create_new_atlas_after_manual_curation(
     # 4. Atlas Generation
     new_atlas_uid = _generate_uid(
         "curated_atlas",
-        decorator=f"{source_atlas.analysis_type.lower()}-{source_atlas.chromatography.lower()}-{source_atlas.polarity.lower()}"
+        decorator=f"{source_atlas.analysis_type.lower()}-{source_atlas.analysis_name.lower()}-{source_atlas.chromatography.lower()}-{source_atlas.polarity.lower()}"
     )
 
     new_atlas = copy.copy(source_atlas)
@@ -1467,6 +1550,7 @@ def create_new_atlas_after_auto_id(
         "autoid_atlas",
         decorator=(
             f"{source_atlas.analysis_type.lower()}-"
+            f"{source_atlas.analysis_name.lower()}-"
             f"{source_atlas.chromatography.lower()}-"
             f"{source_atlas.polarity.lower()}"
         )
@@ -1493,7 +1577,7 @@ def create_new_atlas_after_auto_id(
 
     return new_atlas
 
-def update_atlas_with_rt_alignment(
+def create_aligned_atlas_from_template(
     rt_align_obj: "RTAlignment"
 ) -> tuple[dict[str, "Atlas"], list[float]]:
     """Apply RT alignment model to target atlases and return new Atlas objects with updated RTs, 
@@ -1504,25 +1588,21 @@ def update_atlas_with_rt_alignment(
 
     prov = get_provenance()
     main_db_path = rt_align_obj.paths['main_db_path']
-    targeted_analyses = rt_align_obj.config['WORKFLOWS']['TARGETED_ANALYSES']
-
 
     aligned_atlases = {}
     all_rt_shifts = []
-    atlas_jobs = [
-        (chrom, pol, analysis_type, atlas_params_dict)
-        for chrom, pol_dict in targeted_analyses.items()
-        for pol, analysis_dict in pol_dict.items()
-        for analysis_type, atlas_params_dict in analysis_dict.items()
-    ]
 
-    for chrom, pol, analysis_type, atlas_params_dict in tqdm(atlas_jobs, desc="Updating atlases with RT alignment", disable=should_disable_tqdm()):
-        target_atlas_uid = atlas_params_dict.get('ATLAS', {}).get('uid', None)
-        if target_atlas_uid is None:
-            logger.info(f"Skipping {chrom} {pol} {analysis_type} - no target atlas UID found in parameters")
+    for ta in tqdm(rt_align_obj.config.targeted_analyses, desc="Updating atlases with RT alignment", disable=should_disable_tqdm()):
+        chrom = ta.chromatography
+        pol = ta.polarity
+        analysis_type = ta.analysis_type
+        analysis_name = ta.name
+        target_atlas_uid = ta.atlas_uid
+        if not target_atlas_uid:
+            logger.debug(f"Skipping {chrom} {pol} {analysis_type}/{analysis_name} - no target atlas UID found in parameters")
             continue
 
-        logger.info(f"Loading {chrom} {pol} {analysis_type} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
+        logger.debug(f"Loading {chrom} {pol} {analysis_type}/{analysis_name} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
         atlas_obj = Atlas.from_database(main_db_path, target_atlas_uid)
 
         # Create a new Atlas object for the RT-aligned version
@@ -1553,7 +1633,7 @@ def update_atlas_with_rt_alignment(
             aligned_compound_mzrts[new_mz_rt_uid] = aligned_comp_mzrt
 
         # Generate new UID and name for the aligned atlas
-        aligned_atlas_uid = _generate_uid("rt_atlas", decorator=f"{analysis_type.lower()}-{chrom.lower()}-{pol.lower()}")
+        aligned_atlas_uid = _generate_uid("rt_atlas", decorator=f"{analysis_type.lower()}-{chrom.lower()}-{pol.lower()}-{analysis_name.lower()}")
         aligned_atlas = Atlas(
             atlas_uid=aligned_atlas_uid,
             atlas_name=f"{atlas_obj.atlas_name} (post-rt-alignment)",
@@ -1561,6 +1641,7 @@ def update_atlas_with_rt_alignment(
             chromatography=chrom,
             polarity=pol,
             analysis_type=analysis_type,
+            analysis_name=analysis_name,
             atlas_type="RT-ALIGNED",
             source_atlas_uid=atlas_obj.atlas_uid,
             rt_alignment_number=rt_align_obj.rt_alignment_number,

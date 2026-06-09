@@ -46,7 +46,7 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     else:
         ms1_groups = ms1_df.groupby("mz_rt_uid")
 
-    apply_bounds_cutoff = auto_id_obj.workflow_params.get('apply_suggested_min_conf', None)
+    apply_bounds_cutoff = auto_id_obj.workflow_params.get('suggested_min_conf', None)
     remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', False)
 
     curation_records = []
@@ -123,7 +123,6 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     manual_curation_df['isomers'] = manual_curation_df['isomers'].apply(json.dumps)
     n_unique_uids = manual_curation_df['mz_rt_uid'].nunique() if not manual_curation_df.empty else 0
     logger.info(f"Summary: manual_curation_df contains {n_unique_uids} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
-    logger.info(f"Manual curation df:\n{manual_curation_df[['compound_name', 'mz', 'atlas_rt_peak', 'rt_peak', 'suggested_rt_min', 'suggested_rt_max']].head(10)}")
     auto_id_obj.experimental_data.curation_df = manual_curation_df
 
     return

@@ -48,6 +48,7 @@ def generate_gui_notebooks(
     fname = (
         f"{auto_id_obj.project_name}"
         f"_{auto_id_obj.post_autoid_atlas_obj.analysis_type}"
+        f"-{getattr(auto_id_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'}"
         f"_{auto_id_obj.post_autoid_atlas_obj.polarity}"
         f"_RTA{auto_id_obj.rt_alignment_number}"
         f"_TGA{auto_id_obj.analysis_number}"
@@ -94,6 +95,7 @@ def _make_header_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNod
         f"**Chromatography:** {auto_id_obj.post_autoid_atlas_obj.chromatography}  \n"
         f"**Polarity:** {auto_id_obj.post_autoid_atlas_obj.polarity}  \n"
         f"**Analysis type:** {auto_id_obj.post_autoid_atlas_obj.analysis_type}  \n"
+        f"**Analysis name:** {getattr(auto_id_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'}  \n"
         f"**RT alignment number:** {auto_id_obj.rt_alignment_number}  \n"
         f"**Analysis number:** {auto_id_obj.analysis_number}"
     )

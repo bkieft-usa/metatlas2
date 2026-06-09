@@ -35,9 +35,9 @@ shifter --module=none \\
     {extra_flags}
 """
 
-def get_chromatographies_from_config(config: dict) -> list:
+def get_chromatographies_from_config(config: "Metatlas2Config") -> list:
     """Return all chromatography keys present under RT_ALIGNMENT."""
-    return list(config["WORKFLOWS"].get("RT_ALIGNMENT", {}).keys())
+    return list(config.rt_alignment_config.keys())
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run metatlas2 pre-curation workflow")
@@ -48,7 +48,7 @@ def parse_args():
         p.add_argument("--project", required=True, help="Project name")
         p.add_argument("--rt-align-num", type=int, default=0)
         p.add_argument("--analysis-num", type=int, default=0)
-        p.add_argument("--analysis-subset",  type=lambda s: s.split(","), default=None, help="Comma-separated polarity-analysis_type list to filter config for RT alignment and Auto ID (e.g. 'POS-ISTD,POS-EMA')")
+        p.add_argument("--analysis-subset",  type=lambda s: s.split(","), default=None, help="Comma-separated POL-TYPE-NAME list to filter which named analyses to run (e.g. 'POS-ISTD-default,POS-EMA-default,NEG-EMA-no-standards')")
         p.add_argument("--overwrite", action="store_true", default=False)
         p.add_argument("--skip-setup", action="store_true", default=False)
         p.add_argument("--skip-rt-align", action="store_true", default=False)
@@ -145,7 +145,7 @@ def set_up_paths(
         )
     lcmsruns_path = f"{data_dir}/raw_data/"
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
-    pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.parquet"
+    pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.json"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
@@ -155,9 +155,9 @@ def set_up_paths(
             "pubchem_cache_path": str(pubchem_cache_path)
         }
 
-    owner = config.get('WORKFLOWS').get('PATHS').get('owner', None).lower()
+    owner = config.owner
     user = os.environ.get("USER", "other")
-    if owner is None:
+    if not owner:
         raise ValueError("Owner not specified in config under WORKFLOWS.PATHS.owner")
     if user is None:
         raise ValueError("USER environment variable is not set")
@@ -170,7 +170,7 @@ def set_up_paths(
     analysis_dir = rta_dir / f"TGA{analysis_number}"
 
     # Resolve msms_refs_path relative to METATLAS_DATA_DIR if not absolute
-    msms_refs_path_raw = config.get('WORKFLOWS').get('PATHS').get('msms_refs_path', None)
+    msms_refs_path_raw = config.msms_refs_path
     if msms_refs_path_raw and not Path(msms_refs_path_raw).is_absolute():
         msms_refs_path_resolved = str(Path(data_dir) / msms_refs_path_raw)
     else:

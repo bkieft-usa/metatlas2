@@ -20,6 +20,41 @@ import metatlas2.logging_config as lcf
 logger = lcf.get_logger('workflows')
 
 
+def _get_workflow_params(config: "Metatlas2Config", chromatography: str, polarity: str, analysis_type: str, analysis_name: str) -> Dict[str, Any]:
+    """
+    Look up PARAMS for a specific named analysis entry from the config.
+
+    Delegates to :meth:`Metatlas2Config.get_targeted_analysis` and returns
+    the ``params`` dict of the matching :class:`TargetedAnalysis`.
+    """
+    from metatlas2.workflow_objects import Metatlas2Config
+    logger.info(f"Getting workflow params for {chromatography}/{polarity}/{analysis_type}/{analysis_name}")
+    ta = config.get_targeted_analysis(chromatography, polarity, analysis_type, analysis_name)
+    return ta.params
+
+
+def _atlas_matches_subset(atlas_row, analysis_subset: list) -> bool:
+    """
+    Check if an atlas row matches any entry in the analysis_subset list.
+    Subset entries must be in 'POL-TYPE-NAME' format (e.g. 'POS-EMA-default').
+    """
+    pol = atlas_row['polarity']
+    atype = atlas_row['analysis_type']
+    aname = atlas_row['analysis_name']
+    for subset in analysis_subset:
+        parts = subset.split('-', 2)
+        if len(parts) == 3:
+            s_pol, s_type, s_name = parts
+            if pol == s_pol and atype == s_type and aname == s_name:
+                return True
+        elif len(parts) == 2:
+            # Fallback: POL-TYPE without name matches any analysis_name
+            s_pol, s_type = parts
+            if pol == s_pol and atype == s_type:
+                return True
+    return False
+
+
 def _find_free_port(start: int, max_tries: int = 20) -> int:
     """Return the first free TCP port in [start, start+max_tries)."""
     for port in range(start, start + max_tries):
@@ -214,9 +249,12 @@ def run_auto_identification(
 
     for _, atlas_to_autoid in pre_autoid_atlases.iterrows():
         if auto_id_obj.analysis_subset:
-            analysis_filters = [tuple(subset.split('-', 1)) for subset in auto_id_obj.analysis_subset]
-            if (atlas_to_autoid['polarity'], atlas_to_autoid['analysis_type']) not in analysis_filters:
-                logger.info(f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} with polarity {atlas_to_autoid['polarity']} and analysis type {atlas_to_autoid['analysis_type']} since it's not in the specified analysis subset: {auto_id_obj.analysis_subset}")
+            if not _atlas_matches_subset(atlas_to_autoid, auto_id_obj.analysis_subset):
+                logger.info(
+                    f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} "
+                    f"({atlas_to_autoid['polarity']}-{atlas_to_autoid['analysis_type']}-{atlas_to_autoid['analysis_name']}) "
+                    f"since it's not in the specified analysis subset: {auto_id_obj.analysis_subset}"
+                )
                 continue
 
         auto_id_obj.pre_autoid_atlas_obj = Atlas.from_database(
@@ -226,7 +264,13 @@ def run_auto_identification(
         )
 
         logger.info(f"Loading workflow parameters for targeted analysis from config...")
-        auto_id_obj.workflow_params = auto_id_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][auto_id_obj.pre_autoid_atlas_obj.chromatography][auto_id_obj.pre_autoid_atlas_obj.polarity][auto_id_obj.pre_autoid_atlas_obj.analysis_type]['PARAMS']
+        auto_id_obj.workflow_params = _get_workflow_params(
+            auto_id_obj.config,
+            auto_id_obj.pre_autoid_atlas_obj.chromatography,
+            auto_id_obj.pre_autoid_atlas_obj.polarity,
+            auto_id_obj.pre_autoid_atlas_obj.analysis_type,
+            auto_id_obj.pre_autoid_atlas_obj.analysis_name,
+        )
 
         logger.info("Finding LCMSRuns matching criteria for auto identification...")
         auto_id_obj.autoid_lcmsruns = lrt.filter_lcmsruns_list(
@@ -318,7 +362,13 @@ def run_analysis_gui(
     )
 
     logger.info("Loading workflow parameters for analysis GUI from config...")
-    analysis_gui_obj.workflow_params = analysis_gui_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][analysis_gui_obj.post_autoid_atlas_obj.chromatography][analysis_gui_obj.post_autoid_atlas_obj.polarity][analysis_gui_obj.post_autoid_atlas_obj.analysis_type]['PARAMS']
+    analysis_gui_obj.workflow_params = _get_workflow_params(
+        analysis_gui_obj.config,
+        analysis_gui_obj.post_autoid_atlas_obj.chromatography,
+        analysis_gui_obj.post_autoid_atlas_obj.polarity,
+        analysis_gui_obj.post_autoid_atlas_obj.analysis_type,
+        analysis_gui_obj.post_autoid_atlas_obj.analysis_name,
+    )
 
     logger.info("Loading and filtering GUI inputs...")
     dbi.load_and_filter_for_gui(
@@ -386,7 +436,13 @@ def run_analysis_summary(
     )
 
     logger.info(f"Loading workflow parameters for analysis summary from config...")
-    summary_obj.workflow_params = summary_obj.config['WORKFLOWS']['TARGETED_ANALYSES'][summary_obj.post_autoid_atlas_obj.chromatography][summary_obj.post_autoid_atlas_obj.polarity][summary_obj.post_autoid_atlas_obj.analysis_type]['PARAMS']
+    summary_obj.workflow_params = _get_workflow_params(
+        summary_obj.config,
+        summary_obj.post_autoid_atlas_obj.chromatography,
+        summary_obj.post_autoid_atlas_obj.polarity,
+        summary_obj.post_autoid_atlas_obj.analysis_type,
+        summary_obj.post_autoid_atlas_obj.analysis_name,
+    )
     
     logger.info(f"Setting override parameters for analysis summary...")
     summary_obj.override_parameters = override_parameters if override_parameters is not None else {}

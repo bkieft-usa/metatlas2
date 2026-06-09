@@ -39,6 +39,7 @@ def build_dash_app(
     chrom = analysis_gui_obj.post_autoid_atlas_obj.chromatography
     pol = analysis_gui_obj.post_autoid_atlas_obj.polarity
     analysis_type = analysis_gui_obj.post_autoid_atlas_obj.analysis_type
+    analysis_name = getattr(analysis_gui_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'
     rta = analysis_gui_obj.rt_alignment_number
     tga = analysis_gui_obj.analysis_number
 
@@ -60,7 +61,7 @@ def build_dash_app(
             requests_pathname_prefix=requests_prefix,
             suppress_callback_exceptions=True,
         )
-        app.title = f"{project_shortname} | {chrom} | {pol} | {analysis_type} | RTA{rta} | TGA{tga}"
+        app.title = f"{project_shortname} | {chrom} | {pol} | {analysis_type}-{analysis_name} | RTA{rta} | TGA{tga}"
         logger.debug("App built successfully")
         app.config.prevent_initial_callbacks = "initial_duplicate"
     except Exception as e:

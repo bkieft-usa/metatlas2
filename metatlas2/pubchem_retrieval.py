@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import time
 import re
@@ -107,7 +108,7 @@ def load_or_create_pubchem_cache(pubchem_cache_path: str, use_cache: bool = True
     Load existing PubChem cache or create new one.
     
     Args:
-        pubchem_cache_path: Path to cache parquet file
+        pubchem_cache_path: Path to cache JSON file
         use_cache: If True, load existing cache; if False, return empty cache
         
     Returns:
@@ -120,8 +121,8 @@ def load_or_create_pubchem_cache(pubchem_cache_path: str, use_cache: bool = True
     try:
         cache_path = Path(pubchem_cache_path)
         if cache_path.exists():
-            cache_df = pd.read_parquet(pubchem_cache_path)
-            pubchem_cache = cache_df.set_index('inchi_key').to_dict('index')
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                pubchem_cache = json.load(f)
             logger.info(f"Loaded PubChem cache with {len(pubchem_cache)} entries from {pubchem_cache_path}")
             return pubchem_cache
         else:
@@ -133,26 +134,14 @@ def load_or_create_pubchem_cache(pubchem_cache_path: str, use_cache: bool = True
         return {}
 
 def save_pubchem_cache(cache: Dict[str, Dict], cache_filename: str) -> None:
-    """Save global PubChem cache to Parquet file"""
+    """Save global PubChem cache to JSON file."""
     cache_file = Path(cache_filename)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Convert dict of dicts to DataFrame
-        df = pd.DataFrame.from_dict(cache, orient='index')
-        df.index.name = 'inchi_key'
-        df = df.reset_index()
-        
-        # Remove any duplicate inchi_keys
-        df = df.drop_duplicates(subset='inchi_key', keep='last')
-        
-        # Convert list columns to strings for Parquet compatibility
-        if 'synonyms' in df.columns:
-            df['synonyms'] = df['synonyms'].apply(lambda x: str(x) if isinstance(x, list) else x)
-        
-        # Save to Parquet
-        df.to_parquet(cache_file, engine='pyarrow', compression='snappy', index=False)
-        logger.info(f"Saved global PubChem cache with {len(df)} unique entries to {cache_file}")
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+        logger.info(f"Saved global PubChem cache with {len(cache)} entries to {cache_file}")
     except Exception as e:
         logger.error(f"Error saving cache: {e}")
 
