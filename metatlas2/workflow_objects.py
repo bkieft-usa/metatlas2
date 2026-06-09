@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 import pandas as pd
 import os
+import yaml
 from dataclasses import asdict
 from tqdm.auto import tqdm
 
@@ -16,6 +17,254 @@ import metatlas2.run_targeted_analysis as rtg
 import metatlas2.note_options as gno
 import metatlas2.file_and_project_format as fpf
 logger = lcf.get_logger('workflow_objects')
+
+
+@dataclass
+class TargetedAnalysis:
+    """Configuration for a single named targeted analysis entry.
+
+    The unique identity of an analysis is the combination of
+    ``chromatography + polarity + analysis_type + name``.
+    ``atlas_uid`` is the reference atlas to use, and ``params`` holds
+    the validated PARAMS dict for this entry.
+    """
+    chromatography: str
+    polarity: str
+    analysis_type: str
+    name: str
+    atlas_uid: str
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        """Human-readable composite key: ``chrom/pol/analysis_type/name``."""
+        return f"{self.chromatography}/{self.polarity}/{self.analysis_type}/{self.name}"
+
+
+@dataclass
+class Metatlas2Config:
+    """Parsed representation of a metatlas2 YAML configuration file.
+
+    Attributes
+    ----------
+    paths_config:
+        The ``WORKFLOWS.PATHS`` section as a plain dict (owner, msms_refs_path, etc.).
+    rt_alignment_config:
+        The ``WORKFLOWS.RT_ALIGNMENT`` section as a plain dict keyed by chromatography.
+    targeted_analyses:
+        Flat list of :class:`TargetedAnalysis` objects — one per unique
+        ``chrom/pol/analysis_type/name`` combination.  Because the YAML
+        loader merges duplicate analysis-type keys, **all** named analyses
+        are present even when the YAML file repeats the same key (e.g.
+        multiple ``EMA:`` blocks under the same polarity).
+    """
+    paths_config: Dict[str, Any] = field(default_factory=dict)
+    rt_alignment_config: Dict[str, Any] = field(default_factory=dict)
+    targeted_analyses: List[TargetedAnalysis] = field(default_factory=list)
+
+    def get_targeted_analysis(
+        self,
+        chromatography: str,
+        polarity: str,
+        analysis_type: str,
+        name: str,
+    ) -> "TargetedAnalysis":
+        """Return the :class:`TargetedAnalysis` matching the given key.
+
+        Raises :class:`KeyError` if no match is found.
+        """
+        for ta in self.targeted_analyses:
+            if (
+                ta.chromatography == chromatography
+                and ta.polarity == polarity
+                and ta.analysis_type == analysis_type
+                and ta.name == name
+            ):
+                return ta
+        raise KeyError(
+            f"No targeted analysis found for {chromatography}/{polarity}/{analysis_type}/{name}. "
+            f"Available: {[ta.key for ta in self.targeted_analyses]}"
+        )
+
+    @property
+    def chromatography(self) -> str:
+        """First chromatography key found in targeted analyses (convenience accessor)."""
+        if self.targeted_analyses:
+            return self.targeted_analyses[0].chromatography
+        if self.rt_alignment_config:
+            return next(iter(self.rt_alignment_config))
+        raise ValueError("No chromatography found in config")
+
+    @property
+    def owner(self) -> str:
+        return (self.paths_config.get('owner') or 'jgi').lower()
+
+    @property
+    def msms_refs_path(self) -> Optional[str]:
+        return self.paths_config.get('msms_refs_path', None)
+
+    @property
+    def msms_refs_db_filter(self) -> Optional[str]:
+        return self.paths_config.get('msms_refs_db_filter', None)
+
+    @property
+    def gdrive_subfolder(self) -> Optional[str]:
+        return self.paths_config.get('gdrive_subfolder', None)
+
+@dataclass
+class AtlasEntry:
+    """One atlas input file with its database name and description."""
+    path: Optional[str]
+    name: Optional[str]
+    desc: Optional[str]
+
+    def __post_init__(self):
+        self.path = str(self.path) if self.path else None
+        self.name = str(self.name) if self.name else None
+        self.desc = str(self.desc) if self.desc else None
+        if self.path and not Path(self.path).exists():
+            raise FileNotFoundError(f"Atlas file not found: {self.path}")
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.path
+
+
+@dataclass
+class NewAtlasesConfig:
+    """Parsed representation of a ``create_atlases.yaml`` config file.
+
+    Structure::
+
+        atlases[chromatography][polarity][analysis_type] -> List[AtlasEntry]
+
+    All keys are preserved exactly as written in the YAML (e.g. ``'HILICZ'``,
+    ``'POS'``, ``'QC'``).
+    """
+    atlases: Dict[str, Dict[str, Dict[str, List[AtlasEntry]]]]
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "NewAtlasesConfig":
+        """Load and validate an atlas config YAML, returning a NewAtlasesConfig."""
+        with open(path, 'r') as f:
+            raw = yaml.safe_load(f)
+
+        if 'ATLASES' not in raw:
+            raise ValueError(f"Missing required top-level key 'ATLASES' in {path}")
+
+        atlases: Dict[str, Dict[str, Dict[str, List[AtlasEntry]]]] = {}
+        for chrom, chrom_cfg in raw['ATLASES'].items():
+            if not isinstance(chrom_cfg, dict):
+                raise ValueError(f"Expected a dict under ATLASES.{chrom}")
+            atlases[chrom] = {}
+            for pol, pol_cfg in chrom_cfg.items():
+                if not isinstance(pol_cfg, dict):
+                    raise ValueError(f"Expected a dict under ATLASES.{chrom}.{pol}")
+                atlases[chrom][pol] = {}
+                for analysis_type, entries_raw in pol_cfg.items():
+                    if isinstance(entries_raw, dict):
+                        entries_raw = [entries_raw]
+                    elif not isinstance(entries_raw, list):
+                        raise ValueError(
+                            f"Expected a dict or list under ATLASES.{chrom}.{pol}.{analysis_type}"
+                        )
+                    entries = []
+                    for e in entries_raw:
+                        if not isinstance(e, dict):
+                            raise ValueError(
+                                f"Expected a dict entry under ATLASES.{chrom}.{pol}.{analysis_type}"
+                            )
+                        for required in ('path', 'name', 'desc'):
+                            if required not in e:
+                                raise ValueError(
+                                    f"Missing required field '{required}' in "
+                                    f"ATLASES.{chrom}.{pol}.{analysis_type}"
+                                )
+                        entries.append(AtlasEntry(path=e['path'], name=e['name'], desc=e['desc']))
+                    atlases[chrom][pol][analysis_type] = entries
+
+        logger.info("Loaded atlas configuration from %s", path)
+        return cls(atlases=atlases)
+
+    def iter_entries(self):
+        """Yield (chromatography, polarity, analysis_type, AtlasEntry) tuples."""
+        for chrom, pol_dict in self.atlases.items():
+            for pol, type_dict in pol_dict.items():
+                for analysis_type, entries in type_dict.items():
+                    for entry in entries:
+                        yield chrom, pol, analysis_type, entry
+
+
+@dataclass
+class CompoundParams:
+    """Parameters section of a ``create_compounds.yaml`` config file."""
+    use_pubchem_cache: bool = True
+    update_pubchem_cache: bool = False
+
+
+@dataclass
+class NewCompoundsConfig:
+    """Parsed representation of a ``create_compounds.yaml`` config file.
+
+    Structure::
+
+        compounds[chromatography][polarity] -> List[str]  (validated file paths)
+
+    All keys are preserved exactly as written in the YAML.
+    """
+    params: CompoundParams
+    compounds: Dict[str, Dict[str, List[str]]]
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "NewCompoundsConfig":
+        """Load and validate a compound config YAML, returning a NewCompoundsConfig."""
+        with open(path, 'r') as f:
+            raw = yaml.safe_load(f)
+
+        for required in ('PARAMS', 'COMPOUNDS'):
+            if required not in raw:
+                raise ValueError(f"Missing required top-level key '{required}' in {path}")
+
+        p = raw['PARAMS']
+        params = CompoundParams(
+            use_pubchem_cache=bool(p.get('use_pubchem_cache', True)),
+            update_pubchem_cache=bool(p.get('update_pubchem_cache', False)),
+        )
+
+        compounds: Dict[str, Dict[str, List[str]]] = {}
+        for chrom, chrom_cfg in raw['COMPOUNDS'].items():
+            if not isinstance(chrom_cfg, dict):
+                raise ValueError(f"Expected a dict under COMPOUNDS.{chrom}")
+            compounds[chrom] = {}
+            for pol, pol_cfg in chrom_cfg.items():
+                if not isinstance(pol_cfg, dict):
+                    raise ValueError(f"Expected a dict under COMPOUNDS.{chrom}.{pol}")
+                if 'PATHS' not in pol_cfg:
+                    raise ValueError(f"Missing PATHS under COMPOUNDS.{chrom}.{pol}")
+                if not isinstance(pol_cfg['PATHS'], list):
+                    raise ValueError(f"PATHS must be a list under COMPOUNDS.{chrom}.{pol}")
+                validated: List[str] = []
+                for p_raw in pol_cfg['PATHS']:
+                    if not p_raw:
+                        continue
+                    p_str = str(p_raw)
+                    if not Path(p_str).exists():
+                        raise FileNotFoundError(
+                            f"Compound input file not found: {p_str} for {chrom}/{pol}"
+                        )
+                    validated.append(p_str)
+                compounds[chrom][pol] = validated
+
+        logger.info("Loaded compound configuration from %s", path)
+        return cls(params=params, compounds=compounds)
+
+    def iter_paths(self):
+        """Yield (chromatography, polarity, file_path) tuples for all non-empty paths."""
+        for chrom, pol_dict in self.compounds.items():
+            for pol, paths in pol_dict.items():
+                for file_path in paths:
+                    yield chrom, pol, file_path
+
 
 @dataclass
 class Compound:
@@ -97,12 +346,12 @@ class Compound:
 
     @classmethod
     def create_from_config(
-        cls, 
-        config_path: str, 
+        cls,
+        config_path: str,
         overwrite_db: bool = False
     ) -> None:
         """Create and save Compounds and CompoundMZRTs from a config file."""
-        config = ldt.load_compound_config(config_path)
+        config = NewCompoundsConfig.from_yaml(config_path)
         paths = rtg.set_up_paths(config=config)
         main_db_path = paths.get("main_db_path", None)
         pubchem_cache_path = paths.get("pubchem_cache_path", None)
@@ -111,28 +360,23 @@ class Compound:
         # This will only create the database if it doesn't already exist, unless you want to overwrite
         dbi.create_metatlas_database(main_db_path, overwrite=overwrite_db)
 
-        for chrom, pol_dict in config['COMPOUNDS'].items():
-            for pol, pol_config in pol_dict.items():
-                for file_path in pol_config.get('PATHS', []):
-                    if not file_path:
-                        logger.debug(f"Skipping empty file path for {chrom}/{pol}")
-                        continue
-                    logger.info(f"Processing compound file: {file_path}")
-                    compounds_df = ldt.load_compound_input(file_path)
-                    compounds_df = pcr.retrieve_pubchem_info(
-                        compounds=compounds_df,
-                        pubchem_cache_path=pubchem_cache_path,
-                        use_pubchem_cache=config["PARAMS"].get("use_pubchem_cache", True),
-                        update_pubchem_cache=config["PARAMS"].get("update_pubchem_cache", False)
-                    )
-                    for _, row in compounds_df.iterrows():
-                        try:
-                            compound = cls.from_atlas_row(row)
-                            compounds.append(compound)
-                            compound_mzrt = CompoundMZRT.from_atlas_row(row)
-                            compound_mzrt.source = file_path
-                        except Exception as e:
-                            logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('compound_name', 'Unknown')}: {e}")
+        for chrom, pol, file_path in config.iter_paths():
+            logger.info(f"Processing compound file: {file_path}")
+            compounds_df = ldt.load_compound_input(file_path)
+            compounds_df = pcr.retrieve_pubchem_info(
+                compounds=compounds_df,
+                pubchem_cache_path=pubchem_cache_path,
+                use_pubchem_cache=config.params.use_pubchem_cache,
+                update_pubchem_cache=config.params.update_pubchem_cache,
+            )
+            for _, row in compounds_df.iterrows():
+                try:
+                    compound = cls.from_atlas_row(row)
+                    compounds.append(compound)
+                    compound_mzrt = CompoundMZRT.from_atlas_row(row)
+                    compound_mzrt.source = file_path
+                except Exception as e:
+                    logger.warning(f"Failed to create Compound/CompoundMZRT for row {row.get('compound_name', 'Unknown')}: {e}")
 
         dbi.batch_save_compounds(main_db_path, compounds)
         return
@@ -237,7 +481,8 @@ class Atlas:
     polarity: str
     analysis_type: str
     atlas_type: str
-    
+    analysis_name: str
+
     # Compound references (immutable reference data)
     compound_mzrts: Dict[str, CompoundMZRT] = field(default_factory=dict)
     
@@ -250,14 +495,14 @@ class Atlas:
 
     # Optional link to source atlas for experimental atlases created from reference atlases
     source_atlas_uid: Optional[str] = None
-
+    
     def __post_init__(self):
         self.validate()
 
     def validate(self) -> None:
         """Validate atlas data and return list of issues found."""
 
-        logger.info(f"Validating atlas {self.atlas_name} (UID: {self.atlas_uid}) with {len(self.compound_mzrts)} compounds...")
+        logger.debug(f"Validating atlas {self.atlas_name} (UID: {self.atlas_uid}) with {len(self.compound_mzrts)} compounds...")
 
         # Helper for required fields
         def check_required(field, text):
@@ -289,7 +534,7 @@ class Atlas:
             if not compound.adduct:
                 raise ValueError(f"CompoundMZRT {inchi_key} missing adduct")
 
-        logger.info("Atlas passed validation!")
+        logger.debug("Atlas passed validation!")
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert Atlas to DataFrame format for database operations."""
@@ -308,7 +553,8 @@ class Atlas:
                 'created_by': self.created_by,
                 'created_date': self.created_date,
                 'source': self.source,
-                'source_atlas_uid': self.source_atlas_uid
+                'source_atlas_uid': self.source_atlas_uid,
+                'analysis_name': self.analysis_name,
             })
             rows.append(compound_dict)
         return pd.DataFrame(rows)
@@ -329,6 +575,7 @@ class Atlas:
         created_date = meta.get('created_date', '')
         source = meta.get('source', '')
         source_atlas_uid = meta.get('source_atlas_uid', None)
+        analysis_name = meta.get('analysis_name', 'MAIN_ATLAS')
 
         # Use mz_rt_uid as the unique key for each CompoundMZRT
         compound_mzrts = {}
@@ -351,7 +598,8 @@ class Atlas:
             created_by=created_by,
             created_date=created_date,
             source=source,
-            source_atlas_uid=source_atlas_uid
+            source_atlas_uid=source_atlas_uid,
+            analysis_name=analysis_name,
         )
 
     @classmethod
@@ -368,38 +616,34 @@ class Atlas:
         config_path: str
     ) -> None:
         """Create and save Atlas objects from a config file."""
-        config = ldt.load_atlas_config(config_path)
+        config = NewAtlasesConfig.from_yaml(config_path)
         paths = rtg.set_up_paths(config=config)
         main_db_path = paths.get("main_db_path", None)
 
         atlases = []
         summary = []
-        # Flatten all atlas jobs into a list for single progress bar
-        atlas_jobs = []
-        for chrom, pol_dict in config['ATLASES'].items():
-            for pol, pol_config in pol_dict.items():
-                for analysis_type, atlas_info in pol_config.items():
-                    atlas_entries = atlas_info if isinstance(atlas_info, list) else [atlas_info]
-                    for entry_index, atlas_entry in enumerate(atlas_entries, start=1):
-                        atlas_jobs.append((chrom, pol, analysis_type, atlas_entry, entry_index, len(atlas_entries)))
 
-        for chrom, pol, analysis_type, atlas_entry, entry_index, n_entries in tqdm(atlas_jobs, desc="Creating atlases from config"):
-            if not atlas_entry.get('path'):
+        # Flatten all atlas entries into a list for a single progress bar
+        atlas_jobs = [
+            (chrom, pol, analysis_type, entry)
+            for chrom, pol, analysis_type, entry in config.iter_entries()
+        ]
+
+        for chrom, pol, analysis_type, entry in tqdm(atlas_jobs, desc="Creating atlases from config"):
+            if entry.is_empty:
                 logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
                 continue
             try:
-                atlas_compounds_df = ldt.load_atlas_input(atlas_entry['path'])
-                atlas_name = atlas_entry.get('name', 'Unnamed Atlas')
-                if n_entries > 1 and not atlas_name:
-                    atlas_name = f"{analysis_type} {chrom} {pol} #{entry_index}"
+                atlas_compounds_df = ldt.load_atlas_input(entry.path)
+                atlas_name = entry.name or f"{analysis_type} {chrom} {pol}"
                 atlas_obj = dbi.create_new_atlas_from_dataframe(
                     atlas_df=atlas_compounds_df,
                     atlas_name=atlas_name,
-                    atlas_description=atlas_entry.get('desc', 'No Description'),
+                    atlas_description=entry.desc or 'No Description',
                     analysis_type=analysis_type,
                     chromatography=chrom,
                     polarity=pol,
-                    atlas_file_path=atlas_entry.get('path', 'No File Origin Provided'),
+                    atlas_file_path=entry.path,
                     main_db_path=main_db_path
                 )
                 dbi.save_atlas_to_database(atlas_obj, main_db_path)
@@ -411,7 +655,7 @@ class Atlas:
                     'compound_count': len(atlas_obj.compound_mzrts)
                 })
             except Exception as e:
-                logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol} entry {entry_index}: {e}")
+                logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
 
         logger.info("Summary of new atlases.")
         logger.info("**Make sure to add these to your analysis config to use as project reference atlases:**")
@@ -432,7 +676,8 @@ class Atlas:
             'created_by': self.created_by,
             'created_date': self.created_date,
             'source': self.source,
-            'source_atlas_uid': self.source_atlas_uid
+            'source_atlas_uid': self.source_atlas_uid,
+            'analysis_name': self.analysis_name,
         }
 
 @dataclass
@@ -530,9 +775,9 @@ class RTAlign:
 
     # Paths and config
     paths: Dict[str, str] = field(default_factory=dict)
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: Optional["Metatlas2Config"] = None
 
-    def setup(self, project_name: str, rt_alignment_number: int, config: Dict[str, Any], paths: Dict[str, str]):
+    def setup(self, project_name: str, rt_alignment_number: int, config: "Metatlas2Config", paths: Dict[str, str]):
         """
         Set up RTAlign object using a Project object and RT alignment parameters.
         Populates paths, config, and relevant atlas UID.
@@ -543,9 +788,10 @@ class RTAlign:
         self.project_name = project_name
         self.config = config
         self.paths = paths
-        self.chromatography = next(iter(self.config["WORKFLOWS"]["RT_ALIGNMENT"].keys()))
-        self.align_atlas_uid = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('ATLAS', {}).get('uid', None)
-        self.rt_alignment_params = self.config['WORKFLOWS']['RT_ALIGNMENT'][self.chromatography].get('PARAMS', {})
+        self.chromatography = next(iter(config.rt_alignment_config.keys()))
+        rt_align_chrom_cfg = config.rt_alignment_config[self.chromatography]
+        self.align_atlas_uid = rt_align_chrom_cfg.get('ATLAS', {}).get('uid', None)
+        self.rt_alignment_params = rt_align_chrom_cfg.get('PARAMS', {})
 
         if not os.path.exists(paths["project_db_path"]):
             raise FileNotFoundError(
@@ -556,18 +802,16 @@ class RTAlign:
         if self.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases in text file
             self.run_alignment = False
             logger.info(f"RT alignment is disabled in config. Writing atlases from config to {self.paths['aligned_atlases_store_file']} and exiting...")
-            for chrom, pol_dict in self.config['WORKFLOWS']['TARGETED_ANALYSES'].items():
-                for pol, analysis_dict in pol_dict.items():
-                    for analysis_type, atlas_config in analysis_dict.items():
-                        atlas_uid = atlas_config['ATLAS']['uid']
-                        atlas_obj = Atlas.from_database(
-                            database_path=self.paths['main_db_path'],
-                            atlas_uid=atlas_uid
-                        )
-                        ldt.save_atlas_data_to_csv(
-                            atlas_obj=atlas_obj,
-                            output_path=self.paths['aligned_atlases_store_file'],
-                        )
+            for ta in config.targeted_analyses:
+                atlas_obj = Atlas.from_database(
+                    database_path=self.paths['main_db_path'],
+                    atlas_uid=ta.atlas_uid
+                )
+                atlas_obj.analysis_name = ta.name
+                ldt.save_atlas_metadata_to_csv(
+                    atlas_obj=atlas_obj,
+                    output_path=self.paths['aligned_atlases_store_file'],
+                )
             return
 
         logger.info(f"Checking for existing RT aligned atlases table file at {self.paths['aligned_atlases_store_file']}...")
@@ -612,9 +856,9 @@ class AutoIdentification:
     config_path: str = None
     image_tag: str = "latest"
     paths: Dict[str, str] = field(default_factory=dict)
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: Optional["Metatlas2Config"] = None
 
-    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, config: Dict[str, Any], paths: Dict[str, str], analysis_subset: Optional[List[str]] = None, config_path: str = None, image_tag: str = "latest"):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, config: "Metatlas2Config", paths: Dict[str, str], analysis_subset: Optional[List[str]] = None, config_path: str = None, image_tag: str = "latest"):
         """
         Set up AutoIdentification object.
         Populates paths, config, and relevant atlas UID.
@@ -628,8 +872,8 @@ class AutoIdentification:
         self.analysis_subset = analysis_subset
         self.config_path = config_path
         self.image_tag = image_tag
-        self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
-        self.msms_refs_db_filter = self.config['WORKFLOWS']['PATHS'].get('msms_refs_db_filter', None)
+        self.chromatography = config.chromatography
+        self.msms_refs_db_filter = config.msms_refs_db_filter
 
 @dataclass
 class AnalysisGUI:
@@ -646,7 +890,7 @@ class AnalysisGUI:
     # Paths and config
     config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: Optional["Metatlas2Config"] = None
     notes: Dict[str, Any] = field(default_factory=dict)
     owner: str = "jgi"
 
@@ -676,7 +920,7 @@ class AnalysisGUI:
         self.config_path = config_path
         self.project_name = project_name
         self.config = ldt.load_metatlas2_config(config_path)
-        self.owner = (self.config.get('WORKFLOWS', {}).get('PATHS', {}).get('owner') or "jgi").lower()
+        self.owner = self.config.owner
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
         if override_parameters is not None:
             self.override_parameters = override_parameters
@@ -737,7 +981,7 @@ class AnalysisSummary:
     # Paths and config
     config_path: str = None
     paths: Dict[str, str] = field(default_factory=dict)
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: Optional["Metatlas2Config"] = None
 
     def setup(
         self,
@@ -755,6 +999,6 @@ class AnalysisSummary:
         self.analysis_number = analysis_number
         self.config_path = config_path
         self.config = ldt.load_metatlas2_config(config_path)
-        self.chromatography = next(iter(self.config["WORKFLOWS"]["TARGETED_ANALYSES"].keys()))
+        self.chromatography = self.config.chromatography
         self.project_name = project_name
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
