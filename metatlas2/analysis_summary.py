@@ -1,24 +1,3 @@
-# Metric provenance map
-#
-# GUI flush metrics (written to manual_curation):
-# - rt_min, rt_max: analyst-set RT bounds in GUI
-# - rt_peak: mean of per-file highest-intensity RT within [rt_min, rt_max]
-# - mz: mean of per-file m/z at those highest-intensity RT points
-# - rt_error: rt_peak - atlas_rt_peak
-# - mz_error: ((mz - atlas_mz) / atlas_mz) * 1e6
-# - best_ms1_file: file containing highest intensity point in RT window
-# - best_ms1_rt, best_ms1_mz, best_ms1_intensity: coordinates/intensity of that point
-# - best_ms1_ppm_error: ((best_ms1_mz - atlas_mz) / atlas_mz) * 1e6
-# - best_ms1_rt_error: best_ms1_rt - atlas_rt_peak
-#
-# Summary/final-sheet consumers:
-# - MS1 intensity section: best_ms1_intensity, best_ms1_file, best_ms1_rt
-# - Chromatographic/RT evaluation: rt_min, rt_max, rt_peak, rt_error
-# - Ion and m/z evaluation columns: measured m/z is the average of measured m/z
-#   across the top-3 MS2 hits (score-ranked, one hit per file when available), with
-#   mz delta/ppm and mz quality derived from that averaged measured value.
-# - MSMS information/evaluation columns: sourced from the best MS2 hit.
-
 import itertools
 import shutil
 from typing import Optional, List, Tuple, Dict
@@ -52,32 +31,6 @@ from metatlas2.note_options import (
 )
 logger = lcf.get_logger('analysis_summary')
 
-
-def _safe_float(value, default: float = np.nan) -> float:
-    """Coerce *value* to float, returning *default* on failure."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        logger.warning(f"Value is not a valid float: {value}")
-        return float(default)
-
-
-def _safe_isnan(value) -> bool:
-    """Return True if *value* is NaN, None, or cannot be coerced to a float.
-
-    Unlike ``np.isnan``, this never raises for non-numeric types (strings,
-    None, objects).  None is treated as NaN because aligned mz/intensity
-    arrays use None as a sentinel (JSON round-trip converts float nan →
-    null → Python None) to indicate "no peak at this position".
-    """
-    if value is None:
-        return True
-    try:
-        return np.isnan(float(value))
-    except (TypeError, ValueError):
-        return True
-
-# entrypoint
 def run_all_summaries(
     summary_obj: "AnalysisSummary",
     overwrite: bool = False,
@@ -113,8 +66,7 @@ def run_all_summaries(
         skip_outputs = summary_obj.workflow_params.get("skip_outputs", [])
     
     if summary_obj.experimental_data.curation_df is None or summary_obj.experimental_data.curation_df.empty:
-        logger.error("No manual curation entries found - aborting run_all_summaries.")
-        return
+        raise ValueError("No manual curation entries found. Please ensure the curation_df is populated before running summaries.")
 
     _validate_required_note_selections(summary_obj)
 
@@ -165,9 +117,10 @@ def run_all_summaries(
     )
 
     logger.info("Saving input yaml config to analysis output directory...")
-    with open(f"{summary_obj.paths['analysis_output_dir']}/RTA{summary_obj.rt_alignment_number}_TGA{summary_obj.analysis_number}_analysis_config.yaml", "w") as f:
-        with open(summary_obj.config_path, "r") as original:
-            f.write(original.read())
+    config_out_path = Path(summary_obj.paths['analysis_output_dir']) / "analysis_config_snapshot.yaml"
+    with open(config_out_path, "w") as f:
+        yaml_dump = summary_obj.config.yaml_dump()
+        f.write(yaml_dump)
 
     gdrive_upload = False
     if hasattr(summary_obj, "upload_to_gdrive") and summary_obj.override_parameters.get("upload_to_gdrive") is not None:
@@ -183,10 +136,7 @@ def run_all_summaries(
 ###############################################
 
 def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
+    return "SLURM_JOB_ID" in os.environ
 
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
@@ -293,6 +243,51 @@ def _get_compound_info(
     except Exception as exc:
         logger.warning("Batch compound info query failed: %s", exc)
         return {}
+
+def _safe_float(value, default: float = np.nan) -> float:
+    """Coerce *value* to float, returning *default* on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning(f"Value is not a valid float: {value}")
+        return float(default)
+
+
+def _safe_isnan(value) -> bool:
+    """Return True if *value* is NaN, None, or cannot be coerced to a float.
+
+    Unlike ``np.isnan``, this never raises for non-numeric types (strings,
+    None, objects).  None is treated as NaN because aligned mz/intensity
+    arrays use None as a sentinel (JSON round-trip converts float nan →
+    null → Python None) to indicate "no peak at this position".
+    """
+    if value is None:
+        return True
+    try:
+        return np.isnan(float(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def _as_list(value) -> list:
+    """Safely coerce *value* to a plain Python list.
+
+    Handles the common case where a DataFrame cell contains a numpy array,
+    a Python list, ``None``, or a scalar.  Using ``value or []`` raises
+    ``ValueError`` when *value* is a numpy array with more than one element
+    because Python cannot determine the truth value of such an array.
+    """
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, list):
+        return value
+    # scalar or other iterable — wrap in list so callers always get a list
+    try:
+        return list(value)
+    except TypeError:
+        return []
 
 ###############################################
 #### Identification Figure
@@ -434,24 +429,19 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ms1_df = kwargs["ms1_df"]
     ms2_df = kwargs["ms2_df"]
 
-    # Build top3: find the scan with the highest-scoring top hit, then take
-    # that scan's hits[:3]. hits are already a list of dicts on each ms2 row.
-    # Bug fix: was using a separate ms2_hits_df that doesn't exist; also was
-    # using ms2_hits_df.iloc[best_scan_idx] which is positional but
-    # best_scan_idx was the DataFrame index label, not position.
     top3: list[dict] = []
     best_scan_row = None
-    if not ms2_df.empty:
+    if not ms2_df.empty:            
         best_score = -np.inf
         for _, scan_row in ms2_df.iterrows():
-            hits = scan_row.get("hits") or []
+            hits = _as_list(scan_row.get("hits", [])) if "hits" in scan_row else []
             if hits:
                 score = float(hits[0].get("score", -np.inf))
                 if score > best_score:
                     best_score = score
                     best_scan_row = scan_row
         if best_scan_row is not None:
-            top3 = (best_scan_row.get("hits") or [])[:3]
+            top3 = _as_list(best_scan_row.get("hits", []))[:3]
             # Attach scan-level metadata the hit dicts don't carry
             for hit in top3:
                 hit.setdefault("scan_rt", float(best_scan_row.get("scan_rt", np.nan)))
@@ -489,19 +479,23 @@ def _identification_figure_worker(kwargs: dict) -> str:
                     fontsize=12, weight="bold", ha="left", va="center",
                     rotation=90, color="black", clip_on=False)
 
+    logger.debug("Plotting structure")
     _plot_structure(
         fig.add_subplot(gs[0, 3]),
         mc_row.get("smiles"), mc_row.get("inchi"), inchi_key, size=500,
     )
 
+    logger.debug("Plotting EIC")
     ax_eic_lin = fig.add_subplot(gs[1, 0])
     _plot_eic(ax_eic_lin, ms1_df, mc_row, log_scale=False, color_map=color_map)
     ax_eic_lin.set_title("EIC (linear scale)", fontsize=18)
 
+    logger.debug("Plotting EIC (log scale)")
     ax_eic_log = fig.add_subplot(gs[1, 1])
     _plot_eic(ax_eic_log, ms1_df, mc_row, log_scale=True, color_map=color_map)
     ax_eic_log.set_title("EIC (log₁₀ scale)", fontsize=18)
 
+    logger.debug("Plotting compound info and hit table")
     _plot_compound_info_table(fig.add_subplot(gs[1, 2:4]), mc_row)
     _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), top3, mc_row, ms2_df)
 
@@ -521,7 +515,6 @@ def _identification_figure_worker(kwargs: dict) -> str:
     plt.close(fig)
     return compound_name
 
-
 def _plot_ms2(ax, panel_idx: int, top3: list[dict], ms2_df: pd.DataFrame) -> None:
     """Populate one MS2 mirror panel."""
     _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
@@ -529,8 +522,8 @@ def _plot_ms2(ax, panel_idx: int, top3: list[dict], ms2_df: pd.DataFrame) -> Non
 
     if panel_idx < len(top3):
         hit = top3[panel_idx]
-        q_mz, q_int = hit["query_aligned"]
-        r_mz, r_int = hit["ref_aligned"]
+        q_mz, q_int = _as_list(hit["query_aligned"][0]), _as_list(hit["query_aligned"][1])
+        r_mz, r_int = _as_list(hit["ref_aligned"][0]),   _as_list(hit["ref_aligned"][1])
         _plot_mirror(
             ax, q_mz, q_int, r_mz, r_int,
             frag_colors=hit.get("fragment_colors"),
@@ -545,8 +538,8 @@ def _plot_ms2(ax, panel_idx: int, top3: list[dict], ms2_df: pd.DataFrame) -> Non
         # Bug fix: was using "rt" column; correct column is "scan_rt"
         _plot_raw_ms2(
             ax,
-            mz_arr=raw_row.get("data_frags", []),
-            int_arr=raw_row.get("frag_ints", []),
+            mz_arr=_as_list(raw_row.get("data_frags", [])),
+            int_arr=_as_list(raw_row.get("frag_ints", [])),
             rt=float(raw_row.get("scan_rt", np.nan)),
             title=title,
         )
@@ -686,8 +679,8 @@ def _plot_eic(
         for _, row in ms1_compound_df.iterrows():
             # Bug fix: was using "rt" and "i" columns; correct columns are
             # "spec_rts" and "spec_ints"
-            spec_rts = row.get("spec_rts", [])
-            spec_ints = row.get("spec_ints", [])
+            spec_rts = _as_list(row.get("spec_rts", []))
+            spec_ints = _as_list(row.get("spec_ints", []))
             if not spec_rts or not spec_ints:
                 continue
             # Bug fix: was using "file_path"; correct column is "filename"
@@ -787,7 +780,7 @@ def _plot_hit_info_table(
     ref_frags = int(best_hit.get("ref_frags", 0))
 
     # Bug fix: matched_fragments is already a list of floats — no JSON parsing needed
-    matched_frags = best_hit.get("matched_fragments") or []
+    matched_frags = _as_list(best_hit.get("matched_fragments"))
     frag_str = ", ".join(f"{m:.3f}" for m in matched_frags) if matched_frags else "N/A"
 
     def _v(val, fmt):
@@ -1064,7 +1057,7 @@ def make_final_id_sheet(
             best_hit_data = None
 
             for _, scan_row in grp.iterrows():
-                hits_list = scan_row.get("hits") or []
+                hits_list = _as_list(scan_row.get("hits"))
                 if not hits_list:
                     continue
                 top_hit = hits_list[0]
@@ -1086,7 +1079,7 @@ def make_final_id_sheet(
                 best_scan_row = grp.loc[
                     grp["filename"] == best_hit_data["filename"]
                 ].iloc[0]
-                top3_hits = (best_scan_row.get("hits") or [])[:3]
+                top3_hits = _as_list(best_scan_row.get("hits"))[:3]
                 valid_mzs = [
                     float(h["mz_measured"]) for h in top3_hits
                     if np.isfinite(float(h.get("mz_measured", np.nan)))
@@ -1133,8 +1126,8 @@ def make_final_id_sheet(
         rt_measured = float(mc_row.get("rt_peak", np.nan))
         rt_error = float(mc_row.get("rt_error", np.nan))
         best_ms1_rt = float(mc_row.get("best_ms1_rt", np.nan))
-        max_intensity = float(mc_row.get("best_ms1_intensity", np.nan))
-        max_int_file = mc_row.get("best_ms1_file", "")
+        best_ms1_intensity = float(mc_row.get("best_ms1_intensity", np.nan))
+        best_ms1_file = mc_row.get("best_ms1_file", "")
 
         ms2_notes = str(mc_row.get("ms2_notes", "") or "")
 
@@ -1163,7 +1156,7 @@ def make_final_id_sheet(
             msms_num_ions = f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches)
 
             # Bug fix: matched_fragments is already a list of floats — no JSON parsing needed
-            matched_frags = best_hit.get("matched_fragments") or []
+            matched_frags = _as_list(best_hit.get("matched_fragments"))
             msms_matching_ions = (
                 ",".join(f"{m:.3f}" for m in matched_frags) if matched_frags else "N/A"
             )
@@ -1233,8 +1226,8 @@ def make_final_id_sheet(
             "ms1_notes":              mc_row.get("ms1_notes", "") or "",
             "ms2_notes":              ms2_notes,
             # MS1 INTENSITY INFORMATION
-            "max_intensity":          max_intensity,
-            "max_intensity_file":     Path(max_int_file).name if max_int_file else "",
+            "max_intensity":          best_ms1_intensity,
+            "max_intensity_file":     Path(best_ms1_file).name if best_ms1_file else "",
             "ms1_rt_peak":            _safe_round(best_ms1_rt, 2),
             # MSMS INFORMATION
             "msms_file":              Path(msms_file).name if msms_file else "",
@@ -1766,7 +1759,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     all_intensities = [
         v
         for item in file_items
-        for v in (item.get("spec_ints") or [])
+        for v in _as_list(item.get("spec_ints"))
         if v is not None and not (isinstance(v, float) and np.isnan(v))
     ]
     y_max_global = float(max(all_intensities)) if all_intensities else None
@@ -1805,14 +1798,14 @@ def _compound_pdf_worker(kwargs: dict) -> str:
             for slot_idx, item in enumerate(page_items):
                 ax = axes_flat[slot_idx]
                 fname_s = _strip_non_chars(_short_fname(item["filename"]))
-                spec_ints = item.get("spec_ints") or []
+                spec_ints = _as_list(item.get("spec_ints"))
                 # Fix 6: guard max() against empty list; independent y per subplot
                 valid_ints = [v for v in spec_ints if v is not None and not (isinstance(v, float) and np.isnan(v))]
                 y_max_indep = float(max(valid_ints)) if valid_ints else None
                 group_name = item.get("group_name") or _file_group(item.get("filename", ""))
                 _render_eic_thumbnail(
                     ax,
-                    item.get("spec_rts") or [],
+                    _as_list(item.get("spec_rts")),
                     spec_ints,
                     rt_min,
                     rt_peak,
@@ -2131,7 +2124,7 @@ def make_boxplots(
         metric_dir.mkdir(parents=True, exist_ok=True)
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
-    # ── 3. Pre-group per_file_df — replaces 4×n O(n) filters with O(1) lookup
+    # ── 3. Pre-group per_file_df — replaces 4xn O(n) filters with O(1) lookup
     if per_file_df is not None and not per_file_df.empty:
         pf_groups: dict = {
             key: grp.reset_index(drop=True)
@@ -2277,7 +2270,7 @@ def make_best_ms2_hit_fragment_ions_csv(
             best_score = -np.inf
             best_hit_data: Optional[dict] = None
             for _, scan_row in grp.iterrows():
-                hits = scan_row.get("hits") or []
+                hits = _as_list(scan_row.get("hits"))
                 if not hits:
                     continue
                 # hits are pre-sorted best-first; index 0 is the top hit
@@ -2311,9 +2304,7 @@ def make_best_ms2_hit_fragment_ions_csv(
 
         # Fix 4: query_aligned is stored as a list-of-two-lists; coerce to numpy
         # arrays before NaN masking so plain Python lists don't crash isnan()
-        raw_aligned = best_hit.get("query_aligned") or ([], [])
-        q_mz_all  = np.array(raw_aligned[0], dtype=float)
-        q_int_all = np.array(raw_aligned[1], dtype=float)
+        q_mz_all, q_int_all = np.array(_as_list(best_hit["query_aligned"][0]), dtype=float), np.array(_as_list(best_hit["query_aligned"][1]), dtype=float)
 
         if q_mz_all.size > 0:
             valid     = ~np.isnan(q_mz_all)
@@ -2360,7 +2351,7 @@ def make_best_ms2_hit_fragment_ions_csv(
 def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
     """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
 
-    Each row of *ms1_df* represents one compound × one file, with list columns
+    Each row of *ms1_df* represents one compound x one file, with list columns
     ``spec_rts``, ``spec_ints``, and ``spec_mzs`` (already filtered to the
     in-feature RT window).  Returns a long-format DataFrame with one row per
     (compound, file) and columns:
@@ -2378,9 +2369,9 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
 
     records = []
     for _, row in ms1_df.iterrows():
-        spec_rts  = row.get("spec_rts")  or []
-        spec_ints = row.get("spec_ints") or []
-        spec_mzs  = row.get("spec_mzs")  or []
+        spec_rts  = _as_list(row.get("spec_rts"))
+        spec_ints = _as_list(row.get("spec_ints"))
+        spec_mzs  = _as_list(row.get("spec_mzs"))
 
         # Coerce to float arrays, replacing None/nan with 0 for intensities
         rts  = [float(v) if v is not None else float("nan") for v in spec_rts]
@@ -2405,11 +2396,13 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
                 if total_int > 0 and mzs else float("nan")
             )
 
+        fname = row.get("filename", "")
         records.append({
             "mz_rt_uid":   row.get("mz_rt_uid", ""),
             "inchi_key":   row.get("inchi_key", ""),
             "adduct":      row.get("adduct", ""),
-            "filename":    row.get("filename", ""),
+            "filename":    fname,
+            "file_group":  _file_group(fname),
             "peak_height": peak_height,
             "peak_area":   peak_area,
             "rt_peak":     rt_peak,
@@ -2511,7 +2504,7 @@ def make_data_sheets(
         wide.columns.name = None
         wide.to_csv(csv_path, index=False)
         logger.info(
-            "Exported %s data sheet (%d compounds × %d files) → %s",
+            "Exported %s data sheet (%d compounds x %d files) → %s",
             metric,
             len(wide),
             len(wide.columns) - len(_INDEX_COLS),
@@ -2696,7 +2689,7 @@ def make_peak_height_filtered_csv(
     # ── 6. Export ──────────────────────────────────────────────────────────────
     df.to_csv(output_csv, index=False)
     logger.info(
-        "Exported filtered peak height (%d compounds × %d files) → %s",
+        "Exported filtered peak height (%d compounds x %d files) → %s",
         len(df), len(df.columns) - len(ordered_meta), output_csv,
     )
 
@@ -2905,7 +2898,7 @@ def make_metabomap(
     lfc_df = pd.DataFrame(lfc_records)
     lfc_df.to_csv(lfc_csv, index=False)
     logger.info(
-        "Saved pairwise LFC table (%d compounds × %d group pairs) → %s",
+        "Saved pairwise LFC table (%d compounds x %d group pairs) → %s",
         len(lfc_df), len(lfc_df.columns) - 2, lfc_csv,
     )
     return

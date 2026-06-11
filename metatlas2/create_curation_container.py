@@ -24,45 +24,25 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     Builds the manual curation metadata table using the Tidy DataFrame architecture.
     Returns a DataFrame where each row is a compound's curation metadata.
     """
-    logger.info("Building indices and isomer map...")
-    # The atlas is already a DataFrame in the new architecture
-    dataset = auto_id_obj.experimental_data
+    logger.info("Loading experimental data and atlas for curation metadata creation...")
     atlas_df = auto_id_obj.pre_autoid_atlas_obj.to_dataframe()
+    ms1_df = auto_id_obj.experimental_data.ms1_df
+
+    logger.info("Building indices and isomer map...")
     isomer_dict = _build_isomer_dict(auto_id_obj.pre_autoid_atlas_obj)
-    
-    # find ms2 mz_rt_uids (that passed) to further filter ms1_df
-    ms2_df = dataset.ms2_df
-    mz_rt_uids_with_ms2 = set(ms2_df['mz_rt_uid'].unique()) if not ms2_df.empty else set()
-    logger.info(f"Identified {len(mz_rt_uids_with_ms2)} mz_rt_uids with passing MS2 hits to filter MS1 data...")
 
-    # group by mz_rt_uid, aggregate across all files
-    ms1_df = dataset.ms1_df
-    logger.info(f"Starting MS1 analysis with {len(ms1_df)} total MS1 rows, grouped by mz_rt_uid.")
-    ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(mz_rt_uids_with_ms2)] if not ms1_df.empty else pd.DataFrame()
-    logger.info(f"After filtering MS1 data to only mz_rt_uids with MS2 hits, {len(ms1_df)} total MS1 rows remain for analysis.")
-    if ms1_df.empty:
-        logger.warning("No MS1 data found in experimental_data.ms1_df.")
-        ms1_groups = {}
-    else:
-        ms1_groups = ms1_df.groupby("mz_rt_uid")
-
-    apply_bounds_cutoff = auto_id_obj.workflow_params.get('suggested_min_conf', None)
-    remove_unided = auto_id_obj.workflow_params.get('remove_unided_compounds', False)
-
-    curation_records = []
-    logger.info("Starting iteration through atlas compounds...")
-    
-    # Iterate through atlas compounds
-    for uid, atlas_row in tqdm(atlas_df.set_index("mz_rt_uid").iterrows(), total=len(atlas_df), desc="Creating curation metadata", disable=should_disable_tqdm()):
-        # 1. Initial Metadata setup
-        meta = {
+    logger.info(f"Creating curation container from identified compounds starting from {len(atlas_df)} atlas compounds...")
+    curation_records = []    
+    ms1_groups = ms1_df.groupby("mz_rt_uid")
+    for uid, atlas_row in tqdm(atlas_df.set_index("mz_rt_uid").iterrows(), total=len(atlas_df), desc="Building curation container", disable=should_disable_tqdm()):
+        curation_entry = {
             'mz_rt_uid': uid,
             'compound_uid': atlas_row.get('compound_uid', ''),
             'inchi_key': atlas_row.get('inchi_key', ''),
             'adduct': atlas_row.get('adduct', ''),
             'compound_name': atlas_row.get('compound_name', ''),
-            'auto_ided': False,
-            'curated': False,
+            'passed_autoid': False,
+            'passed_curation': False,
             'polarity': atlas_row.get('polarity', ''),
             'chromatography': atlas_row.get('chromatography', ''),
             'mz_tolerance': atlas_row.get('mz_tolerance', 5.0),
@@ -70,59 +50,56 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             'atlas_rt_peak': atlas_row.get('rt_peak', 0.0),
             'atlas_rt_min': atlas_row.get('rt_min', 0.0),
             'atlas_rt_max': atlas_row.get('rt_max', 0.0),
-            'mz': 0.0, 
-            'rt_peak': 0.0, 
-            'rt_min': 0.0, 
-            'rt_max': 0.0,
-            'initial_rt_min': 0.0, 
-            'initial_rt_max': 0.0,
-            'rt_error': 0.0, 
+            'mz': atlas_row.get('mz', 0.0),
+            'rt_peak': atlas_row.get('rt_peak', 0.0), 
+            'rt_min': atlas_row.get('rt_min', 0.0), 
+            'rt_max': atlas_row.get('rt_max', 0.0),
+            'initial_rt_min': atlas_row.get('rt_min', 0.0),
+            'initial_rt_max': atlas_row.get('rt_max', 0.0),
+            'rt_error': 0.0,
             'mz_error': 0.0,
-            'ms1_notes': '', 
-            'ms2_notes': '', 
+            'ms1_notes': '',
+            'ms2_notes': '',
             'other_notes': '',
             'identification_notes': atlas_row.get('identification_notes', ''),
             'analyst_notes': '',
-            'best_ms1_file': '', 
-            'best_ms1_rt': 0.0, 
+            'best_ms1_file': '',
+            'best_ms1_rt': 0.0,
             'best_ms1_mz': 0.0,
-            'best_ms1_intensity': 0.0, 
-            'best_ms1_ppm_error': 0.0, 
+            'best_ms1_intensity': 0.0,
+            'best_ms1_ppm_error': 0.0,
             'best_ms1_rt_error': 0.0,
-            'max_eic_rt': [], 
+            'max_eic_rt': [],
             'max_eic_intensity': [],
             'isomers': isomer_dict.get(uid, []),
-            'suggested_rt_min': 0.0, 
-            'suggested_rt_max': 0.0, 
+            'suggested_rt_min': 0.0,
+            'suggested_rt_max': 0.0,
             'suggested_rt_peak': 0.0,
             'rt_suggestion_confidence': 0.0
         }
 
-        # 2. MS1 Analysis (wide format)
         try:
             compound_ms1 = ms1_groups.get_group(uid)
-        except (KeyError, AttributeError):
-            compound_ms1 = pd.DataFrame()
+            ms1_summary = analyze_ms1(
+                atlas_row,
+                compound_ms1,
+                apply_bounds_cutoff=auto_id_obj.workflow_params.get('suggested_min_conf', None)
+            )
+            if ms1_summary:
+                curation_entry.update(ms1_summary)
+                curation_entry['passed_autoid'] = True
+        except KeyError: # no MS1 data for this compound
+            pass
 
-        ms1_summary = analyze_ms1(
-            atlas_row,
-            compound_ms1,
-            apply_bounds_cutoff=apply_bounds_cutoff
-        )
-
-        if ms1_summary:
-            meta.update(ms1_summary)
-            meta['auto_ided'] = True
-
-        if not meta['auto_ided'] and remove_unided:
+        if curation_entry['passed_autoid'] is False and auto_id_obj.workflow_params.get('remove_unided_compounds', False) is True:
             continue
 
-        curation_records.append(meta)
+        curation_records.append(curation_entry)
 
     manual_curation_df = pd.DataFrame(curation_records)
     manual_curation_df['isomers'] = manual_curation_df['isomers'].apply(json.dumps)
-    n_unique_uids = manual_curation_df['mz_rt_uid'].nunique() if not manual_curation_df.empty else 0
-    logger.info(f"Summary: manual_curation_df contains {n_unique_uids} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
+    logger.info(f"Summary: manual_curation_df contains {manual_curation_df['mz_rt_uid'].nunique()} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
+    
     auto_id_obj.experimental_data.curation_df = manual_curation_df
 
     return
@@ -146,6 +123,7 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
     # 1. Per-file analysis for Best File and EIC (wide format)
     rt_arrays, int_arrays = [], []  # For all data (for EIC)
     in_feature_mz, in_feature_int, in_feature_rt = [], [], []  # For in_feature only
+    per_file_peak_rts = []  # RT of the highest-intensity in_feature point per file
 
     # Each row is one file for this compound, with lists in columns
     for _, row in compound_ms1_df.iterrows():
@@ -180,6 +158,7 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
             if sum_int > 0:
                 idx = np.argmax(in_feature_ints)
                 h = in_feature_ints[idx]
+                per_file_peak_rts.append(float(in_feature_rts[idx]))
                 if h > max_height:
                     max_height = h
                     centroid = (in_feature_ints * in_feature_mzs).sum() / sum_int
@@ -204,8 +183,9 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
         ], axis=0)
 
     # 3. Window Metrics (in_feature only)
-    idx_max = np.argmax(in_feature_int)
-    win_rt_peak = float(in_feature_rt[idx_max])
+    # rt_peak = mean of each file's highest-intensity in_feature RT point
+    # mz      = mean of all in_feature mzs across all files
+    win_rt_peak = float(np.mean(per_file_peak_rts)) if per_file_peak_rts else float(in_feature_rt[np.argmax(in_feature_int)])
     win_mz_mean = float(np.mean(in_feature_mz))
     rt_err = win_rt_peak - atlas_rt_peak
     mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if atlas_mz else 0.0

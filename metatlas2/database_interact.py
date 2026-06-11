@@ -17,10 +17,8 @@ from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 from tqdm.auto import tqdm
 
-import metatlas2.rt_align_tools as rat
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
-import metatlas2.manual_curation_summarizer as mcs
 logger = lcf.get_logger('database_interact')
 
 def should_disable_tqdm():
@@ -127,8 +125,8 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"assoc-{uuid.uuid4().hex[:32]}"
     elif entity_type == "rt_alignment":
         return f"rta-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "analysis":
-        return f"tga-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "config":
+        return f"cfg-{uuid.uuid4().hex[:32]}"
     elif entity_type == "ms1_data":
         return f"ms1-{uuid.uuid4().hex[:32]}"
     elif entity_type == "ms2_data":
@@ -139,6 +137,8 @@ def _generate_uid(entity_type: str, decorator: str = None) -> str:
         return f"mcr-{uuid.uuid4().hex[:32]}"
     elif entity_type == "project":
         return f"prj-{uuid.uuid4().hex[:32]}"
+    elif entity_type == "workflow_stage_run":
+        return f"wfr-{uuid.uuid4().hex[:32]}"
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")
 
@@ -222,7 +222,7 @@ def create_new_atlas_from_dataframe(
         analysis_type=analysis_type,
         atlas_type="REFERENCE",
         compound_mzrts=compound_mzrts,
-        source=atlas_file_path
+        source=atlas_file_path,
     )
     return atlas_obj
 
@@ -237,7 +237,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
         if main_db_path:
             try:
                 conn.execute(f"ATTACH '{main_db_path}' AS main_db (READ_ONLY)")
-                logger.info("Attached main database for compound metadata")
+                logger.debug("Attached main database for compound metadata")
             except Exception as e:
                 logger.error(f"Error attaching main database: {e}")
                 return pd.DataFrame()
@@ -500,8 +500,10 @@ def save_rt_alignment_model_to_db(
         "alignment_timestamp": prov["timestamp"],
         "alignment_method": "polynomial_qc_based",
         "analyst": prov["analyst"],
+        "r_squared": float(rt_alignment_model.get('r2', 0.0)),
+        "rmse": float(rt_alignment_model.get('rmse', 0.0)),
+        "equation": rt_alignment_model.get('equation', ''),
         "poly_degree": int(rt_alignment_model['degree']),
-        "poly_include_bias": bool(rt_alignment_model.get('poly_features').include_bias if rt_alignment_model.get('poly_features') else True),
         "poly_interaction_only": bool(rt_alignment_model.get('poly_features').interaction_only if rt_alignment_model.get('poly_features') else False),
         "model_intercept": float(rt_alignment_model.get('intercept', 0.0)),
         "model_coefficients": rt_alignment_model['coefficients'].tolist() if hasattr(rt_alignment_model['coefficients'], 'tolist') else list(rt_alignment_model['coefficients'])
@@ -531,6 +533,25 @@ def save_rt_alignment_model_to_db(
     logger.info(f"RT alignment model saved to database with UID: {rt_alignment_uid}")
 
     rt_alignment_model['rt_alignment_uid'] = rt_alignment_uid
+
+    # save RT alignment model metadata to JSON file in RT alignment output directory for easy reference
+    rt_alignment_output_dir = Path(rt_align_obj.paths['rt_alignment_results_dir'])
+    rt_alignment_output_dir.mkdir(parents=True, exist_ok=True)
+    rt_alignment_metadata_path = rt_alignment_output_dir / f"rt_alignment_model_{rt_alignment_uid}.json"
+    with open(rt_alignment_metadata_path, "w") as f:
+        json.dump(model_metadata, f, indent=4)
+    logger.info(f"RT alignment model metadata saved to {rt_alignment_metadata_path}")
+
+    # display model metadata in log for easy reference
+    logger.info(f"RT Alignment Model Metadata for UID {rt_alignment_uid}:")
+    logger.info(f"  QC files used: {model_metadata['qc_files']}")
+    logger.info(f"  Number of compounds used (by UID): {len(model_metadata['compounds_used'])}")
+    logger.info(f"  R²: {model_metadata['r_squared']:.4f}")
+    logger.info(f"  RMSE: {model_metadata['rmse']:.4f}")
+    logger.info(f"  Polynomial degree: {model_metadata['poly_degree']}")
+    logger.info(f"  Polynomial interaction_only: {model_metadata['poly_interaction_only']}")
+    logger.info(f"  Model intercept: {model_metadata['model_intercept']}")
+    logger.info(f"  Model coefficients: {model_metadata['model_coefficients']}")
 
     return rt_alignment_uid
 
@@ -845,52 +866,6 @@ def batch_save_compounds(
 
     return
 
-def _check_identical_reference_exists(conn, reference_data: Dict) -> bool:
-    """
-    Check if an IDENTICAL reference already exists in the database.
-    This implements the schema rule: only create new references if data is different.
-    
-    Args:
-        conn: Database connection
-        reference_data: Dictionary with reference data
-        
-    Returns:
-        True if identical reference exists, False otherwise
-    """
-    try:
-        compound_uid = reference_data.get('compound_uid')
-        rt_peak = float(reference_data.get('rt_peak', 0.0))
-        rt_min = float(reference_data.get('rt_min', 0.0))
-        rt_max = float(reference_data.get('rt_max', 0.0))
-        mz = float(reference_data.get('mz', 0.0))
-        mz_tolerance = float(reference_data.get('mz_tolerance', 5.0))
-        adduct = str(reference_data.get('adduct', ''))
-        chromatography = str(reference_data.get('chromatography', ''))
-        polarity = str(reference_data.get('polarity', ''))
-        
-        # Check for IDENTICAL reference (using small tolerance for floating point comparison)
-        existing_ref = conn.execute("""
-            SELECT mz_rt_uid 
-            FROM compound_mzrt 
-            WHERE compound_uid = ? 
-            AND chromatography = ? 
-            AND polarity = ? 
-            AND adduct = ?
-            AND rt_peak = ?
-            AND rt_min = ?
-            AND rt_max = ?
-            AND mz = ?
-            AND mz_tolerance = ?
-        """, [
-            compound_uid, chromatography, polarity, adduct,
-            rt_peak, rt_min, rt_max, mz, mz_tolerance
-        ]).fetchone()
-        
-        return existing_ref is not None
-        
-    except (ValueError, TypeError) as e:
-        logger.warning(f"Error checking reference data: {e}")
-        return False
 
 def _create_database_tables(conn, db_type: str = "main"):
     """
@@ -1077,6 +1052,37 @@ def _create_database_tables(conn, db_type: str = "main"):
         """)
         
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                run_uid TEXT PRIMARY KEY,
+                rt_alignment_number INTEGER NOT NULL,
+                analysis_number INTEGER,
+                chromatography TEXT NOT NULL,
+                polarity TEXT NOT NULL,
+                analysis_type TEXT NOT NULL,
+                analysis_name TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                atlas_uid TEXT NOT NULL,
+                source_atlas_uid TEXT,
+                override_params TEXT,
+                created_by TEXT,
+                created_date TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS project_config (
+                config_uid          TEXT PRIMARY KEY,
+                rt_alignment_number INTEGER,
+                analysis_number     INTEGER,
+                config_yaml         TEXT NOT NULL,
+                paths_json          TEXT,
+                config_path         TEXT,
+                created_by          TEXT,
+                created_date        TEXT
+            )
+        """)
+
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS ms1_data (
                 mz_rt_uid VARCHAR,
                 filename VARCHAR,
@@ -1123,8 +1129,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 inchi_key VARCHAR,
                 adduct VARCHAR,
                 compound_name VARCHAR,
-                auto_ided BOOLEAN,
-                curated BOOLEAN,
+                passed_autoid BOOLEAN,
+                passed_curation BOOLEAN,
                 polarity VARCHAR,
                 chromatography VARCHAR,
                 mz_tolerance REAL,
@@ -1165,6 +1171,375 @@ def _create_database_tables(conn, db_type: str = "main"):
                 created_date VARCHAR,
             )
         """)
+
+def save_config_to_db(
+    project_db_path: str,
+    config_path: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    paths: Optional[Dict] = None,
+) -> str:
+    """
+    Snapshot the raw YAML text and computed paths dict into the
+    ``project_config`` table.
+
+    Called once at project setup with the RTA and TGA numbers from the CLI.
+    All subsequent workflow stages (RT alignment, auto-ID) read the config and
+    paths back from this single row via :func:`load_config_from_db` and
+    :func:`load_paths_from_db` — no YAML file or ``set_up_paths()`` call is
+    needed after project setup.
+
+    If a row for the same ``(rt_alignment_number, analysis_number)`` already
+    exists the call is a no-op and the existing ``config_uid`` is returned.
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        config_path:          Absolute path to the YAML config file on disk.
+        rt_alignment_number:  RTA index from the CLI call.
+        analysis_number:      TGA index from the CLI call.
+        paths:                Optional dict returned by ``set_up_paths()``.
+                              Serialised as JSON into ``paths_json``.
+
+    Returns:
+        The ``config_uid`` of the stored (or pre-existing) row.
+    """
+    from pathlib import Path as _Path
+    config_yaml = _Path(config_path).read_text()
+    paths_json = json.dumps(paths) if paths is not None else None
+    prov = get_provenance()
+
+    with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+        # Idempotent: skip if a row for this RTA+TGA already exists
+        existing = conn.execute("""
+            SELECT config_uid FROM project_config
+            WHERE rt_alignment_number IS NOT DISTINCT FROM ?
+              AND analysis_number     IS NOT DISTINCT FROM ?
+        """, [rt_alignment_number, analysis_number]).fetchone()
+
+        if existing:
+            logger.info(
+                f"Config snapshot already exists for RTA={rt_alignment_number}, "
+                f"TGA={analysis_number} (uid={existing[0]}). Skipping."
+            )
+            return existing[0]
+
+        config_uid = _generate_uid("config")
+        conn.execute("""
+            INSERT INTO project_config VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            config_uid,
+            rt_alignment_number,
+            analysis_number,
+            config_yaml,
+            paths_json,
+            config_path,
+            prov["analyst"],
+            prov["timestamp"],
+        ))
+
+    logger.info(
+        f"Saved config snapshot {config_uid} to project_config "
+        f"(RTA={rt_alignment_number}, TGA={analysis_number}, path={config_path})"
+    )
+    return config_uid
+
+
+def load_config_from_db(
+    project_db_path: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+) -> Optional["Metatlas2Config"]:
+    """
+    Load and parse a :class:`Metatlas2Config` from the ``project_config`` table.
+
+    Looks up the single row stored for this ``(rt_alignment_number,
+    analysis_number)`` pair — the one written by :func:`save_config_to_db`
+    during project setup.
+
+    Returns ``None`` if no matching row is found.
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        rt_alignment_number:  RTA index from the CLI call.
+        analysis_number:      TGA index from the CLI call.
+
+    Returns:
+        Parsed :class:`Metatlas2Config` or ``None``.
+    """
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            row = conn.execute("""
+                SELECT config_yaml, config_path FROM project_config
+                WHERE rt_alignment_number IS NOT DISTINCT FROM ?
+                  AND analysis_number     IS NOT DISTINCT FROM ?
+                ORDER BY created_date DESC
+                LIMIT 1
+            """, [rt_alignment_number, analysis_number]).fetchone()
+            if row:
+                config_yaml, config_path = row
+                logger.info(
+                    f"Loaded config from project_config table "
+                    f"(RTA={rt_alignment_number}, TGA={analysis_number}, "
+                    f"original_path={config_path})"
+                )
+                return ldt.load_metatlas2_config_from_string(config_yaml)
+    except Exception as e:
+        raise RuntimeError(
+            f"No config found in project database at {project_db_path} for reason {e} "
+            f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
+            "Ensure run_project_setup was called with a config_path."
+        )
+
+
+def load_paths_from_db(
+    project_db_path: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+) -> Optional[Dict]:
+    """
+    Load the serialised ``paths`` dict from the ``project_config`` table.
+
+    Returns the dict that was passed to :func:`save_config_to_db` as the
+    ``paths`` argument (the output of ``set_up_paths()``), or ``None`` if no
+    matching row or no ``paths_json`` value is found.
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        rt_alignment_number:  RTA index from the CLI call.
+        analysis_number:      TGA index from the CLI call.
+
+    Returns:
+        Paths dict or ``None``.
+    """
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            row = conn.execute("""
+                SELECT paths_json FROM project_config
+                WHERE rt_alignment_number IS NOT DISTINCT FROM ?
+                  AND analysis_number     IS NOT DISTINCT FROM ?
+                ORDER BY created_date DESC
+                LIMIT 1
+            """, [rt_alignment_number, analysis_number]).fetchone()
+            if row and row[0]:
+                paths = json.loads(row[0])
+                logger.info(
+                    f"Loaded paths from project_config table "
+                    f"(RTA={rt_alignment_number}, TGA={analysis_number})"
+                )
+                return paths
+    except Exception as e:
+        raise RuntimeError(
+            f"No paths found in project database at {project_db_path} for reason {e} "
+            f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
+            "Ensure run_project_setup was called with config_path and paths."
+        )
+
+
+
+def update_config_overrides(
+    project_db_path: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    atlas_uid: str,
+    override_params: Dict,
+    stage: str = 'MANUALLY_CURATED',
+) -> None:
+    """
+    Persist analyst override parameters onto the matching ``workflow_runs`` row.
+
+    Called after the GUI is launched (``stage='AUTO_IDED'``) to record the
+    override parameters the analyst chose, and again after
+    ``run_analysis_summary`` (``stage='MANUALLY_CURATED'``) to record the
+    parameters used to produce the final curated output.
+
+    The ``override_params`` dict is serialised as JSON into the
+    ``workflow_runs.override_params`` column.  ``None`` values are stripped so
+    only analyst-set overrides are stored.
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        rt_alignment_number:  RTA index of the run.
+        analysis_number:      TGA index of the run.
+        atlas_uid:            UID of the atlas whose ``workflow_runs`` row
+                              should be updated.
+        override_params:      Dict of override parameters.
+        stage:                ``'AUTO_IDED'`` (GUI) or ``'MANUALLY_CURATED'``
+                              (summary).  Defaults to ``'MANUALLY_CURATED'``.
+    """
+    clean = {k: v for k, v in override_params.items() if v is not None}
+    override_json = json.dumps(clean)
+
+    with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+        conn.execute("""
+            UPDATE workflow_runs
+            SET override_params = ?
+            WHERE rt_alignment_number = ?
+              AND analysis_number = ?
+              AND atlas_uid = ?
+              AND stage = ?
+        """, [override_json, rt_alignment_number, analysis_number, atlas_uid, stage])
+
+    logger.info(
+        f"Saved override_params to workflow_runs for atlas {atlas_uid} "
+        f"(RTA={rt_alignment_number}, TGA={analysis_number}, stage={stage}): {clean}"
+    )
+
+
+def register_workflow_run(
+    project_db_path: str,
+    rt_alignment_number: int,
+    analysis_number: Optional[int],
+    atlas_obj: "Atlas",
+    stage: str,
+) -> str:
+    """
+    Register a workflow atlas handoff in the ``workflow_runs`` table.
+
+    This is the durable, database-backed replacement for the flat CSV files
+    that previously tracked which atlas UID to use at each stage
+    (``RT_ALIGNED``, ``AUTO_IDED``, ``MANUALLY_CURATED``).
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        rt_alignment_number:  Integer RT alignment run index (RTA#).
+        analysis_number:      Integer analysis run index (TGA#); ``None`` at
+                              the ``RT_ALIGNED`` stage (before TGA is assigned).
+        atlas_obj:            The :class:`Atlas` that was just saved.
+        stage:                One of ``'RT_ALIGNED'``, ``'AUTO_IDED'``,
+                              ``'MANUALLY_CURATED'``.
+
+    Returns:
+        The newly generated ``run_uid`` string.
+    """
+    prov = get_provenance()
+    run_uid = _generate_uid("workflow_stage_run")
+    with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+        conn.execute("""
+            INSERT INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            run_uid,
+            rt_alignment_number,
+            analysis_number,
+            atlas_obj.chromatography,
+            atlas_obj.polarity,
+            atlas_obj.analysis_type,
+            atlas_obj.analysis_name,
+            stage,
+            atlas_obj.atlas_uid,
+            atlas_obj.source_atlas_uid,
+            None,  # override_params (to be updated during GUI)
+            prov["analyst"],
+            prov["timestamp"],
+        ))
+    logger.info(
+        f"Registered workflow run {run_uid}: stage={stage}, "
+        f"RTA={rt_alignment_number}, TGA={analysis_number}, "
+        f"atlas_uid={atlas_obj.atlas_uid} "
+        f"({atlas_obj.chromatography}/{atlas_obj.polarity}/"
+        f"{atlas_obj.analysis_type}/{atlas_obj.analysis_name})"
+    )
+    return run_uid
+
+
+def count_workflow_runs(
+    project_db_path: str,
+    rt_alignment_number: int,
+    stage: str,
+    analysis_number: Optional[int] = None,
+) -> int:
+    """
+    Return the number of ``workflow_runs`` rows matching the given filters.
+
+    Used by :meth:`RTAlign.setup` to decide whether RT alignment has already
+    been completed for a given RTA number.
+
+    RT-aligned atlases are registered with ``analysis_number=NULL`` (since the
+    TGA is not yet assigned at alignment time), so the ``analysis_number``
+    filter uses ``IS NOT DISTINCT FROM ?`` for correct NULL-safe comparison.
+    When ``analysis_number=None`` is passed (the default), this matches rows
+    where ``analysis_number IS NULL``.  Pass an explicit integer to match a
+    specific TGA.
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        rt_alignment_number:  RT alignment run index to filter on.
+        stage:                Workflow stage to filter on (``'RT_ALIGNED'``,
+                              ``'AUTO_IDED'``, ``'MANUALLY_CURATED'``).
+        analysis_number:      TGA index; ``None`` matches rows where
+                              ``analysis_number IS NULL`` (RT_ALIGNED stage).
+
+    Returns:
+        Integer row count (0 if the table does not yet exist).
+    """
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            count = conn.execute("""
+                SELECT COUNT(*) FROM workflow_runs
+                WHERE rt_alignment_number = ?
+                  AND analysis_number IS NOT DISTINCT FROM ?
+                  AND stage = ?
+            """, [rt_alignment_number, analysis_number, stage]).fetchone()[0]
+        return int(count)
+    except Exception as e:
+        logger.debug(f"count_workflow_runs: {e}")
+        return 0
+
+
+def get_atlases_for_stage(
+    project_db_path: str,
+    rt_alignment_number: int,
+    stage: str,
+    analysis_number: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Return a DataFrame of atlas identity columns for a given workflow stage.
+
+    This is the database-backed replacement for
+    ``ldt.load_atlas_data_from_csv(aligned_atlases_store_file)``.
+
+    Columns returned: ``atlas_uid``, ``chromatography``, ``polarity``,
+    ``analysis_type``, ``analysis_name``, ``rt_alignment_number``,
+    ``analysis_number``.
+
+    Args:
+        project_db_path:      Path to the project DuckDB database.
+        rt_alignment_number:  RT alignment run index to filter on.
+        stage:                Workflow stage (``'RT_ALIGNED'``, ``'AUTO_IDED'``,
+                              ``'MANUALLY_CURATED'``).
+        analysis_number:      Optional TGA index; when ``None`` the filter is
+                              omitted.
+
+    Returns:
+        :class:`pandas.DataFrame` ordered by ``created_date``.  Empty
+        DataFrame when no rows match.
+    """
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            df = conn.execute("""
+                SELECT atlas_uid, chromatography, polarity,
+                       analysis_type, analysis_name,
+                       rt_alignment_number, analysis_number
+                FROM workflow_runs
+                WHERE rt_alignment_number = ?
+                  AND analysis_number IS NOT DISTINCT FROM ?
+                  AND stage = ?
+                ORDER BY created_date
+            """, [rt_alignment_number, analysis_number, stage]).df()
+    except Exception as e:
+        logger.error(f"get_atlases_for_stage: {e}")
+        df = pd.DataFrame()
+    if df.empty:
+        logger.warning(
+            f"No workflow_runs entries found for stage={stage}, "
+            f"RTA={rt_alignment_number}, TGA={analysis_number}."
+        )
+    else:
+        logger.info(
+            f"Found {len(df)} atlas(es) in workflow_runs for stage={stage}, "
+            f"RTA={rt_alignment_number}, TGA={analysis_number}."
+        )
+    return df
+
 
 def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str = None) -> None:
     """
@@ -1388,45 +1763,6 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
             return {}
         return {row[0]: row[1] for row in rows}
 
-def check_existing_auto_identification(auto_id_obj: "AutoIdentification") -> None:
-    """
-    Check for existing AutoIdentification results in the project database for the given
-    RT alignment number and analysis number. If found, raise an error.
-    """
-    project_db_path = auto_id_obj.paths['project_db_path']
-    rt_alignment_number = auto_id_obj.rt_alignment_number
-    analysis_number = auto_id_obj.analysis_number
-
-    if not Path(project_db_path).exists():
-        raise FileNotFoundError(f"Project database not found: {project_db_path}")
-
-    with get_db_connection(project_db_path, read_only=True) as conn:
-        # Check MS1 and MS2 summary tables for existing entries
-
-        ms1_data_exists = conn.execute(
-            "SELECT COUNT(*) FROM ms1_data WHERE rt_alignment_number = ? AND analysis_number = ?",
-            [rt_alignment_number, analysis_number]
-        ).fetchone()[0] > 0
-
-        ms2_data_exists = conn.execute(
-            "SELECT COUNT(*) FROM ms2_data WHERE rt_alignment_number = ? AND analysis_number = ?",
-            [rt_alignment_number, analysis_number]
-        ).fetchone()[0] > 0
-
-        manual_curation_exists = conn.execute(
-            "SELECT COUNT(*) FROM manual_curation WHERE rt_alignment_number = ? AND analysis_number = ?",
-            [rt_alignment_number, analysis_number]
-        ).fetchone()[0] > 0
-
-    if ms1_data_exists or ms2_data_exists or manual_curation_exists:
-        raise ValueError(
-            f"AutoIdentification results already exist for RT alignment number {rt_alignment_number} "
-            f"and analysis number {analysis_number}. Please increment the analysis number or run a new RT alignment."
-        )
-    else:
-        logger.info(f"No existing AutoIdentification results found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}. Proceeding.")
-
-
 def create_new_atlas_after_manual_curation(
     summary_obj: "AnalysisSummary",
 ) -> "Atlas":
@@ -1437,36 +1773,38 @@ def create_new_atlas_after_manual_curation(
     prov = get_provenance()
     source_atlas = summary_obj.post_autoid_atlas_obj
 
-    # 1. Efficiently prepare atlas compounds for DB query
-    # Instead of a full DataFrame, just provide the minimal required structure
-    atlas_compounds = pd.DataFrame({"mz_rt_uid": list(source_atlas.compound_mzrts.keys())})
+    remove_unided_compounds = False
+    if summary_obj.workflow_params.get('remove_unided_compounds', True) or summary_obj.override_parameters.get('remove_unided_compounds', True):
+        remove_unided_compounds = True
+        logger.info("Compounds without manual curation entries will be removed from the curated atlas.")
+
+    remove_flagged_compounds = False
+    if summary_obj.workflow_params.get('remove_flagged_compounds', True) or summary_obj.override_parameters.get('remove_flagged_compounds', True):
+        remove_flagged_compounds = True
+        logger.info("Compounds with 'remove' flag in manual curation ms1 notes will be removed from the curated atlas.")
     
+    require_eval = True
+    if summary_obj.workflow_params.get('gui_require_all_evaluated', True) or summary_obj.override_parameters.get('gui_require_all_evaluated', True):
+        require_eval = True
+        logger.info("All compounds are required to have manual curation entries with ms1 and ms2 notes. Missing notes will cause an error.")
+
+    # 1. Construct manual curation object based on filtered atlas
+    atlas_compounds = pd.DataFrame({"mz_rt_uid": list(source_atlas.compound_mzrts.keys())})
     curation_df = get_manual_curation_entries(
         summary_obj.paths['project_db_path'],
         summary_obj.rt_alignment_number,
         summary_obj.analysis_number,
-        remove_unidentified_compounds=None,
+        remove_unidentified_compounds=remove_unided_compounds,
+        remove_flagged_compounds=remove_flagged_compounds,
         atlas_compounds=atlas_compounds,
         analysis_type=source_atlas.analysis_type,
     )
 
-    # 2. Optimization: Use to_dict('records') instead of iterrows()
-    # This is significantly faster for creating lookup maps
+    # Main Processing Loop
     curation_lookup = {row['mz_rt_uid']: row for row in curation_df.to_dict('records')}
-
-    # Resolve overrides and workflow params once
-    overrides = getattr(summary_obj, 'override_parameters', {}) or {}
-    wp = summary_obj.workflow_params
-    
-    require_eval = overrides.get('gui_require_all_evaluated', wp.get('gui_require_all_evaluated', True))
-    remove_flagged = overrides.get('remove_flagged_compounds', wp.get('remove_flagged_compounds', True))
-
     new_compound_mzrts = {}
-
-    # 3. Main Processing Loop
     for mz_rt_uid, cmzrt in source_atlas.compound_mzrts.items():
         curation_row = curation_lookup.get(mz_rt_uid)
-        
         if curation_row is not None:
             # Cache values to avoid repeated dict lookups
             ms1_notes = str(curation_row.get('ms1_notes', '')).strip()
@@ -1477,18 +1815,13 @@ def create_new_atlas_after_manual_curation(
                 if not ms1_notes:
                     raise ValueError(
                         f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) "
-                        "has empty ms1_notes. Please update in GUI."
+                        "has empty ms1_notes. Please update in GUI before generating summary."
                     )
                 if not ms2_notes:
                     raise ValueError(
                         f"Compound {cmzrt.compound_uid} ({cmzrt.inchi_key} / {cmzrt.adduct}) "
-                        "has empty ms2_notes. Please update in GUI."
+                        "has empty ms2_notes. Please update in GUI before generating summary."
                     )
-
-            # B. Flagged Removal
-            if remove_flagged and 'remove' in ms1_notes.lower():
-                logger.info(f"Removing {cmzrt.compound_uid} ({cmzrt.compound_name}) based on 'remove' flag.")
-                continue
 
             # C. Apply Updates
             # Shallow copy is sufficient as we only update immutable floats
@@ -1500,7 +1833,6 @@ def create_new_atlas_after_manual_curation(
             
         else:
             # No curation entry: keep original, but still copy to avoid shared references
-            logger.warning(f"No curation entry for {mz_rt_uid}, keeping original values.")
             new_compound_mzrts[mz_rt_uid] = copy.copy(cmzrt)
 
     # 4. Atlas Generation
@@ -1519,20 +1851,39 @@ def create_new_atlas_after_manual_curation(
     new_atlas.created_by = prov["analyst"]
     new_atlas.created_date = prov["timestamp"]
 
-    save_atlas_to_database(new_atlas, summary_obj.paths['project_db_path'], summary_obj.paths['main_db_path'])
-
-    logger.info(f"Saved curated atlas {new_atlas_uid} with {len(new_compound_mzrts)} compounds.")
+    logger.info(f"Attaching curated atlas {new_atlas_uid} with {len(new_compound_mzrts)} compounds to summary object.")
     summary_obj.post_curation_atlas_obj = new_atlas
+
     return
+
+def save_curated_atlaes_to_db(summary_obj: "AnalysisSummary") -> None:
+    logger.info("Saving curated Atlas to database...")
+    save_atlas_to_database(
+        summary_obj.post_curation_atlas_obj,
+        summary_obj.paths['project_db_path'],
+        summary_obj.paths['main_db_path']
+    )
+    logger.info("Registering curated Atlas in workflow_runs table...")
+    register_workflow_run(
+        project_db_path=summary_obj.paths['project_db_path'],
+        rt_alignment_number=summary_obj.rt_alignment_number,
+        analysis_number=summary_obj.analysis_number,
+        atlas_obj=summary_obj.post_curation_atlas_obj,
+        stage='MANUALLY_CURATED',
+    )
+    logger.info("Saving curated Atlas data to TSV...")
+    ldt.save_atlas_data_to_tsv(
+        atlas_obj=summary_obj.post_curation_atlas_obj,
+        output_path=summary_obj.paths['analysis_output_dir']
+    )
 
 def create_new_atlas_after_auto_id(
     auto_id_obj: "AutoIdentification"
-) -> "Atlas":
+) -> None:
     """
     Create a new atlas after auto-identification.
     Surviving compounds are those present in the filtered manual_curation list.
     """
-    prov = get_provenance()
     source_atlas = auto_id_obj.pre_autoid_atlas_obj
 
     # 1. Get the set of surviving UIDs
@@ -1564,96 +1915,184 @@ def create_new_atlas_after_auto_id(
     new_atlas.atlas_name = f"{source_atlas.atlas_name} (post-auto-identification)"
     new_atlas.atlas_description = f"{source_atlas.atlas_description} (post-auto-identification)"
     new_atlas.atlas_type = "AUTO_IDED"
-    new_atlas.created_by = prov["analyst"]
-    new_atlas.created_date = prov["timestamp"]
-
-    # 5. Persistence
-    save_atlas_to_database(new_atlas, auto_id_obj.paths['project_db_path'], auto_id_obj.paths['main_db_path'])
+    new_atlas.created_by = get_provenance()["analyst"]
+    new_atlas.created_date = get_provenance()["timestamp"]
 
     logger.info(
         f"Created and saved post-auto-identification atlas {new_atlas_uid} "
         f"(from source {source_atlas.atlas_uid}) with {len(new_compound_mzrts)} compounds."
     )
+    
+    auto_id_obj.post_autoid_atlas_obj = new_atlas
 
-    return new_atlas
+    save_autoided_atlas_to_database(auto_id_obj)
 
-def create_aligned_atlas_from_template(
+    return
+
+def save_autoided_atlas_to_database(auto_id_obj: "AutoIdentification") -> None:
+    logger.info("Saving post-autoid Atlas to database...")
+    save_atlas_to_database(
+        auto_id_obj.post_autoid_atlas_obj,
+        auto_id_obj.paths['project_db_path'],
+        auto_id_obj.paths['main_db_path']
+    )
+    logger.info("Registering post-autoid Atlas in workflow_runs table...")
+    register_workflow_run(
+        project_db_path=auto_id_obj.paths['project_db_path'],
+        rt_alignment_number=auto_id_obj.rt_alignment_number,
+        analysis_number=auto_id_obj.analysis_number,
+        atlas_obj=auto_id_obj.post_autoid_atlas_obj,
+        stage='AUTO_IDED',
+    )
+    logger.info("Saving post-autoid Atlas data to TSV...")
+    ldt.save_atlas_data_to_tsv(
+        atlas_obj=auto_id_obj.post_autoid_atlas_obj,
+        output_path=auto_id_obj.paths['analysis_output_dir']
+    )
+
+def create_new_atlases_after_rt_alignment(
     rt_align_obj: "RTAlignment"
 ) -> tuple[dict[str, "Atlas"], list[float]]:
     """Apply RT alignment model to target atlases and return new Atlas objects with updated RTs, 
     along with a list of all RT shifts applied.
     """
-    
-    from metatlas2.workflow_objects import Atlas, CompoundMZRT
 
-    prov = get_provenance()
-    main_db_path = rt_align_obj.paths['main_db_path']
+    from metatlas2.workflow_objects import Atlas
+
+    def apply_rt_model(atlas_rt_values, model_info):
+        """Apply RT alignment model to Atlas RT values."""
+        X_new = np.array(atlas_rt_values).reshape(-1, 1)
+        X_new_poly = model_info['poly_features'].transform(X_new)
+        aligned_rt = model_info['model'].predict(X_new_poly)
+        return aligned_rt
 
     aligned_atlases = {}
-    all_rt_shifts = []
-
     for ta in tqdm(rt_align_obj.config.targeted_analyses, desc="Updating atlases with RT alignment", disable=should_disable_tqdm()):
         chrom = ta.chromatography
         pol = ta.polarity
         analysis_type = ta.analysis_type
-        analysis_name = ta.name
+        analysis_name = ta.analysis_name
         target_atlas_uid = ta.atlas_uid
         if not target_atlas_uid:
-            logger.debug(f"Skipping {chrom} {pol} {analysis_type}/{analysis_name} - no target atlas UID found in parameters")
+            logger.debug(f"Skipping RT alignment for {chrom} {pol} {analysis_type}-{analysis_name} - no target atlas UID found in parameters")
             continue
 
-        logger.debug(f"Loading {chrom} {pol} {analysis_type}/{analysis_name} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
-        atlas_obj = Atlas.from_database(main_db_path, target_atlas_uid)
+        logger.debug(f"Loading {chrom} {pol} {analysis_type}-{analysis_name} target atlas with UID {target_atlas_uid} for applying RT alignment model...")
+        atlas_obj = Atlas.from_database(rt_align_obj.paths['main_db_path'] , target_atlas_uid)
 
-        # Create a new Atlas object for the RT-aligned version
+        # Copy each CompoundMZRT and overwrite only the RT fields
+        all_rt_shifts = []
+        per_compound_rt_shifts = []
         aligned_compound_mzrts = {}
         for mz_rt_uid, comp_ref in atlas_obj.compound_mzrts.items():
-            # Apply RT alignment model
-            aligned_rt_peak = float(rat.apply_rt_model([comp_ref.rt_peak], rt_align_obj.rt_alignment_model)[0])
+            aligned_rt_peak = float(apply_rt_model([comp_ref.rt_peak], rt_align_obj.rt_alignment_model)[0])
             if rt_align_obj.rt_alignment_params['apply_model_to_min_max']:
-                aligned_rt_min = float(rat.apply_rt_model([comp_ref.rt_min], rt_align_obj.rt_alignment_model)[0])
-                aligned_rt_max = float(rat.apply_rt_model([comp_ref.rt_max], rt_align_obj.rt_alignment_model)[0])
+                aligned_rt_min = float(apply_rt_model([comp_ref.rt_min], rt_align_obj.rt_alignment_model)[0])
+                aligned_rt_max = float(apply_rt_model([comp_ref.rt_max], rt_align_obj.rt_alignment_model)[0])
             else:
                 window = comp_ref.rt_max - comp_ref.rt_min
                 aligned_rt_min = aligned_rt_peak - window / 2
                 aligned_rt_max = aligned_rt_peak + window / 2
+
             rt_shift = aligned_rt_peak - comp_ref.rt_peak
             all_rt_shifts.append(rt_shift)
+            per_compound_rt_shifts.append({
+                'compound_name': comp_ref.compound_name,
+                'inchi_key': comp_ref.inchi_key,
+                'adduct': comp_ref.adduct,
+                'mz_rt_uid': mz_rt_uid,
+                'original_rt_peak': float(comp_ref.rt_peak),
+                'aligned_rt_peak': aligned_rt_peak,
+                'rt_shift': rt_shift,
+            })
 
-            # Create a new CompoundMZRT with updated RTs
-            new_mz_rt_uid = _generate_uid("mz_rt", decorator="exp")
-            comp_dict = {k: v for k, v in comp_ref.__dict__.items() if k not in ['mz_rt_uid', 'rt_peak', 'rt_min', 'rt_max']}
-            aligned_comp_mzrt = CompoundMZRT(
-                **comp_dict,
-                mz_rt_uid=new_mz_rt_uid,
-                rt_peak=aligned_rt_peak,
-                rt_min=aligned_rt_min,
-                rt_max=aligned_rt_max,
-            )
-            aligned_compound_mzrts[new_mz_rt_uid] = aligned_comp_mzrt
+            # Copy the compound_mzrt entry and update RT fields and UID
+            new_comp_mzrt = copy.copy(comp_ref)
+            new_mz_rt_uid = _generate_uid("mz_rt", decorator="rta")
+            new_comp_mzrt.mz_rt_uid = new_mz_rt_uid
+            new_comp_mzrt.rt_peak = aligned_rt_peak
+            new_comp_mzrt.rt_min = aligned_rt_min
+            new_comp_mzrt.rt_max = aligned_rt_max
+            aligned_compound_mzrts[new_mz_rt_uid] = new_comp_mzrt
 
-        # Generate new UID and name for the aligned atlas
+        # Copy the atlas and overwrite only the fields that change
+        aligned_atlas = copy.copy(atlas_obj)
         aligned_atlas_uid = _generate_uid("rt_atlas", decorator=f"{analysis_type.lower()}-{chrom.lower()}-{pol.lower()}-{analysis_name.lower()}")
-        aligned_atlas = Atlas(
-            atlas_uid=aligned_atlas_uid,
-            atlas_name=f"{atlas_obj.atlas_name} (post-rt-alignment)",
-            atlas_description=f"{atlas_obj.atlas_description} (post-rt-alignment)",
-            chromatography=chrom,
-            polarity=pol,
-            analysis_type=analysis_type,
-            analysis_name=analysis_name,
-            atlas_type="RT-ALIGNED",
-            source_atlas_uid=atlas_obj.atlas_uid,
-            rt_alignment_number=rt_align_obj.rt_alignment_number,
-            analysis_number=None,
-            created_by=prov["analyst"],
-            created_date=prov["timestamp"],
-            source=atlas_obj.source,
-            compound_mzrts=aligned_compound_mzrts
-        )
+        aligned_atlas.atlas_uid = aligned_atlas_uid
+        aligned_atlas.atlas_name = f"{atlas_obj.atlas_name} (post-rt-alignment)"
+        aligned_atlas.atlas_description = f"{atlas_obj.atlas_description} (post-rt-alignment)"
+        aligned_atlas.chromatography = chrom
+        aligned_atlas.polarity = pol
+        aligned_atlas.analysis_type = analysis_type
+        aligned_atlas.atlas_type = "RT-ALIGNED"
+        aligned_atlas.rt_alignment_number = rt_align_obj.rt_alignment_number
+        aligned_atlas.analysis_number = None
+        aligned_atlas.analysis_name = analysis_name
+        aligned_atlas.compound_mzrts = aligned_compound_mzrts
+        aligned_atlas.source_atlas_uid = atlas_obj.atlas_uid
+        aligned_atlas.created_by = get_provenance()["analyst"]
+        aligned_atlas.created_date = get_provenance()["timestamp"]
+        
         aligned_atlases[aligned_atlas_uid] = aligned_atlas
 
-    return aligned_atlases, all_rt_shifts
+        # Save and print RT shift stats per-compound for this atlas
+        save_rt_aligned_stats(
+            all_rt_shifts=all_rt_shifts,
+            per_compound_rt_shifts=per_compound_rt_shifts,
+            aligned_atlas_uid=aligned_atlas_uid,
+            output_dir=rt_align_obj.paths['rt_alignment_results_dir'],
+        )
+
+    rt_align_obj.rt_aligned_atlases = aligned_atlases
+
+    save_aligned_atlases_to_db(rt_align_obj)
+
+    return
+
+def save_aligned_atlases_to_db(rt_align_obj: "RTAlignment") -> None:
+    for uid, aligned_atlas_obj in rt_align_obj.rt_aligned_atlases.items():
+        logger.info(f"Saving aligned Atlas {uid} to database...")
+        save_atlas_to_database(
+            atlas_obj=aligned_atlas_obj,
+            db_path=rt_align_obj.paths['project_db_path'],
+            main_db_path=rt_align_obj.paths['main_db_path']
+        )
+        logger.info(f"Saving aligned Atlas {uid} metadata to database...")
+        register_workflow_run(
+            project_db_path=rt_align_obj.paths['project_db_path'],
+            rt_alignment_number=rt_align_obj.rt_alignment_number,
+            analysis_number=None,
+            atlas_obj=aligned_atlas_obj,
+            stage='RT_ALIGNED',
+        )
+        logger.info(f"Saving aligned Atlas {uid} data to TSV...")
+        ldt.save_atlas_data_to_tsv(
+            atlas_obj=aligned_atlas_obj,
+            output_path=rt_align_obj.paths['rt_alignment_results_dir']
+        )
+
+def save_rt_aligned_stats(
+    all_rt_shifts: list[float], 
+    per_compound_rt_shifts: dict[str, float],
+    aligned_atlas_uid: str,
+    output_dir: str
+) -> None:
+    rt_shift_stats = {}
+    if all_rt_shifts:
+        rt_shift_stats = {
+            'rt_shift_min': float(np.min(all_rt_shifts)),
+            'rt_shift_max': float(np.max(all_rt_shifts)),
+            'rt_shift_median': float(np.median(all_rt_shifts)),
+        }
+
+    # Save per-compound RT shift data with summary stats at the top
+    rt_shift_output = {
+        'stats': rt_shift_stats,
+        'compounds': per_compound_rt_shifts,
+    }
+    rt_shift_stats_path = Path(output_dir) / f"{aligned_atlas_uid}_rt_shift_stats.json"
+    with open(rt_shift_stats_path, "w") as f:
+        json.dump(rt_shift_output, f, indent=4)
 
 def to_python_type(val):
     if isinstance(val, np.generic):
@@ -1752,19 +2191,20 @@ def save_auto_identification_results_to_db(auto_id_obj):
     Saves Tidy DataFrames directly to pre-defined DuckDB tables.
     """
     logger.info("Saving results to database...")
+
+    logger.info("Loading experimental data from AutoIdentification object...")
     project_db_path = auto_id_obj.paths['project_db_path']
     dataset = auto_id_obj.experimental_data
     curation_df = dataset.curation_df
     ms1_df = dataset.ms1_df
     ms2_df = dataset.ms2_df
-    prov = get_provenance()
     
     constants = {
         'rt_alignment_number': auto_id_obj.rt_alignment_number,
         'analysis_number': auto_id_obj.analysis_number,
         'analysis_type': auto_id_obj.pre_autoid_atlas_obj.analysis_type,
-        'created_by': prov["analyst"],
-        'created_date': prov["timestamp"]
+        'created_by': get_provenance()["analyst"],
+        'created_date': get_provenance()["timestamp"]
     }
 
     # Add constants to all DataFrames
@@ -1779,13 +2219,6 @@ def save_auto_identification_results_to_db(auto_id_obj):
     if not ms2_df.empty and "hits" in ms2_df.columns:
         ms2_df_to_save = ms2_df.copy()
         ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
-
-    # write ms1_df, ms2_df, and curation_df to a file on disk for debugging
-    debug_dir = Path(project_db_path).parent / "debug"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    ms1_df.to_csv(debug_dir / f"ms1_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
-    ms2_df_to_save.to_csv(debug_dir / f"ms2_data_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
-    curation_df.to_csv(debug_dir / f"manual_curation_{auto_id_obj.rt_alignment_number}_{auto_id_obj.analysis_number}.csv", index=False)
 
     with get_db_connection(project_db_path) as conn:
         if not curation_df.empty:
@@ -1853,7 +2286,7 @@ def get_opposite_polarity_curation(
 ) -> pd.DataFrame:
     """
     Retrieve manual_curation entries for the *opposite* polarity that have been
-    manually curated (curated = 1), matching the same analysis_type,
+    manually curated (passed_curation = 1), matching the same analysis_type,
     rt_alignment_number, and analysis_number.
 
     Matching across polarities is done on (compound_name, inchi_key, atlas_rt_peak)
@@ -1874,7 +2307,7 @@ def get_opposite_polarity_curation(
                   AND polarity = ?
                   AND rt_alignment_number = ?
                   AND analysis_number = ?
-                  AND curated = 1
+                  AND passed_curation = 1
             """, [analysis_type, opposite, rt_alignment_number, analysis_number]).df()
     except Exception as e:
         logger.warning(f"Could not retrieve opposite-polarity curation entries: {e}")
@@ -2028,9 +2461,9 @@ def _transfer_istd_curation(ema_df, db_path, gui_obj, atlas_obj):
     with get_db_connection(db_path, read_only=True) as conn:
         istd_df = conn.execute("""
             SELECT mz_rt_uid, inchi_key, adduct, rt_peak, rt_min, rt_max, 
-                   curated, ms1_notes, ms2_notes, other_notes, analyst_notes
+                   passed_curation, ms1_notes, ms2_notes, other_notes, analyst_notes
             FROM manual_curation 
-            WHERE analysis_type = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND curated = 1
+            WHERE analysis_type = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND passed_curation = 1
         """, [atlas_obj.polarity, gui_obj.rt_alignment_number, gui_obj.analysis_number]).df()
 
     if istd_df.empty: 
@@ -2097,6 +2530,7 @@ def get_manual_curation_entries(
     rt_alignment_number: int,
     analysis_number: int,
     remove_unidentified_compounds: bool = True,
+    remove_flagged_compounds: bool = True,
     atlas_compounds: pd.DataFrame = None,
     analysis_type: str = None,
 ) -> pd.DataFrame:
@@ -2122,7 +2556,9 @@ def get_manual_curation_entries(
                 query += " AND analysis_type = ?"
                 params.append(analysis_type)
             if remove_unidentified_compounds:
-                query += " AND auto_ided = TRUE"
+                query += " AND passed_autoid = TRUE"
+            if remove_flagged_compounds:
+                query += " AND passed_curation = TRUE"
             if atlas_compounds is not None and not atlas_compounds.empty:
                 mz_rt_uids = list(atlas_compounds["mz_rt_uid"].drop_duplicates())
                 placeholders = ", ".join(["?"] * len(mz_rt_uids))
@@ -2323,115 +2759,44 @@ def _get_max_frags(hits_data):
         return -1
     return max((int(h.get('num_matches', -1)) for h in hits_list if isinstance(h, dict)), default=-1)
 
-def _update_manual_curation_with_best_data(summary_obj, curation_df):
+def load_and_filter_for_summary(summary_obj, update_raw_in_feature=False):
+    """Load MS1/MS2/curation data, apply curated RT bounds to in_feature, and
+    populate summary_obj.experimental_data with filtered DataFrames.
+
+    Args:
+        summary_obj: The summary workflow object.
+        update_raw_in_feature: If True, persist the recalculated in_feature
+            values back to the ms1_data and ms2_data database tables (a
+            DELETE + INSERT per table).  If False (default), in_feature is
+            updated only in memory — the DB tables are left unchanged.  The
+            default is False because the in_feature values are always derived
+            from manual_curation.rt_min/rt_max at load time, so writing them
+            back to the raw tables is redundant for normal summary runs.
     """
-    Recalculates best MS1 metrics for each mz_rt_uid based on the current
-    in_feature-filtered ms1_df, updates the in-memory manual_curation_df,
-    and writes all changes to the database in a single batched transaction.
-    """
-    ms1_df = summary_obj.experimental_data.ms1_df
-    if ms1_df.empty:
-        logger.warning("No MS1 data found in experimental_data.ms1_df.")
-        ms1_groups = {}
-    else:
-        ms1_groups = ms1_df.groupby("mz_rt_uid")
-
-    atlas_df = summary_obj.post_curation_atlas_obj.to_dataframe()
-
-    update_field_keys = [
-        "best_ms1_file",
-        "best_ms1_rt",
-        "best_ms1_mz",
-        "best_ms1_intensity",
-        "best_ms1_ppm_error",
-        "best_ms1_rt_error",
-        "mz",
-        "rt_peak",
-        "mz_error",
-        "rt_error",
-    ]
-
-    uid_to_idx = {uid: idx for idx, uid in curation_df['mz_rt_uid'].items()}
-
-    batch_rows = []
-
-    for uid, atlas_row in tqdm(
-        atlas_df.set_index("mz_rt_uid").iterrows(),
-        total=len(atlas_df),
-        desc="Creating curation metadata",
-        disable=should_disable_tqdm()
-    ):
-        try:
-            compound_ms1 = ms1_groups.get_group(uid)
-        except (KeyError, AttributeError):
-            compound_ms1 = pd.DataFrame()
-
-        updated_mc_data = mcs.analyze_ms1(
-            atlas_row,
-            compound_ms1,
-            stage="post_curation_summary"
-        )
-
-        if not updated_mc_data:
-            continue
-
-        # Update in-memory manual_curation_df
-        if uid in uid_to_idx:
-            row_idx = uid_to_idx[uid]
-            for col, val in updated_mc_data.items():
-                if col in curation_df.columns:
-                    curation_df.at[row_idx, col] = val
-
-        # Accumulate only the expected update fields for the batch write,
-        # falling back to the current in-memory value if a key is missing
-        # from the analysis result (e.g. compound had no MS1 data)
-        current_row = curation_df.loc[uid_to_idx[uid]] if uid in uid_to_idx else {}
-        row_update = {"mz_rt_uid": uid}
-        for key in update_field_keys:
-            if key in updated_mc_data:
-                row_update[key] = updated_mc_data[key]
-            elif hasattr(current_row, "__getitem__"):
-                row_update[key] = current_row[key]
-
-        batch_rows.append(row_update)
-
-    logger.info(f"Updating {len(batch_rows)} manual curation entries in database with best MS1 data...")
-    write_curation_updates_to_db(
-        project_db_path=summary_obj.paths["project_db_path"],
-        rt_alignment_number=summary_obj.rt_alignment_number,
-        analysis_number=summary_obj.analysis_number,
-        rows=batch_rows,
-        updated_field_keys=update_field_keys,
-    )
-
-    logger.info(f"Added updated manual curation df with {len(curation_df)} compounds back to summary object.")
-    summary_obj.experimental_data.curation_df = curation_df
-
-def load_and_filter_for_summary(summary_obj):
-
     from metatlas2.workflow_objects import ExperimentalData
 
     atlas_uids = list(summary_obj.post_curation_atlas_obj.compound_mzrts.keys())
+    logger.info(f"Connecting to the database and loading MS1 and MS2 data for {len(atlas_uids)} compounds...")
     with get_db_connection(summary_obj.paths["project_db_path"], read_only=True) as conn:
         uid_filter = f"mz_rt_uid IN {tuple(atlas_uids)}" if atlas_uids else "1=0"
         
         curation_df = conn.execute(f"""
-            SELECT * FROM manual_curation 
-            WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+            SELECT * FROM manual_curation
+            WHERE rt_alignment_number = {summary_obj.rt_alignment_number}
             AND analysis_number = {summary_obj.analysis_number}
             AND {uid_filter}
         """).df()
         
         ms1_df = conn.execute(f"""
-            SELECT * FROM ms1_data 
-            WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+            SELECT * FROM ms1_data
+            WHERE rt_alignment_number = {summary_obj.rt_alignment_number}
             AND analysis_number = {summary_obj.analysis_number}
             AND {uid_filter}
         """).df()
         
         ms2_df = conn.execute(f"""
-            SELECT * FROM ms2_data 
-            WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
+            SELECT * FROM ms2_data
+            WHERE rt_alignment_number = {summary_obj.rt_alignment_number}
             AND analysis_number = {summary_obj.analysis_number}
             AND {uid_filter}
         """).df()
@@ -2440,9 +2805,9 @@ def load_and_filter_for_summary(summary_obj):
         ms2_df = ms2_df.copy()
         ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
 
-    logger.info(f"Loaded {len(curation_df)} manual curation entries ({curation_df['mz_rt_uid'].nunique()} unique compounds),"
-                f" {len(ms1_df)} MS1 data points ({ms1_df['mz_rt_uid'].nunique()} unique compounds),"
-                f" and {len(ms2_df)} MS2 data points ({ms2_df['mz_rt_uid'].nunique()} unique compounds) for summary.")
+    logger.info(f"Loaded {len(curation_df)} manual curation entries,"
+                f" {len(ms1_df)} MS1 data points,"
+                f" and {len(ms2_df)} MS2 data points for summary.")
 
     # Create RT bounds lookup for efficient access
     rt_bounds = {
@@ -2450,18 +2815,18 @@ def load_and_filter_for_summary(summary_obj):
         for _, row in curation_df.iterrows()
     }
 
-    # Update in_feature for MS1 data
+    # Update in_feature for MS1 data (always done in memory)
     logger.info(f"Updating in_feature for MS1 data based on manual curation RT bounds...")
     def update_ms1_in_feature(row):
         bounds = rt_bounds.get(row['mz_rt_uid'])
         if bounds is None:
-            return row['in_feature']
+            raise ValueError(f"No RT bounds found for mz_rt_uid {row['mz_rt_uid']} in curation_df.")
         rt_min, rt_max = bounds
         return [bool(rt_min <= rt <= rt_max) for rt in row['spec_rts']]
 
     ms1_df['in_feature'] = ms1_df.apply(update_ms1_in_feature, axis=1)
 
-    # Update in_feature for MS2 data
+    # Update in_feature for MS2 data (always done in memory)
     logger.info(f"Updating in_feature for MS2 data based on manual curation RT bounds...")
     if not ms2_df.empty:
         rt_min_series = ms2_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[0])
@@ -2473,42 +2838,42 @@ def load_and_filter_for_summary(summary_obj):
             ms2_df['in_feature']
         )
         ms2_df['in_feature'] = ms2_df['in_feature'].astype(bool)
-    
-    # Save updated dataframes back to database
-    logger.info(f"Saving updated data back to database after updating in_feature values from manual curation object...")
-    with get_db_connection(summary_obj.paths["project_db_path"]) as conn:
-        # Delete old entries and insert updated ones for MS1
-        if not ms1_df.empty:
-            logger.info("  Saving MS1 data entries to database...")
-            conn.execute(f"""
-                DELETE FROM ms1_data 
-                WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
-                AND analysis_number = {summary_obj.analysis_number}
-                AND {uid_filter}
-            """)
-            conn.execute("INSERT INTO ms1_data SELECT * FROM ms1_df")
-        
-        # Delete old entries and insert updated ones for MS2
-        if not ms2_df.empty:
-            logger.info("  Saving MS2 data entries to database...")
-            # Re-serialize hits for database storage
-            ms2_df_to_save = ms2_df.copy()
-            ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
-            
-            conn.execute(f"""
-                DELETE FROM ms2_data 
-                WHERE rt_alignment_number = {summary_obj.rt_alignment_number} 
-                AND analysis_number = {summary_obj.analysis_number}
-                AND {uid_filter}
-            """)
-            conn.execute("INSERT INTO ms2_data SELECT * FROM ms2_df_to_save")
 
-    logger.info(f"Updated in_feature values saved to database.")
+    # Optionally persist the updated in_feature values back to the raw DB tables.
+    if update_raw_in_feature:
+        logger.info("Saving updated in_feature values back to database (update_raw_in_feature=True)...")
+        with get_db_connection(summary_obj.paths["project_db_path"]) as conn:
+            # Delete old entries and insert updated ones for MS1
+            if not ms1_df.empty:
+                logger.info("  Saving MS1 data entries to database...")
+                conn.execute(f"""
+                    DELETE FROM ms1_data
+                    WHERE rt_alignment_number = {summary_obj.rt_alignment_number}
+                    AND analysis_number = {summary_obj.analysis_number}
+                    AND {uid_filter}
+                """)
+                conn.execute("INSERT INTO ms1_data SELECT * FROM ms1_df")
+            
+            # Delete old entries and insert updated ones for MS2
+            if not ms2_df.empty:
+                logger.info("  Saving MS2 data entries to database...")
+                # Re-serialize hits for database storage
+                ms2_df_to_save = ms2_df.copy()
+                ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
+                
+                conn.execute(f"""
+                    DELETE FROM ms2_data
+                    WHERE rt_alignment_number = {summary_obj.rt_alignment_number}
+                    AND analysis_number = {summary_obj.analysis_number}
+                    AND {uid_filter}
+                """)
+                conn.execute("INSERT INTO ms2_data SELECT * FROM ms2_df_to_save")
+        logger.info("Updated in_feature values saved to database.")
+    else:
+        logger.info("Skipping DB write of in_feature (update_raw_in_feature=False); values updated in memory only.")
 
     # Create filtered copies with only in_feature=True data
     logger.info(f"Creating filtered copies with only in_feature=True data...")
-    
-    # Filter MS1 data: subset lists based on in_feature
     if not ms1_df.empty:
         def filter_ms1_row(row):
             mask = row['in_feature']
@@ -2523,26 +2888,28 @@ def load_and_filter_for_summary(summary_obj):
 
         ms1_df_filtered = pd.DataFrame(ms1_df.apply(filter_ms1_row, axis=1).tolist())
 
-    # Filter MS2 data: keep only rows with in_feature=True
     if not ms2_df.empty:
         ms2_df_filtered = ms2_df[ms2_df['in_feature'] == True].copy()
     else:
-        ms2_df_filtered = ms2_df.copy()    
+        ms2_df_filtered = ms2_df.copy()
 
     # Store filtered dataframes in experimental_data object
     summary_obj.experimental_data = ExperimentalData()
+    summary_obj.experimental_data.curation_df = curation_df
     summary_obj.experimental_data.ms1_df = ms1_df_filtered
     summary_obj.experimental_data.ms2_df = ms2_df_filtered
-    logger.info(f"Added {len(ms1_df_filtered)} MS1 rows and {len(ms2_df_filtered)} MS2 rows with in_feature=True to the summary object.")
+    logger.info(f"Summary object experimental_data populated with {len(curation_df)} curation entries")
+    logger.info(f"Added {len(ms1_df_filtered)} MS1 rows ({len(ms1_df_filtered)/len(ms1_df)*100:.1f} percent of total) and {len(ms2_df_filtered)} MS2 rows ({len(ms2_df_filtered)/len(ms2_df)*100:.1f} percent of total) with in_feature=True to the summary object.")
 
-    _update_manual_curation_with_best_data(summary_obj, curation_df)
+    return
 
 def load_and_filter_for_gui(analysis_gui_obj):
 
     from metatlas2.workflow_objects import ExperimentalData
 
+    atlas_uids = list(analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.keys())
+    logger.info(f"Connecting to the database and loading MS1 and MS2 data for {len(atlas_uids)} compounds...")
     with get_db_connection(analysis_gui_obj.paths["project_db_path"], read_only=True) as conn:
-        atlas_uids = list(analysis_gui_obj.post_autoid_atlas_obj.compound_mzrts.keys())
         uid_filter = f"mz_rt_uid IN {tuple(atlas_uids)}" if atlas_uids else "1=0"
         
         logger.info("Loading manual curation table from database...")

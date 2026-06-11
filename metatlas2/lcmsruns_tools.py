@@ -134,13 +134,13 @@ def filter_lcmsruns_list(
             return False
         return True
 
-    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with criteria: "
-                f"include_file_type={inc_set}, "
-                f"exclude_file_type={exc_set}, "
-                f"file_format={file_format}, "
-                f"chromatography={chromatography}, "
-                f"polarity={pol_set}, "
-                f"ms_level={ms_level}")
+    logger.info(f"Filtering {len(lcmsruns)} LCMS runs with criteria: ")
+    logger.info(f"  include_file_type={inc_set}")
+    logger.info(f"  exclude_file_type={exc_set}")
+    logger.info(f"  file_format={file_format}")
+    logger.info(f"  chromatography={chromatography}")
+    logger.info(f"  polarity={pol_set}")
+    logger.info(f"  ms_level={ms_level}")
     filtered = [run for run in lcmsruns if match(run)]
 
     logger.info(f"Filtered to {len(filtered)} out of {len(lcmsruns)} total files.")

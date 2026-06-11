@@ -3,7 +3,7 @@ import numpy as np
 import sys
 import os
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
 from tqdm.auto import tqdm
 
 from sklearn.preprocessing import PolynomialFeatures
@@ -11,7 +11,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
 
-import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('rt_align_tools')
 
@@ -20,28 +19,6 @@ def should_disable_tqdm():
         "SLURM_JOB_ID" in os.environ
         or not sys.stdout.isatty()
     )
-
-def apply_rt_alignment_to_target_atlases(
-        rt_align_obj: "RTAlign"
-) -> Tuple[Dict[str, "Atlas"], Dict[str, float]]:
-
-    logger.info("Applying RT alignment model to target atlases and generating RT-aligned Atlas objects...")
-    aligned_atlases, all_rt_shifts = dbi.create_aligned_atlas_from_template(rt_align_obj)
-
-    # Calculate RT shift stats
-    rt_shift_stats = {}
-    if all_rt_shifts:
-        rt_shift_stats = {
-            'rt_shift_min': float(np.min(all_rt_shifts)),
-            'rt_shift_max': float(np.max(all_rt_shifts)),
-            'rt_shift_median': float(np.median(all_rt_shifts)),
-        }
-
-    logger.info(f"Applied RT alignment model to {len(aligned_atlases)} target atlases. RT shift stats: {rt_shift_stats}")
-    rt_align_obj.rt_shift_stats = rt_shift_stats
-    rt_align_obj.rt_aligned_atlases = aligned_atlases
-    
-    return
 
 def calculate_model_values_from_existing(model_dict: Dict) -> Dict:
     """
@@ -96,13 +73,6 @@ def build_polynomial_model(X, y, degree):
         'intercept': model.intercept_
     }
 
-def apply_rt_model(atlas_rt_values, model_info):
-    """Apply RT alignment model to Atlas RT values."""
-    X_new = np.array(atlas_rt_values).reshape(-1, 1)
-    X_new_poly = model_info['poly_features'].transform(X_new)
-    aligned_rt = model_info['model'].predict(X_new_poly)
-    return aligned_rt
-
 def format_polynomial_equation(model_info):
     """Format polynomial equation as string."""
     degree = model_info['degree']
@@ -127,7 +97,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
 
     modeling_results_df = rt_align_obj.modeling_data
     rt_alignment_model = rt_align_obj.rt_alignment_model
-    output_dir = rt_align_obj.paths['rt_alignment_output_dir']
+    output_dir = rt_align_obj.paths['rt_alignment_results_dir']
 
     # Sort by Atlas RT before numbering and plotting
     modeling_results_df = modeling_results_df.sort_values('atlas_rt_peak').reset_index(drop=True)
@@ -204,7 +174,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
 
     if save_plot:
         try:
-            plot_save_dir = Path(output_dir) / "rt_alignment_results"
+            plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
             pdf_path = plot_save_dir / f"summary-for-{rt_alignment_model['rt_alignment_uid']}.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
@@ -356,124 +326,3 @@ def build_rt_alignment_model(
     rt_align_obj.modeling_data = modeling_results_df
 
     return
-
-def create_file_matching_summary(
-    rt_align_obj: "RTAlign",
-) -> None:
-    """
-    Evaluate QC compound matching statistics directly from ExperimentalData and Atlas.
-
-    Args:
-        experimental_data: ExperimentalData object with extracted MS1 data
-        atlas: Atlas object with compound references
-
-    Returns:
-        None (logs statistics)
-    """
-    logger.info(f"Evaluating QC compound matching statistics for {len(rt_align_obj.align_atlas_obj.compound_mzrts)} compounds"
-                f" from {len(rt_align_obj.experimental_data.ms1_df)} MS1 data points"
-                f" across {len(rt_align_obj.experimental_data.ms1_df['filename'].unique())} unique files"
-                f" for {len(rt_align_obj.experimental_data.ms1_df['mz_rt_uid'].unique())} compounds...")
-
-    total_compounds = 0
-    compounds_with_matches = 0
-    compounds_without_matches = 0
-    total_peaks_extracted = 0
-    file_match_counts = {}
-    
-    for compound_mzrt in tqdm(rt_align_obj.align_atlas_obj.compound_mzrts.values(), desc="Creating file matching summary", disable=should_disable_tqdm()):
-        mz_rt_uid = getattr(compound_mzrt, 'mz_rt_uid', None)
-        ms1_df_comp = rt_align_obj.experimental_data.ms1_df[rt_align_obj.experimental_data.ms1_df['mz_rt_uid'] == mz_rt_uid]
-        total_compounds += 1
-        has_matches = False
-        compound_peaks = 0
-
-        if ms1_df_comp.empty:
-            logger.warning(f"No MS1 data found for compound {compound_mzrt.compound_name} (mz_rt_uid: {mz_rt_uid}).")
-            compounds_without_matches += 1
-            continue
-
-        # Wide format: one row per compound per file, with lists in columns
-        for _, row in ms1_df_comp.iterrows():
-            filename = row.get('filename', None)
-            intensity_list = row.get('spec_ints', [])
-            in_feature_mask = row.get('in_feature', [True]*len(intensity_list))
-            found_peak = False
-            for i, use in enumerate(in_feature_mask):
-                if not use:
-                    continue
-                try:
-                    intensity = intensity_list[i]
-                except (IndexError, TypeError):
-                    continue
-                if float(intensity) > 0:
-                    has_matches = True
-                    found_peak = True
-                    compound_peaks += 1
-            if found_peak and filename is not None:
-                if filename not in file_match_counts:
-                    file_match_counts[filename] = {'compounds_matched': 0, 'total_peaks': 0}
-                file_match_counts[filename]['compounds_matched'] += 1
-                file_match_counts[filename]['total_peaks'] += 1
-
-        if has_matches:
-            compounds_with_matches += 1
-        else:
-            compounds_without_matches += 1
-
-        total_peaks_extracted += compound_peaks
-
-    total_files_analyzed = len(file_match_counts)
-    total_files_with_matches = sum(1 for stats in file_match_counts.values() if stats['compounds_matched'] > 0)
-    total_files_without_matches = total_files_analyzed - total_files_with_matches
-
-    match_percentage = (compounds_with_matches / total_compounds * 100) if total_compounds > 0 else 0
-    avg_peaks_per_compound = (total_peaks_extracted / compounds_with_matches) if compounds_with_matches > 0 else 0
-    avg_compounds_per_file = sum(stats['compounds_matched'] for stats in file_match_counts.values()) / total_files_analyzed if total_files_analyzed > 0 else 0
-
-    logger.info(f"QC Compound Matching Summary:")
-    logger.info(f"  Total compounds: {total_compounds}")
-    logger.info(f"  Compounds with matches: {compounds_with_matches} ({match_percentage:.1f}%)")
-    logger.info(f"  Compounds without matches: {compounds_without_matches}")
-    logger.info(f"  Total files analyzed: {total_files_analyzed}")
-    logger.info(f"  Files with matches: {total_files_with_matches}")
-    logger.info(f"  Files without matches: {total_files_without_matches}")
-    logger.info(f"  Total peaks extracted: {total_peaks_extracted}")
-    logger.info(f"  Average peaks per matched compound: {avg_peaks_per_compound:.1f}")
-    logger.info(f"  Average compounds matched per file: {avg_compounds_per_file:.1f}")
-
-    return
-
-def display_rt_alignment_summary(rt_align_obj: "RTAlign") -> None:
-    """
-    Log a concise summary of the RT alignment model and RT shift statistics using RTAlign object.
-    """
-
-    logger.info("Generating RT alignment model summary...")
-
-    model = rt_align_obj.rt_alignment_model
-    stats = getattr(rt_align_obj, "rt_shift_stats", None)
-
-    if model is None:
-        logger.info("No RT alignment model available to summarize.")
-        return
-
-    r2 = model.get('r2', None)
-    rmse = model.get('rmse', None)
-    degree = model.get('degree', None)
-    equation = model.get('equation', None)
-    compounds = model.get('compounds_used_for_modeling', [])
-    n_compounds = len(compounds) if compounds is not None else 0
-
-    logger.info("RT Alignment Model Summary:")
-    logger.info(f"  Polynomial degree: {degree}")
-    logger.info(f"  R²: {r2:.4f}" if r2 is not None else "  R²: N/A")
-    logger.info(f"  RMSE: {rmse:.4f} min" if rmse is not None else "  RMSE: N/A")
-    logger.info(f"  Equation: {equation}" if equation else "  Equation: N/A")
-    logger.info(f"  Compounds used for modeling: {n_compounds}")
-
-    if stats:
-        logger.info("RT Shift Statistics (across all aligned compounds):")
-        logger.info(f"  Min RT shift: {stats.get('rt_shift_min', 'N/A'):.4f} min")
-        logger.info(f"  Max RT shift: {stats.get('rt_shift_max', 'N/A'):.4f} min")
-        logger.info(f"  Median RT shift: {stats.get('rt_shift_median', 'N/A'):.4f} min")

@@ -1,26 +1,17 @@
 import pandas as pd
 import numpy as np
 import os
-import sys
 import csv
 import yaml
-import ast
-from dataclasses import dataclass, field
+import json
 from pathlib import Path
-from typing import Dict, Any, List, Optional
 import grp
 import subprocess
-import joblib
 from matchms import Spectrum
-from tqdm.auto import tqdm
+from typing import Dict, Any
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
-
-import ast
-import json
-import pandas as pd
-from pathlib import Path
 
 DEFAULT_EXCLUDE_LCMSRUNS = {
     'gui': ['INJBL', 'BLANK'],
@@ -30,15 +21,15 @@ DEFAULT_EXCLUDE_LCMSRUNS = {
     'data_sheets': ['INJBL', 'BLANK'],
 }
 
-DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = ['EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK']
+DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = [
+    'EXPERIMENTAL', 
+    'ISTD', 
+    'EXCTRL', 
+    'REFSTD', 
+    'INJBLK'
+    ]
 
 DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['QC']
-
-def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
 
 def load_msms_refs_file(
     file_path: str,
@@ -315,7 +306,7 @@ def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
                         chromatography=chromatography,
                         polarity=polarity,
                         analysis_type=analysis_type,
-                        name=name,
+                        analysis_name=name,
                         atlas_uid=atlas_uid,
                         params=params,
                     ))
@@ -324,7 +315,7 @@ def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
 
     logger.info(
         f"Loaded config from {config_path}: "
-        f"{len(rt_alignment_config)} RT alignment chromatographies, "
+        f"{len(rt_alignment_config)} RT alignment, "
         f"{len(targeted_analyses)} targeted analyses"
     )
     return Metatlas2Config(
@@ -332,6 +323,39 @@ def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
         rt_alignment_config=rt_alignment_config,
         targeted_analyses=targeted_analyses,
     )
+
+def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
+    """Parse and validate a metatlas2 config from a raw YAML string.
+
+    This is the companion to :func:`load_metatlas2_config` used when the YAML
+    text has been retrieved from the ``project_config`` database table rather
+    than read directly from a file on disk.  All validation and normalisation
+    logic is identical — the only difference is the source of the raw text.
+
+    Args:
+        config_yaml: Raw YAML text (as stored in ``project_config.config_yaml``).
+
+    Returns:
+        A fully validated :class:`~metatlas2.workflow_objects.Metatlas2Config`.
+    """
+    import io
+    import tempfile, os
+
+    # Write to a temp file so load_metatlas2_config can open it normally.
+    # This keeps all validation logic in one place without duplication.
+    with tempfile.NamedTemporaryFile(
+        mode='w', suffix='.yaml', delete=False, encoding='utf-8'
+    ) as tmp:
+        tmp.write(config_yaml)
+        tmp_path = tmp.name
+
+    try:
+        config = load_metatlas2_config(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    return config
+
 
 def load_compound_input(file_path: str) -> pd.DataFrame:
     """Load compound input file (TSV/CSV) and validate required columns."""
@@ -436,6 +460,7 @@ def save_atlas_data_to_tsv(atlas_obj: "Atlas", output_path: str) -> None:
     atlas_df = atlas_obj.to_dataframe()
     output_file = f"{atlas_obj.atlas_uid}.tsv"
     atlas_df.to_csv(f"{output_path}/{output_file}", index=False, sep='\t')
+    logger.info(f"Saved Atlas data to {output_path}/{output_file}")
 
 def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
     """Load Atlas data from CSV file."""
@@ -474,7 +499,7 @@ def log_filter_table(steps, starting_entries, starting_compounds, entries_label=
     if title is None:
         title = f"{entries_label} filtering summary"
     pct_label = f"{entries_label} %"
-    col_w = [25, 10, 12, 10, 12]
+    col_w = [28, 10, 12, 10, 12]
     header = (
         f"{'Step':<{col_w[0]}} {entries_label:>{col_w[1]}} {pct_label:>{col_w[2]}} "
         f"{'Compounds':>{col_w[3]}} {'Compounds %':>{col_w[4]}}"

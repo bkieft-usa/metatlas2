@@ -31,14 +31,14 @@ class TargetedAnalysis:
     chromatography: str
     polarity: str
     analysis_type: str
-    name: str
+    analysis_name: str
     atlas_uid: str
     params: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def key(self) -> str:
         """Human-readable composite key: ``chrom/pol/analysis_type/name``."""
-        return f"{self.chromatography}/{self.polarity}/{self.analysis_type}/{self.name}"
+        return f"{self.chromatography}/{self.polarity}/{self.analysis_type}/{self.analysis_name}"
 
 
 @dataclass
@@ -67,7 +67,7 @@ class Metatlas2Config:
         chromatography: str,
         polarity: str,
         analysis_type: str,
-        name: str,
+        analysis_name: str,
     ) -> "TargetedAnalysis":
         """Return the :class:`TargetedAnalysis` matching the given key.
 
@@ -78,11 +78,11 @@ class Metatlas2Config:
                 ta.chromatography == chromatography
                 and ta.polarity == polarity
                 and ta.analysis_type == analysis_type
-                and ta.name == name
+                and ta.analysis_name == analysis_name
             ):
                 return ta
         raise KeyError(
-            f"No targeted analysis found for {chromatography}/{polarity}/{analysis_type}/{name}. "
+            f"No targeted analysis found for {chromatography}/{polarity}/{analysis_type}/{analysis_name}. "
             f"Available: {[ta.key for ta in self.targeted_analyses]}"
         )
 
@@ -481,7 +481,7 @@ class Atlas:
     polarity: str
     analysis_type: str
     atlas_type: str
-    analysis_name: str
+    analysis_name: str = "MAIN_ATLAS"
 
     # Compound references (immutable reference data)
     compound_mzrts: Dict[str, CompoundMZRT] = field(default_factory=dict)
@@ -607,7 +607,7 @@ class Atlas:
         """
         Load an Atlas object directly from the database using its UID.
         """
-        logger.info(f"Loading atlas with UID {atlas_uid} from database...")
+        logger.debug(f"Loading atlas with UID {atlas_uid} from database...")
         return cls.from_dataframe(dbi.get_atlas_compounds_table(database_path, atlas_uid, main_db_path))
 
     @classmethod
@@ -615,7 +615,9 @@ class Atlas:
         cls, 
         config_path: str
     ) -> None:
-        """Create and save Atlas objects from a config file."""
+        """
+        Create and save Atlas objects from a config file.
+        """
         config = NewAtlasesConfig.from_yaml(config_path)
         paths = rtg.set_up_paths(config=config)
         main_db_path = paths.get("main_db_path", None)
@@ -635,11 +637,10 @@ class Atlas:
                 continue
             try:
                 atlas_compounds_df = ldt.load_atlas_input(entry.path)
-                atlas_name = entry.name or f"{analysis_type} {chrom} {pol}"
                 atlas_obj = dbi.create_new_atlas_from_dataframe(
                     atlas_df=atlas_compounds_df,
-                    atlas_name=atlas_name,
-                    atlas_description=entry.desc or 'No Description',
+                    atlas_name=entry.name,
+                    atlas_description=entry.desc,
                     analysis_type=analysis_type,
                     chromatography=chrom,
                     polarity=pol,
@@ -687,7 +688,7 @@ class Project:
     paths: Dict[str, str] = field(default_factory=dict)
     lcmsruns: List['LCMSRun'] = field(default_factory=list)
 
-    def setup(self, project_name: str, config: Dict[str, Any], paths: Dict[str, str], overwrite_existing: bool = False):
+    def setup(self, project_name: str, config: Dict[str, Any], paths: Dict[str, str], overwrite_existing: bool = False, config_path: str = None, rt_alignment_number: int = None, analysis_number: int = None):
 
         self.project_name = fpf.parse_project_name(project_name)
         self.config = config
@@ -725,6 +726,15 @@ class Project:
 
         logger.info(f"Storing LCMS runs in Project object...")
         self.lcmsruns = [LCMSRun(**row) for row in lcmsruns_list]
+
+        logger.info(f"Saving config snapshot to database for RTA{rt_alignment_number}/TGA{analysis_number}...")
+        dbi.save_config_to_db(
+            project_db_path=self.paths['project_db_path'],
+            config_path=config_path,
+            rt_alignment_number=rt_alignment_number,
+            analysis_number=analysis_number,
+            paths=self.paths,
+        )
 
         return
 
@@ -777,53 +787,91 @@ class RTAlign:
     paths: Dict[str, str] = field(default_factory=dict)
     config: Optional["Metatlas2Config"] = None
 
-    def setup(self, project_name: str, rt_alignment_number: int, config: "Metatlas2Config", paths: Dict[str, str]):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int):
         """
-        Set up RTAlign object using a Project object and RT alignment parameters.
-        Populates paths, config, and relevant atlas UID.
+        Set up RTAlign object by loading config and paths from the project database.
+
+        Config and paths are loaded from the ``project_config`` table written
+        during ``run_project_setup``.  No YAML file or ``set_up_paths()`` call
+        is required.
         """
 
         logger.info(f"Setting up RTAlign object with RT alignment number {rt_alignment_number}...")
         self.rt_alignment_number = rt_alignment_number
+        self.analysis_number = analysis_number
         self.project_name = project_name
-        self.config = config
-        self.paths = paths
-        self.chromatography = next(iter(config.rt_alignment_config.keys()))
-        rt_align_chrom_cfg = config.rt_alignment_config[self.chromatography]
-        self.align_atlas_uid = rt_align_chrom_cfg.get('ATLAS', {}).get('uid', None)
-        self.rt_alignment_params = rt_align_chrom_cfg.get('PARAMS', {})
 
-        if not os.path.exists(paths["project_db_path"]):
-            raise FileNotFoundError(
-                f"Project database not found: {paths['project_db_path']}. "
-                "Please run project setup first."
-            )
+        self.project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
 
-        if self.rt_alignment_params.get('do_alignment', True) is False: # still write the csv for auto id to find the config atlases in text file
+        self.paths = dbi.load_paths_from_db(
+            project_db_path=self.project_db_path,
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
+        )
+        self.config = dbi.load_config_from_db(
+            project_db_path=self.project_db_path,
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
+        )
+
+        self.chromatography = next(iter(self.config.rt_alignment_config.keys()))
+        self.align_atlas_uid = self.config.rt_alignment_config[self.chromatography].get('ATLAS', {}).get('uid', None)
+        self.rt_alignment_params = self.config.rt_alignment_config[self.chromatography].get('PARAMS', {})
+
+        if self.rt_alignment_params.get('do_alignment', True) is False: # short circuit but still save template atlases to DB
             self.run_alignment = False
-            logger.info(f"RT alignment is disabled in config. Writing atlases from config to {self.paths['aligned_atlases_store_file']} and exiting...")
-            for ta in config.targeted_analyses:
-                atlas_obj = Atlas.from_database(
-                    database_path=self.paths['main_db_path'],
-                    atlas_uid=ta.atlas_uid
-                )
-                atlas_obj.analysis_name = ta.name
-                ldt.save_atlas_metadata_to_csv(
-                    atlas_obj=atlas_obj,
-                    output_path=self.paths['aligned_atlases_store_file'],
-                )
+            self._skip_rt_align_routine()
             return
 
-        logger.info(f"Checking for existing RT aligned atlases table file at {self.paths['aligned_atlases_store_file']}...")
-        if os.path.exists(self.paths['aligned_atlases_store_file']) and self.rt_alignment_params.get('use_existing_rt_alignment', False) is True:
-            logger.info(f"Aligned atlases have already been generated for RT alignment number {self.rt_alignment_number} at {self.paths['aligned_atlases_store_file']}, not overwriting since use_existing_rt_alignment is set to True in config.")
-            self.run_alignment = False
-        elif os.path.exists(self.paths['aligned_atlases_store_file']) and self.rt_alignment_params.get('use_existing_rt_alignment', False) is False:
-            logger.warning(f"Aligned atlases file already exists at {self.paths['aligned_atlases_store_file']} for RT alignment number {self.rt_alignment_number}, but overwriting existing file since use_existing_rt_alignment is set to False in config.")
-            Path(self.paths['aligned_atlases_store_file']).unlink()
-        elif not os.path.exists(self.paths['aligned_atlases_store_file']):
-            logger.info(f"No existing aligned atlases file found at {self.paths['aligned_atlases_store_file']} for RT alignment number {self.rt_alignment_number}. Aligned atlases will be generated.")
+        self._check_existing_rt_aligned_atlases()
 
+    def _skip_rt_align_routine(self):
+        logger.info(
+            "RT alignment is disabled in config. "
+            "Copying reference atlases into project DB and registering in workflow_runs..."
+        )
+        for ta in self.config.targeted_analyses:
+            atlas_obj = Atlas.from_database(
+                database_path=self.paths['main_db_path'],
+                atlas_uid=ta.atlas_uid
+            )
+            atlas_obj.analysis_name = ta.analysis_name
+            atlas_obj.rt_alignment_number = self.rt_alignment_number
+            atlas_obj.analysis_number = None
+            dbi.save_atlas_to_database(
+                atlas_obj=atlas_obj,
+                db_path=self.paths['project_db_path'],
+                main_db_path=self.paths['main_db_path'],
+            )
+            dbi.register_workflow_run(
+                project_db_path=self.paths['project_db_path'],
+                rt_alignment_number=self.rt_alignment_number,
+                analysis_number=None,
+                atlas_obj=atlas_obj,
+                stage='RT_ALIGNED',
+            )
+
+    def _check_existing_rt_aligned_atlases(self):
+        logger.info(f"Checking if RT-aligned atlases already exist for RTA{self.rt_alignment_number}...")
+        aligned_count = dbi.count_workflow_runs(
+            project_db_path=self.paths['project_db_path'],
+            rt_alignment_number=self.rt_alignment_number,
+            stage='RT_ALIGNED',
+        )
+        if aligned_count > 0:
+            if self.rt_alignment_params.get('use_existing_rt_alignment', False):
+                logger.info(
+                    f"RT-aligned atlases already exist for RTA{self.rt_alignment_number} "
+                    f"and use_existing_rt_alignment=True. Skipping RT alignment."
+                )
+                self.run_alignment = False
+            else:
+                raise ValueError(
+                    f"RT-aligned atlases already exist for RTA{self.rt_alignment_number} "
+                    f"but use_existing_rt_alignment=False in config. "
+                    f"To run a new RT alignment, increment rt_alignment_number. "
+                    f"To reuse the existing alignment, set use_existing_rt_alignment=True."
+                )
 @dataclass
 class ExperimentalData:
     def __init__(self):
@@ -853,27 +901,57 @@ class AutoIdentification:
     post_autoid_atlas_obj: Optional[Atlas] = None
 
     # Paths and config
-    config_path: str = None
     image_tag: str = "latest"
     paths: Dict[str, str] = field(default_factory=dict)
     config: Optional["Metatlas2Config"] = None
 
-    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, config: "Metatlas2Config", paths: Dict[str, str], analysis_subset: Optional[List[str]] = None, config_path: str = None, image_tag: str = "latest"):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, analysis_subset: Optional[List[str]] = None, image_tag: str = "latest"):
         """
-        Set up AutoIdentification object.
-        Populates paths, config, and relevant atlas UID.
+        Set up AutoIdentification object by loading config and paths from the
+        project database.
+
+        Config and paths are loaded from the ``project_config`` table written
+        during ``run_project_setup``.  No YAML file or ``set_up_paths()`` call
+        is required.
         """
         logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.config = config
-        self.paths = paths
         self.project_name = project_name
         self.analysis_subset = analysis_subset
-        self.config_path = config_path
         self.image_tag = image_tag
-        self.chromatography = config.chromatography
-        self.msms_refs_db_filter = config.msms_refs_db_filter
+
+        project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
+
+        self.paths = dbi.load_paths_from_db(
+            project_db_path=project_db_path,
+            rt_alignment_number=rt_alignment_number,
+            analysis_number=analysis_number,
+        )
+        self.config = dbi.load_config_from_db(
+            project_db_path=project_db_path,
+            rt_alignment_number=rt_alignment_number,
+            analysis_number=analysis_number,
+        )
+
+        self.chromatography = self.config.chromatography
+        self.msms_refs_db_filter = self.config.msms_refs_db_filter
+
+        self._check_existing_auto_ided_atlases()
+
+    def _check_existing_auto_ided_atlases(self):
+        logger.debug(f"Checking if AutoID-aligned atlases already exist for RTA{self.rt_alignment_number} and TGA{self.analysis_number}...")
+        autoided_count = dbi.count_workflow_runs(
+            project_db_path=self.paths['project_db_path'],
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
+            stage='AUTO_IDED',
+        )
+        if autoided_count > 0:
+            raise ValueError(
+                f"AutoID-aligned atlases already exist for RTA{self.rt_alignment_number} and TGA{self.analysis_number} "
+                f"To run a new AutoID, increment analysis_number. "
+            )
 
 @dataclass
 class AnalysisGUI:
@@ -909,7 +987,7 @@ class AnalysisGUI:
     ms2_hits_df: Optional[pd.DataFrame] = None
     override_parameters: Dict[str, Any] = field(default_factory=dict)
 
-    def setup(self, config_path: str, project_name: str, rt_alignment_number: int, analysis_number: int, override_parameters: Optional[Dict[str, Any]] = None):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, override_parameters: Optional[Dict[str, Any]] = None):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
@@ -917,9 +995,22 @@ class AnalysisGUI:
         logger.info(f"Setting up AnalysisGUI object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.config_path = config_path
         self.project_name = project_name
-        self.config = ldt.load_metatlas2_config(config_path)
+
+        project_db_path = rtg.get_project_db_path(self.project_name)
+        self.config = dbi.load_config_from_db(
+            project_db_path=project_db_path,
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
+        )
+        if self.config is None:
+            raise RuntimeError(
+                f"No config found in project database at {project_db_path} "
+                f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
+                "Ensure run_project_setup was called with a config_path."
+            )
+        logger.info("Config loaded from project database.")
+
         self.owner = self.config.owner
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
         if override_parameters is not None:
@@ -985,7 +1076,6 @@ class AnalysisSummary:
 
     def setup(
         self,
-        config_path: str,
         project_name: str,
         rt_alignment_number: int,
         analysis_number: int,
@@ -997,8 +1087,21 @@ class AnalysisSummary:
         logger.info(f"Setting up AnalysisSummary object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
-        self.config_path = config_path
-        self.config = ldt.load_metatlas2_config(config_path)
-        self.chromatography = self.config.chromatography
         self.project_name = project_name
+
+        project_db_path = rtg.get_project_db_path(self.project_name)
+        self.config = dbi.load_config_from_db(
+            project_db_path=project_db_path,
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
+        )
+        if self.config is None:
+            raise RuntimeError(
+                f"No config found in project database at {project_db_path} "
+                f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
+                "Ensure run_project_setup was called with a config_path."
+            )
+        logger.info("Config loaded from project database.")
+
+        self.chromatography = self.config.chromatography
         self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)

@@ -117,7 +117,6 @@ def _make_imports_cell() -> nbformat.NotebookNode:
 
 def _make_variables_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     src = (
-        f"ANALYSIS_CONFIG  = {auto_id_obj.config_path!r}\n"
         f"PROJECT_NAME     = {auto_id_obj.project_name!r}\n"
         f"RT_ALIGN_NUM     = {auto_id_obj.rt_alignment_number!r}\n"
         f"ANALYSIS_NUM     = {auto_id_obj.analysis_number!r}\n"
@@ -131,12 +130,11 @@ def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
         "# Manual Curation\n"
         "wfs.run_analysis_gui(\n"
-        "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
-        "    post_autoid_atlas=ANALYSIS_ATLAS,\n" \
-        "    override_parameters=OVERRIDE_PARAMS\n" \
+        "    post_autoid_atlas=ANALYSIS_ATLAS,\n"
+        "    override_parameters=OVERRIDE_PARAMS,\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)
@@ -146,13 +144,12 @@ def _make_summary_cell() -> nbformat.NotebookNode:
     src = (
         "# Analysis Summary\n"
         "wfs.run_analysis_summary(\n"
-        "    config_path=ANALYSIS_CONFIG,\n"
         "    project_name=PROJECT_NAME,\n"
         "    rt_alignment_number=RT_ALIGN_NUM,\n"
         "    analysis_number=ANALYSIS_NUM,\n"
         "    post_autoid_atlas=ANALYSIS_ATLAS,\n"
         "    override_parameters=OVERRIDE_PARAMS,\n"
-        "    overwrite=False\n"
+        "    overwrite=False,\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)

@@ -228,7 +228,7 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
         return ms2_df.reindex(columns=final_columns), ms1_df
 
     # Collect per-step stats for the summary table: (step_label, scans_after, compounds_after)
-    ms2_steps = [("start", starting_scans, starting_uids)]
+    ms2_steps = [("all ms2 scans", starting_scans, starting_uids)]
 
     # Only in_feature=True scans count toward compound retention.
     in_feature_df = ms2_df[ms2_df['in_feature'] == True]
@@ -246,14 +246,14 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
 
     ms2_df = ms2_df.reindex(columns=final_columns)
 
-    # Synchronize MS1: drop compounds with no passing MS2 hits; log its own table
+    # Synchronize MS1: drop compounds with no passing MS2 hits (if we made it this far, there are MS2 filters)
     if not ms1_df.empty and not ms2_df.empty:
         ms1_starting_entries = len(ms1_df)
         ms1_starting_uids = ms1_df['mz_rt_uid'].nunique()
         valid_uids = ms2_df['mz_rt_uid'].unique()
         ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(valid_uids)].copy()
         ms1_steps = [
-            ("start", ms1_starting_entries, ms1_starting_uids),
+            ("all ms2 data", ms1_starting_entries, ms1_starting_uids),
             ("pass MS1 & MS2", len(ms1_df), ms1_df['mz_rt_uid'].nunique()),
         ]
         ldt.log_filter_table(ms1_steps, ms1_starting_entries, ms1_starting_uids, title="MS1 sync with MS2 hits summary")

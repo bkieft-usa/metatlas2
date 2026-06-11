@@ -11,6 +11,7 @@ import json
 
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
+import metatlas2.create_curation_container as ccc
 from metatlas2.note_options import (
     normalize_note_value,
     should_require_note_selection,
@@ -217,7 +218,7 @@ def build_dash_app(
 
     # format of the app itself
     all_notes_len = len(analysis_gui_obj.notes["ms1_notes"]) + len(analysis_gui_obj.notes["ms2_notes"]) + len(analysis_gui_obj.notes["other_notes"])
-    total_plot_height = all_notes_len*70
+    total_plot_height = all_notes_len*80
     ms1_height = total_plot_height*0.6
     ms2_height = total_plot_height*0.4
     app.layout = dbc.Container(
@@ -550,84 +551,64 @@ def build_dash_app(
         return _patch_with_seq(state, **changes)
 
     def _compute_window_ms1_metrics(state):
+        """Recompute MS1 metrics for the analyst-selected RT window.
+
+        Delegates to ccc.analyze_ms1() (stage='post_curation_summary') so that
+        metric definitions are identical to those used during curation object
+        creation:
+          - rt_peak  = mean of each file's highest-intensity in-window RT point
+          - mz       = mean of all in-window mzs across all files
+          - best_*   = values from the single file with the highest peak intensity
+
+        The analyst's [rt_min, rt_max] window replaces the original in_feature
+        mask: any point within the new window is treated as in-feature.
+        """
         row = _compound_row(state["compound_idx"])
         mz_rt_uid = row["mz_rt_uid"]
         rt_min = float(state["rt_min"])
         rt_max = float(state["rt_max"])
-        
+
         sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
         if sub.empty:
             return None
 
-        atlas_mz = row.get("atlas_mz", np.nan)
-        atlas_rt_peak = row.get("atlas_rt_peak", np.nan)
+        # Build a minimal atlas_row dict with the reference values analyze_ms1 needs.
+        atlas_row = {
+            "mz": row.get("atlas_mz", np.nan),
+            "rt_peak": row.get("atlas_rt_peak", np.nan),
+            "rt_min": row.get("atlas_rt_min", np.nan),
+            "rt_max": row.get("atlas_rt_max", np.nan),
+        }
 
-        global_max_int = -np.inf
-        best_point = None
-        all_win_mzs = []
-        all_win_ints = []
-        all_win_rts = []
-
+        # Replace each row's in_feature mask with the analyst's RT window so
+        # analyze_ms1 treats exactly [rt_min, rt_max] as the feature window.
+        rows_with_window_mask = []
         for _, r in sub.iterrows():
-            # Extract lists and convert to arrays
-            rt_arr = np.asarray(r.get("spec_rts", []), dtype=np.float32)
-            int_arr = np.asarray(r.get("spec_ints", []), dtype=np.float32)
-            mz_arr = np.asarray(r.get("spec_mzs", []), dtype=np.float32)
-            feat_mask = np.asarray(r.get("in_feature", []), dtype=bool)
+            rt_arr = np.asarray(r.get("spec_rts", []), dtype=np.float64)
+            window_mask = (rt_arr >= rt_min) & (rt_arr <= rt_max)
+            new_row = r.to_dict()
+            new_row["in_feature"] = window_mask.tolist()
+            rows_with_window_mask.append(new_row)
 
-            if len(rt_arr) == 0: continue
-
-            # Apply feature mask AND RT window mask
-            if len(feat_mask) != len(rt_arr):
-                feat_mask = np.ones(len(rt_arr), dtype=bool)
-                
-            win_mask = (feat_mask) & (rt_arr >= rt_min) & (rt_arr <= rt_max)
-            
-            if not np.any(win_mask):
-                continue
-
-            # Collect data for window averages
-            all_win_mzs.extend(mz_arr[win_mask])
-            all_win_ints.extend(int_arr[win_mask])
-            all_win_rts.extend(rt_arr[win_mask])
-
-            # Find max in this file
-            masked_ints = int_arr[win_mask]
-            local_idx = np.argmax(masked_ints)
-            local_max = masked_ints[local_idx]
-            
-            if local_max > global_max_int:
-                global_max_int = local_max
-                abs_idx = np.where(win_mask)[0][local_idx]
-                best_point = {
-                    "rt": rt_arr[abs_idx],
-                    "mz": mz_arr[abs_idx],
-                    "int": local_max,
-                    "file": r.get("filename", "")
-                }
-
-        if best_point is None:
+        if not rows_with_window_mask:
             return None
 
-        # Compute centroid for the best file's window (matching legacy behavior)
-        # This is a simplification: using the average of all points in the window
-        win_mz_mean = float(np.mean(all_win_mzs))
-        win_rt_peak = float(best_point["rt"])
-        
-        rt_err = win_rt_peak - atlas_rt_peak if pd.notnull(atlas_rt_peak) else float("nan")
-        mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if pd.notnull(atlas_mz) and atlas_mz != 0 else float("nan")
+        windowed_df = pd.DataFrame(rows_with_window_mask)
+        metrics = ccc.analyze_ms1(atlas_row, windowed_df, stage="post_curation_summary")
+        if not metrics:
+            return None
 
         return {
-            "rt_peak": win_rt_peak,
-            "mz": win_mz_mean,
-            "rt_error": rt_err,
-            "mz_error": mz_err,
-            "best_ms1_file": best_point["file"],
-            "best_ms1_rt": win_rt_peak,
-            "best_ms1_mz": float(np.mean(all_win_mzs)),
-            "best_ms1_intensity": float(global_max_int),
-            "best_ms1_ppm_error": mz_err,
-            "best_ms1_rt_error": rt_err,
+            "rt_peak": metrics.get("rt_peak"),
+            "mz": metrics.get("mz"),
+            "rt_error": metrics.get("rt_error"),
+            "mz_error": metrics.get("mz_error"),
+            "best_ms1_file": metrics.get("best_ms1_file"),
+            "best_ms1_rt": metrics.get("best_ms1_rt"),
+            "best_ms1_mz": metrics.get("best_ms1_mz"),
+            "best_ms1_intensity": metrics.get("best_ms1_intensity"),
+            "best_ms1_ppm_error": metrics.get("best_ms1_ppm_error"),
+            "best_ms1_rt_error": metrics.get("best_ms1_rt_error"),
         }
 
     def _flush_to_db(state):
@@ -647,8 +628,6 @@ def build_dash_app(
         row = _compound_row(state["compound_idx"])
 
         # Optimistically reflect user-edited RT bounds in memory immediately.
-        # Async DB writes can finish after navigation, but the UI should still
-        # show the latest local edits when loading related compounds/isomers.
         try:
             idx = state["compound_idx"]
             df_idx = manual_curation_df.index[idx]
@@ -675,6 +654,7 @@ def build_dash_app(
 
                 if use_precomputed:
                     updates = {
+                        "passed_curation": False if "remove" in state.get("ms1_note", "").lower() else True,
                         "mz": row.get("mz", None),
                         "rt_min": state["rt_min"],
                         "rt_max": state["rt_max"],
@@ -699,7 +679,7 @@ def build_dash_app(
                         updates = {}
                     else:
                         updates = {
-                            "curated": True,
+                            "passed_curation": False if "remove" in state.get("ms1_note", "").lower() else True,
                             "mz": window_metrics["mz"],
                             "rt_min": state["rt_min"],
                             "rt_max": state["rt_max"],
@@ -726,10 +706,10 @@ def build_dash_app(
                     with flush_lock:
                         current_latest = latest_flushed_seq_by_session.get(flush_key, -1)
                     if seq < current_latest:
-                        #logger.info(
-                        #    f"Skipping stale flush for compound {state['compound_idx']} "
-                        #    f"seq={seq} (current latest={current_latest})"
-                        #)
+                        logger.debug(
+                           f"Skipping stale flush for compound {state['compound_idx']} "
+                           f"seq={seq} (current latest={current_latest})"
+                        )
                         return
                     dbi.write_curation_updates_to_db(
                         project_db_path=analysis_gui_obj.paths["project_db_path"],
@@ -774,10 +754,6 @@ def build_dash_app(
 
     # main figures for ms data display
     def _make_ms1_figure(state, yaxis_scale="linear"):
-        import time
-        fig_start = time.time()
-        
-        y_bottom = 0.0
 
         lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
@@ -928,7 +904,7 @@ def build_dash_app(
                 fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"
                 fig.add_trace(go.Scatter(
                     x=[iso_rt_min, iso_rt_min, iso_rt_max, iso_rt_max, iso_rt_min],
-                    y=[y_bottom, y_upper_bound, y_upper_bound, y_bottom, y_bottom],
+                    y=[0.0, y_upper_bound, y_upper_bound, 0.0, 0.0],
                     mode="lines",
                     fill="toself",
                     fillcolor=fillcolor,
@@ -1022,7 +998,7 @@ def build_dash_app(
         # Atlas RT peak line (black, static)
         fig.add_trace(go.Scatter(
             x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
-            y=[y_bottom, y_upper_bound],
+            y=[0.0, y_upper_bound],
             mode="lines",
             line=dict(color="black", width=2.5),
             showlegend=False,
@@ -1033,7 +1009,7 @@ def build_dash_app(
         if pd.notnull(row.get("suggested_rt_min")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_min"], row["suggested_rt_min"]],
-                y=[y_bottom, y_upper_bound],
+                y=[0.0, y_upper_bound],
                 mode="lines",
                 line=dict(color="orange", width=2.5),
                 showlegend=False,
@@ -1042,7 +1018,7 @@ def build_dash_app(
         if pd.notnull(row.get("suggested_rt_max")):
             fig.add_trace(go.Scatter(
                 x=[row["suggested_rt_max"], row["suggested_rt_max"]],
-                y=[y_bottom, y_upper_bound],
+                y=[0.0, y_upper_bound],
                 mode="lines",
                 line=dict(color="orange", width=2.5, dash="dash"),
                 showlegend=False,
@@ -1067,8 +1043,8 @@ def build_dash_app(
 
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
-            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['best_ms1_rt']:.4f}  |  RT Δ: {row['best_ms1_rt_error']:.3f}<br>"
-            f"Atlas m/z: {row['atlas_mz']:.4f}  |  Meas M/Z: {row['best_ms1_mz']:.4f}  |  M/Z ppm Δ: {row['best_ms1_ppm_error']:.2f}<br>"
+            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['rt_peak']:.4f}  |  RT Δ: {row['rt_error']:.3f}<br>"
+            f"Atlas m/z: {row['atlas_mz']:.4f}  |  Meas M/Z: {row['mz']:.4f}  |  M/Z ppm Δ: {row['mz_error']:.2f}<br>"
             f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
         )
 
@@ -1118,8 +1094,40 @@ def build_dash_app(
             ),
         )
 
-        fig_time = time.time() - fig_start
-        logger.debug(f"_make_ms1_figure completed in {fig_time:.3f}s")
+        # MS2 scan RT markers: one black dot per scan at y=0, with CE/index/score/RT hover
+        ms2_scans_by_energy = _get_ms2_scans(row, expanded_rt_min, expanded_rt_max)
+        ms2_marker_rts = []
+        ms2_marker_hover = []
+        for _ce, _scans_df in ms2_scans_by_energy.items():
+            if _scans_df.empty or "scan_rt" not in _scans_df.columns:
+                continue
+            _ce_label = _format_collision_energy_label(_ce)
+            for _scan_idx, (_, _scan_row) in enumerate(_scans_df.iterrows()):
+                _rt = _scan_row.get("scan_rt")
+                if _rt is None or (isinstance(_rt, float) and np.isnan(_rt)):
+                    continue
+                _hits = _scan_row.get("hits", [])
+                if isinstance(_hits, list) and len(_hits) > 0 and isinstance(_hits[0], dict):
+                    _score = _hits[0].get("score", None)
+                    _score_str = f"{_score:.4f}" if isinstance(_score, (int, float)) and np.isfinite(_score) else "NA"
+                else:
+                    _score_str = "NA"
+                ms2_marker_rts.append(_rt)
+                ms2_marker_hover.append(
+                    f"CE: {_ce_label}<br>Score: {_score_str}<br>RT: {_rt:.4f} min"
+                )
+        if ms2_marker_rts:
+            fig.add_trace(go.Scatter(
+                x=ms2_marker_rts,
+                y=[0.0] * len(ms2_marker_rts),
+                mode="markers",
+                marker=dict(color="black", size=10, symbol="arrow"),
+                cliponaxis=False,
+                showlegend=False,
+                text=ms2_marker_hover,
+                hovertemplate="%{text}<extra></extra>",
+            ))
+
         return fig
 
     def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, row_idx, col_idx, colors=None, default_color="red", line_width_px=3):
@@ -1836,7 +1844,8 @@ def build_dash_app(
         
         pending = html.Span(
             [
-                "Working analysis: ", html.I(f"{row['compound_name']} ({row['adduct']}) [{state['compound_idx']+1}]"),
+                html.I("Current analysis: ", style={"color": "black"}),
+                html.Br(), f"{row['compound_name']} ({row['adduct']}) [{state['compound_idx']+1}]",
                 html.Br(), f"RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
                 html.Br(), f"MS1: {state['ms1_note']}",
                 html.Br(), f"MS2: {state['ms2_note']}",
@@ -1849,7 +1858,8 @@ def build_dash_app(
             s = state["last_saved"]
             saved = html.Span(
                 [
-                    "Saved: ", html.I(f"{s['name']} ({s['adduct']}) [{s['index']}]"),
+                    html.I("Last Saved: ", style={"color": "black"}),
+                    html.Br(), f"{s['name']} ({s['adduct']}) [{s['index']}]",
                 ],
                 style={"color": "#2a7a2a", "fontSize": "16px", "fontWeight": "bold"},
             )

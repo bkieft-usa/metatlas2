@@ -129,6 +129,46 @@ def generate_slurm_script(args, paths) -> str:
 
     return out_path
 
+def get_project_db_path(project_name: str) -> str:
+    """Derive the project database path from ``project_name`` alone.
+
+    Scans ``{METATLAS_DATA_DIR}/projects/targeted_outputs/`` for a file named
+    ``{project_name}.duckdb`` under any ``owner/user`` subdirectory.  This
+    allows async stages (GUI, summary) to locate the project DB without needing
+    the config YAML on disk.
+
+    Args:
+        project_name: The full project name string.
+
+    Returns:
+        Absolute path to the ``.duckdb`` file.
+
+    Raises:
+        FileNotFoundError: If no matching database file is found.
+        ValueError: If ``METATLAS_DATA_DIR`` is not set.
+    """
+    data_dir = os.environ.get("METATLAS_DATA_DIR")
+    if data_dir is None:
+        raise ValueError(
+            "METATLAS_DATA_DIR environment variable is not set. "
+            "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
+        )
+    base = Path(data_dir) / "projects" / "targeted_outputs"
+    target = f"{project_name}.duckdb"
+    matches = list(base.rglob(target))
+    if not matches:
+        raise FileNotFoundError(
+            f"No project database found for '{project_name}' under {base}. "
+            "Run project setup first."
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple project databases found for '{project_name}': {matches}. "
+            "Specify the path explicitly."
+        )
+    return str(matches[0])
+
+
 def set_up_paths(
     config: Dict[str, Any],
     project_name: str = None,
@@ -185,6 +225,7 @@ def set_up_paths(
         "msms_refs_path": msms_refs_path_resolved,
         "pubchem_cache_path": str(pubchem_cache_path),
         "rt_alignment_output_dir": str(rta_dir),
+        "rt_alignment_results_dir": str(rta_dir / "rt_alignment_results"),
         "aligned_atlases_store_file": str(rta_dir / "rt_aligned_atlases.csv"),
         "analysis_output_dir": str(analysis_dir),
         "auto_ided_atlases_store_file": str(analysis_dir / "auto_ided_atlases.csv"),
@@ -252,41 +293,40 @@ def main():
 
     if not args.skip_setup:
         if not args.log_to_stdout and args.command == "run": print("======--- Setting up project specs...")
-        logger.info("Running Project Setup")
+        logger.info("------------ Running Project Setup")
         wfs.run_project_setup(
             project_name=args.project,
             config=config,
             paths=paths,
             overwrite_existing=args.overwrite,
+            config_path=os.path.abspath(args.config),
+            rt_alignment_number=args.rt_align_num,
+            analysis_number=args.analysis_num,
         )
 
     if not args.skip_rt_align:
         if not args.log_to_stdout and args.command == "run": print("=======-- Running RT alignment...")
-        logger.info("Running RT Alignment ...")
+        logger.info("------------ Running RT Alignment ...")
         wfs.run_rt_alignment(
             project_name=args.project,
             rt_alignment_number=args.rt_align_num,
-            config=config,
-            paths=paths,
+            analysis_number=args.analysis_num,
         )
 
     if not args.skip_auto_id:
         if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
-        logger.info("Running Auto Identification")
+        logger.info("------------ Running Auto Identification")
         wfs.run_auto_identification(
             project_name=args.project,
-            config=config,
-            paths=paths,
             rt_alignment_number=args.rt_align_num,
             analysis_number=args.analysis_num,
             analysis_subset=args.analysis_subset,
-            config_path=os.path.abspath(args.config),
             image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
         )
 
     ### NOT WORKING YET
     if args.skip_curation:
-        logger.info("Skipping curation step is not implemented yet.")
+        logger.info("------------ Skipping curation step is not implemented yet.")
     #     if not args.log_to_stdout and args.command == "run": print("========- Skipping curation step and running summary...")
     #     logger.info("Skipping curation GUI and running summary.")
 
