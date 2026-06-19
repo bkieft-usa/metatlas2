@@ -25,11 +25,11 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     Returns a DataFrame where each row is a compound's curation metadata.
     """
     logger.info("Loading experimental data and atlas for curation metadata creation...")
-    atlas_df = auto_id_obj.pre_autoid_atlas_obj.to_dataframe()
+    atlas_df = auto_id_obj.auto_ided_atlas_obj.to_dataframe()
     ms1_df = auto_id_obj.experimental_data.ms1_df
 
     logger.info("Building indices and isomer map...")
-    isomer_dict = _build_isomer_dict(auto_id_obj.pre_autoid_atlas_obj)
+    isomer_dict = _build_isomer_dict(auto_id_obj.auto_ided_atlas_obj)
 
     logger.info(f"Creating curation container from identified compounds starting from {len(atlas_df)} atlas compounds...")
     curation_records = []    
@@ -83,7 +83,7 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             ms1_summary = analyze_ms1(
                 atlas_row,
                 compound_ms1,
-                apply_bounds_cutoff=auto_id_obj.workflow_params.get('suggested_min_conf', None)
+                apply_bounds_cutoff=auto_id_obj.ta.params.get('suggested_min_conf', None)
             )
             if ms1_summary:
                 curation_entry.update(ms1_summary)
@@ -91,7 +91,7 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
         except KeyError: # no MS1 data for this compound
             pass
 
-        if curation_entry['passed_autoid'] is False and auto_id_obj.workflow_params.get('remove_unided_compounds', False) is True:
+        if curation_entry['passed_autoid'] is False and auto_id_obj.ta.params.get('remove_unided_compounds', False) is True:
             continue
 
         curation_records.append(curation_entry)

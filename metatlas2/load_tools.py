@@ -9,6 +9,7 @@ import grp
 import subprocess
 from matchms import Spectrum
 from typing import Dict, Any
+import tempfile
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
@@ -337,12 +338,9 @@ def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
 
     Returns:
         A fully validated :class:`~metatlas2.workflow_objects.Metatlas2Config`.
-    """
-    import io
-    import tempfile, os
+    """    
 
     # Write to a temp file so load_metatlas2_config can open it normally.
-    # This keeps all validation logic in one place without duplication.
     with tempfile.NamedTemporaryFile(
         mode='w', suffix='.yaml', delete=False, encoding='utf-8'
     ) as tmp:

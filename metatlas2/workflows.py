@@ -20,56 +20,6 @@ import metatlas2.logging_config as lcf
 logger = lcf.get_logger('workflows')
 
 
-def _get_workflow_params(config: "Metatlas2Config", chromatography: str, polarity: str, analysis_type: str, analysis_name: str) -> Dict[str, Any]:
-    """
-    Look up PARAMS for a specific named analysis entry from the config.
-
-    Delegates to :meth:`Metatlas2Config.get_targeted_analysis` and returns
-    the ``params`` dict of the matching :class:`TargetedAnalysis`.
-    """
-    ta = config.get_targeted_analysis(chromatography, polarity, analysis_type, analysis_name)
-    logger.info(f"Loaded workflow parameters for analysis with the following specs:")
-    logger.info(f"  Chromatography: {ta.chromatography}")
-    logger.info(f"  Polarity: {ta.polarity}")
-    logger.info(f"  Analysis type: {ta.analysis_type}")
-    logger.info(f"  Analysis name: {ta.analysis_name}")
-    return ta.params
-
-
-def _atlas_matches_subset(atlas_row, analysis_subset: list) -> bool:
-    """
-    Check if an atlas row matches any entry in the analysis_subset list.
-    Subset entries must be in 'POL-TYPE-NAME' format (e.g. 'POS-EMA-default').
-    """
-    pol = atlas_row['polarity']
-    atype = atlas_row['analysis_type']
-    aname = atlas_row['analysis_name']
-    for subset in analysis_subset:
-        parts = subset.split('-', 2)
-        if len(parts) == 3:
-            s_pol, s_type, s_name = parts
-            if pol == s_pol and atype == s_type and aname == s_name:
-                return True
-        else:
-            raise ValueError(f"Invalid analysis_subset entry '{subset}'. Must be in 'POL-TYPE-NAME' format (e.g. 'POS-EMA-DEFAULT').")
-    return False
-
-
-def _find_free_port(start: int, max_tries: int = 20) -> int:
-    """Return the first free TCP port in [start, start+max_tries)."""
-    for port in range(start, start + max_tries):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("0.0.0.0", port))
-                return port
-            except OSError:
-                continue
-    raise RuntimeError(
-        f"No free port found in the range {start}-{start + max_tries - 1}. "
-        "Close another notebook or specify a different starting port."
-    )
-
-
 def run_project_setup(
     project_name: str,
     config: Dict[str, Any],
@@ -137,7 +87,7 @@ def run_rt_alignment(
         ms_level="ms1"
     )
     
-    logger.info("Retrieving template Atlas from database...")
+    logger.info("Retrieving QC Atlas from database...")
     rt_align_obj.align_atlas_obj = Atlas.from_database(
         database_path=rt_align_obj.paths['main_db_path'],
         atlas_uid=rt_align_obj.align_atlas_uid
@@ -164,11 +114,31 @@ def run_rt_alignment(
     )
     
     logger.info("Passing RTAlign object to alignment applicator...")
-    dbi.create_new_atlases_after_rt_alignment(
-        rt_align_obj=rt_align_obj
-    )
+    for ta in rt_align_obj.config.targeted_analyses:
 
-    logger.info(f"RT alignment procedure complete for RT alignment number {rt_align_obj.rt_alignment_number} and chromatography {rt_align_obj.chromatography}!")
+        rt_align_obj.unaligned_atlas_obj = Atlas.from_database(
+            rt_align_obj.paths['main_db_path'] , 
+            ta.atlas_uid # the atlas from the config
+        )
+
+        logger.info(f"Cloning config Atlas {rt_align_obj.unaligned_atlas_obj.atlas_uid} for RT alignment stage...")
+        rt_align_obj.aligned_atlas_obj = dbi.clone_atlas(
+            obj=rt_align_obj,
+            stage='RT_ALIGNED',
+            ta=ta
+        )
+
+        logger.info("Applying RT alignment model to new Atlas compound_mzrts...")
+        rt_shifted_data = rat.calculate_rt_shifts(
+            rt_align_obj=rt_align_obj,
+        )
+
+        logger.info("Updating RT-aligned Atlas compound_mzrts in database...")
+        dbi.update_compound_mzrt_for_atlas(
+            obj=rt_align_obj,
+            mz_rt_update_df=rt_shifted_data,
+            stage='RT_ALIGNED',
+        )
 
 def run_auto_identification(
     project_name: str,
@@ -203,45 +173,35 @@ def run_auto_identification(
         project_db_path=auto_id_obj.paths['project_db_path'],
     )
 
-    logger.info(f"Retrieving atlases from database for auto identification...")
-    pre_autoid_atlases = dbi.get_atlases_for_stage(
-        project_db_path=auto_id_obj.paths['project_db_path'],
-        rt_alignment_number=auto_id_obj.rt_alignment_number,
-        stage='RT_ALIGNED',
-    )
+    for ta in auto_id_obj.config.targeted_analyses:
+        auto_id_obj.ta = ta
 
-    logger.info(f"Beginning Auto Identification for {len(pre_autoid_atlases)} RT-aligned atlases from RT alignment number {auto_id_obj.rt_alignment_number}.")
-    for _, atlas_to_autoid in pre_autoid_atlases.iterrows():
-        if auto_id_obj.analysis_subset and not _atlas_matches_subset(atlas_to_autoid, auto_id_obj.analysis_subset):
-            logger.info(
-                f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} "
-                f"({atlas_to_autoid['polarity']}-{atlas_to_autoid['analysis_type']}-{atlas_to_autoid['analysis_name']}) "
-                f"since it's not in the specified analysis subset: {auto_id_obj.analysis_subset}"
-            )
-            continue
+        autoid_atlas_info = dbi.get_atlas_uid_from_stage(
+            obj=auto_id_obj,
+            stage='RT_ALIGNED'
+        )
+        if not autoid_atlas_info: continue
 
-        auto_id_obj.pre_autoid_atlas_obj = Atlas.from_database(
+        auto_id_obj.aligned_atlas_obj = Atlas.from_database(
             database_path=auto_id_obj.paths['project_db_path'],
-            atlas_uid=atlas_to_autoid['atlas_uid'],
+            atlas_uid=autoid_atlas_info['atlas_uid'],
             main_db_path=auto_id_obj.paths['main_db_path']
         )
 
-        logger.info(f"Loading workflow parameters for targeted analysis from config...")
-        auto_id_obj.workflow_params = _get_workflow_params(
-            auto_id_obj.config,
-            auto_id_obj.pre_autoid_atlas_obj.chromatography,
-            auto_id_obj.pre_autoid_atlas_obj.polarity,
-            auto_id_obj.pre_autoid_atlas_obj.analysis_type,
-            auto_id_obj.pre_autoid_atlas_obj.analysis_name,
+        logger.info(f"Cloning aligned Atlas {auto_id_obj.aligned_atlas_obj.atlas_uid} for auto identification stage...")
+        auto_id_obj.auto_ided_atlas_obj = dbi.clone_atlas(
+            obj=auto_id_obj,
+            stage='AUTO_IDED',
+            ta=ta
         )
 
         logger.info("Finding LCMSRuns matching criteria for auto identification...")
         auto_id_obj.autoid_lcmsruns = lrt.filter_lcmsruns_list(
             lcmsruns=project_lcmsruns,
-            include_file_type=auto_id_obj.workflow_params.get('include_lcmsruns', []),
-            exclude_file_type=auto_id_obj.workflow_params['exclude_lcmsruns'].get('data_extraction', []),
-            chromatography=auto_id_obj.pre_autoid_atlas_obj.chromatography,
-            polarity=auto_id_obj.pre_autoid_atlas_obj.polarity
+            include_file_type=auto_id_obj.ta.params.get('include_lcmsruns', []),
+            exclude_file_type=auto_id_obj.ta.params['exclude_lcmsruns'].get('data_extraction', []),
+            chromatography=ta.chromatography,
+            polarity=ta.polarity
         )
 
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
@@ -265,8 +225,10 @@ def run_auto_identification(
         )
 
         logger.info("Creating post-auto-ID Atlas from filtered data...")
-        dbi.create_new_atlas_after_auto_id(
-            auto_id_obj=auto_id_obj
+        dbi.update_compound_mzrt_for_atlas(
+            obj=auto_id_obj,
+            mz_rt_update_df=auto_id_obj.experimental_data.curation_df,
+            stage='AUTO_IDED',
         )
 
         logger.info("Passing Atlas object to curation notebook generator...")
@@ -274,15 +236,10 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
-    logger.info(f"Auto identification procedure complete for RT alignment number {auto_id_obj.rt_alignment_number} and analysis number {auto_id_obj.analysis_number}!")
-
     return
 
 def run_analysis_gui(
-    project_name: str,
-    rt_alignment_number: int = None,
-    analysis_number: int = None,
-    post_autoid_atlas: str = None,
+    run_parameters: Dict[str, Any],
     override_parameters: Dict[str, Any] = None,
     dash_app_port: int = 8050,
 ) -> "CurationApp":
@@ -298,49 +255,49 @@ def run_analysis_gui(
     analysis_gui_obj = AnalysisGUI()
 
     analysis_gui_obj.setup(
-        project_name=project_name,
-        rt_alignment_number=rt_alignment_number,
-        analysis_number=analysis_number,
+        run_parameters=run_parameters,
         override_parameters=override_parameters,
     )
 
-    analysis_gui_obj.get_note_options()
-
-    analysis_gui_obj.post_autoid_atlas_obj = Atlas.from_database(
-        database_path=analysis_gui_obj.paths['project_db_path'],
-        atlas_uid=post_autoid_atlas,
-        main_db_path=analysis_gui_obj.paths['main_db_path']
+    logger.info("Looking up Atlas UID for manual curation stage from database based on config parameters...")
+    curation_atlas_info = dbi.get_atlas_uid_from_stage(
+        obj=analysis_gui_obj,
+        stage='AUTO_IDED',
     )
-
-    if analysis_gui_obj.override_parameters:
-        logger.info("Persisting GUI override parameters to workflow_runs table...")
-        dbi.update_config_overrides(
-            project_db_path=analysis_gui_obj.paths['project_db_path'],
-            rt_alignment_number=analysis_gui_obj.rt_alignment_number,
-            analysis_number=analysis_gui_obj.analysis_number,
-            atlas_uid=analysis_gui_obj.post_autoid_atlas_obj.atlas_uid,
-            override_params=analysis_gui_obj.override_parameters,
-            stage='AUTO_IDED',
-        )
-
-    logger.info("Loading workflow parameters for analysis GUI from config...")
-    analysis_gui_obj.workflow_params = _get_workflow_params(
-        analysis_gui_obj.config,
-        analysis_gui_obj.post_autoid_atlas_obj.chromatography,
-        analysis_gui_obj.post_autoid_atlas_obj.polarity,
-        analysis_gui_obj.post_autoid_atlas_obj.analysis_type,
-        analysis_gui_obj.post_autoid_atlas_obj.analysis_name,
+    if curation_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
+        logger.warning(f"Atlas UID for manual curation stage from database {curation_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
+        logger.warning("Please verify that you intended to input a different Atlas UID in the notebook before proceeding.")
+    
+    logger.info(f"Retrieving Atlas UID {curation_atlas_info['atlas_uid']} for manual curation stage.")
+    analysis_gui_obj.auto_ided_atlas_obj = Atlas.from_database(
+        database_path=analysis_gui_obj.paths['project_db_path'],
+        atlas_uid=curation_atlas_info['atlas_uid'],
+        main_db_path=analysis_gui_obj.paths['main_db_path']
     )
 
     logger.info("Loading and filtering GUI inputs...")
     dbi.load_and_filter_for_gui(
-        analysis_gui_obj=analysis_gui_obj,
+        analysis_gui_obj=analysis_gui_obj
     )
 
     logger.info("Launching Analysis GUI...")
     shutdown_holder = [None]
 
+    def _find_free_port(start: int, max_tries: int = 20) -> int:
+        """Return the first free TCP port in [start, start+max_tries)."""
+        for port in range(start, start + max_tries):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("0.0.0.0", port))
+                    return port
+                except OSError:
+                    continue
+        raise RuntimeError(
+            f"No free port found in the range {start}-{start + max_tries - 1}. "
+            "Close another notebook or specify a different starting port."
+        )
     dash_app_port = _find_free_port(dash_app_port)
+
     dash_app = agu.build_dash_app(
         analysis_gui_obj=analysis_gui_obj,
         port=dash_app_port,
@@ -364,10 +321,7 @@ def run_analysis_gui(
     return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
 
 def run_analysis_summary(
-    project_name: str,
-    rt_alignment_number: int,
-    analysis_number: int,
-    post_autoid_atlas: str = None,
+    run_parameters: Dict[str, Any],
     override_parameters: Dict[str, Any] = None,
     overwrite: bool = False,
 ) -> None:
@@ -386,50 +340,49 @@ def run_analysis_summary(
     summary_obj = AnalysisSummary()
     
     summary_obj.setup(
-        project_name=project_name,
-        rt_alignment_number=rt_alignment_number,
-        analysis_number=analysis_number,
+        run_parameters=run_parameters,
+        override_parameters=override_parameters,
     )
 
-    summary_obj.post_autoid_atlas_obj = Atlas.from_database(
+    logger.info("Looking up Atlas UID for analysis summary stage from database based on config parameters...")
+    summary_atlas_info = dbi.get_atlas_uid_from_stage(
+        obj=summary_obj,
+        stage='AUTO_IDED',
+    )
+    if summary_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
+        logger.warning(f"Atlas UID for summary stage from database {summary_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
+        logger.warning("Please verify that you intended to input a different Atlas UID in the notebook before proceeding.")
+    
+    logger.info(f"Retrieving Atlas UID {summary_atlas_info['atlas_uid']} for analysis summary stage.")
+    summary_obj.auto_ided_atlas_obj = Atlas.from_database(
         database_path=summary_obj.paths['project_db_path'],
-        atlas_uid=post_autoid_atlas,
+        atlas_uid=summary_atlas_info['atlas_uid'],
         main_db_path=summary_obj.paths['main_db_path']
     )
 
-    logger.info(f"Loading workflow parameters for analysis summary from config...")
-    summary_obj.workflow_params = _get_workflow_params(
-        summary_obj.config,
-        summary_obj.post_autoid_atlas_obj.chromatography,
-        summary_obj.post_autoid_atlas_obj.polarity,
-        summary_obj.post_autoid_atlas_obj.analysis_type,
-        summary_obj.post_autoid_atlas_obj.analysis_name,
-    )
-    
-    logger.info(f"Setting override parameters for analysis summary...")
-    summary_obj.override_parameters = override_parameters if override_parameters is not None else {}
-
-    logger.info("Passing AnalysisSummary object to new Atlas generator...")
-    dbi.create_new_atlas_after_manual_curation(
-        summary_obj=summary_obj
-    )
-
-    logger.info("Saving post-manual-curation Atlas to database...")
-    dbi.save_curated_atlaes_to_db(
-        summary_obj=summary_obj
-    )
-
-    logger.info("Loading analysis data scoped to post-manual-curation atlas...")
+    logger.info("Loading analysis data scoped to atlas after manual curation...")
     dbi.load_and_filter_for_summary(
         summary_obj=summary_obj,
         update_raw_in_feature=False
     )
 
-    logger.info("Saving post-manual-curation Atlas data to TSV...")
-    ldt.save_atlas_data_to_tsv(
-        atlas_obj=summary_obj.post_curation_atlas_obj,
-        output_path=summary_obj.paths['analysis_output_dir']
+    if summary_obj.ta.params.get("gui_require_all_evaluated", True):
+        logger.info("Checking that all compounds have been evaluated in the GUI before allowing summary generation...")
+        dbi.check_require_evaluated(summary_obj)
+
+    logger.info("Updating compound mz_rt values for the atlas based on the manual curation...")
+    dbi.update_compound_mzrt_for_atlas(
+        obj=summary_obj,
+        mz_rt_update_df=summary_obj.experimental_data.curation_df,
+        stage='AUTO_IDED',
     )
+
+    if summary_obj.override_parameters:
+        logger.info("Persisting GUI override parameters to workflow_runs table...")
+        dbi.update_config_overrides(
+            obj=summary_obj,
+            stage='AUTO_IDED',
+        )
 
     logger.info("Creating and saving summary files and figures to output directory...")
     asm.run_all_summaries(

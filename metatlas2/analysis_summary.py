@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import requests
 import statistics
 import textwrap
 import warnings
@@ -57,13 +58,13 @@ def run_all_summaries(
     overwrite:
         Passed through to all sub-functions.
     """
-    _analysis_name = getattr(summary_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'
-    output_loc = Path(summary_obj.paths.get("analysis_output_dir", None)) / f"{summary_obj.post_autoid_atlas_obj.polarity}-{summary_obj.post_autoid_atlas_obj.analysis_type}-{_analysis_name}"
+    output_loc = Path(summary_obj.paths["analysis_output_dir"]) / f"{summary_obj.ta.chromatography}-{summary_obj.ta.polarity}-{summary_obj.ta.analysis_type}-{summary_obj.ta.analysis_name}"
     os.makedirs(output_loc, exist_ok=True)
+
     if summary_obj.override_parameters.get("skip_outputs") is not None:
         skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
     else:
-        skip_outputs = summary_obj.workflow_params.get("skip_outputs", [])
+        skip_outputs = summary_obj.ta.params.get("skip_outputs", [])
     
     if summary_obj.experimental_data.curation_df is None or summary_obj.experimental_data.curation_df.empty:
         raise ValueError("No manual curation entries found. Please ensure the curation_df is populated before running summaries.")
@@ -106,27 +107,11 @@ def run_all_summaries(
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
         make_metabomap(summary_obj, overwrite=overwrite)
 
-    logger.info("Exporting post-auto-ID atlas data CSV...")
-    summary_obj.post_autoid_atlas_obj.to_dataframe().to_csv(
-        f"{summary_obj.paths['analysis_output_dir']}/{summary_obj.post_autoid_atlas_obj.atlas_uid}.csv", index=False
-    )
-
-    logger.info("Exporting post-curation atlas data CSV...")
-    summary_obj.post_curation_atlas_obj.to_dataframe().to_csv(
-        f"{summary_obj.paths['analysis_output_dir']}/{summary_obj.post_curation_atlas_obj.atlas_uid}.csv", index=False
-    )
-
-    logger.info("Saving input yaml config to analysis output directory...")
-    config_out_path = Path(summary_obj.paths['analysis_output_dir']) / "analysis_config_snapshot.yaml"
-    with open(config_out_path, "w") as f:
-        yaml_dump = summary_obj.config.yaml_dump()
-        f.write(yaml_dump)
-
     gdrive_upload = False
-    if hasattr(summary_obj, "upload_to_gdrive") and summary_obj.override_parameters.get("upload_to_gdrive") is not None:
+    if summary_obj.override_parameters.get("upload_to_gdrive") is not None:
         gdrive_upload = summary_obj.override_parameters["upload_to_gdrive"]
-    elif hasattr(summary_obj, "workflow_params") and summary_obj.workflow_params.get("upload_to_gdrive") is not None:
-        gdrive_upload = summary_obj.workflow_params["upload_to_gdrive"]
+    elif summary_obj.ta.params.get("upload_to_gdrive") is not None:
+        gdrive_upload = summary_obj.ta.params["upload_to_gdrive"]
     if gdrive_upload:
         logger.info("Uploading outputs to Google Drive...")
         rcl.copy_outputs_to_google_drive(summary_obj, overwrite=overwrite)
@@ -167,7 +152,7 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
     force_eval = (
         overrides["gui_require_all_evaluated"]
         if overrides.get("gui_require_all_evaluated") is not None
-        else summary_obj.workflow_params.get("gui_require_all_evaluated", False)
+        else summary_obj.ta.params.get("gui_require_all_evaluated", False)
     )
     if not force_eval:
         return
@@ -315,8 +300,8 @@ def make_identification_figure(
     color_map = None
     if hasattr(summary_obj, "override_parameters") and summary_obj.override_parameters.get("gui_lcmsruns_colors"):
         color_map = summary_obj.override_parameters["gui_lcmsruns_colors"]
-    elif hasattr(summary_obj, "workflow_params") and summary_obj.workflow_params.get("gui_lcmsruns_colors"):
-        color_map = summary_obj.workflow_params["gui_lcmsruns_colors"]
+    elif hasattr(summary_obj, "ta.params") and summary_obj.ta.params.get("gui_lcmsruns_colors"):
+        color_map = summary_obj.ta.params["gui_lcmsruns_colors"]
 
     # Bug fix: was "curation_df", correct attribute is "manual_curation_df"
     manual_curation_df = summary_obj.experimental_data.curation_df
@@ -1008,9 +993,9 @@ def make_final_id_sheet(
     output_loc = Path(output_loc)
     chromatography = summary_obj.chromatography
     analysis_info = (
-        f"{summary_obj.post_curation_atlas_obj.chromatography}"
-        f"-{summary_obj.post_curation_atlas_obj.polarity}"
-        f"-{summary_obj.post_curation_atlas_obj.analysis_type}"
+        f"{summary_obj.auto_ided_atlas_obj.chromatography}"
+        f"-{summary_obj.auto_ided_atlas_obj.polarity}"
+        f"-{summary_obj.auto_ided_atlas_obj.analysis_type}"
     )
     run_info = f"RTA{summary_obj.rt_alignment_number}-TGA{summary_obj.analysis_number}"
     output_filename = f"{summary_obj.project_name}_{analysis_info}-{run_info}_{output_filename}"
@@ -2693,9 +2678,73 @@ def make_peak_height_filtered_csv(
         len(df), len(df.columns) - len(ordered_meta), output_csv,
     )
 
+def _get_modelseed_compounds(cache_path: Path) -> pd.DataFrame:
+    """Load the ModelSEED compounds table, fetching and caching it if needed.
+
+    Parameters
+    ----------
+    cache_path:
+        Permanent local path to store/load the TSV.
+    """
+
+    _MODELSEED_COMPOUNDS_URL = (
+        "https://raw.githubusercontent.com/ModelSEED/ModelSEEDDatabase/"
+        "master/Biochemistry/compounds.tsv"
+    )
+    if cache_path.exists():
+        logger.info("Loading ModelSEED compounds from local cache: %s", cache_path)
+    else:
+        logger.info("Fetching ModelSEED compounds table from %s", _MODELSEED_COMPOUNDS_URL)
+        resp = requests.get(_MODELSEED_COMPOUNDS_URL, timeout=30)
+        resp.raise_for_status()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(resp.text, encoding="utf-8")
+        logger.info("Saved ModelSEED compounds cache → %s", cache_path)
+
+    return pd.read_csv(cache_path, sep="\t", low_memory=False)
+
+
+def _build_inchikey_to_cpd(cache_path: Path) -> dict[str, str]:
+    """Return a mapping of InChIKey → semicolon-joined ModelSEED CPD IDs.
+
+    Rows with no InChIKey are dropped immediately to reduce memory usage.
+    When multiple CPD IDs share the same InChIKey, all are retained and
+    joined with ';' (e.g. ``'cpd00001;cpd99999'``).
+
+    Parameters
+    ----------
+    cache_path:
+        Passed through to :func:`_get_modelseed_compounds`.
+    """
+    df = _get_modelseed_compounds(cache_path)
+
+    if "inchikey" not in df.columns or "id" not in df.columns:
+        logger.error(
+            "ModelSEED compounds TSV does not contain expected columns "
+            "'id' / 'inchikey'. Available: %s", list(df.columns)
+        )
+        return {}
+
+    df = df[["id", "inchikey"]].dropna(subset=["inchikey"])
+    df = df[df["inchikey"].str.strip() != ""]
+
+    mapping = (
+        df.groupby("inchikey")["id"]
+        .agg(lambda ids: ";".join(ids))
+        .to_dict()
+    )
+
+    n_multi = sum(1 for v in mapping.values() if ";" in v)
+    logger.info(
+        "Built InChIKey→CPD mapping: %d unique InChIKeys (%d with multiple CPD IDs).",
+        len(mapping), n_multi,
+    )
+    return mapping
+
 def make_metabomap(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
+    modelseed_cache_path: Optional[Path] = None,
 ) -> None:
     """Merge pos/neg filtered peak-height tables and compute pairwise log2 fold-changes.
 
@@ -2703,18 +2752,18 @@ def make_metabomap(
     type, opposite polarity) exists alongside the current one.  When found, the two
     tables are merged on ``inchi_key``; for compounds shared between polarities the
     higher peak-height value is kept per matched replicate column.  QC and ISTD
-    sample groups are excluded.  Two output CSVs are written to
+    sample groups are excluded.  Two output TSVs are written to
     ``<analysis_output_dir>/metabomaps/``:
 
-    ``merged_peak_heights.csv``
-        One row per unique ``inchi_key``; columns are the sample-group name (index 12
-        of the underscore-split column name, e.g. ``M-HighS-HighL-12h-HeatStr``).
-        Replicate columns share the same group name.  Values are the element-wise
-        maximum across the two polarities (positional matching after sorting within
-        each group alphabetically).
+    ``merged_peak_heights.tsv``
+        One row per unique ``inchi_key``; ID columns are ``inchi_key``, ``cpd_id``
+        (ModelSEED CPD number, or empty string when not found), and
+        ``compound_name``.  Value columns are the sample-group name (index 12 of
+        the underscore-split column name).  Replicate columns share the same group
+        name.  Values are the element-wise maximum across the two polarities.
 
-    ``log_fold_changes.csv``
-        One row per ``inchi_key``; columns are ``group1_vs_group2`` for every
+    ``log_fold_changes.tsv``
+        Same ID columns as above; value columns are ``group1_vs_group2`` for every
         pairwise combination of unique sample groups.  LFC is
         ``log2(mean(group1_replicates) / mean(group2_replicates))``.  Rows or
         pairs where either mean is zero or NaN are set to ``NaN``.
@@ -2725,11 +2774,17 @@ def make_metabomap(
         Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
     overwrite:
         When *False*, skips writing if both output files already exist.
+    modelseed_cache_path:
+        Optional local path for caching the ModelSEED compounds TSV (avoids
+        repeated network requests across runs).  Pass e.g.
+        ``Path('/tmp/modelseed_compounds.tsv')``.
     """
     analysis_output_dir = Path(summary_obj.paths.get("analysis_output_dir"))
-    current_polarity = summary_obj.post_autoid_atlas_obj.polarity   # e.g. "POS"
-    analysis_type    = summary_obj.post_autoid_atlas_obj.analysis_type  # e.g. "EMA"
-    analysis_name    = getattr(summary_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'
+    current_polarity = summary_obj.auto_ided_atlas_obj.polarity        # e.g. "POS"
+    analysis_type    = summary_obj.auto_ided_atlas_obj.analysis_type   # e.g. "EMA"
+    analysis_name    = (
+        getattr(summary_obj.auto_ided_atlas_obj, "analysis_name", "default") or "default"
+    )
 
     if current_polarity.upper() == "POS":
         sibling_polarity = "NEG"
@@ -2751,11 +2806,11 @@ def make_metabomap(
         / "data_sheets" / "peak_height_filtered.csv"
     )
 
-    metabomaps_dir = analysis_output_dir / "metabomaps"
-    merged_csv     = metabomaps_dir / "merged_peak_heights.csv"
-    lfc_csv        = metabomaps_dir / "log_fold_changes.csv"
+    metabomaps_dir  = analysis_output_dir / "metabomaps"
+    merged_tsv      = metabomaps_dir / "merged_peak_heights.tsv"
+    lfc_tsv         = metabomaps_dir / "log_fold_changes.tsv"
 
-    if not overwrite and merged_csv.exists() and lfc_csv.exists():
+    if not overwrite and merged_tsv.exists() and lfc_tsv.exists():
         logger.info(
             "Overwriting disabled: metabomap files already exist in %s", metabomaps_dir
         )
@@ -2777,7 +2832,7 @@ def make_metabomap(
     logger.info("Building metabomap from:\n  %s\n  %s", current_csv, sibling_csv)
 
     # ── Constants ──────────────────────────────────────────────────────────────
-    _META_COLS_SET = {"control_filter", "compound_name", "inchi_key"}
+    _META_COLS_SET  = {"control_filter", "compound_name", "inchi_key"}
     _EXCLUDE_PATTERNS = ("QC", "ISTD")
 
     def _col_group(col: str) -> Optional[str]:
@@ -2798,11 +2853,10 @@ def make_metabomap(
     cur_df = _load_filtered(current_csv)
     sib_df = _load_filtered(sibling_csv)
 
-    # ── Build sorted data column lists (for positional replicate matching) ────
+    # ── Build sorted data column lists ────────────────────────────────────────
     cur_data_cols = [c for c in cur_df.columns if c not in _META_COLS_SET]
     sib_data_cols = [c for c in sib_df.columns if c not in _META_COLS_SET]
 
-    # Sort by (group_name, full_col_name) so replicates are consistently ordered
     cur_sorted = sorted(cur_data_cols, key=lambda c: (_col_group(c), c))
     sib_sorted = sorted(sib_data_cols, key=lambda c: (_col_group(c), c))
 
@@ -2828,7 +2882,7 @@ def make_metabomap(
         merged_data_df = pd.DataFrame(
             merged_vals,
             index=all_inchi_keys,
-            columns=cur_groups,  # rename to group names
+            columns=cur_groups,
         )
     else:
         logger.warning(
@@ -2849,26 +2903,46 @@ def make_metabomap(
     merged_data_df.index.name = "inchi_key"
     merged_data_df = merged_data_df.reset_index()
 
-    # Restore compound_name (prefer current polarity, fall back to sibling)
+    # ── Restore compound_name ─────────────────────────────────────────────────
     compound_names = (
         cur_indexed["compound_name"].combine_first(sib_indexed["compound_name"])
         if "compound_name" in cur_indexed.columns and "compound_name" in sib_indexed.columns
-        else cur_indexed.get("compound_name", sib_indexed.get("compound_name", pd.Series(dtype=str)))
+        else cur_indexed.get(
+            "compound_name", sib_indexed.get("compound_name", pd.Series(dtype=str))
+        )
     )
     merged_data_df.insert(1, "compound_name", merged_data_df["inchi_key"].map(compound_names))
+
+    # ── Add ModelSEED CPD ID column ───────────────────────────────────────────
+    modelseed_cache_path = Path(summary_obj.paths["modelseed_compounds_path"])
+    try:
+        inchikey_to_cpd = _build_inchikey_to_cpd(modelseed_cache_path)
+    except Exception as exc:
+        logger.warning(
+            "Could not retrieve ModelSEED compound data (%s) — 'cpd_id' column "
+            "will be NaN.",
+            exc,
+        )
+        inchikey_to_cpd = {}
+
+    merged_data_df.insert(
+        1,
+        "cpd_id",
+        merged_data_df["inchi_key"].map(inchikey_to_cpd),  # NaN when not found
+    )
 
     logger.info(
         "Merged %d (cur) + %d (sib) → %d unique inchi_keys, %d sample columns",
         len(cur_df), len(sib_df), len(merged_data_df),
-        len(merged_data_df.columns) - 2,
+        len(merged_data_df.columns) - 3,  # exclude the 3 ID columns
     )
 
-    merged_data_df.to_csv(merged_csv, index=False)
-    logger.info("Saved merged peak heights → %s", merged_csv)
+    merged_data_df.to_csv(merged_tsv, sep="\t", index=False)
+    logger.info("Saved merged peak heights → %s", merged_tsv)
 
     # ── Pairwise log2 fold-change table ───────────────────────────────────────
-    lfc_meta = {"inchi_key", "compound_name"}
-    data_cols_renamed = [c for c in merged_data_df.columns if c not in lfc_meta]
+    _lfc_meta = {"inchi_key", "cpd_id", "compound_name"}
+    data_cols_renamed = [c for c in merged_data_df.columns if c not in _lfc_meta]
     unique_groups = list(dict.fromkeys(data_cols_renamed))
 
     if len(unique_groups) < 2:
@@ -2877,7 +2951,6 @@ def make_metabomap(
         )
         return
 
-    # Compute per-group mean across all replicate columns (duplicate column names)
     group_means: dict[str, np.ndarray] = {}
     for grp in unique_groups:
         grp_data = merged_data_df.loc[:, merged_data_df.columns == grp]

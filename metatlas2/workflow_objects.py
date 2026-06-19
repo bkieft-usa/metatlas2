@@ -777,6 +777,8 @@ class RTAlign:
     rt_alignment_params: Dict[str, Any] = field(default_factory=dict)
     aligner_lcmsruns: List[LCMSRun] = field(default_factory=list)
     modeling_data: Optional[pd.DataFrame] = field(default=None)
+    unaligned_atlas_obj: Optional[Atlas] = None
+    aligned_atlas_obj: Optional[Atlas] = None
 
     # Attributes modified by external functions
     rt_shift_stats: Dict[str, Any] = field(default_factory=dict)
@@ -790,17 +792,12 @@ class RTAlign:
     def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int):
         """
         Set up RTAlign object by loading config and paths from the project database.
-
-        Config and paths are loaded from the ``project_config`` table written
-        during ``run_project_setup``.  No YAML file or ``set_up_paths()`` call
-        is required.
         """
 
         logger.info(f"Setting up RTAlign object with RT alignment number {rt_alignment_number}...")
         self.rt_alignment_number = rt_alignment_number
         self.analysis_number = analysis_number
         self.project_name = project_name
-
         self.project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
 
         self.paths = dbi.load_paths_from_db(
@@ -831,24 +828,18 @@ class RTAlign:
             "Copying reference atlases into project DB and registering in workflow_runs..."
         )
         for ta in self.config.targeted_analyses:
-            atlas_obj = Atlas.from_database(
+            self.aligned_atlas_obj = Atlas.from_database(
                 database_path=self.paths['main_db_path'],
                 atlas_uid=ta.atlas_uid
             )
-            atlas_obj.analysis_name = ta.analysis_name
-            atlas_obj.rt_alignment_number = self.rt_alignment_number
-            atlas_obj.analysis_number = None
-            dbi.save_atlas_to_database(
-                atlas_obj=atlas_obj,
-                db_path=self.paths['project_db_path'],
-                main_db_path=self.paths['main_db_path'],
-            )
-            dbi.register_workflow_run(
-                project_db_path=self.paths['project_db_path'],
-                rt_alignment_number=self.rt_alignment_number,
-                analysis_number=None,
-                atlas_obj=atlas_obj,
-                stage='RT_ALIGNED',
+            self.aligned_atlas_obj.analysis_name = ta.analysis_name
+            self.aligned_atlas_obj.rt_alignment_number = self.rt_alignment_number
+            self.aligned_atlas_obj.analysis_number = None
+
+            dbi.save_atlas_to_db_and_disk(
+                obj=self,
+                atlas_to_update=self.aligned_atlas_obj,
+                stage='RT_ALIGNED'
             )
 
     def _check_existing_rt_aligned_atlases(self):
@@ -893,12 +884,12 @@ class AutoIdentification:
     created_date: str = None
 
     # Attributes added during analysis
+    ta: "TargetedAnalysis" = None
     analysis_subset: Optional[List[str]] = None
-    workflow_params: Dict[str, Any] = field(default_factory=dict)
     autoid_lcmsruns: List[LCMSRun] = field(default_factory=list)
     experimental_data: Optional[ExperimentalData] = None
-    pre_autoid_atlas_obj: Optional[Atlas] = None
-    post_autoid_atlas_obj: Optional[Atlas] = None
+    aligned_atlas_obj: Optional[Atlas] = None
+    auto_ided_atlas_obj: Optional[Atlas] = None
 
     # Paths and config
     image_tag: str = "latest"
@@ -909,10 +900,6 @@ class AutoIdentification:
         """
         Set up AutoIdentification object by loading config and paths from the
         project database.
-
-        Config and paths are loaded from the ``project_config`` table written
-        during ``run_project_setup``.  No YAML file or ``set_up_paths()`` call
-        is required.
         """
         logger.info(f"Setting up AutoIdentification object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
         self.rt_alignment_number = rt_alignment_number
@@ -920,20 +907,20 @@ class AutoIdentification:
         self.project_name = project_name
         self.analysis_subset = analysis_subset
         self.image_tag = image_tag
-
-        project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
+        self.project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
 
         self.paths = dbi.load_paths_from_db(
-            project_db_path=project_db_path,
-            rt_alignment_number=rt_alignment_number,
-            analysis_number=analysis_number,
+            project_db_path=self.project_db_path,
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
         )
         self.config = dbi.load_config_from_db(
-            project_db_path=project_db_path,
-            rt_alignment_number=rt_alignment_number,
-            analysis_number=analysis_number,
+            project_db_path=self.project_db_path,
+            rt_alignment_number=self.rt_alignment_number,
+            analysis_number=self.analysis_number,
         )
 
+        self.owner = self.config.owner
         self.chromatography = self.config.chromatography
         self.msms_refs_db_filter = self.config.msms_refs_db_filter
 
@@ -950,7 +937,7 @@ class AutoIdentification:
         if autoided_count > 0:
             raise ValueError(
                 f"AutoID-aligned atlases already exist for RTA{self.rt_alignment_number} and TGA{self.analysis_number} "
-                f"To run a new AutoID, increment analysis_number. "
+                f"To run a new AutoID analysis, increment analysis_number in the command line call. "
             )
 
 @dataclass
@@ -973,9 +960,8 @@ class AnalysisGUI:
     owner: str = "jgi"
 
     # Attributes added during analysis
-    workflow_params: Dict[str, Any] = field(default_factory=dict)
-    post_autoid_atlas_obj: Optional[Atlas] = None
-    post_curation_atlas_obj: Optional[Atlas] = None
+    ta: "TargetedAnalysis" = None
+    auto_ided_atlas_obj: Optional[Atlas] = None
 
     # ExperimentalData loaded from the DB (filtered by override thresholds)
     experimental_data: Optional[Any] = None
@@ -987,37 +973,48 @@ class AnalysisGUI:
     ms2_hits_df: Optional[pd.DataFrame] = None
     override_parameters: Dict[str, Any] = field(default_factory=dict)
 
-    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, override_parameters: Optional[Dict[str, Any]] = None):
+    def setup(
+        self, 
+        run_parameters: Dict[str, Any],
+        override_parameters: Optional[Dict[str, Any]] = None
+    ):
         """
         Set up AnalysisGUI object.
         Populates paths, config, and relevant atlas UID.
         """
-        logger.info(f"Setting up AnalysisGUI object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
-        self.rt_alignment_number = rt_alignment_number
-        self.analysis_number = analysis_number
-        self.project_name = project_name
+        logger.info(f"Setting up AnalysisGUI object for RT alignment number {run_parameters['rt_alignment_number']}, analysis number {run_parameters['analysis_number']} for project {run_parameters['project_name']}...")
+        self.rt_alignment_number = run_parameters['rt_alignment_number']
+        self.analysis_number = run_parameters['analysis_number']
+        self.chromatography = run_parameters['chromatography']
+        self.polarity = run_parameters['polarity']
+        self.analysis_type = run_parameters['analysis_type']
+        self.analysis_name = run_parameters['analysis_name']
+        self.project_name = run_parameters['project_name']
+        self.project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
 
-        project_db_path = rtg.get_project_db_path(self.project_name)
         self.config = dbi.load_config_from_db(
-            project_db_path=project_db_path,
+            project_db_path=self.project_db_path,
             rt_alignment_number=self.rt_alignment_number,
             analysis_number=self.analysis_number,
         )
-        if self.config is None:
-            raise RuntimeError(
-                f"No config found in project database at {project_db_path} "
-                f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
-                "Ensure run_project_setup was called with a config_path."
-            )
-        logger.info("Config loaded from project database.")
 
         self.owner = self.config.owner
-        self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
+        self.paths = rtg.set_up_paths(
+            config=self.config, 
+            project_name=self.project_name, 
+            rt_alignment_number=self.rt_alignment_number, 
+            analysis_number=self.analysis_number
+        )
+
         if override_parameters is not None:
             self.override_parameters = override_parameters
-        dbi.validate_override_parameters(self.override_parameters)
-        
-    def get_note_options(self):
+            dbi.validate_override_parameters(self.override_parameters)
+
+        self._get_note_options()
+
+        self.ta = self.config.get_targeted_analysis(self.chromatography, self.polarity, self.analysis_type, self.analysis_name)
+
+    def _get_note_options(self):
         """Get note options from config for manual curation."""
         
         ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=self.owner)
@@ -1059,10 +1056,9 @@ class AnalysisSummary:
     polarity: str = None
 
     # Attributes added during analysis
-    workflow_params: Dict[str, Any] = field(default_factory=dict)
+    ta: "TargetedAnalysis" = None
     override_parameters: Dict[str, Any] = field(default_factory=dict)
-    post_autoid_atlas_obj: Optional[Atlas] = None
-    post_curation_atlas_obj: Optional[Atlas] = None
+    auto_ided_atlas_obj: Optional[Atlas] = None
     summary_data: Optional[pd.DataFrame] = None
 
     # Pre-loaded data tables (populated by load_data())
@@ -1075,33 +1071,75 @@ class AnalysisSummary:
     config: Optional["Metatlas2Config"] = None
 
     def setup(
-        self,
-        project_name: str,
-        rt_alignment_number: int,
-        analysis_number: int,
+        self, 
+        run_parameters: Dict[str, Any],
+        override_parameters: Optional[Dict[str, Any]] = None
     ):
         """
         Set up AnalysisSummary object.
         Populates paths, config, and relevant atlas UID.
         """
-        logger.info(f"Setting up AnalysisSummary object for RT alignment number {rt_alignment_number}, analysis number {analysis_number} for project {project_name}...")
-        self.rt_alignment_number = rt_alignment_number
-        self.analysis_number = analysis_number
-        self.project_name = project_name
+        logger.info(f"Setting up AnalysisSummary object for RT alignment number {run_parameters['rt_alignment_number']}, analysis number {run_parameters['analysis_number']} for project {run_parameters['project_name']}...")
+        self.rt_alignment_number = run_parameters['rt_alignment_number']
+        self.analysis_number = run_parameters['analysis_number']
+        self.chromatography = run_parameters['chromatography']
+        self.polarity = run_parameters['polarity']
+        self.analysis_type = run_parameters['analysis_type']
+        self.analysis_name = run_parameters['analysis_name']
+        self.project_name = run_parameters['project_name']
+        self.project_db_path = rtg.get_project_db_path(self.project_name) # hack to grab db path before paths is set
 
-        project_db_path = rtg.get_project_db_path(self.project_name)
         self.config = dbi.load_config_from_db(
-            project_db_path=project_db_path,
+            project_db_path=self.project_db_path,
             rt_alignment_number=self.rt_alignment_number,
             analysis_number=self.analysis_number,
         )
-        if self.config is None:
-            raise RuntimeError(
-                f"No config found in project database at {project_db_path} "
-                f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
-                "Ensure run_project_setup was called with a config_path."
-            )
-        logger.info("Config loaded from project database.")
 
-        self.chromatography = self.config.chromatography
-        self.paths = rtg.set_up_paths(config=self.config, project_name=self.project_name, rt_alignment_number=self.rt_alignment_number, analysis_number=self.analysis_number)
+        self.owner = self.config.owner
+        self.paths = rtg.set_up_paths(
+            config=self.config, 
+            project_name=self.project_name, 
+            rt_alignment_number=self.rt_alignment_number, 
+            analysis_number=self.analysis_number
+        )
+
+        if override_parameters is not None:
+            self.override_parameters = override_parameters
+            dbi.validate_override_parameters(self.override_parameters)
+
+        self._get_note_options()
+
+        self.ta = self.config.get_targeted_analysis(self.chromatography, self.polarity, self.analysis_type, self.analysis_name)
+
+    def _get_note_options(self):
+        """Get note options from config for manual curation."""
+        
+        ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=self.owner)
+        ms1_options, ms1_hotkeys = gno.get_note_options_and_hotkeys(
+            self.override_parameters["note_options_overrides"].get("ms1_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
+            ms1_notes_opts,
+        )
+        ms2_options, ms2_hotkeys = gno.get_note_options_and_hotkeys(
+            self.override_parameters["note_options_overrides"].get("ms2_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
+            ms2_notes_opts,
+        )
+        other_options, other_hotkeys = gno.get_note_options_and_hotkeys(
+            self.override_parameters["note_options_overrides"].get("other_notes", {}) if self.override_parameters.get("note_options_overrides") else {},
+            other_notes_opts,
+        )
+
+        ms1_key_to_label = {v: k for k, v in ms1_hotkeys.items()}
+        ms2_key_to_label = {v: k for k, v in ms2_hotkeys.items()}
+        other_key_to_label = {v: k for k, v in other_hotkeys.items()}
+
+        self.notes = {
+            "ms1_notes": ms1_options,
+            "ms1_hotkeys": ms1_hotkeys,
+            "ms2_notes": ms2_options,
+            "ms2_hotkeys": ms2_hotkeys,
+            "other_notes": other_options,
+            "other_hotkeys": other_hotkeys,
+            "ms1_key_to_label": ms1_key_to_label,
+            "ms2_key_to_label": ms2_key_to_label,
+            "other_key_to_label": other_key_to_label
+        }

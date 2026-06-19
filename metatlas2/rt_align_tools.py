@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Dict, Tuple
 from tqdm.auto import tqdm
+import json
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
@@ -326,3 +327,72 @@ def build_rt_alignment_model(
     rt_align_obj.modeling_data = modeling_results_df
 
     return
+
+def calculate_rt_shifts(rt_align_obj: "RTAlign") -> pd.DataFrame:
+    # Apply RT shifts to the template atlas compound mzrt uids and save the new bounds to a dataframe
+    all_rt_shifts = []
+    per_compound_rt_shifts = []
+    new_compound_mzrts = {}
+    for mz_rt_uid, comp_ref in rt_align_obj.aligned_atlas_obj.compound_mzrts.items():
+        aligned_rt_peak = float(_apply_rt_model([comp_ref.rt_peak], rt_align_obj.rt_alignment_model)[0])
+        if rt_align_obj.rt_alignment_params['apply_model_to_min_max']:
+            aligned_rt_min = float(_apply_rt_model([comp_ref.rt_min], rt_align_obj.rt_alignment_model)[0])
+            aligned_rt_max = float(_apply_rt_model([comp_ref.rt_max], rt_align_obj.rt_alignment_model)[0])
+        else:
+            window = comp_ref.rt_max - comp_ref.rt_min
+            aligned_rt_min = aligned_rt_peak - window / 2
+            aligned_rt_max = aligned_rt_peak + window / 2
+
+        rt_shift = aligned_rt_peak - comp_ref.rt_peak
+        all_rt_shifts.append(rt_shift)
+        per_compound_rt_shifts.append({
+            'compound_name': comp_ref.compound_name,
+            'inchi_key': comp_ref.inchi_key,
+            'adduct': comp_ref.adduct,
+            'mz_rt_uid': mz_rt_uid,
+            'original_rt_peak': float(comp_ref.rt_peak),
+            'aligned_rt_peak': aligned_rt_peak,
+            'rt_shift': rt_shift,
+        })
+        new_compound_mzrts[mz_rt_uid] = {"rt_peak": aligned_rt_peak, "rt_min": aligned_rt_min, "rt_max": aligned_rt_max}
+
+    # Save and print RT shift stats per-compound for this atlas
+    output_fname = f"rt_shifts_for_{rt_align_obj.aligned_atlas_obj.atlas_uid}.json" 
+    _save_rt_aligned_stats_to_json(
+        all_rt_shifts=all_rt_shifts,
+        per_compound_rt_shifts=per_compound_rt_shifts,
+        output_file=output_fname,
+        output_dir=rt_align_obj.paths['rt_alignment_results_dir'],
+    )
+
+    return pd.DataFrame([{'mz_rt_uid': k, **v} for k, v in new_compound_mzrts.items()])
+
+def _apply_rt_model(atlas_rt_values, model_info):
+    """Apply RT alignment model to Atlas RT values."""
+    X_new = np.array(atlas_rt_values).reshape(-1, 1)
+    X_new_poly = model_info['poly_features'].transform(X_new)
+    aligned_rt = model_info['model'].predict(X_new_poly)
+    return aligned_rt
+
+def _save_rt_aligned_stats_to_json(
+    all_rt_shifts: list[float], 
+    per_compound_rt_shifts: dict[str, float],
+    output_file: str,
+    output_dir: str
+) -> None:
+    rt_shift_stats = {}
+    if all_rt_shifts:
+        rt_shift_stats = {
+            'rt_shift_min': float(np.min(all_rt_shifts)),
+            'rt_shift_max': float(np.max(all_rt_shifts)),
+            'rt_shift_median': float(np.median(all_rt_shifts)),
+        }
+
+    # Save per-compound RT shift data with summary stats at the top
+    rt_shift_output = {
+        'stats': rt_shift_stats,
+        'compounds': per_compound_rt_shifts,
+    }
+    rt_shift_stats_path = Path(output_dir) / f"{output_file}"
+    with open(rt_shift_stats_path, "w") as f:
+        json.dump(rt_shift_output, f, indent=4)

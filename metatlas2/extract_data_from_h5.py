@@ -5,8 +5,8 @@ import sys
 from tqdm.auto import tqdm
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
 from pathlib import Path
+from typing import Union
 
 import metatlas2.logging_config as lcf
 import metatlas2.load_tools as ldt
@@ -382,14 +382,16 @@ def _join_metadata(ms1_df, ms2_df, atlas):
         ms2_df = ms2_df.merge(meta_df, on="mz_rt_uid", how="left")
     return ms1_df, ms2_df
 
-def extract_data_from_raw(obj):
+def extract_data_from_raw(
+    obj: Union["RTAlign", "AutoIdentification"]
+):
     from metatlas2.workflow_objects import ExperimentalData
     
     stage = "rt_alignment" if hasattr(obj, "rt_alignment_params") else "auto_identification"
-    atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.pre_autoid_atlas_obj
+    atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.auto_ided_atlas_obj
     polarity = "positive" if atlas.polarity.lower() == "pos" else "negative" if atlas.polarity.lower() == "neg" else atlas.polarity.lower()
     lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns
-    wp = obj.rt_alignment_params if stage == "rt_alignment" else obj.workflow_params
+    wp = obj.rt_alignment_params if stage == "rt_alignment" else obj.ta.params
     
     used_params = [
         "atlas_extra_time", "ms1_mz_tolerance_ppm", "only_keep_data_in_feature",

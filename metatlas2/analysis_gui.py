@@ -30,17 +30,17 @@ def build_dash_app(
     #logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
     # Set some params
-    top_n_hits = analysis_gui_obj.workflow_params.get("gui_top_n_hits", 20)
+    top_n_hits = analysis_gui_obj.ta.params.get("gui_top_n_hits", 20)
     if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
         top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
     async_flush_errors: dict = {}
 
     # Extract metadata for display
     project_shortname = analysis_gui_obj.project_name.split("_")[4]
-    chrom = analysis_gui_obj.post_autoid_atlas_obj.chromatography
-    pol = analysis_gui_obj.post_autoid_atlas_obj.polarity
-    analysis_type = analysis_gui_obj.post_autoid_atlas_obj.analysis_type
-    analysis_name = getattr(analysis_gui_obj.post_autoid_atlas_obj, 'analysis_name', 'default') or 'default'
+    chrom = analysis_gui_obj.chromatography
+    pol = analysis_gui_obj.polarity
+    analysis_type = analysis_gui_obj.analysis_type
+    analysis_name = analysis_gui_obj.analysis_name
     rta = analysis_gui_obj.rt_alignment_number
     tga = analysis_gui_obj.analysis_number
 
@@ -218,7 +218,7 @@ def build_dash_app(
 
     # format of the app itself
     all_notes_len = len(analysis_gui_obj.notes["ms1_notes"]) + len(analysis_gui_obj.notes["ms2_notes"]) + len(analysis_gui_obj.notes["other_notes"])
-    total_plot_height = all_notes_len*80
+    total_plot_height = all_notes_len*75
     ms1_height = total_plot_height*0.6
     ms2_height = total_plot_height*0.4
     app.layout = dbc.Container(
@@ -755,7 +755,7 @@ def build_dash_app(
     # main figures for ms data display
     def _make_ms1_figure(state, yaxis_scale="linear"):
 
-        lcmsruns_color_map = analysis_gui_obj.workflow_params.get("gui_lcmsruns_colors", {})
+        lcmsruns_color_map = analysis_gui_obj.ta.params.get("gui_lcmsruns_colors", {})
         if analysis_gui_obj.override_parameters['gui_lcmsruns_colors'] is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']            
     
@@ -1406,7 +1406,7 @@ def build_dash_app(
 
     def _get_force_eval_and_warnings(state, delta):
         """Return warning messages for required-evaluation navigation logic."""
-        force_eval = analysis_gui_obj.workflow_params.get("gui_require_all_evaluated", False)
+        force_eval = analysis_gui_obj.ta.params.get("gui_require_all_evaluated", False)
         if analysis_gui_obj.override_parameters["gui_require_all_evaluated"] is not None:
             force_eval = analysis_gui_obj.override_parameters["gui_require_all_evaluated"]
         ms2_warning = None
