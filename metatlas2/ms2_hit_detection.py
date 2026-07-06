@@ -286,7 +286,7 @@ def _assign_hits(ms2_df, results_map):
 def find_ms2_hits(auto_id_obj):
     dataset = auto_id_obj.experimental_data
     wp = auto_id_obj.ta.params
-    polarity = auto_id_obj.polarity
+    polarity = auto_id_obj.ta.polarity
     
     ms2_df = dataset.ms2_df
     if ms2_df.empty:

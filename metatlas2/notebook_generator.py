@@ -62,8 +62,7 @@ def generate_gui_notebooks(
         f"_{run_params['chromatography']}"
         f"_{run_params['polarity']}"
         f"_{run_params['analysis_type']}"
-        f"-{run_params['analysis_name']}"
-        f"_{run_params['polarity']}"
+        f"_{run_params['analysis_name']}"
         f".ipynb"
     )
     out_path = os.path.join(auto_id_obj.paths['analysis_output_dir'], fname)

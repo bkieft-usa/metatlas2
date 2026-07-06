@@ -63,8 +63,27 @@ def load_msms_refs_file(
     )
 
 
+    # Normalize polarity to the long lowercase form used in the refs file
+    # ('positive'/'negative') so callers can pass 'POS'/'NEG', 'pos'/'neg',
+    # 'positive'/'negative', etc. without causing a silent mismatch.
+    _POLARITY_MAP = {
+        'pos': 'positive', 'positive': 'positive',
+        'neg': 'negative', 'negative': 'negative',
+    }
+    if polarity is not None:
+        polarity_norm = _POLARITY_MAP.get(polarity.lower())
+        if polarity_norm is None:
+            raise ValueError(
+                f"Unrecognised polarity value {polarity!r}. "
+                f"Expected one of: {list(_POLARITY_MAP.keys())}"
+            )
+    else:
+        polarity_norm = None
+
     refs_by_inchi_key: dict[str, list[Spectrum]] = {}
     n_skipped = 0
+    n_db_filtered = 0
+    n_pol_filtered = 0
     inchi_key_set = set(inchi_keys) if inchi_keys is not None else None
 
     with file_path.open('r') as fh:
@@ -80,11 +99,12 @@ def load_msms_refs_file(
                 n_skipped += 1
                 continue
 
-
             if database_filter and rec.get('database') != database_filter:
+                n_db_filtered += 1
                 continue
 
-            if polarity and rec.get('polarity') != polarity:
+            if polarity_norm and rec.get('polarity') != polarity_norm:
+                n_pol_filtered += 1
                 continue
 
             rec_inchi_key = rec.get('inchi_key', '')
@@ -135,12 +155,20 @@ def load_msms_refs_file(
             refs_by_inchi_key.setdefault(inchi_key, []).append(spec)
 
     if not refs_by_inchi_key:
+        parts = []
         if database_filter:
-            raise ValueError(
-                f"No spectra matched database_filter={database_filter!r} in {file_path}. "
-                f"Check the filter value or the 'database' field in the source file."
+            parts.append(
+                f"database_filter={database_filter!r} filtered out {n_db_filtered} record(s)"
             )
-        raise ValueError(f"Reference file {file_path} is empty after parsing.")
+        if polarity_norm:
+            parts.append(
+                f"polarity={polarity!r} (normalised to {polarity_norm!r}) filtered out {n_pol_filtered} record(s)"
+            )
+        detail = "; ".join(parts) if parts else "file may be empty or all records were unparseable"
+        raise ValueError(
+            f"No spectra remained after filtering in {file_path}. {detail}. "
+            f"Check filter values and the 'database'/'polarity' fields in the source file."
+        )
 
     total = sum(len(v) for v in refs_by_inchi_key.values())
     logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
@@ -152,6 +180,7 @@ def load_msms_refs_file(
 def _validate_rt_alignment_params(params: Dict[str, Any], location: str) -> Dict[str, Any]:
     """Validate and coerce a single PARAMS block from RT_ALIGNMENT.
     """
+    params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', False))
     params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT
     params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
     params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))

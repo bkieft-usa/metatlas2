@@ -51,8 +51,8 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             'atlas_rt_min': atlas_row.get('rt_min', 0.0),
             'atlas_rt_max': atlas_row.get('rt_max', 0.0),
             'mz': atlas_row.get('mz', 0.0),
-            'rt_peak': atlas_row.get('rt_peak', 0.0), 
-            'rt_min': atlas_row.get('rt_min', 0.0), 
+            'rt_peak': atlas_row.get('rt_peak', 0.0),
+            'rt_min': atlas_row.get('rt_min', 0.0),
             'rt_max': atlas_row.get('rt_max', 0.0),
             'initial_rt_min': atlas_row.get('rt_min', 0.0),
             'initial_rt_max': atlas_row.get('rt_max', 0.0),
@@ -75,7 +75,14 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             'suggested_rt_min': 0.0,
             'suggested_rt_max': 0.0,
             'suggested_rt_peak': 0.0,
-            'rt_suggestion_confidence': 0.0
+            'rt_suggestion_confidence': 0.0,
+            # PubChem / chemical metadata — carried from the atlas (compounds table join)
+            'formula': atlas_row.get('formula', ''),
+            'smiles': atlas_row.get('smiles', ''),
+            'inchi': atlas_row.get('inchi', ''),
+            'pubchem_cid': atlas_row.get('pubchem_cid', ''),
+            'mono_isotopic_molecular_weight': atlas_row.get('mono_isotopic_molecular_weight', 0.0),
+            'iupac_name': atlas_row.get('iupac_name', ''),
         }
 
         try:
@@ -175,6 +182,10 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
         if not rt_arrays or not in_feature_rt:
             return {}
 
+    if not in_feature_rt or not in_feature_int:
+        return {}
+
+    if stage == "manual_curation_creator":
         # 2. EIC Calculation (Vectorized, all data)
         all_rts = np.unique(np.concatenate(rt_arrays))
         max_eic_intensity = np.max([
@@ -191,26 +202,22 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
     mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if atlas_mz else 0.0
 
     if stage == "manual_curation_creator":
-        # 4. RT Suggestion (using the best trace found)
-        best_trace_data = None
-        if best_file_info:
-            # Find the row for the best file
-            best_row = compound_ms1_df[compound_ms1_df['filename'] == best_file_info['best_ms1_file']]
-            if not best_row.empty:
-                best_rt_list = best_row.iloc[0].get('spec_rts', [])
-                best_int_list = best_row.iloc[0].get('spec_ints', [])
-                best_in_feature = best_row.iloc[0].get('in_feature', [True]*len(best_rt_list))
-                best_rt_arr = np.asarray(best_rt_list)
-                best_int_arr = np.asarray(best_int_list)
-                best_in_feature_mask = np.asarray(best_in_feature, dtype=bool)
-                best_trace_data = {
-                    'rt': best_rt_arr[best_in_feature_mask],
-                    'i': best_int_arr[best_in_feature_mask]
-                }
+        # 4. RT Suggestion (using average EIC across all files)
+        avg_trace_data = None
+        if rt_arrays:
+            all_rts = np.unique(np.concatenate(rt_arrays))  # already computed above
+            avg_eic_intensity = np.mean([
+                np.interp(all_rts, r, i, left=0, right=0)
+                for r, i in zip(rt_arrays, int_arrays)
+            ], axis=0)
+            avg_trace_data = {
+                'rt': all_rts,
+                'i': avg_eic_intensity
+            }
 
         suggestion = _suggest_rt_bounds_from_ms1(
-            best_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max
-        ) if best_trace_data else None
+            avg_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max
+        ) if avg_trace_data else None
 
     # Assemble result
     res = best_file_info.copy() if best_file_info else {}

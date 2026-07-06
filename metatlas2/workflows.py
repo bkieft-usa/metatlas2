@@ -3,6 +3,7 @@ import logging
 import socket
 import threading, time, os
 from IPython.display import display, HTML
+from pathlib import Path
 
 from werkzeug.serving import make_server
 
@@ -17,6 +18,7 @@ import metatlas2.analysis_summary as asm
 import metatlas2.notebook_generator as nbg
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
+import metatlas2.gdrive_upload as gdu
 logger = lcf.get_logger('workflows')
 
 
@@ -29,12 +31,6 @@ def run_project_setup(
     rt_alignment_number: int = None,
     analysis_number: int = None,
 ) -> None:
-    """
-    Creates project database and loads LCMS run files.
-    When ``config_path``, ``rt_alignment_number``, and ``analysis_number`` are
-    all provided, saves a single config snapshot to the project database keyed
-    by RTA+TGA.  All subsequent workflow stages read the config from this row.
-    """
 
     from metatlas2.workflow_objects import Project
 
@@ -55,9 +51,6 @@ def run_rt_alignment(
     rt_alignment_number: int,
     analysis_number: int,
 ) -> None:
-    """Run fresh RT alignment using an RT alignment atlas.
-    Config and paths are loaded automatically from the project database.
-    """
 
     from metatlas2.workflow_objects import RTAlign, Atlas
 
@@ -140,6 +133,10 @@ def run_rt_alignment(
             stage='RT_ALIGNED',
         )
 
+    if rt_align_obj.rt_alignment_params.get('upload_to_gdrive', False):
+        logger.info("Uploading RT alignment results to Google Drive...")
+        gdu.copy_outputs_to_google_drive(rt_align_obj, "RT_ALIGNMENT", overwrite=False)
+
 def run_auto_identification(
     project_name: str,
     rt_alignment_number: int = None,
@@ -147,14 +144,6 @@ def run_auto_identification(
     analysis_subset: list = None,
     image_tag: str = "latest",
 ) -> Dict[str, int]:
-    """
-    Runs targeted analysis using RT-aligned atlases from database.
-    Can be run independently if RT alignment has been completed.
-    Config and paths are loaded automatically from the project database.
-
-    Returns:
-        Dict with analysis statistics: {atlas_uid: num_identifications}
-    """
 
     from metatlas2.workflow_objects import Atlas, AutoIdentification
 
@@ -174,7 +163,10 @@ def run_auto_identification(
     )
 
     for ta in auto_id_obj.config.targeted_analyses:
+        
         auto_id_obj.ta = ta
+        auto_id_obj.paths['analysis_results_output_dir'] = Path(auto_id_obj.paths["analysis_output_dir"]) / f"{auto_id_obj.ta.chromatography}-{auto_id_obj.ta.polarity}-{auto_id_obj.ta.analysis_type}-{auto_id_obj.ta.analysis_name}"
+        os.makedirs(auto_id_obj.paths['analysis_results_output_dir'], exist_ok=True)
 
         autoid_atlas_info = dbi.get_atlas_uid_from_stage(
             obj=auto_id_obj,
@@ -243,12 +235,6 @@ def run_analysis_gui(
     override_parameters: Dict[str, Any] = None,
     dash_app_port: int = 8050,
 ) -> "CurationApp":
-    """
-    Runs the analysis GUI for interactive exploration of results.
-    Requires RT alignment and auto identification to have been completed.
-
-    Config is loaded automatically from the project database
-    """
 
     from metatlas2.workflow_objects import Atlas, AnalysisGUI
 
@@ -262,7 +248,7 @@ def run_analysis_gui(
     logger.info("Looking up Atlas UID for manual curation stage from database based on config parameters...")
     curation_atlas_info = dbi.get_atlas_uid_from_stage(
         obj=analysis_gui_obj,
-        stage='AUTO_IDED',
+        stage='AUTO_IDED', # updated data during GUI only lives in curation_df for now
     )
     if curation_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
         logger.warning(f"Atlas UID for manual curation stage from database {curation_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
@@ -325,15 +311,6 @@ def run_analysis_summary(
     override_parameters: Dict[str, Any] = None,
     overwrite: bool = False,
 ) -> None:
-    """
-    Run all summary outputs for a completed analysis.
-
-    Creates and configures an :class:`AnalysisSummary` object, loads all
-    analysis data tables from the project database exactly once, then
-    produces all summary files in order.
-
-    Config is loaded automatically from the project database
-    """
 
     from metatlas2.workflow_objects import Atlas, AnalysisSummary
 
@@ -347,7 +324,7 @@ def run_analysis_summary(
     logger.info("Looking up Atlas UID for analysis summary stage from database based on config parameters...")
     summary_atlas_info = dbi.get_atlas_uid_from_stage(
         obj=summary_obj,
-        stage='AUTO_IDED',
+        stage='AUTO_IDED', # start with auto ided atlas again (like GUI), but this time clone and update based on mc GUI (curation_df)
     )
     if summary_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
         logger.warning(f"Atlas UID for summary stage from database {summary_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
@@ -358,6 +335,13 @@ def run_analysis_summary(
         database_path=summary_obj.paths['project_db_path'],
         atlas_uid=summary_atlas_info['atlas_uid'],
         main_db_path=summary_obj.paths['main_db_path']
+    )
+
+    logger.info(f"Cloning aligned Atlas {summary_obj.auto_ided_atlas_obj.atlas_uid} for analysis summary stage...")
+    summary_obj.manually_curated_atlas_obj = dbi.clone_atlas(
+        obj=summary_obj,
+        stage='MANUALLY_CURATED',
+        ta=summary_obj.ta
     )
 
     logger.info("Loading analysis data scoped to atlas after manual curation...")
@@ -374,14 +358,14 @@ def run_analysis_summary(
     dbi.update_compound_mzrt_for_atlas(
         obj=summary_obj,
         mz_rt_update_df=summary_obj.experimental_data.curation_df,
-        stage='AUTO_IDED',
+        stage='MANUALLY_CURATED',
     )
 
     if summary_obj.override_parameters:
         logger.info("Persisting GUI override parameters to workflow_runs table...")
         dbi.update_config_overrides(
             obj=summary_obj,
-            stage='AUTO_IDED',
+            stage='MANUALLY_CURATED',
         )
 
     logger.info("Creating and saving summary files and figures to output directory...")

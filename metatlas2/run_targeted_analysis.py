@@ -187,12 +187,14 @@ def set_up_paths(
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.json"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"
+    modelseed_table_path = f"{data_dir}/databases/modelseed_db/modelseed.tsv"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
         return {
             "lcmsruns_directory": str(lcmsruns_path),
             "main_db_path": str(main_db_path),
-            "pubchem_cache_path": str(pubchem_cache_path)
+            "pubchem_cache_path": str(pubchem_cache_path),
+            "modelseed_table_path": str(modelseed_table_path),
         }
 
     owner = config.owner
@@ -224,6 +226,7 @@ def set_up_paths(
         "main_db_path": str(main_db_path),
         "msms_refs_path": msms_refs_path_resolved,
         "pubchem_cache_path": str(pubchem_cache_path),
+        "modelseed_table_path": str(modelseed_table_path),
         "rt_alignment_output_dir": str(rta_dir),
         "rt_alignment_results_dir": str(rta_dir / "rt_alignment_results"),
         "aligned_atlases_store_file": str(rta_dir / "rt_aligned_atlases.csv"),

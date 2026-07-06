@@ -11,7 +11,7 @@ import statistics
 import textwrap
 import warnings
 from tqdm.auto import tqdm
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 import metatlas2.database_interact as dbi
-import metatlas2.rclone as rcl
+import metatlas2.gdrive_upload as gdu
 import metatlas2.logging_config as lcf
 from metatlas2.note_options import (
     get_note_options_and_hotkeys,
@@ -37,29 +37,7 @@ def run_all_summaries(
     overwrite: bool = False,
 ) -> None:
     """Run all summary outputs for one analysis.
-
-    Calls ``summary_obj.load_data()`` (a no-op if data are already cached)
-    then runs all five output functions in order:
-
-    1. Per-compound identification figures  (PDF, one per compound)
-    2. EIC thumbnail PDFs (shared-y and independent-y variants)
-    3. Summary Excel table (``Draft_Final_Identifications.xlsx``)
-    4. Six boxplot PDFs (3 metrics x linear / log₁₀)
-    5. Manual curation CSV (``manual_curation.csv``)
-
-    Because data tables are stored on ``summary_obj`` after the first call
-    to ``load_data()``, all five sub-functions share the same in-memory
-    DataFrames with no redundant database queries.
-
-    Parameters
-    ----------
-    summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
-    overwrite:
-        Passed through to all sub-functions.
     """
-    output_loc = Path(summary_obj.paths["analysis_output_dir"]) / f"{summary_obj.ta.chromatography}-{summary_obj.ta.polarity}-{summary_obj.ta.analysis_type}-{summary_obj.ta.analysis_name}"
-    os.makedirs(output_loc, exist_ok=True)
 
     if summary_obj.override_parameters.get("skip_outputs") is not None:
         skip_outputs = summary_obj.override_parameters.get("skip_outputs", [])
@@ -73,35 +51,35 @@ def run_all_summaries(
 
     if "final_id_sheet" not in (skip_outputs or []):
         logger.info("Making Final Identification sheet...")
-        make_final_id_sheet(summary_obj, output_loc=output_loc, overwrite=overwrite)
+        make_final_id_sheet(summary_obj, overwrite=overwrite)
 
     if "id_figures" not in (skip_outputs or []):
         logger.info("Making Identification figures...")
-        make_identification_figure(summary_obj, output_loc=output_loc, overwrite=overwrite, max_workers=8)
+        make_identification_figure(summary_obj, overwrite=overwrite, max_workers=8)
 
     if "eic_thumbnails" not in (skip_outputs or []):
         logger.info("Making EIC thumbnails...")
-        make_eic_thumbnails(summary_obj, output_loc=output_loc, overwrite=overwrite, max_workers=8)
+        make_eic_thumbnails(summary_obj, overwrite=overwrite, max_workers=8)
 
     if "boxplots" not in (skip_outputs or []):
         logger.info("Making Boxplots...")
-        make_boxplots(summary_obj, output_loc=output_loc, overwrite=overwrite, max_workers=8)
+        make_boxplots(summary_obj, overwrite=overwrite, max_workers=8)
 
     if "data_sheets" not in (skip_outputs or []):
         logger.info("Making quantitative data sheets...")
-        make_data_sheets(summary_obj, output_loc=output_loc, overwrite=overwrite)
+        make_data_sheets(summary_obj, overwrite=overwrite)
 
     if "manual_curation_csv" not in (skip_outputs or []):
         logger.info("Making Manual curation CSV...")
-        make_manual_curation_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+        make_manual_curation_csv(summary_obj, overwrite=overwrite)
 
     if "best_ms2_hits_csv" not in (skip_outputs or []):
         logger.info("Making best MS2 hit fragment ions CSV...")
-        make_best_ms2_hit_fragment_ions_csv(summary_obj, output_loc=output_loc, overwrite=overwrite)
+        make_best_ms2_hit_fragment_ions_csv(summary_obj, overwrite=overwrite)
 
     if "peak_height_filtered_csv" not in (skip_outputs or []):
         logger.info("Making filtered peak height CSV...")
-        make_peak_height_filtered_csv(output_loc=output_loc, overwrite=overwrite)
+        make_peak_height_filtered_csv(summary_obj, overwrite=overwrite)
 
     if "metabomap" not in (skip_outputs or []):
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
@@ -114,7 +92,7 @@ def run_all_summaries(
         gdrive_upload = summary_obj.ta.params["upload_to_gdrive"]
     if gdrive_upload:
         logger.info("Uploading outputs to Google Drive...")
-        rcl.copy_outputs_to_google_drive(summary_obj, overwrite=overwrite)
+        gdu.copy_outputs_to_google_drive(summary_obj, "ANALYSIS_SUMMARY", overwrite=overwrite)
 
 ###############################################
 #### Global helpers
@@ -202,14 +180,20 @@ def _get_compound_info(
     main_db_path: str,
     inchi_keys: List[str],
 ) -> dict[str, tuple]:
-    """Fetch all compound metadata in ONE query.
+    """Fetch all compound metadata in ONE query from the compounds table.
 
     Returns
     -------
     dict of inchi_key -> (formula, smiles, inchi, pubchem_cid, mono_isotopic_molecular_weight)
     Missing keys are simply absent from the dict.
+
+    Note: this is kept as a fallback for callers that do not have the metadata
+    already available in the curation_df.  The preferred path is to read
+    formula/smiles/inchi/pubchem_cid/mono_isotopic_molecular_weight directly
+    from mc_row, which is populated by create_manual_curation_obj from the
+    atlas query (get_atlas_compounds_table already joins compounds).
     """
-    if not inchi_keys:
+    if not inchi_keys or not main_db_path:
         return {}
     placeholders = ",".join("?" * len(inchi_keys))
     try:
@@ -280,13 +264,10 @@ def _as_list(value) -> list:
 
 def make_identification_figure(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     overwrite: bool = True,
     max_workers: Optional[int] = None,
 ) -> None:
-    main_db_path = summary_obj.paths.get("main_db_path")
-
-    output_dir = Path(output_loc) / "identification_figures"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "identification_figures"
     if overwrite and output_dir.exists():
         logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
         shutil.rmtree(output_dir)
@@ -303,7 +284,6 @@ def make_identification_figure(
     elif hasattr(summary_obj, "ta.params") and summary_obj.ta.params.get("gui_lcmsruns_colors"):
         color_map = summary_obj.ta.params["gui_lcmsruns_colors"]
 
-    # Bug fix: was "curation_df", correct attribute is "manual_curation_df"
     manual_curation_df = summary_obj.experimental_data.curation_df
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - nothing to plot.")
@@ -313,13 +293,8 @@ def make_identification_figure(
     ms1_all_df = summary_obj.experimental_data.ms1_df
     ms2_all_df = summary_obj.experimental_data.ms2_df
 
-    # Bug fix: was referencing ms1_df["file_path"] which doesn't exist;
-    # correct column is "filename"
     total_files = ms1_all_df["filename"].nunique() if (ms1_all_df is not None and not ms1_all_df.empty) else 0
     logger.info("Plotting %d compounds across %d files.", len(manual_curation_df), total_files)
-
-    unique_inchi_keys = manual_curation_df["inchi_key"].dropna().unique().tolist()
-    batch_info = _get_compound_info(main_db_path, unique_inchi_keys)
 
     def _pregroup(df: Optional[pd.DataFrame]) -> dict:
         if df is None or df.empty:
@@ -330,15 +305,13 @@ def make_identification_figure(
         }
 
     ms1_groups = _pregroup(ms1_all_df)
-    # Bug fix: there is no separate ms2_hits_df — hits are embedded as a list
-    # of dicts in ms2_df["hits"]. One groupby covers both raw scan data and hits.
     ms2_groups = _pregroup(ms2_all_df)
     empty_df = pd.DataFrame()
 
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
+        compound_name = mc_row.get("compound_name", "Undefined")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
@@ -349,14 +322,11 @@ def make_identification_figure(
         )
         fig_path = output_dir / f"{safe_name}.pdf"
 
-        info = batch_info.get(inchi_key, (None, None, None, None, None))
-        formula, smiles, inchi = info[0], info[1], info[2]
-
-        mc_row_dict = mc_row.to_dict()
-        mc_row_dict.update({"formula": formula, "smiles": smiles, "inchi": inchi})
-
+        # formula/smiles/inchi are already in mc_row, populated by
+        # create_manual_curation_obj from the atlas query which joins compounds.
+        # No separate DB query needed.
         tasks.append({
-            "mc_row_dict":   mc_row_dict,
+            "mc_row_dict":   mc_row.to_dict(),
             "compound_name": compound_name,
             "adduct":        adduct,
             "inchi_key":     inchi_key,
@@ -364,7 +334,6 @@ def make_identification_figure(
             "fig_path":      str(fig_path),
             "color_map":     color_map,
             "ms1_df":        ms1_groups.get(mz_rt_uid, empty_df),
-            # Bug fix: pass single ms2 group; worker extracts hits itself
             "ms2_df":        ms2_groups.get(mz_rt_uid, empty_df),
         })
 
@@ -513,14 +482,12 @@ def _plot_ms2(ax, panel_idx: int, top3: list[dict], ms2_df: pd.DataFrame) -> Non
             ax, q_mz, q_int, r_mz, r_int,
             frag_colors=hit.get("fragment_colors"),
             score=float(hit.get("score", np.nan)),
-            # Bug fix: "rt" doesn't exist in hit dict; scan_rt was attached at build time
             rt=float(hit.get("scan_rt", np.nan)),
             title=title,
         )
     elif panel_idx == 0 and not ms2_df.empty:
         # No hits at all — show raw spectrum from first scan
         raw_row = ms2_df.iloc[0]
-        # Bug fix: was using "rt" column; correct column is "scan_rt"
         _plot_raw_ms2(
             ax,
             mz_arr=_as_list(raw_row.get("data_frags", [])),
@@ -627,8 +594,8 @@ def _plot_raw_ms2(
     ax.tick_params(labelsize=14)
     rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
     ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.07, "Score: N/A", fontsize=12, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=10, weight="normal", ha="center", va="top", transform=ax.transAxes)
+    ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
 
@@ -662,17 +629,21 @@ def _plot_eic(
                 ha="center", va="center", fontsize=14, color="gray")
     else:
         for _, row in ms1_compound_df.iterrows():
-            # Bug fix: was using "rt" and "i" columns; correct columns are
-            # "spec_rts" and "spec_ints"
             spec_rts = _as_list(row.get("spec_rts", []))
             spec_ints = _as_list(row.get("spec_ints", []))
             if not spec_rts or not spec_ints:
                 continue
-            # Bug fix: was using "file_path"; correct column is "filename"
             color = _get_file_color(row.get("filename", ""), color_map)
             i_vals = np.log10(np.maximum(spec_ints, 1)) if log_scale else spec_ints
-            ax.plot(spec_rts, i_vals, color=color, linewidth=1.0, alpha=0.7)
+            ax.plot(
+                spec_rts, 
+                i_vals, 
+                color=color, 
+                linewidth=1.0, 
+                alpha=0.7,
+                )
 
+    ax.set_xlim([rt_min-2.0, rt_max+2.0])
     ax.set_xlabel("Retention Time (min)", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=14, weight="bold")
     ax.tick_params(labelsize=14)
@@ -694,19 +665,19 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
             return str(val)
 
     rows = [
-        ("Compound",        _fmt(mc_row.get("compound_name"))),
-        ("Formula",         _fmt(mc_row.get("formula"))),
-        ("Adduct",          _fmt(mc_row.get("adduct"))),
-        ("Polarity",        _fmt(mc_row.get("polarity"))),
-        ("Chromatography",  _fmt(mc_row.get("chromatography"))),
-        ("Atlas m/z",       _fmt(mc_row.get("atlas_mz"), "{:.4f}")),
-        ("Measured m/z",    _fmt(mc_row.get("mz"), "{:.4f}")),
-        ("m/z ppm Δ",       _fmt(mc_row.get("mz_error"), "{:.1f} ppm")),
-        ("Atlas RT range",  f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
+        ("Compound", _fmt(mc_row.get("compound_name", "Undefined"))),
+        ("Formula", _fmt(mc_row.get("formula"))),
+        ("Adduct", _fmt(mc_row.get("adduct"))),
+        ("Polarity", _fmt(mc_row.get("polarity"))),
+        ("Chromatography", _fmt(mc_row.get("chromatography"))),
+        ("Atlas m/z", _fmt(mc_row.get("atlas_mz"), "{:.4f}")),
+        ("Measured m/z", _fmt(mc_row.get("mz"), "{:.4f}")),
+        ("m/z ppm Δ", _fmt(mc_row.get("mz_error"), "{:.1f} ppm")),
+        ("Atlas RT range", f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
         ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
-        ("Atlas RT peak",   _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
-        ("Measured RT",     _fmt(mc_row.get("rt_peak"), "{:.3f} min")),
-        ("RT Δ",            _fmt(mc_row.get("rt_error"), "{:.3f}")),
+        ("Atlas RT peak", _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
+        ("Measured RT", _fmt(mc_row.get("rt_peak"), "{:.3f} min")),
+        ("RT Δ", _fmt(mc_row.get("rt_error"), "{:.3f}")),
     ]
 
     y_pos = 1.03
@@ -735,8 +706,6 @@ def _plot_hit_info_table(
 
     best_hit = top3[0]
 
-    # Bug fix: was using "file_path" which doesn't exist; filename was
-    # attached to the hit dict at build time in the worker
     raw_name = os.path.basename(str(best_hit.get("filename", "")))
 
     def _to_float(value, default=np.nan):
@@ -753,7 +722,6 @@ def _plot_hit_info_table(
         else np.nan
     )
     atlas_rt = _to_float(mc_row.get("atlas_rt_peak"))
-    # Bug fix: "rt" doesn't exist in hit dict; scan_rt was attached at build time
     measured_rt = _to_float(best_hit.get("scan_rt"))
     rt_error = (
         measured_rt - atlas_rt
@@ -764,7 +732,6 @@ def _plot_hit_info_table(
     num_matches = int(best_hit.get("num_matches", 0))
     ref_frags = int(best_hit.get("ref_frags", 0))
 
-    # Bug fix: matched_fragments is already a list of floats — no JSON parsing needed
     matched_frags = _as_list(best_hit.get("matched_fragments"))
     frag_str = ", ".join(f"{m:.3f}" for m in matched_frags) if matched_frags else "N/A"
 
@@ -833,8 +800,6 @@ def _plot_hit_info_table(
             ha="left", va="top", transform=ax.transAxes)
 
     # 2nd and 3rd best hit filenames and total file count
-    # Bug fix: was using top3.iloc[n]["file_path"] — top3 is now a list of
-    # dicts, not a DataFrame, and the correct key is "filename"
     additional_info_y = frag_center - frag_row_h / 2 - 0.04
     line_spacing = 0.07
 
@@ -848,8 +813,6 @@ def _plot_hit_info_table(
         ax.text(0, additional_info_y - line_spacing, f"3rd best: {third_file}",
                 fontsize=13, ha="left", va="top", transform=ax.transAxes)
 
-    # Bug fix: was using ms2_hits_df["file_path"] — the df is now ms2_df
-    # and the correct column is "filename"
     total_files = ms2_df["filename"].nunique() if not ms2_df.empty else 0
     y_offset = (
         line_spacing * 2 if len(top3) >= 3
@@ -886,8 +849,8 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
     ax.text(0.5, 0.5, "No MS2 Data", transform=ax.transAxes,
             ha="center", va="center", fontsize=14, weight="bold", color="gray")
     ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.07, "Score: N/A", fontsize=12, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.02, "RT: N/A", fontsize=10, weight="normal", ha="center", va="top", transform=ax.transAxes)
+    ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
+    ax.text(0.5, 1.02, f"RT: N/A", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
 
@@ -985,17 +948,16 @@ def _plot_structure(
 
 def make_final_id_sheet(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     output_filename: str = "Final_Identifications.xlsx",
     overwrite: bool = True,
 ) -> None:
 
-    output_loc = Path(output_loc)
+    output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
     chromatography = summary_obj.chromatography
     analysis_info = (
-        f"{summary_obj.auto_ided_atlas_obj.chromatography}"
-        f"-{summary_obj.auto_ided_atlas_obj.polarity}"
-        f"-{summary_obj.auto_ided_atlas_obj.analysis_type}"
+        f"{summary_obj.chromatography}"
+        f"-{summary_obj.polarity}"
+        f"-{summary_obj.analysis_type}"
     )
     run_info = f"RTA{summary_obj.rt_alignment_number}-TGA{summary_obj.analysis_number}"
     output_filename = f"{summary_obj.project_name}_{analysis_info}-{run_info}_{output_filename}"
@@ -1006,32 +968,31 @@ def make_final_id_sheet(
         logger.info("Overwriting disabled: existing file %s will be used.", excel_path)
         return
 
-    # Bug fix: was "curation_df", correct attribute is "manual_curation_df"
     manual_curation_df = summary_obj.experimental_data.curation_df
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - nothing to export.")
         return
     manual_curation_df = manual_curation_df.reset_index(drop=True)
 
-    logger.info("Fetching compound metadata in single batch query...")
-    db_path = summary_obj.paths.get("main_db_path")
-    unique_inchi_keys = manual_curation_df["inchi_key"].dropna().unique().tolist()
-    batch_info = _get_compound_info(db_path, unique_inchi_keys)
-    compound_info_map: dict[str, tuple] = {
-        ik: v[:4] for ik, v in batch_info.items()  # formula, smiles, inchi, pubchem_cid
-    }
-    mass_map: dict[str, Optional[float]] = {
-        ik: v[4] for ik, v in batch_info.items()  # mono_isotopic_molecular_weight
-    }
+    compound_info_map: dict[str, tuple] = {}
+    mass_map: dict[str, Optional[float]] = {}
+    for _, _row in manual_curation_df.iterrows():
+        ik = _row.get("inchi_key", "")
+        if not ik or ik in compound_info_map:
+            continue
+        compound_info_map[ik] = (
+            _row.get("formula") or None,
+            _row.get("smiles") or None,
+            _row.get("inchi") or None,
+            _row.get("pubchem_cid") or None,
+        )
+        raw_mass = _row.get("mono_isotopic_molecular_weight")
+        try:
+            mass_map[ik] = float(raw_mass) if raw_mass not in (None, "", 0, 0.0) else None
+        except (TypeError, ValueError):
+            mass_map[ik] = None
 
     # --- Build MS2 lookup maps ---
-    # For each mz_rt_uid, find the scan with the highest-scoring top hit,
-    # then extract that hit's data and the top-3 mz average.
-    #
-    # Bug fix: original code used grp.iloc[0] (first scan in group, arbitrary order)
-    # instead of the scan whose best hit has the highest score.
-    # Bug fix: msms_rt was pulled from best_hit.get("rt") which doesn't exist in
-    # the hit dict — scan_rt lives on the ms2_df row, not the hit.
     ms2_best: dict[str, dict] = {}       # mz_rt_uid -> best hit dict + scan metadata
     ms2_top3_mz_avg: dict[str, float] = {}  # mz_rt_uid -> mean mz of top 3 hits
 
@@ -1086,7 +1047,7 @@ def make_final_id_sheet(
         disable=should_disable_tqdm(),
     ):
         compound_idx_display = _display_compound_idx(compound_idx)
-        compound_name = mc_row.get("compound_name") or f"compound_{compound_idx_display}"
+        compound_name = mc_row.get("compound_name", "Undefined")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
@@ -1095,9 +1056,6 @@ def make_final_id_sheet(
         formula, smiles, inchi, pubchem_cid = compound_info_map.get(inchi_key, (None, None, None, None))
         exact_mass = mass_map.get(inchi_key)
 
-        # Bug fix: original unpacked to overlapping_inchi_keys but dict stores
-        # "overlapping_mz_rt_uids" and the rows.append below referenced
-        # overlapping_inchi_keys (NameError). Renamed to match the append below.
         overlapping_compound, overlapping_mz_rt_uids = overlapping_map.get(compound_idx, ("", ""))
         identified_metabolite = compound_name if not overlapping_compound else overlapping_compound
 
@@ -1127,7 +1085,6 @@ def make_final_id_sheet(
         best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is not None:
             msms_file = str(best_hit.get("filename", ""))
-            # Bug fix: "rt" key doesn't exist in hit dict; scan_rt is attached at build time
             msms_rt = float(best_hit.get("scan_rt", np.nan))
             msms_score = float(best_hit.get("score", np.nan))
 
@@ -1140,7 +1097,6 @@ def make_final_id_sheet(
             ref_frags = int(best_hit.get("ref_frags", 0))
             msms_num_ions = f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches)
 
-            # Bug fix: matched_fragments is already a list of floats — no JSON parsing needed
             matched_frags = _as_list(best_hit.get("matched_fragments"))
             msms_matching_ions = (
                 ",".join(f"{m:.3f}" for m in matched_frags) if matched_frags else "N/A"
@@ -1192,7 +1148,6 @@ def make_final_id_sheet(
             "identified_metabolite":  identified_metabolite,
             "label":                  compound_name,
             "overlapping_compound":   overlapping_compound,
-            # Bug fix: was "overlapping_inchi_keys" (NameError); variable is overlapping_mz_rt_uids
             "overlapping_inchi_keys": overlapping_mz_rt_uids,
             "formula":                formula or "",
             "polarity":               polarity,
@@ -1566,7 +1521,6 @@ def _compute_all_overlapping_compounds(
 
 def make_eic_thumbnails(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     overwrite: bool = True,
     max_workers: Optional[int] = None,
 ) -> None:
@@ -1575,6 +1529,7 @@ def make_eic_thumbnails(
     rt_alignment_num = summary_obj.rt_alignment_number
     analysis_num = summary_obj.analysis_number
 
+    output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
     base_dir = Path(output_loc)
     shared_base_dir = base_dir / "eics"
     dir_shared = shared_base_dir / "eic_thumbnails_shared_y"
@@ -1593,7 +1548,6 @@ def make_eic_thumbnails(
         logger.info("Creating directory %s", d)
         d.mkdir(parents=True, exist_ok=True)
 
-    # Fix 1: correct attribute name
     if summary_obj.experimental_data.curation_df is None:
         summary_obj.load_data()
     manual_curation_df = summary_obj.experimental_data.curation_df
@@ -1605,7 +1559,6 @@ def make_eic_thumbnails(
 
     manual_curation_df = manual_curation_df.reset_index(drop=True)
 
-    # Fix 2: group by mz_rt_uid instead of (inchi_key, adduct)
     if ms1_all_df is not None and not ms1_all_df.empty:
         ms1_groups: dict[str, pd.DataFrame] = {
             key: grp.reset_index(drop=True)
@@ -1620,11 +1573,10 @@ def make_eic_thumbnails(
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
+        compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
 
-        # Fix 3: look up by mz_rt_uid
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         safe_stem = (
             f"{cmp_idx_display:04d}_{compound_name}_{adduct}_{inchi_key}"
@@ -1638,7 +1590,6 @@ def make_eic_thumbnails(
         if ms1_cmp is None or ms1_cmp.empty:
             file_items = [{"filename": "", "spec_rts": [], "spec_ints": [], "group_name": "unknown"}]
         else:
-            # Fix 4: use correct column names (filename, spec_rts, spec_ints)
             file_items = []
             for _, file_row in ms1_cmp.iterrows():
                 f_path = str(file_row.get("filename", ""))
@@ -1740,7 +1691,6 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     rt_max_val = mc_row.get("rt_max", np.nan)
     rt_peak = mc_row.get("atlas_rt_peak", np.nan)
 
-    # Fix 5: spec_ints is now a list of floats, not scalars — flatten correctly
     all_intensities = [
         v
         for item in file_items
@@ -1784,7 +1734,6 @@ def _compound_pdf_worker(kwargs: dict) -> str:
                 ax = axes_flat[slot_idx]
                 fname_s = _strip_non_chars(_short_fname(item["filename"]))
                 spec_ints = _as_list(item.get("spec_ints"))
-                # Fix 6: guard max() against empty list; independent y per subplot
                 valid_ints = [v for v in spec_ints if v is not None and not (isinstance(v, float) and np.isnan(v))]
                 y_max_indep = float(max(valid_ints)) if valid_ints else None
                 group_name = item.get("group_name") or _file_group(item.get("filename", ""))
@@ -1845,7 +1794,6 @@ def _short_fname(filename: str) -> str:
         return "no data"
     stem = os.path.splitext(os.path.basename(filename))[0]
     parts = stem.split("_")
-    # Fix 7: guard against IndexError for non-standard filenames
     if len(parts) > 15:
         return f"{parts[12]}_{parts[15]}"
     if len(parts) > 12:
@@ -1905,7 +1853,7 @@ def _render_eic_thumbnail(
     ax.tick_params(axis="both", labelsize=10, length=2, pad=1)
     ax.xaxis.label.set_visible(False)
     ax.yaxis.label.set_visible(False)
-
+    
     ax.set_title(fname_short, fontsize=10, pad=2.5, loc="center")
 
     for spine in ax.spines.values():
@@ -2057,12 +2005,11 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
 
 def make_boxplots(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     overwrite: bool = True,
     max_workers: Optional[int] = None,
 ) -> None:
 
-    output_dir = Path(output_loc) / "boxplots"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "boxplots"
     if overwrite and output_dir.exists():
         logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
         shutil.rmtree(output_dir)
@@ -2123,7 +2070,7 @@ def make_boxplots(
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name") or "unknown"
+        compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
         key = (inchi_key, adduct)
@@ -2176,7 +2123,6 @@ def make_boxplots(
 
 def make_manual_curation_csv(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     output_filename: str = "manually_curated_compound_data.csv",
     overwrite: bool = True,
 ) -> None:
@@ -2187,9 +2133,6 @@ def make_manual_curation_csv(
     summary_obj:
         Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
         ``manual_curation_df`` is loaded automatically if not already cached.
-    output_loc:
-        Override output directory. Defaults to
-        ``<project_directory>/analysis_tables/rt<N>_analysis<M>/``.
     output_filename:
         CSV filename (the ``.csv`` extension is appended automatically if absent).
     overwrite:
@@ -2201,7 +2144,7 @@ def make_manual_curation_csv(
         The exported DataFrame (empty on error).
     """
 
-    output_dir = Path(output_loc) / "data_sheets"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
         logger.info("Overwriting disabled: existing file %s will be used.", output_file)
@@ -2222,13 +2165,12 @@ def make_manual_curation_csv(
 
 def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     output_filename: str = "best_ms2_hit_fragment_ions.csv",
     overwrite: bool = True,
     min_fragment_intensity: Optional[float] = 1e4,
 ) -> None:
 
-    output_dir = Path(output_loc) / "data_sheets"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
         logger.info("Overwriting disabled: existing file %s will be used.", output_file)
@@ -2237,7 +2179,6 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     logger.info("Exporting best MS2 hit fragment ions CSV to %s", output_file)
 
-    # Fix 1: correct attribute name
     if summary_obj.experimental_data.curation_df is None:
         summary_obj.load_data()
     manual_curation_df = summary_obj.experimental_data.curation_df
@@ -2246,8 +2187,6 @@ def make_best_ms2_hit_fragment_ions_csv(
         logger.error("No manual curation entries found - best MS2 hit CSV not written.")
         return
 
-    # Fix 2: fetch ms2_df from summary_obj instead of undefined variable,
-    # and build best-hit dict from nested hits structure
     ms2_df = summary_obj.experimental_data.ms2_df
     ms2_best: dict[str, dict] = {}
     if ms2_df is not None and not ms2_df.empty:
@@ -2264,7 +2203,6 @@ def make_best_ms2_hit_fragment_ions_csv(
                     best_score = top_score
                     best_hit_data = {
                         **hits[0],
-                        # Fix 3: correct key names from scan_row
                         "filename": scan_row.get("filename", ""),
                         "scan_rt":  float(scan_row.get("scan_rt", np.nan)),
                     }
@@ -2280,15 +2218,13 @@ def make_best_ms2_hit_fragment_ions_csv(
     ):
         cmp_idx_display = _display_compound_idx(cmp_idx)
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
-        compound_name = mc_row.get("compound_name") or f"compound_{cmp_idx_display}"
+        compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
 
         best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is None:
             continue
 
-        # Fix 4: query_aligned is stored as a list-of-two-lists; coerce to numpy
-        # arrays before NaN masking so plain Python lists don't crash isnan()
         q_mz_all, q_int_all = np.array(_as_list(best_hit["query_aligned"][0]), dtype=float), np.array(_as_list(best_hit["query_aligned"][1]), dtype=float)
 
         if q_mz_all.size > 0:
@@ -2315,7 +2251,6 @@ def make_best_ms2_hit_fragment_ions_csv(
             "compound_index": cmp_idx_display,
             "compound_name":  compound_name,
             "adduct":         adduct,
-            # Fix 5: correct key names when reading from best_hit dict
             "filename":       os.path.basename(str(best_hit.get("filename", ""))),
             "rt_peak":        best_hit.get("scan_rt", np.nan),
             "mz_peak":        best_hit.get("mz_measured", np.nan),
@@ -2401,12 +2336,11 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
 
 def make_data_sheets(
     summary_obj: "AnalysisSummary",
-    output_loc: Optional[Path] = None,
     overwrite: bool = True,
 ) -> None:
     """Export per-compound, per-file quantitative metric tables as wide-format CSVs."""
 
-    output_dir = Path(output_loc) / "data_sheets"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
     if overwrite and output_dir.exists():
         logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
         shutil.rmtree(output_dir)
@@ -2444,8 +2378,6 @@ def make_data_sheets(
     mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
     pfm = per_file_df.merge(mc_slim, on="mz_rt_uid", how="left")
 
-    # Fix 2: derive file column label from "filename" (the correct column name),
-    # not from a non-existent "file_path" column
     pfm["_file_col"] = pfm["filename"].apply(
         lambda p: os.path.splitext(os.path.basename(str(p)))[0] if p else "unknown"
     )
@@ -2458,8 +2390,6 @@ def make_data_sheets(
         "mz_peak",
         "mz_centroid",
     ]
-    # Fix 3: include inchi_key so make_peak_height_filtered_csv can group by it;
-    # use _file_col as the pivot column so filenames are cleaned up
     _INDEX_COLS = [
         "compound_index",
         "compound_name",
@@ -2499,13 +2429,13 @@ def make_data_sheets(
     logger.info("Data sheets written to %s", output_dir)
 
 def make_peak_height_filtered_csv(
-    output_loc: Optional[Path] = None,
+    obj: "AnalysisSummary",
     overwrite: bool = True,
     control_fold_threshold: float = 3.0,
 ) -> None:
     """Filter and process the ``peak_height`` data sheet."""
 
-    out_dir    = Path(output_loc) / "data_sheets"
+    out_dir = Path(obj.paths['analysis_results_output_dir']) / "data_sheets"
     source_csv = out_dir / "peak_height.csv"
     output_csv = out_dir / "peak_height_filtered.csv"
     if not source_csv.exists():
@@ -2521,13 +2451,11 @@ def make_peak_height_filtered_csv(
 
     df = pd.read_csv(source_csv)
 
-    # Fix 4: _META_COLS now matches the columns actually written by make_data_sheets,
-    # including mz_rt_uid and inchi_key; no longer references the removed "file_path"
     _META_COLS = {"compound_index", "compound_name", "mz_rt_uid", "inchi_key", "adduct", "polarity"}
     data_cols = [c for c in df.columns if c not in _META_COLS]
 
     # ── 1. Control-signal filter ───────────────────────────────────────────────
-    _CTRL_PATTERNS = ("ExCtrl", "TxCtrl", "InjBL")
+    _CTRL_PATTERNS = ("ExCtrl", "InjBL")
     ctrl_cols     = [c for c in data_cols if any(p in c for p in _CTRL_PATTERNS)]
     non_ctrl_cols = [c for c in data_cols if c not in ctrl_cols]
 
@@ -2561,8 +2489,6 @@ def make_peak_height_filtered_csv(
         return
 
     # ── 2. Merge identical inchi_key rows by max; keep chosen adduct/polarity ──
-    # Fix 5: group by inchi_key (not mz_rt_uid) — multiple mz_rt_uids can share
-    # an inchi_key (different adducts), and this step collapses them
     group_keys       = ["inchi_key", "compound_name", "control_filter"]
     source_meta_cols = [c for c in ("adduct", "polarity") if c in df.columns]
     selector_cols    = non_ctrl_cols if non_ctrl_cols else data_cols
@@ -2613,8 +2539,6 @@ def make_peak_height_filtered_csv(
             columns=["_selection_score", "_best_col", "_row_order"]
         )
 
-    # Fix 6: also drop mz_rt_uid before the groupby — it is specific to one
-    # adduct/file combination and would prevent inchi_key-level deduplication
     drop_cols = [c for c in ("compound_index", "mz_rt_uid", "adduct", "polarity") if c in df.columns]
     df = df.drop(columns=drop_cols)
 
@@ -2624,7 +2548,6 @@ def make_peak_height_filtered_csv(
         df = df.merge(chosen_meta, on=group_keys, how="left")
     logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df))
 
-    # ── 3. Shorten column names; merge duplicate columns by row-wise max ────────
     def _shorten(col: str) -> str:
         parts = col.split("_")
         return "_".join(parts[:-2]) if len(parts) > 2 else col
@@ -2637,8 +2560,6 @@ def make_peak_height_filtered_csv(
     if df.columns.duplicated().any():
         meta_df = df[[c for c in df.columns if c in _META_FIXED]].reset_index(drop=True)
         data_df = df[[c for c in df.columns if c not in _META_FIXED]]
-        # Fix 7: reset_index on the transposed frame before groupby so the index
-        # is the column name, not a RangeIndex, avoiding a silent groupby on integers
         data_merged = (
             data_df.T
             .groupby(level=0)
@@ -2779,12 +2700,11 @@ def make_metabomap(
         repeated network requests across runs).  Pass e.g.
         ``Path('/tmp/modelseed_compounds.tsv')``.
     """
-    analysis_output_dir = Path(summary_obj.paths.get("analysis_output_dir"))
-    current_polarity = summary_obj.auto_ided_atlas_obj.polarity        # e.g. "POS"
-    analysis_type    = summary_obj.auto_ided_atlas_obj.analysis_type   # e.g. "EMA"
-    analysis_name    = (
-        getattr(summary_obj.auto_ided_atlas_obj, "analysis_name", "default") or "default"
-    )
+    analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
+    chromatography = summary_obj.chromatography
+    current_polarity = summary_obj.polarity
+    analysis_type = summary_obj.analysis_type
+    analysis_name = summary_obj.analysis_name
 
     if current_polarity.upper() == "POS":
         sibling_polarity = "NEG"
@@ -2798,17 +2718,17 @@ def make_metabomap(
         return
 
     current_csv = (
-        analysis_output_dir / f"{current_polarity}-{analysis_type}-{analysis_name}"
+        analysis_output_dir
         / "data_sheets" / "peak_height_filtered.csv"
     )
     sibling_csv = (
-        analysis_output_dir / f"{sibling_polarity}-{analysis_type}-{analysis_name}"
+        Path(str(analysis_output_dir).replace(f"-{current_polarity}-", f"-{sibling_polarity}-")) 
         / "data_sheets" / "peak_height_filtered.csv"
     )
 
-    metabomaps_dir  = analysis_output_dir / "metabomaps"
-    merged_tsv      = metabomaps_dir / "merged_peak_heights.tsv"
-    lfc_tsv         = metabomaps_dir / "log_fold_changes.tsv"
+    metabomaps_dir = analysis_output_dir / "../metabomap"
+    merged_tsv = metabomaps_dir / "merged_peak_heights.tsv"
+    lfc_tsv = metabomaps_dir / "log_fold_changes.tsv"
 
     if not overwrite and merged_tsv.exists() and lfc_tsv.exists():
         logger.info(
@@ -2914,7 +2834,7 @@ def make_metabomap(
     merged_data_df.insert(1, "compound_name", merged_data_df["inchi_key"].map(compound_names))
 
     # ── Add ModelSEED CPD ID column ───────────────────────────────────────────
-    modelseed_cache_path = Path(summary_obj.paths["modelseed_compounds_path"])
+    modelseed_cache_path = Path(summary_obj.paths["modelseed_table_path"])
     try:
         inchikey_to_cpd = _build_inchikey_to_cpd(modelseed_cache_path)
     except Exception as exc:
@@ -2958,6 +2878,7 @@ def make_metabomap(
 
     lfc_records: dict[str, np.ndarray] = {
         "inchi_key":     merged_data_df["inchi_key"].to_numpy(),
+        "cpd_id":        merged_data_df["cpd_id"].to_numpy(),
         "compound_name": merged_data_df["compound_name"].to_numpy(),
     }
     for grp1, grp2 in itertools.combinations(unique_groups, 2):
@@ -2969,9 +2890,9 @@ def make_metabomap(
         lfc_records[f"{grp1}_vs_{grp2}"] = lfc
 
     lfc_df = pd.DataFrame(lfc_records)
-    lfc_df.to_csv(lfc_csv, index=False)
+    lfc_df.to_csv(lfc_tsv, sep="\t", index=False)
     logger.info(
         "Saved pairwise LFC table (%d compounds x %d group pairs) → %s",
-        len(lfc_df), len(lfc_df.columns) - 2, lfc_csv,
+        len(lfc_df), len(lfc_df.columns) - 3, lfc_tsv,
     )
     return
