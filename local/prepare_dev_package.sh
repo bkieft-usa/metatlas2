@@ -6,11 +6,11 @@
 #
 # Usage:
 #   cd /global/homes/b/bkieft/metatlas2
-#   ./scripts/prepare_dev_package.sh [output_dir] [--keep-existing-archive] [--no-parquet-subset] [--skip-zenodo-upload]
+#   ./local/prepare_dev_package.sh [output_dir] [--keep-existing-archive] [--no-h5-subset] [--skip-zenodo-upload]
 #
 # Options:
 #   --keep-existing-archive  Skip package creation and only upload existing tarball to Zenodo
-#   --no-parquet-subset  Skip filtering copied parquet rows (filtering is on by default)
+#   --no-h5-subset  Skip filtering copied h5 files (filtering is on by default)
 #   --skip-zenodo-upload  Skip upload to Zenodo (useful for testing)
 # Output:
 #   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
@@ -32,15 +32,15 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Parse arguments
 KEEP_EXISTING=false
-SUBSET_PARQUET=true
+SUBSET_H5=true
 SKIP_ZENODO_UPLOAD=false
 OUTPUT_DIR=""
 
 for arg in "$@"; do
     if [[ "$arg" == "--keep-existing-archive" ]]; then
         KEEP_EXISTING=true
-    elif [[ "$arg" == "--no-parquet-subset" ]]; then
-        SUBSET_PARQUET=false
+    elif [[ "$arg" == "--no-h5-subset" ]]; then
+        SUBSET_H5=false
     elif [[ "$arg" == "--skip-zenodo-upload" ]]; then
         SKIP_ZENODO_UPLOAD=true
     elif [[ -z "$OUTPUT_DIR" ]]; then
@@ -55,7 +55,7 @@ PACKAGE_NAME="metatlas2-dev-data"
 # Source project with representative ISTD data
 SOURCE_PROJECT="20260311_JGI_AE_511825_SorghAnth_final_EXP120B_HILICZ_USHXG03401"
 SOURCE_OWNER="jgi"
-SOURCE_BASE="${METATLAS_DATA_DIR}/lcmsruns/${SOURCE_OWNER}/${SOURCE_PROJECT}"
+SOURCE_BASE="${METATLAS_DATA_DIR}/raw_data/${SOURCE_OWNER}/${SOURCE_PROJECT}"
 
 echo "========================================"
 echo "Metatlas2 Dev Package Preparation"
@@ -87,8 +87,8 @@ if [[ "$KEEP_EXISTING" == true ]]; then
     echo "Skipping to Zenodo upload..."
 else
     # Validate source directory exists
-    if [[ ! -d "${SOURCE_BASE}/parquet" ]]; then
-        echo "Error: Source parquet directory not found: ${SOURCE_BASE}/parquet" >&2
+    if [[ ! -d "${SOURCE_BASE}" ]]; then
+        echo "Error: Source raw_data directory not found: ${SOURCE_BASE}" >&2
         echo "Please verify the project name and path." >&2
         exit 1
     fi
@@ -100,21 +100,21 @@ if [[ -d "${OUTPUT_DIR}/${PACKAGE_NAME}" ]]; then
 fi
 
 # Create output structure matching expected paths:
-# - lcmsruns/dev/{project_name}/parquet/
+# - raw_data/dev/{project_name}/   (h5 files live directly here)
 # - databases/main_db/
 # - configs/
 # - projects/targeted_outputs/ (will be created by workflow)
 STANDALONE_PROJECT="20260101_JGI_XX_000000_STANDALONE-DEV_test_EXP000_HILICZ_TESTXXXX"
-mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/lcmsruns/dev/${STANDALONE_PROJECT}/parquet"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/raw_data/dev/${STANDALONE_PROJECT}"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/main_db"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/configs"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/projects/targeted_outputs"
 cd "${OUTPUT_DIR}/${PACKAGE_NAME}"
 
-echo "Collecting parquet files..."
+echo "Collecting h5 files..."
 echo "------------------------------------"
 
-# Copy all parquet files for specific run types
+# Copy all h5 files for specific run types
 QC_RUNS=("Run104" "Run196" "Run150" "Run58" "Run261")
 EXPERIMENTAL_RUNS=("Run152" "Run158" "Run161" "Run164" "Run17" "Run173" "Run198" "Run20" "Run219" "Run23" "Run231" "Run32" "Run35" "Run38" "Run41" "Run72")
 
@@ -123,21 +123,21 @@ ALL_RUNS=("${QC_RUNS[@]}" "${EXPERIMENTAL_RUNS[@]}")
 COPIED=0
 MISSING=0
 
-echo "Copying parquet files for ${#ALL_RUNS[@]} runs (each run may have multiple parquet files)..."
+echo "Copying h5 files for ${#ALL_RUNS[@]} runs (each run may have multiple h5 files)..."
 echo ""
 
 for run in "${ALL_RUNS[@]}"; do
-    # Find all parquet files for this run
+    # Find all h5 files for this run (pos polarity)
     shopt -s nullglob
-    run_files=("${SOURCE_BASE}/parquet/"*"_${run}_"*pos.parquet)
+    run_files=("${SOURCE_BASE}/"*"_${run}".h5)
     shopt -u nullglob
     
     if [[ ${#run_files[@]} -gt 0 ]]; then
         echo -n "  [$((COPIED+MISSING+1))/${#ALL_RUNS[@]}] ${run}... "
         
         local_count=0
-        for pfile in "${run_files[@]}"; do
-            cp "$pfile" "lcmsruns/dev/${STANDALONE_PROJECT}/parquet/" && local_count=$((local_count + 1))
+        for hfile in "${run_files[@]}"; do
+            cp "$hfile" "raw_data/dev/${STANDALONE_PROJECT}/" && local_count=$((local_count + 1))
         done
         
         echo "OK (${local_count} files)"
@@ -157,10 +157,10 @@ if [[ ${MISSING} -gt 0 ]]; then
     echo "You may need to adjust the run list in this script."
 fi
 
-# Count total parquet files copied
-TOTAL_PARQUET=$(find "lcmsruns/dev/${STANDALONE_PROJECT}/parquet/" -name "*.parquet" 2>/dev/null | wc -l)
+# Count total h5 files copied
+TOTAL_H5=$(find "raw_data/dev/${STANDALONE_PROJECT}/" -name "*.h5" 2>/dev/null | wc -l)
 echo ""
-echo "Total parquet files copied: ${TOTAL_PARQUET}"
+echo "Total h5 files copied: ${TOTAL_H5}"
 
 echo ""
 echo "Creating compound definitions..."
@@ -498,28 +498,27 @@ EOF
 
 echo "   Created ms2_references.json"
 
-if [[ "$SUBSET_PARQUET" == true ]]; then
+if [[ "$SUBSET_H5" == true ]]; then
     echo ""
-    echo "Subsetting copied parquet files..."
+    echo "Subsetting copied h5 files..."
     echo "----------------------------------"
 
     # Use conservative defaults so rows needed by both RT alignment and targeted analysis are retained.
-    SUBSET_PPM_MS1=20.0
+    SUBSET_PPM_MS1=5.0
     SUBSET_PPM_MS2=20.0
-    SUBSET_EXTRA_TIME=5.0
+    SUBSET_EXTRA_TIME=0.5
 
-    PARQUET_DIR="lcmsruns/dev/${STANDALONE_PROJECT}/parquet"
+    H5_DIR="raw_data/dev/${STANDALONE_PROJECT}"
 
     python3 - <<PY
 import csv
 import sys
+import tables
+import numpy as np
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 
-
-def parse_float(value: str):
+def parse_float(value):
     if value is None:
         return None
     text = str(value).strip()
@@ -531,7 +530,7 @@ def parse_float(value: str):
         return None
 
 
-def parse_windows(tsv_path: Path):
+def parse_windows(tsv_path):
     windows = []
     if not tsv_path.exists():
         return windows
@@ -547,45 +546,126 @@ def parse_windows(tsv_path: Path):
     return windows
 
 
-def ppm_bounds(mz: float, ppm: float):
+def ppm_bounds(mz, ppm):
     delta = mz * ppm / 1e6
     return mz - delta, mz + delta
 
 
-def filter_parquet_file(parquet_file: Path, windows, mz_column: str, ppm: float, extra_time: float):
-    parquet = pq.ParquetFile(parquet_file)
-    if parquet.metadata.num_rows == 0 or not windows:
-        return pa.Table.from_batches([], schema=parquet.schema_arrow)
+def filter_h5_table(h5file, node_path, mz_col, rt_col, windows, ppm, extra_time):
+    """Read a PyTables node and return a filtered structured array.
 
-    filtered_tables = []
+    Mirrors the logic in extract_data_from_h5._load_h5_table + _join_ms1/ms2_to_atlas:
+    - For MS1 nodes, the production code reads the *_mz sorted variant and uses
+      searchsorted for a fast mz-range pre-filter, then does a full mz+rt interval
+      join per atlas window.
+    - We replicate this by keeping any row whose (mz, rt) falls within at least one
+      atlas window (mz ± ppm, rt ± extra_time).  The result is a superset of what
+      the pipeline would actually use, ensuring no data is lost.
+    """
+    try:
+        node = h5file.get_node(node_path)
+    except tables.NoSuchNodeError:
+        return None
+
+    try:
+        data = node.read()
+    except Exception as exc:
+        print(f"    Warning: could not read {node_path}: {exc}")
+        return None
+
+    if len(data) == 0:
+        return data
+
+    mz_vals = data[mz_col].astype(np.float64)
+    rt_vals = data[rt_col].astype(np.float64)
+
+    keep = np.zeros(len(data), dtype=bool)
     for mz, rt_min, rt_max in windows:
-        mz_min, mz_max = ppm_bounds(mz, ppm)
+        mz_lo, mz_hi = ppm_bounds(mz, ppm)
         rt_lo = rt_min - extra_time
         rt_hi = rt_max + extra_time
+        mask = (mz_vals >= mz_lo) & (mz_vals <= mz_hi) & (rt_vals >= rt_lo) & (rt_vals <= rt_hi)
+        keep |= mask
 
-        filtered = pq.read_table(
-            parquet_file,
-            filters=[
-                (mz_column, '>=', mz_min),
-                (mz_column, '<=', mz_max),
-                ('rt', '>=', rt_lo),
-                ('rt', '<=', rt_hi),
-            ],
-        )
-        if filtered.num_rows:
-            filtered_tables.append(filtered)
+    return data[keep]
 
-    if not filtered_tables:
-        return pa.Table.from_batches([], schema=parquet.schema_arrow)
-    if len(filtered_tables) == 1:
-        return filtered_tables[0]
 
-    combined = pa.concat_tables(filtered_tables).combine_chunks()
-    return pa.Table.from_pandas(combined.to_pandas().drop_duplicates(), preserve_index=False)
+def rewrite_h5_file(h5_path, windows_ms1, windows_ms2, ppm_ms1, ppm_ms2, extra_time):
+    """Filter an h5 file in-place, keeping only rows within atlas windows.
+
+    The production pipeline (extract_data_from_h5._load_h5_table) reads MS1 data
+    from the *_mz sorted variant (e.g. ms1_pos_mz) using searchsorted for a fast
+    mz pre-filter, then does a full interval join.  We must filter BOTH the base
+    node (ms1_pos) AND its sorted variant (ms1_pos_mz) identically so the file
+    remains consistent and the pipeline can read either form.
+
+    MS2 nodes have no _mz variant — the pipeline reads ms2_pos directly.
+    """
+    import shutil
+
+    # Base MS1/MS2 node paths
+    ms1_base_keys = {"/ms1_pos", "/ms1_neg"}
+    ms2_base_keys = {"/ms2_pos", "/ms2_neg"}
+    # Sorted-by-mz MS1 variants read by the production pipeline
+    ms1_mz_keys = {"/ms1_pos_mz", "/ms1_neg_mz"}
+
+    tmp_path = h5_path.with_suffix(".tmp.h5")
+    changed = False
+
+    try:
+        with tables.open_file(str(h5_path), mode="r") as src, \
+             tables.open_file(str(tmp_path), mode="w") as dst:
+
+            for node in src.walk_nodes("/", classname="Table"):
+                node_path = node._v_pathname
+                is_ms1_base = node_path in ms1_base_keys
+                is_ms1_mz   = node_path in ms1_mz_keys
+                is_ms2      = node_path in ms2_base_keys
+
+                if (is_ms1_base or is_ms1_mz) and windows_ms1:
+                    # Both the base and the _mz sorted variant are filtered the same way.
+                    # The _mz variant is sorted by mz, so searchsorted works on it; our
+                    # mask approach is equivalent and preserves the sort order because we
+                    # keep a contiguous boolean mask (not a shuffle).
+                    filtered = filter_h5_table(src, node_path, "mz", "rt", windows_ms1, ppm_ms1, extra_time)
+                elif is_ms2 and windows_ms2:
+                    filtered = filter_h5_table(src, node_path, "precursor_MZ", "rt", windows_ms2, ppm_ms2, extra_time)
+                else:
+                    filtered = None
+
+                parent_path = node._v_parent._v_pathname
+                node_name = node._v_name
+
+                if filtered is not None:
+                    before = len(node.read())
+                    after = len(filtered)
+                    if after != before:
+                        changed = True
+                    # Create parent groups if needed
+                    if parent_path != "/":
+                        dst.create_group("/", parent_path.lstrip("/"), createparents=True)
+                    dst.create_table(parent_path, node_name, obj=filtered,
+                                     filters=tables.Filters(complevel=1, complib="blosc"))
+                else:
+                    # Copy node as-is (metadata tables, etc.)
+                    node.copy(dst.get_node(parent_path) if parent_path != "/" else dst.root,
+                              newname=node_name)
+
+    except Exception as exc:
+        tmp_path.unlink(missing_ok=True)
+        print(f"    Warning: failed to filter {h5_path.name}: {exc}")
+        return False, 0, 0
+
+    if changed:
+        shutil.move(str(tmp_path), str(h5_path))
+    else:
+        tmp_path.unlink(missing_ok=True)
+
+    return changed, 0, 0
 
 
 root = Path(".")
-parquet_dir = root / Path("${PARQUET_DIR}")
+h5_dir = root / Path("${H5_DIR}")
 ppm_ms1 = float("${SUBSET_PPM_MS1}")
 ppm_ms2 = float("${SUBSET_PPM_MS2}")
 extra_time = float("${SUBSET_EXTRA_TIME}")
@@ -595,48 +675,27 @@ windows.extend(parse_windows(root / "qc_compounds_pos.tsv"))
 windows.extend(parse_windows(root / "ema_compounds_pos.tsv"))
 
 if not windows:
-    print("No compound windows found; skipping parquet subsetting.")
+    print("No compound windows found; skipping h5 subsetting.")
     sys.exit(0)
 
-files = sorted(parquet_dir.glob("*.parquet"))
+files = sorted(h5_dir.glob("*.h5"))
 if not files:
-    print("No parquet files found; skipping parquet subsetting.")
+    print("No h5 files found; skipping h5 subsetting.")
     sys.exit(0)
 
-total_before = 0
-total_after = 0
+print(f"Filtering {len(files)} h5 files to atlas windows (ppm_ms1={ppm_ms1}, ppm_ms2={ppm_ms2}, extra_time={extra_time} min)...")
+
 updated = 0
-
-for pfile in files:
-    name = pfile.name
-    is_ms1 = name.endswith("_ms1_pos.parquet") or name.endswith("_ms1_neg.parquet")
-    is_ms2 = name.endswith("_ms2_pos.parquet") or name.endswith("_ms2_neg.parquet")
-    if not (is_ms1 or is_ms2):
-        continue
-
-    parquet = pq.ParquetFile(pfile)
-    before_rows = parquet.metadata.num_rows
-    total_before += before_rows
-
-    if is_ms1:
-        filtered = filter_parquet_file(pfile, windows, "mz", ppm_ms1, extra_time)
-    else:
-        filtered = filter_parquet_file(pfile, windows, "precursor_MZ", ppm_ms2, extra_time)
-
-    after_rows = filtered.num_rows
-    total_after += after_rows
-
-    if after_rows != before_rows:
-        pq.write_table(filtered, pfile, compression="snappy")
+for hfile in files:
+    changed, _, _ = rewrite_h5_file(hfile, windows, windows, ppm_ms1, ppm_ms2, extra_time)
+    if changed:
         updated += 1
+    print(f"  {hfile.name}: {'filtered' if changed else 'unchanged'}")
 
-    print(f"  {name}: {before_rows} -> {after_rows} rows")
-
-print(f"Subset summary: {len(files)} files scanned, {updated} rewritten")
-print(f"Rows retained: {total_after}/{total_before} ({(100.0 * total_after / total_before) if total_before else 0:.2f}%)")
+print(f"H5 subset summary: {len(files)} files processed, {updated} rewritten")
 PY
 
-    echo "   Parquet subsetting complete"
+    echo "   H5 subsetting complete"
 fi
 
 echo ""
@@ -684,13 +743,17 @@ WORKFLOWS:
       ATLAS:
         uid: dev-qc-hilicz-pos
       PARAMS:
-          include_lcmsruns:
-            - QC
+          upload_to_gdrive: true
+          include_lcmsruns: # 'QC'
           exclude_lcmsruns:
             - NEG
-          use_existing_rt_alignment: false
-          ppm_error: 20.0
-          extra_time: 2.0
+          use_existing_rt_alignment: true
+          remove_unided_compounds: false
+          only_keep_data_in_feature: true
+          atlas_extra_time: 0.0
+          ms1_min_peak_intensity: 0
+          ms1_min_num_points: 0
+          ms1_mz_tolerance_ppm: 5.0
           apply_model_to_min_max: true
           polynomial_degree: 2
           min_observations_per_compound: 1
@@ -700,41 +763,51 @@ WORKFLOWS:
     HILICZ:
       POS:
         EMA:
-          ATLAS:
-            uid: dev-ema-hilicz-pos
-          PARAMS:
-            include_lcmsruns:
-              - EXPERIMENTAL
-            exclude_lcmsruns:
-              data_extraction:
-                - QC
-              gui:
-              id_sheet:
-              chromatograms:
-              id_plots:
-              data_sheets:
-            do_alignment: true
-            create_curation_notebooks: true
-            upload_to_gdrive: false
-            skip_outputs: []
-            remove_unided_compounds: false
-            remove_flagged_compounds: false
-            apply_istd_to_ema: false
-            ms1_min_peak_intensity: 1000
-            ms1_min_num_points: 1
-            ppm_error: 20.0
-            ms2_min_score: 0.1
-            ms2_min_matching_frags: 1
-            ms2_frag_mz_tolerance: 0.05
-            gui_require_all_evaluated: false
-            gui_top_n_hits: 10
-            gui_lcmsruns_colors:
-              QC: red
-              EXPERIMENTAL: gray
-            note_options_overrides:
-              ms1_notes: {}
-              ms2_notes: {}
-              other_notes: {}
+          DEFAULT:
+            ATLAS:
+              uid: atl-ref-ema-hilicz-pos-04fe39f125b24507adeebf7221c46ec1
+            PARAMS:
+              include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+              exclude_lcmsruns:
+                data_extraction:
+                  - QC
+                  - NEG
+                gui: # INJBL, BLANK
+                id_sheet: # INJBL, BLANK, REFSTD
+                chromatograms: # INJBL, BLANK
+                id_plots: # INJBL, BLANK, REFSTD
+                data_sheets: # INJBL, BLANK
+              do_alignment: true
+              remove_unided_compounds: true
+              remove_flagged_compounds: true
+              only_keep_data_in_feature: false
+              apply_cross_polarity_curation: true
+              suggested_min_conf: 0.75
+              atlas_extra_time: 0
+              ms1_min_peak_intensity: 5e5
+              ms1_min_num_points: 5
+              ms1_mz_tolerance_ppm: 5.0
+              ms2_min_num_scans: 1
+              ms2_min_precursor_intensity: 0
+              ms2_min_score: 0.5
+              ms2_min_matching_frags: 1
+              ms2_mz_tolerance_ppm: 20.0
+              ms2_frag_mz_tolerance: 0.05
+              gui_require_all_evaluated: false
+              gui_top_n_hits: 10
+              gui_lcmsruns_colors:
+                ISTD: blue
+                QC: orange
+                EXCTRL: red
+                TXCTRL: green
+                REFSTD: black
+              note_options_overrides:
+                ms1_notes:
+                ms2_notes:
+                other_notes:
+              create_curation_notebooks: true
+              upload_to_gdrive: true
+              skip_outputs:
 EOF
 
 echo "   Created configs/compounds_config.yaml"
@@ -962,7 +1035,7 @@ else
 fi
 
 echo ""
-echo "========================================" 
+echo "========================================"
 echo "SUCCESS!"
 echo "========================================"
 echo "New version published: ${VERSION_TAG}"
