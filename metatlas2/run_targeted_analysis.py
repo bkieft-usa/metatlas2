@@ -170,7 +170,7 @@ def get_project_db_path(project_name: str) -> str:
 
 
 def set_up_paths(
-    config: Dict[str, Any],
+    config: "Metatlas2Config",
     project_name: str = None,
     rt_alignment_number: int = None,
     analysis_number: int = None,
@@ -302,7 +302,6 @@ def main():
             config=config,
             paths=paths,
             overwrite_existing=args.overwrite,
-            config_path=os.path.abspath(args.config),
             rt_alignment_number=args.rt_align_num,
             analysis_number=args.analysis_num,
         )

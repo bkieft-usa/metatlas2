@@ -9,7 +9,6 @@ import grp
 import subprocess
 from matchms import Spectrum
 from typing import Dict, Any
-import tempfile
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
@@ -252,38 +251,9 @@ def _validate_targeted_analysis_params(params: Dict[str, Any], location: str) ->
     return params
 
 
-def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
-    """Load and validate a metatlas2 YAML config file.
-
-    The config uses ``yaml.safe_load`` with a structure where analysis name
-    is a mapping key, so each unique analysis is unambiguous:
-
-    .. code-block:: yaml
-
-        TARGETED_ANALYSES:
-          HILICZ:
-            POS:
-              EMA:
-                ANALYSIS-NAME-1:
-                  ATLAS:
-                    uid: atl-ref-ema-hilicz-pos-...
-                  PARAMS:
-                    ...
-                ANALYSIS-NAME-2:
-                  ATLAS:
-                    uid: atl-ref-ema-hilicz-pos-...
-                  PARAMS:
-                    ...
-
-    Returns a :class:`~metatlas2.workflow_objects.Metatlas2Config` instance
-    whose ``targeted_analyses`` attribute is a flat list of
-    :class:`~metatlas2.workflow_objects.TargetedAnalysis` objects — one per
-    unique ``chrom/pol/analysis_type/name`` combination.
-    """
+def _build_metatlas2_config(raw: Dict[str, Any], source_name: str) -> "Metatlas2Config":
+    """Build a Metatlas2Config from parsed YAML content."""
     from metatlas2.workflow_objects import Metatlas2Config, TargetedAnalysis
-
-    with open(config_path, 'r') as f:
-        raw = yaml.safe_load(f)
 
     # ── top-level structure ────────────────────────────────────────────────
     if 'WORKFLOWS' not in raw:
@@ -308,7 +278,6 @@ def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
         rt_alignment_config[chromatography] = chrom_cfg
 
     # ── TARGETED_ANALYSES → flat list of TargetedAnalysis objects ──────────
-    # Structure: chrom -> polarity -> analysis_type -> name -> {ATLAS, PARAMS}
     targeted_analyses: list = []
     for chromatography, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
         for polarity, pol_cfg in chrom_cfg.items():
@@ -344,7 +313,7 @@ def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
     paths_config: Dict[str, Any] = dict(raw['WORKFLOWS'].get('PATHS') or {})
 
     logger.info(
-        f"Loaded config from {config_path}: "
+        f"Loaded config from {source_name}: "
         f"{len(rt_alignment_config)} RT alignment, "
         f"{len(targeted_analyses)} targeted analyses"
     )
@@ -354,13 +323,45 @@ def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
         targeted_analyses=targeted_analyses,
     )
 
+
+def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
+    """Load and validate a metatlas2 YAML config file.
+
+    The config uses ``yaml.safe_load`` with a structure where analysis name
+    is a mapping key, so each unique analysis is unambiguous:
+
+    .. code-block:: yaml
+
+        TARGETED_ANALYSES:
+          HILICZ:
+            POS:
+              EMA:
+                ANALYSIS-NAME-1:
+                  ATLAS:
+                    uid: atl-ref-ema-hilicz-pos-...
+                  PARAMS:
+                    ...
+                ANALYSIS-NAME-2:
+                  ATLAS:
+                    uid: atl-ref-ema-hilicz-pos-...
+                  PARAMS:
+                    ...
+
+    Returns a :class:`~metatlas2.workflow_objects.Metatlas2Config` instance
+    whose ``targeted_analyses`` attribute is a flat list of
+    :class:`~metatlas2.workflow_objects.TargetedAnalysis` objects — one per
+    unique ``chrom/pol/analysis_type/name`` combination.
+    """
+    with open(config_path, 'r') as f:
+        raw = yaml.safe_load(f)
+    return _build_metatlas2_config(raw, config_path)
+
 def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
     """Parse and validate a metatlas2 config from a raw YAML string.
 
-    This is the companion to :func:`load_metatlas2_config` used when the YAML
-    text has been retrieved from the ``project_config`` database table rather
-    than read directly from a file on disk.  All validation and normalisation
-    logic is identical — the only difference is the source of the raw text.
+    This is the companion to :func:`load_metatlas2_config` used when YAML text
+    has been retrieved from the ``project_config`` database table rather than
+    read directly from a file on disk.
 
     Args:
         config_yaml: Raw YAML text (as stored in ``project_config.config_yaml``).
@@ -369,19 +370,8 @@ def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
         A fully validated :class:`~metatlas2.workflow_objects.Metatlas2Config`.
     """    
 
-    # Write to a temp file so load_metatlas2_config can open it normally.
-    with tempfile.NamedTemporaryFile(
-        mode='w', suffix='.yaml', delete=False, encoding='utf-8'
-    ) as tmp:
-        tmp.write(config_yaml)
-        tmp_path = tmp.name
-
-    try:
-        config = load_metatlas2_config(tmp_path)
-    finally:
-        os.unlink(tmp_path)
-
-    return config
+    raw = yaml.safe_load(config_yaml)
+    return _build_metatlas2_config(raw, "project_config.config_yaml")
 
 
 def load_compound_input(file_path: str) -> pd.DataFrame:

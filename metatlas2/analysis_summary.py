@@ -81,6 +81,10 @@ def run_all_summaries(
         logger.info("Making filtered peak height CSV...")
         make_peak_height_filtered_csv(summary_obj, overwrite=overwrite)
 
+    if "log_fold_changes_csv" not in (skip_outputs or []):
+        logger.info("Making log fold changes CSV from filtered peak heights...")
+        make_log_fold_changes_csv(summary_obj, overwrite=overwrite)
+
     if "metabomap" not in (skip_outputs or []):
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
         make_metabomap(summary_obj, overwrite=overwrite)
@@ -2599,6 +2603,63 @@ def make_peak_height_filtered_csv(
         len(df), len(df.columns) - len(ordered_meta), output_csv,
     )
 
+
+def make_log_fold_changes_csv(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = True,
+) -> None:
+    """Create per-run log2 fold-change CSV from peak_height_filtered.csv.
+
+    This output is independent of metabomap and does not require both
+    polarities to be present.
+    """
+    out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
+    source_csv = out_dir / "peak_height_filtered.csv"
+    output_csv = out_dir / "log_fold_changes.csv"
+
+    if not source_csv.exists():
+        logger.error(
+            "peak_height_filtered.csv not found at %s — run make_peak_height_filtered_csv first.",
+            source_csv,
+        )
+        return
+    if not overwrite and output_csv.exists():
+        logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
+        return
+
+    logger.info("Creating per-run log fold changes CSV at %s", output_csv)
+    df = pd.read_csv(source_csv)
+
+    id_cols = [
+        c for c in ["inchi_key", "compound_name", "control_filter", "chosen_adduct", "chosen_polarity"]
+        if c in df.columns
+    ]
+    data_cols = [c for c in df.columns if c not in id_cols]
+
+    if not data_cols:
+        logger.warning("No numeric sample columns found in %s; writing identifiers only.", source_csv)
+        pd.DataFrame({c: df[c] for c in id_cols}).to_csv(output_csv, sep=",", index=False)
+        return
+
+    data_num = df[data_cols].apply(pd.to_numeric, errors="coerce")
+    lfc_records = {col: df[col].to_numpy() for col in id_cols}
+
+    for g1, g2 in itertools.combinations(data_num.columns, 2):
+        v1 = data_num[g1].to_numpy(dtype=float)
+        v2 = data_num[g2].to_numpy(dtype=float)
+        valid = (v1 > 0) & (v2 > 0) & np.isfinite(v1) & np.isfinite(v2)
+        res = np.full(len(v1), np.nan)
+        res[valid] = np.log2(v1[valid] / v2[valid])
+        lfc_records[f"{g1}_vs_{g2}"] = res
+
+    pd.DataFrame(lfc_records).to_csv(output_csv, sep=",", index=False)
+    logger.info(
+        "Exported per-run log fold changes (%d compounds x %d comparisons) → %s",
+        len(df),
+        max(len(lfc_records) - len(id_cols), 0),
+        output_csv,
+    )
+
 def _get_modelseed_compounds(cache_path: Path) -> pd.DataFrame:
     """Load the ModelSEED compounds table, fetching and caching it if needed.
 
@@ -2667,232 +2728,97 @@ def make_metabomap(
     overwrite: bool = True,
     modelseed_cache_path: Optional[Path] = None,
 ) -> None:
-    """Merge pos/neg filtered peak-height tables and compute pairwise log2 fold-changes.
-
-    Checks whether the sibling-polarity ``peak_height_filtered.csv`` (same analysis
-    type, opposite polarity) exists alongside the current one.  When found, the two
-    tables are merged on ``inchi_key``; for compounds shared between polarities the
-    higher peak-height value is kept per matched replicate column.  QC and ISTD
-    sample groups are excluded.  Two output TSVs are written to
-    ``<analysis_output_dir>/metabomaps/``:
-
-    ``merged_peak_heights.tsv``
-        One row per unique ``inchi_key``; ID columns are ``inchi_key``, ``cpd_id``
-        (ModelSEED CPD number, or empty string when not found), and
-        ``compound_name``.  Value columns are the sample-group name (index 12 of
-        the underscore-split column name).  Replicate columns share the same group
-        name.  Values are the element-wise maximum across the two polarities.
-
-    ``log_fold_changes.tsv``
-        Same ID columns as above; value columns are ``group1_vs_group2`` for every
-        pairwise combination of unique sample groups.  LFC is
-        ``log2(mean(group1_replicates) / mean(group2_replicates))``.  Rows or
-        pairs where either mean is zero or NaN are set to ``NaN``.
-
-    Parameters
-    ----------
-    summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
-    overwrite:
-        When *False*, skips writing if both output files already exist.
-    modelseed_cache_path:
-        Optional local path for caching the ModelSEED compounds TSV (avoids
-        repeated network requests across runs).  Pass e.g.
-        ``Path('/tmp/modelseed_compounds.tsv')``.
-    """
+    # 1. Setup Paths and Polarities
     analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
-    chromatography = summary_obj.chromatography
-    current_polarity = summary_obj.polarity
-    analysis_type = summary_obj.analysis_type
-    analysis_name = summary_obj.analysis_name
-
-    if current_polarity.upper() == "POS":
-        sibling_polarity = "NEG"
-    elif current_polarity.upper() == "NEG":
-        sibling_polarity = "POS"
-    else:
-        logger.error(
-            "Unrecognised polarity '%s' — cannot determine sibling polarity for metabomap.",
-            current_polarity,
-        )
-        return
-
-    current_csv = (
-        analysis_output_dir
-        / "data_sheets" / "peak_height_filtered.csv"
-    )
-    sibling_csv = (
-        Path(str(analysis_output_dir).replace(f"-{current_polarity}-", f"-{sibling_polarity}-")) 
-        / "data_sheets" / "peak_height_filtered.csv"
-    )
-
+    curr_pol = summary_obj.polarity.upper()
+    sib_pol = "NEG" if curr_pol == "POS" else "POS"
+    
+    current_csv = analysis_output_dir / "data_sheets" / "peak_height_filtered.csv"
+    sibling_csv = Path(str(analysis_output_dir).replace(f"-{curr_pol}-", f"-{sib_pol}-")) / "data_sheets" / "peak_height_filtered.csv"
+    
     metabomaps_dir = analysis_output_dir / "../metabomap"
-    merged_tsv = metabomaps_dir / "merged_peak_heights.tsv"
-    lfc_tsv = metabomaps_dir / "log_fold_changes.tsv"
+    merged_tsv, lfc_tsv = metabomaps_dir / "merged_peak_heights.tsv", metabomaps_dir / "log_fold_changes.tsv"
 
     if not overwrite and merged_tsv.exists() and lfc_tsv.exists():
-        logger.info(
-            "Overwriting disabled: metabomap files already exist in %s", metabomaps_dir
-        )
         return
 
-    if not current_csv.exists():
-        logger.error("Current polarity filtered peak-height CSV not found: %s", current_csv)
-        return
-
-    if not sibling_csv.exists():
-        logger.info(
-            "Sibling polarity (%s-%s) peak_height_filtered.csv not yet available"
-            " — skipping metabomap.",
-            sibling_polarity, analysis_type,
-        )
+    if not current_csv.exists() or not sibling_csv.exists():
+        logger.warning("Missing polarity CSVs; skipping metabomap.")
         return
 
     metabomaps_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Building metabomap from:\n  %s\n  %s", current_csv, sibling_csv)
 
-    # ── Constants ──────────────────────────────────────────────────────────────
-    _META_COLS_SET  = {"control_filter", "compound_name", "inchi_key"}
-    _EXCLUDE_PATTERNS = ("QC", "ISTD")
+    # 2. Helper for Column Filtering
+    _META = {"control_filter", "compound_name", "inchi_key"}
+    _EXCLUDE = ("QC", "ISTD")
 
-    def _col_group(col: str) -> Optional[str]:
-        """Return sample-group label (underscore-split index 12) or None to drop."""
+    def _get_grp(col: str) -> Optional[str]:
         parts = col.split("_")
-        if len(parts) <= 12:
-            return None
-        grp = parts[12]
-        if any(p in grp for p in _EXCLUDE_PATTERNS):
-            return None
-        return grp
+        return parts[12] if len(parts) > 12 and not any(p in parts[12] for p in _EXCLUDE) else None
 
-    def _load_filtered(csv_path: Path) -> pd.DataFrame:
-        df = pd.read_csv(csv_path)
-        keep = [c for c in df.columns if c in _META_COLS_SET or _col_group(c) is not None]
-        return df[keep].copy()
+    def _process_df(path: Path):
+        df = pd.read_csv(path)
+        cols = [c for c in df.columns if c in _META or _get_grp(c) is not None]
+        df = df[cols].copy()
+        # Group by InChI + Name to collapse peak_1, peak_2 etc. into the max value
+        return df.set_index(["inchi_key", "compound_name"]).groupby(level=[0, 1]).max()
 
-    cur_df = _load_filtered(current_csv)
-    sib_df = _load_filtered(sibling_csv)
+    # 3. Load and Align
+    cur_idx = _process_df(current_csv)
+    sib_idx = _process_df(sibling_csv)
+    
+    # Ensure columns are sorted consistently by group
+    cur_sorted = sorted([c for c in cur_idx.columns if c not in _META], key=lambda c: (_get_grp(c), c))
+    sib_sorted = sorted([c for c in sib_idx.columns if c not in _META], key=lambda c: (_get_grp(c), c))
+    
+    all_ids = cur_idx.index.union(sib_idx.index)
+    cur_matrix = cur_idx[cur_sorted].reindex(all_ids)
+    sib_matrix = sib_idx[sib_sorted].reindex(all_ids)
 
-    # ── Build sorted data column lists ────────────────────────────────────────
-    cur_data_cols = [c for c in cur_df.columns if c not in _META_COLS_SET]
-    sib_data_cols = [c for c in sib_df.columns if c not in _META_COLS_SET]
+    # 4. Merge using Element-wise Max
+    cur_groups = [_get_grp(c) for c in cur_sorted]
+    sib_groups = [_get_grp(c) for c in sib_sorted]
 
-    cur_sorted = sorted(cur_data_cols, key=lambda c: (_col_group(c), c))
-    sib_sorted = sorted(sib_data_cols, key=lambda c: (_col_group(c), c))
-
-    cur_groups = [_col_group(c) for c in cur_sorted]
-    sib_groups = [_col_group(c) for c in sib_sorted]
-
-    # ── Index both frames by inchi_key ────────────────────────────────────────
-    cur_indexed = cur_df.set_index("inchi_key")
-    sib_indexed = sib_df.set_index("inchi_key")
-    all_inchi_keys = cur_indexed.index.union(sib_indexed.index)
-
-    cur_matrix = cur_indexed[cur_sorted].reindex(all_inchi_keys)
-    sib_matrix = sib_indexed[sib_sorted].reindex(all_inchi_keys)
-
-    # ── Merge: element-wise max when groups match; group-max fallback ─────────
     if cur_groups == sib_groups:
-        logger.info(
-            "Column groups match between polarities (%d replicates) "
-            "— using element-wise maximum.",
-            len(cur_groups),
-        )
         merged_vals = np.fmax(cur_matrix.values, sib_matrix.values)
-        merged_data_df = pd.DataFrame(
-            merged_vals,
-            index=all_inchi_keys,
-            columns=cur_groups,
-        )
+        merged_data_df = pd.DataFrame(merged_vals, index=all_ids, columns=cur_groups)
     else:
-        logger.warning(
-            "Column groups differ between polarities (%d cur vs %d sib) "
-            "— using per-group maximum (per-replicate resolution not available).",
-            len(cur_groups), len(sib_groups),
-        )
-        all_groups_ordered = list(dict.fromkeys(cur_groups + sib_groups))
-        merged_data_df = pd.DataFrame(index=all_inchi_keys)
-        for grp in all_groups_ordered:
-            cur_grp_cols = [c for c in cur_sorted if _col_group(c) == grp]
-            sib_grp_cols = [c for c in sib_sorted if _col_group(c) == grp]
-            grp_vals = pd.concat(
-                [cur_matrix[cur_grp_cols], sib_matrix[sib_grp_cols]], axis=1
-            )
-            merged_data_df[grp] = grp_vals.max(axis=1)
+        logger.warning("Column groups differ; using per-group max.")
+        all_grps = list(dict.fromkeys(cur_groups + sib_groups))
+        merged_data_df = pd.DataFrame(index=all_ids)
+        for grp in all_grps:
+            c_cols = [c for c in cur_sorted if _get_grp(c) == grp]
+            s_cols = [c for c in sib_sorted if _get_grp(c) == grp]
+            # Combine all replicates for this group from both polarities and take max
+            merged_data_df[grp] = pd.concat([cur_matrix[c_cols], sib_matrix[s_cols]], axis=1).max(axis=1)
 
-    merged_data_df.index.name = "inchi_key"
-    merged_data_df = merged_data_df.reset_index()
-
-    # ── Restore compound_name ─────────────────────────────────────────────────
-    compound_names = (
-        cur_indexed["compound_name"].combine_first(sib_indexed["compound_name"])
-        if "compound_name" in cur_indexed.columns and "compound_name" in sib_indexed.columns
-        else cur_indexed.get(
-            "compound_name", sib_indexed.get("compound_name", pd.Series(dtype=str))
-        )
-    )
-    merged_data_df.insert(1, "compound_name", merged_data_df["inchi_key"].map(compound_names))
-
-    # ── Add ModelSEED CPD ID column ───────────────────────────────────────────
-    modelseed_cache_path = Path(summary_obj.paths["modelseed_table_path"])
+    # 5. Finalize Metadata and ModelSEED
+    merged_data_df = merged_data_df.reset_index() # Now contains inchi_key and compound_name
+    
+    ms_path = Path(summary_obj.paths["modelseed_table_path"])
     try:
-        inchikey_to_cpd = _build_inchikey_to_cpd(modelseed_cache_path)
-    except Exception as exc:
-        logger.warning(
-            "Could not retrieve ModelSEED compound data (%s) — 'cpd_id' column "
-            "will be NaN.",
-            exc,
-        )
+        inchikey_to_cpd = _build_inchikey_to_cpd(ms_path)
+    except Exception:
         inchikey_to_cpd = {}
 
-    merged_data_df.insert(
-        1,
-        "cpd_id",
-        merged_data_df["inchi_key"].map(inchikey_to_cpd),  # NaN when not found
-    )
-
-    logger.info(
-        "Merged %d (cur) + %d (sib) → %d unique inchi_keys, %d sample columns",
-        len(cur_df), len(sib_df), len(merged_data_df),
-        len(merged_data_df.columns) - 3,  # exclude the 3 ID columns
-    )
-
+    merged_data_df.insert(1, "cpd_id", merged_data_df["inchi_key"].map(inchikey_to_cpd))
     merged_data_df.to_csv(merged_tsv, sep="\t", index=False)
-    logger.info("Saved merged peak heights → %s", merged_tsv)
 
-    # ── Pairwise log2 fold-change table ───────────────────────────────────────
-    _lfc_meta = {"inchi_key", "cpd_id", "compound_name"}
-    data_cols_renamed = [c for c in merged_data_df.columns if c not in _lfc_meta]
-    unique_groups = list(dict.fromkeys(data_cols_renamed))
+    # 6. Log2 Fold Changes
+    unique_groups = [c for c in merged_data_df.columns if c not in {"inchi_key", "compound_name", "cpd_id"}]
+    if len(unique_groups) < 2: return
 
-    if len(unique_groups) < 2:
-        logger.warning(
-            "Fewer than 2 unique sample groups found — pairwise LFC table not created."
-        )
-        return
+    # Precompute means to avoid repeated slicing
+    means = {grp: merged_data_df[grp].mean(axis=1).to_numpy() if merged_data_df[grp].ndim > 1 
+             else merged_data_df[grp].to_numpy() for grp in unique_groups}
 
-    group_means: dict[str, np.ndarray] = {}
-    for grp in unique_groups:
-        grp_data = merged_data_df.loc[:, merged_data_df.columns == grp]
-        group_means[grp] = grp_data.mean(axis=1).to_numpy(dtype=float)
-
-    lfc_records: dict[str, np.ndarray] = {
-        "inchi_key":     merged_data_df["inchi_key"].to_numpy(),
-        "cpd_id":        merged_data_df["cpd_id"].to_numpy(),
-        "compound_name": merged_data_df["compound_name"].to_numpy(),
-    }
-    for grp1, grp2 in itertools.combinations(unique_groups, 2):
-        m1 = group_means[grp1]
-        m2 = group_means[grp2]
+    lfc_records = {col: merged_data_df[col].to_numpy() for col in ["inchi_key", "cpd_id", "compound_name"]}
+    
+    for g1, g2 in itertools.combinations(unique_groups, 2):
+        m1, m2 = means[g1], means[g2]
         valid = (m1 > 0) & (m2 > 0) & ~np.isnan(m1) & ~np.isnan(m2)
-        lfc = np.full(len(m1), np.nan)
-        lfc[valid] = np.log2(m1[valid] / m2[valid])
-        lfc_records[f"{grp1}_vs_{grp2}"] = lfc
+        res = np.full(len(m1), np.nan)
+        res[valid] = np.log2(m1[valid] / m2[valid])
+        lfc_records[f"{g1}_vs_{g2}"] = res
 
-    lfc_df = pd.DataFrame(lfc_records)
-    lfc_df.to_csv(lfc_tsv, sep="\t", index=False)
-    logger.info(
-        "Saved pairwise LFC table (%d compounds x %d group pairs) → %s",
-        len(lfc_df), len(lfc_df.columns) - 3, lfc_tsv,
-    )
-    return
+    pd.DataFrame(lfc_records).to_csv(lfc_tsv, sep="\t", index=False)

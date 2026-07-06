@@ -334,7 +334,6 @@ def calculate_rt_shifts(rt_align_obj: "RTAlign") -> pd.DataFrame:
     per_compound_rt_shifts = []
     new_compound_mzrts = {}
     for mz_rt_uid, comp_ref in rt_align_obj.aligned_atlas_obj.compound_mzrts.items():
-        print(f"Processing compound: {comp_ref.compound_name} with RT peak, min, and max of {comp_ref.rt_peak}, {comp_ref.rt_min}, {comp_ref.rt_max}")
         aligned_rt_peak = float(_apply_rt_model([comp_ref.rt_peak], rt_align_obj.rt_alignment_model)[0])
         if rt_align_obj.rt_alignment_params['apply_model_to_min_max']:
             aligned_rt_min = float(_apply_rt_model([comp_ref.rt_min], rt_align_obj.rt_alignment_model)[0])

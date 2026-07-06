@@ -21,13 +21,11 @@ import metatlas2.logging_config as lcf
 import metatlas2.gdrive_upload as gdu
 logger = lcf.get_logger('workflows')
 
-
 def run_project_setup(
     project_name: str,
-    config: Dict[str, Any],
+    config: "Metatlas2Config",
     paths: Dict[str, str],
     overwrite_existing: bool = False,
-    config_path: str = None,
     rt_alignment_number: int = None,
     analysis_number: int = None,
 ) -> None:
@@ -41,7 +39,6 @@ def run_project_setup(
         config=config,
         paths=paths,
         overwrite_existing=overwrite_existing,
-        config_path=config_path,
         rt_alignment_number=rt_alignment_number,
         analysis_number=analysis_number,
     )

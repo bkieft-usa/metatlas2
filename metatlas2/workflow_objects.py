@@ -1,10 +1,11 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, List
 from pathlib import Path
+from copy import deepcopy
+import json
 import pandas as pd
 import os
 import yaml
-from dataclasses import asdict
 from tqdm.auto import tqdm
 
 import metatlas2.database_interact as dbi
@@ -85,6 +86,32 @@ class Metatlas2Config:
     @property
     def gdrive_subfolder(self) -> Optional[str]:
         return self.paths_config.get('gdrive_subfolder', None)
+
+    def to_snapshot(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: Dict[str, Any]) -> "Metatlas2Config":
+        targeted_analyses_raw = snapshot.get("targeted_analyses", [])
+        targeted_analyses = []
+        for ta in targeted_analyses_raw:
+            targeted_analyses.append(TargetedAnalysis(
+                chromatography=ta["chromatography"],
+                polarity=ta["polarity"],
+                analysis_type=ta["analysis_type"],
+                analysis_name=ta["analysis_name"],
+                atlas_uid=ta["atlas_uid"],
+                params=dict(ta.get("params") or {}),
+            ))
+
+        return cls(
+            paths_config=dict(snapshot.get("paths_config") or {}),
+            rt_alignment_config=dict(snapshot.get("rt_alignment_config") or {}),
+            targeted_analyses=targeted_analyses,
+        )
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_snapshot())
 
 @dataclass
 class AtlasEntry:
@@ -595,7 +622,7 @@ class Project:
     paths: Dict[str, str] = field(default_factory=dict)
     lcmsruns: List['LCMSRun'] = field(default_factory=list)
 
-    def setup(self, project_name: str, config: Dict[str, Any], paths: Dict[str, str], overwrite_existing: bool = False, config_path: str = None, rt_alignment_number: int = None, analysis_number: int = None):
+    def setup(self, project_name: str, config: "Metatlas2Config", paths: Dict[str, str], overwrite_existing: bool = False, rt_alignment_number: int = None, analysis_number: int = None):
 
         self.project_name = fpf.parse_project_name(project_name)
         self.paths = paths
@@ -611,7 +638,7 @@ class Project:
         logger.info(f"Saving config snapshot to database for RTA{rt_alignment_number}/TGA{analysis_number}...")
         dbi.save_config_to_db(
             project_db_path=self.paths['project_db_path'],
-            config_path=config_path,
+            config=config,
             rt_alignment_number=rt_alignment_number,
             analysis_number=analysis_number,
             paths=self.paths,

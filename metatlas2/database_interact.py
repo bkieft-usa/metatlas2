@@ -1198,13 +1198,13 @@ def _create_database_tables(conn, db_type: str = "main"):
 
 def save_config_to_db(
     project_db_path: str,
-    config_path: str,
+    config: "Metatlas2Config",
     rt_alignment_number: int,
     analysis_number: Optional[int] = None,
     paths: Optional[Dict] = None,
 ) -> str:
     """
-    Snapshot the raw YAML text and computed paths dict into the
+    Snapshot the current config object and computed paths dict into the
     ``project_config`` table.
 
     Called once at project setup with the RTA and TGA numbers from the CLI.
@@ -1218,7 +1218,7 @@ def save_config_to_db(
 
     Args:
         project_db_path:      Path to the project DuckDB database.
-        config_path:          Absolute path to the YAML config file on disk.
+        config:               Config object or config dict to serialise.
         rt_alignment_number:  RTA index from the CLI call.
         analysis_number:      TGA index from the CLI call.
         paths:                Optional dict returned by ``set_up_paths()``.
@@ -1227,8 +1227,7 @@ def save_config_to_db(
     Returns:
         The ``config_uid`` of the stored (or pre-existing) row.
     """
-    from pathlib import Path as _Path
-    config_yaml = _Path(config_path).read_text()
+    config_json = config.to_json()
     paths_json = json.dumps(paths) if paths is not None else None
     prov = get_provenance()
 
@@ -1254,16 +1253,16 @@ def save_config_to_db(
             config_uid,
             rt_alignment_number,
             analysis_number,
-            config_yaml,
+            config_json,
             paths_json,
-            config_path,
+            None,
             prov["analyst"],
             prov["timestamp"],
         ))
 
     logger.info(
         f"Saved config snapshot {config_uid} to project_config "
-        f"(RTA={rt_alignment_number}, TGA={analysis_number}, path={config_path})"
+        f"(RTA={rt_alignment_number}, TGA={analysis_number})"
     )
     return config_uid
 
@@ -1293,25 +1292,26 @@ def load_config_from_db(
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
             row = conn.execute("""
-                SELECT config_yaml, config_path FROM project_config
+                SELECT config_yaml FROM project_config
                 WHERE rt_alignment_number IS NOT DISTINCT FROM ?
                   AND analysis_number     IS NOT DISTINCT FROM ?
                 ORDER BY created_date DESC
                 LIMIT 1
             """, [rt_alignment_number, analysis_number]).fetchone()
             if row:
-                config_yaml, config_path = row
+                (config_json,) = row
                 logger.info(
                     f"Loaded config from project_config table "
-                    f"(RTA={rt_alignment_number}, TGA={analysis_number}, "
-                    f"original_path={config_path})"
+                    f"(RTA={rt_alignment_number}, TGA={analysis_number})"
                 )
-                return ldt.load_metatlas2_config_from_string(config_yaml)
+                from metatlas2.workflow_objects import Metatlas2Config
+
+                return Metatlas2Config.from_snapshot(json.loads(config_json))
     except Exception as e:
         raise RuntimeError(
             f"No config found in project database at {project_db_path} for reason {e} "
             f"for RTA={rt_alignment_number}, TGA={analysis_number}. "
-            "Ensure run_project_setup was called with a config_path."
+            "Ensure run_project_setup was called with a config object."
         )
 
 
