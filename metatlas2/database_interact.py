@@ -147,6 +147,7 @@ def create_new_atlas_from_dataframe(
     atlas_name: str, 
     atlas_description: str, 
     analysis_type: str,
+    analysis_name: str,
     chromatography: str = None, 
     polarity: str = None,
     atlas_file_path: str = None,
@@ -212,7 +213,7 @@ def create_new_atlas_from_dataframe(
         )
         compound_mzrts[mz_rt_uid] = compound_mzrt
 
-    atlas_uid = _generate_uid("ref_atlas", decorator=f"{analysis_type.lower()}-{chromatography.lower()}-{polarity.lower()}")
+    atlas_uid = _generate_uid("ref_atlas", decorator=f"{chromatography.lower()}-{polarity.lower()}-{analysis_type.lower()}-{analysis_name.lower()}")
     atlas_obj = Atlas(
         atlas_uid=atlas_uid,
         atlas_name=atlas_name,
@@ -220,6 +221,7 @@ def create_new_atlas_from_dataframe(
         chromatography=chromatography,
         polarity=polarity,
         analysis_type=analysis_type,
+        analysis_name=analysis_name,
         atlas_type="REFERENCE",
         compound_mzrts=compound_mzrts,
         source=atlas_file_path,
@@ -933,11 +935,7 @@ def _create_database_tables(conn, db_type: str = "main"):
         conn: Active DuckDB connection (inside an open transaction).
         db_type: ``"main"`` or ``"project"``.
     """
-    # ------------------------------------------------------------------ #
-    # Tables shared by both database types                                 #
-    # ------------------------------------------------------------------ #
-
-    # Unified atlases table — project-only columns are nullable in main DB
+    # Tables shared by both database types
     conn.execute("""
         CREATE TABLE IF NOT EXISTS atlases (
             atlas_uid          TEXT PRIMARY KEY,
@@ -957,7 +955,6 @@ def _create_database_tables(conn, db_type: str = "main"):
         )
     """)
 
-    # Unified compound_mzrt table — prev_mz_rt_uid is NULL for reference entries
     conn.execute("""
         CREATE TABLE IF NOT EXISTS compound_mzrt (
             mz_rt_uid          TEXT PRIMARY KEY,
@@ -982,7 +979,6 @@ def _create_database_tables(conn, db_type: str = "main"):
         )
     """)
 
-    # atlas_compound_associations is identical in both DB types
     conn.execute("""
         CREATE TABLE IF NOT EXISTS atlas_compound_associations (
             association_uid  TEXT PRIMARY KEY,
@@ -996,9 +992,7 @@ def _create_database_tables(conn, db_type: str = "main"):
         )
     """)
 
-    # ------------------------------------------------------------------ #
-    # Main-database-only tables                                            #
-    # ------------------------------------------------------------------ #
+    # Main-database-only tables
     if db_type == "main":
         conn.execute("""
             CREATE TABLE IF NOT EXISTS compounds (
@@ -1031,9 +1025,7 @@ def _create_database_tables(conn, db_type: str = "main"):
             )
         """)
 
-    # ------------------------------------------------------------------ #
-    # Project-database-only tables                                         #
-    # ------------------------------------------------------------------ #
+    # Project-database-only tables
     elif db_type == "project":
         conn.execute("""
             CREATE TABLE IF NOT EXISTS lcmsruns (
@@ -1186,6 +1178,12 @@ def _create_database_tables(conn, db_type: str = "main"):
                 suggested_rt_max        REAL,
                 suggested_rt_peak       REAL,
                 rt_suggestion_confidence REAL,
+                formula                 VARCHAR,
+                smiles                  VARCHAR,
+                inchi                   VARCHAR,
+                pubchem_cid             VARCHAR,
+                mono_isotopic_molecular_weight REAL,
+                iupac_name              VARCHAR,
                 rt_alignment_number     INTEGER,
                 analysis_number         INTEGER,
                 analysis_type           VARCHAR,
@@ -1991,6 +1989,7 @@ def save_auto_identification_results_to_db(auto_id_obj):
         "best_ms1_mz", "best_ms1_intensity", "best_ms1_ppm_error", "best_ms1_rt_error",
         "max_eic_rt", "max_eic_intensity", "isomers", "suggested_rt_min",
         "suggested_rt_max", "suggested_rt_peak", "rt_suggestion_confidence",
+        "formula", "smiles", "inchi", "pubchem_cid", "mono_isotopic_molecular_weight", "iupac_name",
         "rt_alignment_number", "analysis_number", "analysis_type", "analysis_name",
         "created_by", "created_date",
     ]

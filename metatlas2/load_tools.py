@@ -4,6 +4,7 @@ import os
 import csv
 import yaml
 import json
+import re
 from pathlib import Path
 import grp
 import subprocess
@@ -532,3 +533,30 @@ def log_filter_table(steps, starting_entries, starting_compounds, entries_label=
         )
     rows.append(sep)
     logger.info("%s:\n%s", title, "\n".join(rows))
+
+def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, analysis_type: str, analysis_name: str) -> dict:
+
+    chrom_lc = chromatography.lower()
+    pol_lc = polarity.lower()
+    type_lc = analysis_type.lower()
+    name_lc = analysis_name.lower()
+
+    # The decorator prefix embedded in the UID: atl-ref-{chrom}-{pol}-{type}-{name}-
+    uid_prefix = f"atl-ref-{chrom_lc}-{pol_lc}-{type_lc}-{name_lc}-"
+
+    # Regex to extract any UID from a "Created new atlas" log line
+    uid_pattern = re.compile(r'\(UID:\s*(atl-[^\)]+)\)')
+
+    matched_uid = None
+    with open(log_file, 'r') as fh:
+        for line in fh:
+            if 'Created new atlas' not in line:
+                continue
+            m = uid_pattern.search(line)
+            if m:
+                uid = m.group(1).strip()
+                if uid.startswith(uid_prefix):
+                    matched_uid = uid  # keep the last match
+
+    return matched_uid
+    

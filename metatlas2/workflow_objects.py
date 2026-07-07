@@ -426,8 +426,8 @@ class Atlas:
     chromatography: str
     polarity: str
     analysis_type: str
-    atlas_type: str
-    analysis_name: str = "MAIN_ATLAS"
+    atlas_type: str = "REFERENCE"
+    analysis_name: str = "MAIN"
     compound_mzrts: Dict[str, CompoundMZRT] = field(default_factory=dict)
     rt_alignment_number: Optional[int] = None
     analysis_number: Optional[int] = None
@@ -509,11 +509,11 @@ class Atlas:
         polarity = meta.get('polarity', '')
         analysis_type = meta.get('analysis_type', '')
         atlas_type = meta.get('atlas_type', 'REFERENCE')
+        analysis_name = meta.get('analysis_name', 'MAIN')
         created_by = meta.get('created_by', '')
         created_date = meta.get('created_date', '')
         source = meta.get('source', '')
         source_atlas_uid = meta.get('source_atlas_uid', None)
-        analysis_name = meta.get('analysis_name', 'MAIN_ATLAS')
 
         # Use mz_rt_uid as the unique key for each CompoundMZRT
         compound_mzrts = {}
@@ -595,7 +595,7 @@ class Atlas:
         logger.info("Summary of new atlases.")
         logger.info("**Make sure to add these to your analysis config to use as project reference atlases:**")
         for info in summary:
-            logger.info(f"Atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
+            logger.info(f"Created new atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
         return
     
     def to_dict(self) -> Dict[str, Any]:

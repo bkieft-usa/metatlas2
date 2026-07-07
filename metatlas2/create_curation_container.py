@@ -76,7 +76,6 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             'suggested_rt_max': 0.0,
             'suggested_rt_peak': 0.0,
             'rt_suggestion_confidence': 0.0,
-            # PubChem / chemical metadata — carried from the atlas (compounds table join)
             'formula': atlas_row.get('formula', ''),
             'smiles': atlas_row.get('smiles', ''),
             'inchi': atlas_row.get('inchi', ''),

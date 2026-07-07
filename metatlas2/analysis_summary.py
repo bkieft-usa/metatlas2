@@ -1,3 +1,4 @@
+import datetime
 import itertools
 import shutil
 from typing import Optional, List, Tuple, Dict
@@ -15,6 +16,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib.backends.backend_pdf import PdfPages
@@ -23,6 +26,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 import metatlas2.database_interact as dbi
+import metatlas2.file_and_project_format as fpf
 import metatlas2.gdrive_upload as gdu
 import metatlas2.logging_config as lcf
 from metatlas2.note_options import (
@@ -83,11 +87,15 @@ def run_all_summaries(
 
     if "log_fold_changes_csv" not in (skip_outputs or []):
         logger.info("Making log fold changes CSV from filtered peak heights...")
-        make_log_fold_changes_csv(summary_obj, overwrite=overwrite)
+        make_log_fold_changes_csv(summary_obj, overwrite=overwrite, use_filter=True)
 
     if "metabomap" not in (skip_outputs or []):
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
         make_metabomap(summary_obj, overwrite=overwrite)
+
+    if "analysis_parquet" not in (skip_outputs or []):
+        logger.info("Making unified analysis Parquet files...")
+        make_analysis_parquet(summary_obj, overwrite=overwrite)
 
     gdrive_upload = False
     if summary_obj.override_parameters.get("upload_to_gdrive") is not None:
@@ -179,43 +187,6 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         "Please update those compounds in the GUI before running summaries. "
         + " | ".join(details)
     )
-
-def _get_compound_info(
-    main_db_path: str,
-    inchi_keys: List[str],
-) -> dict[str, tuple]:
-    """Fetch all compound metadata in ONE query from the compounds table.
-
-    Returns
-    -------
-    dict of inchi_key -> (formula, smiles, inchi, pubchem_cid, mono_isotopic_molecular_weight)
-    Missing keys are simply absent from the dict.
-
-    Note: this is kept as a fallback for callers that do not have the metadata
-    already available in the curation_df.  The preferred path is to read
-    formula/smiles/inchi/pubchem_cid/mono_isotopic_molecular_weight directly
-    from mc_row, which is populated by create_manual_curation_obj from the
-    atlas query (get_atlas_compounds_table already joins compounds).
-    """
-    if not inchi_keys or not main_db_path:
-        return {}
-    placeholders = ",".join("?" * len(inchi_keys))
-    try:
-        with dbi.get_db_connection(main_db_path, read_only=True) as conn:
-            rows = conn.execute(
-                f"""SELECT inchi_key, formula, smiles, inchi,
-                           pubchem_cid, mono_isotopic_molecular_weight
-                    FROM compounds
-                    WHERE inchi_key IN ({placeholders})""",
-                inchi_keys,
-            ).fetchall()
-        return {
-            row[0]: (row[1], row[2], row[3], row[4], float(row[5]) if row[5] is not None else None)
-            for row in rows
-        }
-    except Exception as exc:
-        logger.warning("Batch compound info query failed: %s", exc)
-        return {}
 
 def _safe_float(value, default: float = np.nan) -> float:
     """Coerce *value* to float, returning *default* on failure."""
@@ -326,9 +297,6 @@ def make_identification_figure(
         )
         fig_path = output_dir / f"{safe_name}.pdf"
 
-        # formula/smiles/inchi are already in mc_row, populated by
-        # create_manual_curation_obj from the atlas query which joins compounds.
-        # No separate DB query needed.
         tasks.append({
             "mc_row_dict":   mc_row.to_dict(),
             "compound_name": compound_name,
@@ -1153,7 +1121,7 @@ def make_final_id_sheet(
             "label":                  compound_name,
             "overlapping_compound":   overlapping_compound,
             "overlapping_inchi_keys": overlapping_mz_rt_uids,
-            "formula":                formula or "",
+            "formula":                formula,
             "polarity":               polarity,
             "exact_mass":             _safe_round(exact_mass, 7) if exact_mass is not None else np.nan,
             "inchi_key":              inchi_key,
@@ -1198,10 +1166,6 @@ def make_final_id_sheet(
 
     final_df = pd.DataFrame(rows)
     logger.info("Assembled final ID table with %d rows.", len(final_df))
-
-    # ------------------------------------------------------------------ #
-    #  Excel formatting                                                    #
-    # ------------------------------------------------------------------ #
 
     COL_NAMES = [
         # COMPOUND ANNOTATION
@@ -2038,7 +2002,7 @@ def make_boxplots(
         )
     per_file_df = summary_obj.per_file_metrics_df
 
-    # ── 1. Build atlas lookup (unchanged) ────────────────────────────────────
+    # Build atlas lookup
     atlas_lookup: Dict[Tuple[str, str], Dict[str, float]] = {
         (mc.get("inchi_key", ""), mc.get("adduct", "")): {
             "atlas_mz":      float(mc.get("atlas_mz", np.nan)),
@@ -2047,7 +2011,7 @@ def make_boxplots(
         for _, mc in manual_curation_df.iterrows()
     }
 
-    # ── 2. Create metric output dirs upfront, store paths as strings ──────────
+    # Create metric output dirs upfront, store paths as strings
     _METRIC_CONFIGS = [
         ("peak_height", False, "Peak Height (intensity)", None),
         ("peak_height", True,  "Peak Height (log₁₀)",     None),
@@ -2060,7 +2024,7 @@ def make_boxplots(
         metric_dir.mkdir(parents=True, exist_ok=True)
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
-    # ── 3. Pre-group per_file_df — replaces 4xn O(n) filters with O(1) lookup
+    # Pre-group per_file_df
     if per_file_df is not None and not per_file_df.empty:
         pf_groups: dict = {
             key: grp.reset_index(drop=True)
@@ -2070,7 +2034,7 @@ def make_boxplots(
         pf_groups = {}
     empty_df = pd.DataFrame()
 
-    # ── 4. One task per compound — worker handles all 4 metric PDFs ───────────
+    # One task per compound
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
@@ -2281,12 +2245,12 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
     (compound, file) and columns:
 
     * ``mz_rt_uid``, ``inchi_key``, ``adduct``, ``filename``
-    * ``peak_height``  – maximum intensity in the window
-    * ``peak_area``    – sum of intensities (proxy for area)
-    * ``rt_peak``      – RT at the intensity maximum
-    * ``rt_centroid``  – intensity-weighted mean RT
-    * ``mz_peak``      – m/z at the intensity maximum
-    * ``mz_centroid``  – intensity-weighted mean m/z
+    * ``peak_height``  - maximum intensity in the window
+    * ``peak_area``    - sum of intensities (proxy for area)
+    * ``rt_peak``      - RT at the intensity maximum
+    * ``rt_centroid``  - intensity-weighted mean RT
+    * ``mz_peak``      - m/z at the intensity maximum
+    * ``mz_centroid``  - intensity-weighted mean m/z
     """
     if ms1_df is None or ms1_df.empty:
         return pd.DataFrame()
@@ -2305,12 +2269,12 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
         if not ints or max(ints) == 0:
             peak_height = peak_area = rt_peak = rt_centroid = mz_peak = mz_centroid = float("nan")
         else:
-            peak_idx    = int(np.argmax(ints))
+            peak_idx = int(np.argmax(ints))
             peak_height = ints[peak_idx]
-            peak_area   = float(np.nansum(ints))
-            rt_peak     = rts[peak_idx]  if peak_idx < len(rts)  else float("nan")
-            mz_peak     = mzs[peak_idx]  if peak_idx < len(mzs)  else float("nan")
-            total_int   = peak_area
+            peak_area = float(np.nansum(ints))
+            rt_peak = rts[peak_idx]  if peak_idx < len(rts)  else float("nan")
+            mz_peak = mzs[peak_idx]  if peak_idx < len(mzs)  else float("nan")
+            total_int = peak_area
             rt_centroid = (
                 float(np.nansum([r * i for r, i in zip(rts, ints)]) / total_int)
                 if total_int > 0 else float("nan")
@@ -2394,11 +2358,13 @@ def make_data_sheets(
         "mz_peak",
         "mz_centroid",
     ]
+    # Ordered metadata columns: compound_index, mz_rt_uid, compound_name, inchi_key, adduct
     _INDEX_COLS = [
         "compound_index",
-        "compound_name",
         "mz_rt_uid",
+        "compound_name",
         "inchi_key",
+        "adduct",
     ]
 
     for metric in _DATA_SHEET_METRICS:
@@ -2410,10 +2376,12 @@ def make_data_sheets(
 
         csv_path = output_dir / f"{metric}.csv"
 
+        # Include only index cols that are actually present
+        present_idx = [c for c in _INDEX_COLS if c in pfm.columns]
         wide = (
-            pfm[_INDEX_COLS + ["_file_col", metric]]
+            pfm[present_idx + ["_file_col", metric]]
             .pivot_table(
-                index=_INDEX_COLS,
+                index=present_idx,
                 columns="_file_col",
                 values=metric,
                 aggfunc="first",
@@ -2426,7 +2394,7 @@ def make_data_sheets(
             "Exported %s data sheet (%d compounds x %d files) → %s",
             metric,
             len(wide),
-            len(wide.columns) - len(_INDEX_COLS),
+            len(wide.columns) - len(present_idx),
             csv_path,
         )
 
@@ -2437,7 +2405,19 @@ def make_peak_height_filtered_csv(
     overwrite: bool = True,
     control_fold_threshold: float = 3.0,
 ) -> None:
-    """Filter and process the ``peak_height`` data sheet."""
+    """Filter and process the ``peak_height`` data sheet.
+
+    Reads ``peak_height.csv`` (produced by :func:`make_data_sheets`) and writes
+    ``peak_height_filtered.csv`` with the following column layout::
+
+        control_filter, compound_index, mz_rt_uid, compound_name, inchi_key,
+        adduct, <sample_file_1>, <sample_file_2>, ...
+
+    Rows with the same ``inchi_key`` and ``compound_name`` (e.g. different
+    adducts) are collapsed to a single row by taking the element-wise maximum
+    across sample columns.  The adduct that produced the highest peak across
+    non-control samples is recorded in the ``adduct`` column.
+    """
 
     out_dir = Path(obj.paths['analysis_results_output_dir']) / "data_sheets"
     source_csv = out_dir / "peak_height.csv"
@@ -2455,10 +2435,11 @@ def make_peak_height_filtered_csv(
 
     df = pd.read_csv(source_csv)
 
-    _META_COLS = {"compound_index", "compound_name", "mz_rt_uid", "inchi_key", "adduct", "polarity"}
+    # ── Identify metadata vs sample columns ──────────────────────────────────
+    _META_COLS = {"compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
     data_cols = [c for c in df.columns if c not in _META_COLS]
 
-    # ── 1. Control-signal filter ───────────────────────────────────────────────
+    # ── 1. Control-signal filter ──────────────────────────────────────────────
     _CTRL_PATTERNS = ("ExCtrl", "InjBL")
     ctrl_cols     = [c for c in data_cols if any(p in c for p in _CTRL_PATTERNS)]
     non_ctrl_cols = [c for c in data_cols if c not in ctrl_cols]
@@ -2492,123 +2473,110 @@ def make_peak_height_filtered_csv(
         logger.warning("No compounds found — no output written.")
         return
 
-    # ── 2. Merge identical inchi_key rows by max; keep chosen adduct/polarity ──
-    group_keys       = ["inchi_key", "compound_name", "control_filter"]
-    source_meta_cols = [c for c in ("adduct", "polarity") if c in df.columns]
-    selector_cols    = non_ctrl_cols if non_ctrl_cols else data_cols
+    # ── 2. Collapse duplicate (inchi_key, compound_name) rows ────────────────
+    # When multiple adducts exist for the same compound, keep the adduct that
+    # produced the highest peak across non-control sample columns.
+    selector_cols = non_ctrl_cols if non_ctrl_cols else data_cols
+    group_keys    = ["inchi_key", "compound_name", "control_filter"]
 
-    def _infer_polarity_from_label(label: object) -> str:
-        if not isinstance(label, str) or not label:
-            return ""
-        m = re.search(r"(^|[_\-])(pos|neg)([_\-]|$)", label, flags=re.IGNORECASE)
-        if m:
-            return m.group(2).upper()
-        m = re.search(r"(positive|negative)", label, flags=re.IGNORECASE)
-        if m:
-            return "POS" if m.group(1).lower().startswith("pos") else "NEG"
-        return ""
+    # Determine the best adduct per (inchi_key, compound_name, control_filter)
+    chosen_adduct_map: Dict[tuple, str] = {}
+    if "adduct" in df.columns and selector_cols:
+        sel_score = df[selector_cols].max(axis=1, skipna=True).fillna(-np.inf)
+        tmp = df[group_keys + ["adduct"]].copy()
+        tmp["_score"] = sel_score.values
+        tmp["_order"] = np.arange(len(tmp))
+        tmp = tmp.sort_values(["_score", "_order"], ascending=[False, True])
+        best = tmp.drop_duplicates(subset=group_keys, keep="first")
+        for _, row in best.iterrows():
+            key = (row["inchi_key"], row["compound_name"], row["control_filter"])
+            chosen_adduct_map[key] = row["adduct"]
 
-    chosen_meta = None
+    # Preserve compound_index and mz_rt_uid for the best-scoring row per group
+    chosen_index_map: Dict[tuple, int] = {}
+    chosen_uid_map:   Dict[tuple, str] = {}
     if selector_cols:
-        selection_score = df[selector_cols].max(axis=1, skipna=True)
-        selector_frame  = df[selector_cols]
-        best_col        = selector_frame.idxmax(axis=1)
-        best_col        = best_col.where(selector_frame.notna().any(axis=1), "")
+        sel_score = df[selector_cols].max(axis=1, skipna=True).fillna(-np.inf)
+        tmp2 = df[group_keys].copy()
+        if "compound_index" in df.columns:
+            tmp2["compound_index"] = df["compound_index"].values
+        if "mz_rt_uid" in df.columns:
+            tmp2["mz_rt_uid"] = df["mz_rt_uid"].values
+        tmp2["_score"] = sel_score.values
+        tmp2["_order"] = np.arange(len(tmp2))
+        tmp2 = tmp2.sort_values(["_score", "_order"], ascending=[False, True])
+        best2 = tmp2.drop_duplicates(subset=group_keys, keep="first")
+        for _, row in best2.iterrows():
+            key = (row["inchi_key"], row["compound_name"], row["control_filter"])
+            if "compound_index" in best2.columns:
+                chosen_index_map[key] = row["compound_index"]
+            if "mz_rt_uid" in best2.columns:
+                chosen_uid_map[key] = row["mz_rt_uid"]
 
-        chosen_src = (
-            df[group_keys + source_meta_cols].copy()
-            if source_meta_cols
-            else df[group_keys].copy()
-        )
-        chosen_src["_selection_score"] = selection_score.fillna(-np.inf)
-        chosen_src["_best_col"]        = best_col
-        chosen_src["_row_order"]       = np.arange(len(chosen_src))
-        chosen_src = chosen_src.sort_values(
-            ["_selection_score", "_row_order"], ascending=[False, True]
-        )
-        chosen_meta = chosen_src.drop_duplicates(subset=group_keys, keep="first")
-        chosen_meta = chosen_meta.rename(columns={
-            "adduct":   "chosen_adduct",
-            "polarity": "chosen_polarity",
-        })
-        if "chosen_polarity" not in chosen_meta.columns:
-            chosen_meta["chosen_polarity"] = chosen_meta["_best_col"].map(
-                _infer_polarity_from_label
-            )
-        else:
-            chosen_meta["chosen_polarity"] = chosen_meta["chosen_polarity"].fillna(
-                chosen_meta["_best_col"].map(_infer_polarity_from_label)
-            )
-        chosen_meta = chosen_meta.drop(
-            columns=["_selection_score", "_best_col", "_row_order"]
-        )
+    # Drop per-row metadata before groupby-max so only numeric data is aggregated
+    drop_before_agg = [c for c in ("compound_index", "mz_rt_uid", "adduct") if c in df.columns]
+    df_agg = df.drop(columns=drop_before_agg)
 
-    drop_cols = [c for c in ("compound_index", "mz_rt_uid", "adduct", "polarity") if c in df.columns]
-    df = df.drop(columns=drop_cols)
+    n_before = len(df_agg)
+    df_agg = df_agg.groupby(group_keys, sort=False).max().reset_index()
+    logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df_agg))
 
-    n_before = len(df)
-    df = df.groupby(group_keys, sort=False).max().reset_index()
-    if chosen_meta is not None:
-        df = df.merge(chosen_meta, on=group_keys, how="left")
-    logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df))
+    # Re-attach chosen metadata columns
+    def _lookup(row, mapping, default=""):
+        return mapping.get((row["inchi_key"], row["compound_name"], row["control_filter"]), default)
 
-    def _shorten(col: str) -> str:
-        parts = col.split("_")
-        return "_".join(parts[:-2]) if len(parts) > 2 else col
+    df_agg["adduct"]         = df_agg.apply(lambda r: _lookup(r, chosen_adduct_map), axis=1)
+    df_agg["compound_index"] = df_agg.apply(lambda r: _lookup(r, chosen_index_map, np.nan), axis=1)
+    df_agg["mz_rt_uid"]      = df_agg.apply(lambda r: _lookup(r, chosen_uid_map), axis=1)
 
-    _META_FIXED = {
-        "inchi_key", "compound_name", "control_filter", "chosen_adduct", "chosen_polarity"
-    }
-    df.columns = [c if c in _META_FIXED else _shorten(c) for c in df.columns]
-
-    if df.columns.duplicated().any():
-        meta_df = df[[c for c in df.columns if c in _META_FIXED]].reset_index(drop=True)
-        data_df = df[[c for c in df.columns if c not in _META_FIXED]]
-        data_merged = (
-            data_df.T
-            .groupby(level=0)
-            .max()
-            .T
-            .reset_index(drop=True)
-        )
-        df = pd.concat([meta_df, data_merged], axis=1)
-        logger.info(
-            "Merged duplicate columns after shortening; %d data columns remain.",
-            len(data_merged.columns),
-        )
-
-    # ── 4. Impute NaN cells with the global matrix minimum ────────────────────
-    data_cols_final = [c for c in df.columns if c not in _META_FIXED]
-    global_min = float(df[data_cols_final].min().min()) if data_cols_final else np.nan
+    # ── 3. Impute NaN sample cells with the global matrix minimum ────────────
+    _META_FIXED = {"control_filter", "compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
+    data_cols_final = [c for c in df_agg.columns if c not in _META_FIXED]
+    global_min = float(df_agg[data_cols_final].min().min()) if data_cols_final else np.nan
     if not np.isnan(global_min):
-        n_nan = int(df[data_cols_final].isna().sum().sum())
-        df[data_cols_final] = df[data_cols_final].fillna(global_min)
+        n_nan = int(df_agg[data_cols_final].isna().sum().sum())
+        df_agg[data_cols_final] = df_agg[data_cols_final].fillna(global_min)
         logger.info("Imputed %d NaN cells with global minimum: %g", n_nan, global_min)
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
-    # ── 5. Reorder columns ─────────────────────────────────────────────────────
-    ordered_meta = ["control_filter", "compound_name", "inchi_key"]
-    if "chosen_adduct" in df.columns:
-        ordered_meta.append("chosen_adduct")
-    if "chosen_polarity" in df.columns:
-        ordered_meta.append("chosen_polarity")
-    other_cols = [c for c in df.columns if c not in set(ordered_meta)]
-    df = df[ordered_meta + other_cols]
+    # ── 4. Reorder columns: control_filter, compound_index, mz_rt_uid,
+    #       compound_name, inchi_key, adduct, ...sample data... ───────────────
+    ordered_meta = ["control_filter", "compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"]
+    ordered_meta = [c for c in ordered_meta if c in df_agg.columns]
+    other_cols   = [c for c in df_agg.columns if c not in set(ordered_meta)]
+    df_agg = df_agg[ordered_meta + other_cols]
 
-    # ── 6. Export ──────────────────────────────────────────────────────────────
-    df.to_csv(output_csv, index=False)
+    # Export
+    df_agg.to_csv(output_csv, index=False)
     logger.info(
         "Exported filtered peak height (%d compounds x %d files) → %s",
-        len(df), len(df.columns) - len(ordered_meta), output_csv,
+        len(df_agg), len(df_agg.columns) - len(ordered_meta), output_csv,
     )
 
 
 def make_log_fold_changes_csv(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
+    use_filter: bool = True,
 ) -> None:
-    """Create per-run log2 fold-change CSV from peak_height_filtered.csv.
+    """Create group-level log2 fold-change CSV from peak_height_filtered.csv.
+
+    Sample columns are grouped by the 13th underscore-separated field of the
+    column name (index 12), which corresponds to the ``sample_name`` field
+    defined in :data:`metatlas2.file_and_project_format.FILE_PATTERN`.
+    Within each group the mean of all replicate values is computed, and
+    pairwise log2 fold-changes are then calculated between every pair of
+    groups.
+
+    Output column layout::
+
+        compound_index, mz_rt_uid, compound_name, inchi_key, adduct,
+        <GroupA>_vs_<GroupB>, ...
+
+    When *use_filter* is ``True`` (default), only rows where
+    ``control_filter == 'keep'`` are included (the column itself is not
+    written to the output).
 
     This output is independent of metabomap and does not require both
     polarities to be present.
@@ -2627,36 +2595,84 @@ def make_log_fold_changes_csv(
         logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
         return
 
-    logger.info("Creating per-run log fold changes CSV at %s", output_csv)
+    logger.info("Creating group-level log fold changes CSV at %s", output_csv)
     df = pd.read_csv(source_csv)
+    if use_filter and "control_filter" in df.columns:
+        df = df[df["control_filter"] == "keep"].reset_index(drop=True)
 
-    id_cols = [
-        c for c in ["inchi_key", "compound_name", "control_filter", "chosen_adduct", "chosen_polarity"]
-        if c in df.columns
-    ]
-    data_cols = [c for c in df.columns if c not in id_cols]
+    # Metadata columns — same as peak_height_filtered.csv but without control_filter.
+    # Preserve ordered output: compound_index, mz_rt_uid, compound_name, inchi_key, adduct
+    _ID_COL_NAMES = {"compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
+    _ID_COL_ORDER = ["compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"]
+    id_cols   = [c for c in _ID_COL_ORDER if c in df.columns]
+    data_cols = [c for c in df.columns if c not in _ID_COL_NAMES and c != "control_filter"]
 
     if not data_cols:
         logger.warning("No numeric sample columns found in %s; writing identifiers only.", source_csv)
-        pd.DataFrame({c: df[c] for c in id_cols}).to_csv(output_csv, sep=",", index=False)
+        df[id_cols].to_csv(output_csv, sep=",", index=False)
         return
 
     data_num = df[data_cols].apply(pd.to_numeric, errors="coerce")
-    lfc_records = {col: df[col].to_numpy() for col in id_cols}
 
-    for g1, g2 in itertools.combinations(data_num.columns, 2):
-        v1 = data_num[g1].to_numpy(dtype=float)
-        v2 = data_num[g2].to_numpy(dtype=float)
-        valid = (v1 > 0) & (v2 > 0) & np.isfinite(v1) & np.isfinite(v2)
-        res = np.full(len(v1), np.nan)
-        res[valid] = np.log2(v1[valid] / v2[valid])
+    # ── Group replicate columns by sample_name (13th underscore-split field) ──
+    group_to_cols: Dict[str, List[str]] = {}
+    ungrouped_cols: List[str] = []
+    for col in data_num.columns:
+        grp = fpf.get_file_parts(col, "sample_name")
+        if grp is not None:
+            group_to_cols.setdefault(grp, []).append(col)
+        else:
+            ungrouped_cols.append(col)
+
+    if ungrouped_cols:
+        logger.warning(
+            "%d sample column(s) could not be assigned to a group (fewer than 13 "
+            "underscore-separated parts) and will be skipped: %s",
+            len(ungrouped_cols),
+            ungrouped_cols[:10],
+        )
+
+    if len(group_to_cols) < 2:
+        logger.warning(
+            "Fewer than 2 sample groups identified in %s "
+            "(groups found: %s) — no fold-change comparisons possible.",
+            source_csv,
+            list(group_to_cols.keys()),
+        )
+        df[id_cols].to_csv(output_csv, sep=",", index=False)
+        return
+
+    logger.info(
+        "Identified %d sample groups: %s",
+        len(group_to_cols),
+        list(group_to_cols.keys()),
+    )
+    for grp, cols in group_to_cols.items():
+        logger.info("  Group '%s': %d replicate(s) — %s", grp, len(cols), cols)
+
+    # ── Compute per-group mean across replicates ──────────────────────────────
+    group_means: Dict[str, np.ndarray] = {}
+    for grp, cols in group_to_cols.items():
+        group_means[grp] = data_num[cols].mean(axis=1).to_numpy(dtype=float)
+
+    # ── Build output: id columns + pairwise LFC columns ──────────────────────
+    lfc_records: Dict[str, object] = {col: df[col].to_numpy() for col in id_cols}
+
+    n_comparisons = 0
+    for g1, g2 in itertools.combinations(group_means.keys(), 2):
+        m1 = group_means[g1]
+        m2 = group_means[g2]
+        valid = (m1 > 0) & (m2 > 0) & np.isfinite(m1) & np.isfinite(m2)
+        res = np.full(len(m1), np.nan)
+        res[valid] = np.log2(m1[valid] / m2[valid])
         lfc_records[f"{g1}_vs_{g2}"] = res
+        n_comparisons += 1
 
     pd.DataFrame(lfc_records).to_csv(output_csv, sep=",", index=False)
     logger.info(
-        "Exported per-run log fold changes (%d compounds x %d comparisons) → %s",
+        "Exported group-level log fold changes (%d compounds x %d group comparisons) → %s",
         len(df),
-        max(len(lfc_records) - len(id_cols), 0),
+        n_comparisons,
         output_csv,
     )
 
@@ -2726,18 +2742,44 @@ def _build_inchikey_to_cpd(cache_path: Path) -> dict[str, str]:
 def make_metabomap(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
-    modelseed_cache_path: Optional[Path] = None,
 ) -> None:
-    # 1. Setup Paths and Polarities
+    """Merge POS and NEG ``peak_height_filtered.csv`` files into a single
+    metabomap table and compute group-level log2 fold-changes.
+
+    For each unique ``(inchi_key, compound_name)`` pair the row with the
+    highest peak height across non-control sample columns is selected,
+    regardless of polarity or adduct.  The chosen adduct and polarity are
+    recorded as ``chosen_adduct`` and ``chosen_polarity`` columns.
+
+    Sample columns are then grouped by the 13th underscore-separated field
+    (``sample_name``, index 12) and the mean of each group's replicates is
+    used to compute pairwise log2 fold-changes.
+
+    Outputs
+    -------
+    ``<analysis_output_dir>/../metabomap/merged_peak_heights.tsv``
+        One row per ``(inchi_key, compound_name)`` with columns:
+        ``inchi_key, cpd_id, compound_name, chosen_adduct, chosen_polarity,
+        <sample_file_1>, ...``
+
+    ``<analysis_output_dir>/../metabomap/log_fold_changes.tsv``
+        One row per ``(inchi_key, compound_name)`` with columns:
+        ``inchi_key, cpd_id, compound_name, <GroupA>_vs_<GroupB>, ...``
+    """
+    # ── 1. Setup paths ────────────────────────────────────────────────────────
     analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
     curr_pol = summary_obj.polarity.upper()
-    sib_pol = "NEG" if curr_pol == "POS" else "POS"
-    
+    sib_pol  = "NEG" if curr_pol == "POS" else "POS"
+
     current_csv = analysis_output_dir / "data_sheets" / "peak_height_filtered.csv"
-    sibling_csv = Path(str(analysis_output_dir).replace(f"-{curr_pol}-", f"-{sib_pol}-")) / "data_sheets" / "peak_height_filtered.csv"
-    
+    sibling_csv = (
+        Path(str(analysis_output_dir).replace(f"-{curr_pol}-", f"-{sib_pol}-"))
+        / "data_sheets" / "peak_height_filtered.csv"
+    )
+
     metabomaps_dir = analysis_output_dir / "../metabomap"
-    merged_tsv, lfc_tsv = metabomaps_dir / "merged_peak_heights.tsv", metabomaps_dir / "log_fold_changes.tsv"
+    merged_tsv = metabomaps_dir / "merged_peak_heights.tsv"
+    lfc_tsv    = metabomaps_dir / "log_fold_changes.tsv"
 
     if not overwrite and merged_tsv.exists() and lfc_tsv.exists():
         return
@@ -2748,53 +2790,76 @@ def make_metabomap(
 
     metabomaps_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Helper for Column Filtering
-    _META = {"control_filter", "compound_name", "inchi_key"}
-    _EXCLUDE = ("QC", "ISTD")
+    # ── 2. Load both polarity CSVs ────────────────────────────────────────────
+    _META_COLS = {"control_filter", "compound_index", "mz_rt_uid",
+                  "compound_name", "inchi_key", "adduct"}
+    _EXCLUDE_GROUPS = ("QC", "ISTD")
 
-    def _get_grp(col: str) -> Optional[str]:
-        parts = col.split("_")
-        return parts[12] if len(parts) > 12 and not any(p in parts[12] for p in _EXCLUDE) else None
+    def _load_filtered(path: Path, polarity_label: str) -> pd.DataFrame:
+        """Load one peak_height_filtered.csv, tag with polarity, keep 'keep' rows."""
+        raw = pd.read_csv(path)
+        if "control_filter" in raw.columns:
+            raw = raw[raw["control_filter"] == "keep"].reset_index(drop=True)
+        raw["_polarity"] = polarity_label
+        return raw
 
-    def _process_df(path: Path):
-        df = pd.read_csv(path)
-        cols = [c for c in df.columns if c in _META or _get_grp(c) is not None]
-        df = df[cols].copy()
-        # Group by InChI + Name to collapse peak_1, peak_2 etc. into the max value
-        return df.set_index(["inchi_key", "compound_name"]).groupby(level=[0, 1]).max()
+    cur_df = _load_filtered(current_csv, curr_pol)
+    sib_df = _load_filtered(sibling_csv, sib_pol)
 
-    # 3. Load and Align
-    cur_idx = _process_df(current_csv)
-    sib_idx = _process_df(sibling_csv)
-    
-    # Ensure columns are sorted consistently by group
-    cur_sorted = sorted([c for c in cur_idx.columns if c not in _META], key=lambda c: (_get_grp(c), c))
-    sib_sorted = sorted([c for c in sib_idx.columns if c not in _META], key=lambda c: (_get_grp(c), c))
-    
-    all_ids = cur_idx.index.union(sib_idx.index)
-    cur_matrix = cur_idx[cur_sorted].reindex(all_ids)
-    sib_matrix = sib_idx[sib_sorted].reindex(all_ids)
+    # Stack both polarities
+    combined = pd.concat([cur_df, sib_df], axis=0, ignore_index=True)
 
-    # 4. Merge using Element-wise Max
-    cur_groups = [_get_grp(c) for c in cur_sorted]
-    sib_groups = [_get_grp(c) for c in sib_sorted]
+    # Identify sample columns (present in either polarity)
+    all_sample_cols = [
+        c for c in combined.columns
+        if c not in _META_COLS and c != "_polarity"
+    ]
 
-    if cur_groups == sib_groups:
-        merged_vals = np.fmax(cur_matrix.values, sib_matrix.values)
-        merged_data_df = pd.DataFrame(merged_vals, index=all_ids, columns=cur_groups)
+    # ── 3. Select best row per (inchi_key, compound_name) ────────────────────
+    # "Best" = highest max peak height across non-control sample columns.
+    # Control columns (ExCtrl, InjBL) are excluded from the selection score.
+    _CTRL_PATTERNS = ("ExCtrl", "InjBL")
+    non_ctrl_sample_cols = [
+        c for c in all_sample_cols
+        if not any(p in c for p in _CTRL_PATTERNS)
+    ]
+    score_cols = non_ctrl_sample_cols if non_ctrl_sample_cols else all_sample_cols
+
+    if score_cols:
+        combined["_score"] = combined[score_cols].apply(
+            pd.to_numeric, errors="coerce"
+        ).max(axis=1, skipna=True).fillna(-np.inf)
     else:
-        logger.warning("Column groups differ; using per-group max.")
-        all_grps = list(dict.fromkeys(cur_groups + sib_groups))
-        merged_data_df = pd.DataFrame(index=all_ids)
-        for grp in all_grps:
-            c_cols = [c for c in cur_sorted if _get_grp(c) == grp]
-            s_cols = [c for c in sib_sorted if _get_grp(c) == grp]
-            # Combine all replicates for this group from both polarities and take max
-            merged_data_df[grp] = pd.concat([cur_matrix[c_cols], sib_matrix[s_cols]], axis=1).max(axis=1)
+        combined["_score"] = -np.inf
 
-    # 5. Finalize Metadata and ModelSEED
-    merged_data_df = merged_data_df.reset_index() # Now contains inchi_key and compound_name
-    
+    combined["_order"] = np.arange(len(combined))
+    combined_sorted = combined.sort_values(
+        ["_score", "_order"], ascending=[False, True]
+    )
+    best = combined_sorted.drop_duplicates(
+        subset=["inchi_key", "compound_name"], keep="first"
+    ).reset_index(drop=True)
+
+    logger.info(
+        "Metabomap: selected best row for %d unique (inchi_key, compound_name) pairs "
+        "from %d combined rows (%s + %s).",
+        len(best), len(combined), curr_pol, sib_pol,
+    )
+
+    # Record chosen adduct and polarity
+    best["chosen_adduct"]   = best["adduct"]   if "adduct"    in best.columns else ""
+    best["chosen_polarity"] = best["_polarity"]
+
+    # ── 4. Build the merged peak-heights table ────────────────────────────────
+    # Keep only sample columns that are actually present in the best-row selection
+    present_sample_cols = [c for c in all_sample_cols if c in best.columns]
+
+    merged_data_df = best[
+        ["inchi_key", "compound_name", "chosen_adduct", "chosen_polarity"]
+        + present_sample_cols
+    ].copy()
+
+    # Attach ModelSEED CPD IDs
     ms_path = Path(summary_obj.paths["modelseed_table_path"])
     try:
         inchikey_to_cpd = _build_inchikey_to_cpd(ms_path)
@@ -2803,22 +2868,443 @@ def make_metabomap(
 
     merged_data_df.insert(1, "cpd_id", merged_data_df["inchi_key"].map(inchikey_to_cpd))
     merged_data_df.to_csv(merged_tsv, sep="\t", index=False)
+    logger.info(
+        "Wrote merged_peak_heights.tsv (%d compounds x %d sample columns) → %s",
+        len(merged_data_df), len(present_sample_cols), merged_tsv,
+    )
 
-    # 6. Log2 Fold Changes
-    unique_groups = [c for c in merged_data_df.columns if c not in {"inchi_key", "compound_name", "cpd_id"}]
-    if len(unique_groups) < 2: return
+    # ── 5. Group sample columns by sample_name (index 12) and compute LFC ────
+    _LFC_META = {"inchi_key", "cpd_id", "compound_name", "chosen_adduct", "chosen_polarity"}
+    sample_data_cols = [c for c in merged_data_df.columns if c not in _LFC_META]
 
-    # Precompute means to avoid repeated slicing
-    means = {grp: merged_data_df[grp].mean(axis=1).to_numpy() if merged_data_df[grp].ndim > 1 
-             else merged_data_df[grp].to_numpy() for grp in unique_groups}
+    group_to_cols: Dict[str, List[str]] = {}
+    for col in sample_data_cols:
+        grp = _sample_group_from_col(col)
+        if grp is not None and not any(ex in grp for ex in _EXCLUDE_GROUPS):
+            group_to_cols.setdefault(grp, []).append(col)
 
-    lfc_records = {col: merged_data_df[col].to_numpy() for col in ["inchi_key", "cpd_id", "compound_name"]}
-    
-    for g1, g2 in itertools.combinations(unique_groups, 2):
-        m1, m2 = means[g1], means[g2]
-        valid = (m1 > 0) & (m2 > 0) & ~np.isnan(m1) & ~np.isnan(m2)
+    if len(group_to_cols) < 2:
+        logger.warning(
+            "Fewer than 2 sample groups found in metabomap (%s) — LFC table not written.",
+            list(group_to_cols.keys()),
+        )
+        return
+
+    logger.info(
+        "Metabomap LFC: %d groups — %s",
+        len(group_to_cols), list(group_to_cols.keys()),
+    )
+
+    data_num = merged_data_df[sample_data_cols].apply(pd.to_numeric, errors="coerce")
+
+    group_means: Dict[str, np.ndarray] = {
+        grp: data_num[cols].mean(axis=1).to_numpy(dtype=float)
+        for grp, cols in group_to_cols.items()
+    }
+
+    lfc_records: Dict[str, object] = {
+        col: merged_data_df[col].to_numpy()
+        for col in ["inchi_key", "cpd_id", "compound_name"]
+    }
+
+    n_comparisons = 0
+    for g1, g2 in itertools.combinations(group_means.keys(), 2):
+        m1, m2 = group_means[g1], group_means[g2]
+        valid = (m1 > 0) & (m2 > 0) & np.isfinite(m1) & np.isfinite(m2)
         res = np.full(len(m1), np.nan)
         res[valid] = np.log2(m1[valid] / m2[valid])
         lfc_records[f"{g1}_vs_{g2}"] = res
+        n_comparisons += 1
 
     pd.DataFrame(lfc_records).to_csv(lfc_tsv, sep="\t", index=False)
+    logger.info(
+        "Wrote log_fold_changes.tsv (%d compounds x %d group comparisons) → %s",
+        len(merged_data_df), n_comparisons, lfc_tsv,
+    )
+
+
+###############################################
+#### Make parquet files
+###############################################
+
+def make_analysis_parquet(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = True,
+) -> None:
+    """Write two unified Parquet files for downstream querying.
+
+    Output layout
+    -------------
+
+        <analysis_output_dir>/
+        └── parquet_results/
+            └── chromatography=<CHROM>/
+                └── polarity=<POL>/
+                    └── analysis_type=<TYPE>/
+                        └── analysis_name=<NAME>/
+                            ├── compound_per_file.parquet
+                            └── compound_lfc.parquet
+
+    Files
+    -----
+    compound_per_file.parquet
+        One row per compound per LC-MS file.  Sorted by ``atlas_mz`` so that
+        mz ± tolerance queries benefit from row-group statistics.
+
+    compound_lfc.parquet
+        One row per compound per condition-pair (long format).  Sorted by
+        (condition_1, condition_2, atlas_mz).
+
+    Both files carry project-level key-value metadata in the Parquet footer from project_name
+
+    Parameters
+    ----------
+    summary_obj:
+        Configured :class:`AnalysisSummary` object after curation data has
+        been loaded.
+    overwrite:
+        When *False*, skips writing if both output files already exist.
+    """
+
+    analysis_output_dir = Path(summary_obj.paths["analysis_results_output_dir"]).parent
+    chrom = summary_obj.chromatography
+    polarity = summary_obj.polarity
+    analysis_type = summary_obj.analysis_type
+    analysis_name = summary_obj.analysis_name
+
+    partition_dir = (
+        analysis_output_dir
+        / "parquet_results"
+        / f"chromatography={chrom}"
+        / f"polarity={polarity}"
+        / f"analysis_type={analysis_type}"
+        / f"analysis_name={analysis_name}"
+    )
+
+    per_file_path = partition_dir / "compound_per_file.parquet"
+    lfc_path = partition_dir / "compound_lfc.parquet"
+
+    if not overwrite and per_file_path.exists() and lfc_path.exists():
+        logger.info(
+            "Overwriting disabled: existing Parquet files in %s will be used.", partition_dir
+        )
+        return
+
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Writing analysis Parquet files to %s", partition_dir)
+
+    # Start with analysis-level fields always available from summary_obj
+    footer_meta: dict[bytes, bytes] = {
+        b"project_name":         str(summary_obj.project_name or "").encode(),
+        b"chromatography":       chrom.encode(),
+        b"polarity":             polarity.encode(),
+        b"analysis_type":        analysis_type.encode(),
+        b"analysis_name":        analysis_name.encode(),
+        b"rt_alignment_number":  str(summary_obj.rt_alignment_number or "").encode(),
+        b"analysis_number":      str(summary_obj.analysis_number or "").encode(),
+        b"created_date":         datetime.date.today().isoformat().encode(),
+    }
+
+    # Overlay all fields parsed from the project name
+    parsed_meta = _parse_project_metadata(summary_obj.project_name)
+    for key, val in parsed_meta.items():
+        footer_meta[key.encode()] = val.encode()
+
+    def _attach_meta(table: pa.Table) -> pa.Table:
+        existing = table.schema.metadata or {}
+        return table.replace_schema_metadata({**existing, **footer_meta})
+
+    # Write settings
+    _WRITE_KWARGS = dict(
+        compression="zstd",
+        compression_level=3,
+        write_statistics=True,
+        row_group_size=100_000,
+        data_page_size=1 * 1024 * 1024,
+        use_dictionary=True,
+    )
+
+    # compound_per_file
+    logger.info("Building compound_per_file table...")
+    per_file_table = _build_compound_per_file_table(summary_obj)
+
+    if per_file_table.num_rows > 0:
+        per_file_table = _attach_meta(per_file_table)
+        pq.write_table(per_file_table, per_file_path, **_WRITE_KWARGS)
+        logger.info(
+            "Wrote compound_per_file.parquet (%d rows, %d columns) → %s",
+            per_file_table.num_rows, per_file_table.num_columns, per_file_path,
+        )
+    else:
+        logger.warning("compound_per_file table is empty — file not written.")
+
+    # compound_lfc
+    logger.info("Building compound_lfc table...")
+    lfc_table = _build_compound_lfc_table(summary_obj)
+
+    if lfc_table.num_rows > 0:
+        lfc_table = _attach_meta(lfc_table)
+        pq.write_table(lfc_table, lfc_path, **_WRITE_KWARGS)
+        logger.info(
+            "Wrote compound_lfc.parquet (%d rows, %d columns) → %s",
+            lfc_table.num_rows, lfc_table.num_columns, lfc_path,
+        )
+    else:
+        logger.warning("compound_lfc table is empty — file not written.")
+
+    logger.info("Analysis Parquet export complete → %s", partition_dir)
+
+def _build_compound_per_file_table(
+    summary_obj: "AnalysisSummary",
+) -> pa.Table:
+    """Build a PyArrow Table with one row per compound x file.
+
+    Joins ``per_file_metrics_df`` (peak_height, peak_area, rt_peak,
+    rt_centroid, mz_peak, mz_centroid) with compound-level metadata from
+    ``curation_df`` (atlas_mz, atlas_rt_*, adduct, formula, inchi_key,
+    ms1/ms2 notes, quality scores, msi_level, control_filter).
+
+    The table is sorted by ``atlas_mz`` ascending so that PyArrow row-group
+    statistics enable efficient mz ± tolerance predicate pushdown.
+
+    Returns
+    -------
+    pa.Table
+    """
+    if summary_obj.per_file_metrics_df is None or summary_obj.per_file_metrics_df.empty:
+        logger.info("per_file_metrics_df not set — computing from ms1_df...")
+        summary_obj.per_file_metrics_df = _build_per_file_metrics_df(
+            summary_obj.experimental_data.ms1_df
+        )
+
+    per_file_df = summary_obj.per_file_metrics_df
+    if per_file_df is None or per_file_df.empty:
+        logger.warning("per_file_metrics_df is empty — compound_per_file table will be empty.")
+        return pa.table({})
+
+    mc = summary_obj.experimental_data.curation_df
+    if mc is None or mc.empty:
+        logger.warning("curation_df is empty — compound_per_file table will be empty.")
+        return pa.table({})
+
+    mc = mc.reset_index(drop=True)
+
+    # Build quality-score lookup from curation_df
+    chromatography = summary_obj.chromatography
+    quality_rows: list[dict] = []
+    for _, mc_row in mc.iterrows():
+        mz_rt_uid = mc_row.get("mz_rt_uid", "")
+        mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
+        mz_measured     = float(mc_row.get("mz", np.nan))
+        rt_error        = float(mc_row.get("rt_error", np.nan))
+
+        if not np.isnan(mz_measured) and not np.isnan(mz_theoretical) and mz_theoretical != 0:
+            ppm_err = (mz_measured - mz_theoretical) / mz_theoretical * 1e6
+            da_err  = abs(mz_theoretical - mz_measured)
+        else:
+            ppm_err = da_err = np.nan
+
+        mz_q  = _mz_quality(ppm_err, da_err)
+        rt_q  = _rt_quality(rt_error, chromatography)
+        ms2_notes = str(mc_row.get("ms2_notes", "") or "")
+        try:
+            msms_q = float(ms2_notes.split(",")[0])
+        except (ValueError, AttributeError):
+            msms_q = np.nan
+
+        total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
+
+        quality_rows.append({
+            "mz_rt_uid":    mz_rt_uid,
+            "compound_name": str(mc_row.get("compound_name", "")),
+            "inchi_key":    str(mc_row.get("inchi_key", "")),
+            "formula":      str(mc_row.get("formula", "")),
+            "adduct":       str(mc_row.get("adduct", "")),
+            "atlas_mz":     mz_theoretical,
+            "atlas_rt_peak": float(mc_row.get("atlas_rt_peak", np.nan)),
+            "atlas_rt_min":  float(mc_row.get("atlas_rt_min", np.nan)),
+            "atlas_rt_max":  float(mc_row.get("atlas_rt_max", np.nan)),
+            "ms1_notes":    str(mc_row.get("ms1_notes", "") or ""),
+            "ms2_notes":    ms2_notes,
+            "msms_score":   float(mc_row.get("msms_score", np.nan)) if "msms_score" in mc_row else np.nan,
+            "mz_quality":   mz_q,
+            "rt_quality":   rt_q,
+            "msms_quality": msms_q,
+            "total_score":  total_score,
+            "msi_level":    msi_level,
+        })
+
+    quality_df = pd.DataFrame(quality_rows)
+
+    # Load control_filter from peak_height_filtered.csv if available
+    out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
+    ctrl_filter_map: dict[str, str] = {}
+    filtered_csv = out_dir / "peak_height_filtered.csv"
+    if filtered_csv.exists():
+        try:
+            fdf = pd.read_csv(filtered_csv, usecols=lambda c: c in {"inchi_key", "control_filter"})
+            if "inchi_key" in fdf.columns and "control_filter" in fdf.columns:
+                ctrl_filter_map = dict(zip(fdf["inchi_key"], fdf["control_filter"]))
+        except Exception as exc:
+            logger.warning("Could not read control_filter from %s: %s", filtered_csv, exc)
+
+    quality_df["control_filter"] = quality_df["inchi_key"].map(ctrl_filter_map).fillna("")
+
+    # Merge per_file_df with quality metadata
+    merged = per_file_df.merge(quality_df, on="mz_rt_uid", how="left")
+
+    # Select and type-cast columns
+    str_cols = [
+        "mz_rt_uid", "compound_name", "inchi_key", "formula", "adduct",
+        "filename", "file_group", "ms1_notes", "ms2_notes",
+        "msi_level", "control_filter",
+    ]
+    float_cols = [
+        "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+        "peak_height", "peak_area", "rt_peak", "rt_centroid",
+        "mz_peak", "mz_centroid",
+        "msms_score", "mz_quality", "rt_quality", "msms_quality",
+        "total_score",
+    ]
+
+    for col in str_cols:
+        if col not in merged.columns:
+            merged[col] = ""
+        merged[col] = merged[col].fillna("").astype(str)
+
+    for col in float_cols:
+        if col not in merged.columns:
+            merged[col] = np.nan
+        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+    merged = merged[str_cols + float_cols]
+
+    # Sort by atlas_mz for row-group skipping on mz range queries
+    merged = merged.sort_values("atlas_mz", ascending=True, na_position="last")
+
+    return pa.Table.from_pandas(merged, preserve_index=False)
+
+
+def _build_compound_lfc_table(
+    summary_obj: "AnalysisSummary",
+) -> pa.Table:
+    """Build a PyArrow Table with one row per compound x condition-pair (long format).
+
+    Reads ``log_fold_changes.csv`` (produced by :func:`make_log_fold_changes_csv`)
+    and melts the wide pairwise LFC columns into long format so that
+    ``condition_1`` and ``condition_2`` are filterable data columns.
+
+    Also joins compound-level quantitative metadata from ``curation_df``
+    (atlas_mz, atlas_rt_min/max/peak, adduct, formula, inchi_key) so the
+    table can be queried by mz/RT as well as by condition pair.
+
+    Returns
+    -------
+    pa.Table
+        Sorted by (condition_1, condition_2, atlas_mz).  Empty table if the
+        source CSV does not exist.
+    """
+    out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
+    lfc_csv = out_dir / "log_fold_changes.csv"
+
+    if not lfc_csv.exists():
+        logger.warning(
+            "log_fold_changes.csv not found at %s — compound_lfc table will be empty. "
+            "Run make_log_fold_changes_csv first.",
+            lfc_csv,
+        )
+        return pa.table({})
+
+    lfc_df = pd.read_csv(lfc_csv)
+
+    # Identify identity columns vs LFC columns
+    _ID_COLS = {"inchi_key", "compound_name", "control_filter", "chosen_adduct", "chosen_polarity"}
+    id_cols  = [c for c in lfc_df.columns if c in _ID_COLS]
+    lfc_cols = [c for c in lfc_df.columns if c not in _ID_COLS]
+
+    if not lfc_cols:
+        logger.warning("No LFC columns found in %s — compound_lfc table will be empty.", lfc_csv)
+        return pa.table({})
+
+    # Melt wide → long: each LFC column becomes one row
+    long_df = lfc_df.melt(
+        id_vars=id_cols,
+        value_vars=lfc_cols,
+        var_name="comparison",
+        value_name="log2_fold_change",
+    )
+
+    # Parse "g1_vs_g2" into separate condition columns
+    split = long_df["comparison"].str.split("_vs_", n=1, expand=True)
+    long_df["condition_1"] = split[0].fillna("")
+    long_df["condition_2"] = split[1].fillna("") if 1 in split.columns else ""
+    long_df = long_df.drop(columns=["comparison"])
+
+    # ── Join compound quantitative metadata from curation_df ─────────────────
+    mc = summary_obj.experimental_data.curation_df
+    if mc is not None and not mc.empty:
+        mc_slim = (
+            mc.reset_index(drop=True)[[
+                "inchi_key", "adduct", "formula",
+                "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+            ]]
+            .drop_duplicates(subset=["inchi_key"])
+        )
+        long_df = long_df.merge(mc_slim, on="inchi_key", how="left")
+    else:
+        for col in ("adduct", "formula", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max"):
+            long_df[col] = np.nan if col.startswith("atlas") else ""
+
+    str_cols = [
+        "inchi_key", "compound_name", "control_filter",
+        "condition_1", "condition_2", "adduct", "formula",
+    ]
+    float_cols = [
+        "log2_fold_change",
+        "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+    ]
+
+    for col in str_cols:
+        if col not in long_df.columns:
+            long_df[col] = ""
+        long_df[col] = long_df[col].fillna("").astype(str)
+
+    for col in float_cols:
+        if col not in long_df.columns:
+            long_df[col] = np.nan
+        long_df[col] = pd.to_numeric(long_df[col], errors="coerce")
+
+    col_order = str_cols + float_cols
+    long_df = long_df[col_order]
+
+    # Sort so condition pair + mz queries get row-group skipping
+    long_df = long_df.sort_values(
+        ["condition_1", "condition_2", "atlas_mz"],
+        ascending=True,
+        na_position="last",
+    )
+
+    return pa.Table.from_pandas(long_df, preserve_index=False)
+
+
+def _parse_project_metadata(project_name: str) -> dict[str, str]:
+
+    if not project_name:
+        return {}
+    try:
+        parsed = fpf.PROJECT_PATTERN.match(project_name)
+        if not parsed:
+            logger.warning(
+                "project_name '%s' does not match PROJECT_PATTERN — "
+                "project metadata will not be added to Parquet footer.",
+                project_name,
+            )
+            return {}
+        return {k: str(v) for k, v in parsed.groupdict().items() if v is not None}
+    except Exception as exc:
+        logger.warning(
+            "Could not parse project metadata from '%s': %s — "
+            "project metadata will not be added to Parquet footer.",
+            project_name, exc,
+        )
+        return {}

@@ -351,7 +351,7 @@ def run_analysis_summary(
         logger.info("Checking that all compounds have been evaluated in the GUI before allowing summary generation...")
         dbi.check_require_evaluated(summary_obj)
 
-    logger.info("Updating compound mz_rt values for the atlas based on the manual curation...")
+    logger.info("Updating compound mz_rt values for the curated atlas based on the manual curation...")
     dbi.update_compound_mzrt_for_atlas(
         obj=summary_obj,
         mz_rt_update_df=summary_obj.experimental_data.curation_df,

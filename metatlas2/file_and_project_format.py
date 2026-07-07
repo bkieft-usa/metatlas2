@@ -50,3 +50,16 @@ def parse_project_name(project_name: str):
         if suffix:
             print(f"Warning: Project name '{project_name}' has a suffix '{suffix}'.")
     return project_name
+
+def get_file_parts(name: str, part: str):
+    """Return the named capture group *part* from a file stem or project name.
+    """
+    try:
+        match = FILE_PATTERN.match(name + ".h5")
+        if match:
+            try:
+                return match.group(part)
+            except IndexError:
+                raise ValueError(f"File name '{name}' does not match the expected format.")
+    except Exception:
+        raise ValueError(f"File name '{name}' does not match the expected format.")

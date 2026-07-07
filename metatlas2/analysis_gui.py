@@ -700,8 +700,6 @@ def build_dash_app(
                         }
 
                 # DB write — serialize to prevent DuckDB CHECKPOINT race conditions.
-                # Re-check sequence inside the lock so a faster thread that already
-                # wrote a newer edit cannot be overwritten by this stale worker.
                 with db_write_lock:
                     with flush_lock:
                         current_latest = latest_flushed_seq_by_session.get(flush_key, -1)
