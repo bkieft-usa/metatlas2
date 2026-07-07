@@ -115,8 +115,25 @@ echo "Collecting h5 files..."
 echo "------------------------------------"
 
 # Copy all h5 files for specific run types
-QC_RUNS=("Run104" "Run196" "Run150" "Run58" "Run261")
-EXPERIMENTAL_RUNS=("Run152" "Run158" "Run161" "Run164" "Run17" "Run173" "Run198" "Run20" "Run219" "Run23" "Run231" "Run32" "Run35" "Run38" "Run41" "Run72")
+QC_RUNS=(
+    "Run196" 
+    "Run150" 
+    "Run58"
+)
+EXPERIMENTAL_RUNS=(
+    "Run159" # NEG_MS2_56_T1-256534-8-Tr-RE_1
+    "Run162" # NEG_MS2_57_T1-256534-8-Tr-RE_2
+    "Run183" # NEG_MS2_58_T1-256534-8-Tr-RE_3
+    "Run158" # POS_MS2_56_T1-256534-8-Tr-RE_1
+    "Run161" # POS_MS2_57_T1-256534-8-Tr-RE_2
+    "Run182" # POS_MS2_58_T1-256534-8-Tr-RE_3
+    "Run153" # NEG_MS2_51_T1-256534-8-WT-RE_1
+    "Run174" # NEG_MS2_52_T1-256534-8-WT-RE_2
+    "Run186" # NEG_MS2_53_T1-256534-8-WT-RE_3
+    "Run152" # POS_MS2_51_T1-256534-8-WT-RE_1
+    "Run173" # POS_MS2_52_T1-256534-8-WT-RE_2
+    "Run185" # POS_MS2_53_T1-256534-8-WT-RE_3
+)
 
 ALL_RUNS=("${QC_RUNS[@]}" "${EXPERIMENTAL_RUNS[@]}")
 
@@ -127,7 +144,7 @@ echo "Copying h5 files for ${#ALL_RUNS[@]} runs (each run may have multiple h5 f
 echo ""
 
 for run in "${ALL_RUNS[@]}"; do
-    # Find all h5 files for this run (pos polarity)
+    # Find all h5 files for this run
     shopt -s nullglob
     run_files=("${SOURCE_BASE}/"*"_${run}".h5)
     shopt -u nullglob
@@ -182,18 +199,30 @@ EOF
 echo "   Created qc_compounds_pos.tsv"
 
 cat > ema_compounds_pos.tsv << 'EOF'
-compound_name	adduct	mz	rt_peak	rt_min	rt_max	inchi_key	mz_tolerance	polarity
-adenine	[M+H]+	136.06177	2.675523943	1.925523943	3.425523943	GFFGJBXGBJISGV-UHFFFAOYSA-N	20	positive
-riboflavin	[M+H]+	377.14556	4.559205568	3.809205568	5.309205568	AUNGANRZJHBGPY-SCRDCRAPSA-N	20	positive
-guanine	[M+H]+	152.05669	6.255773885	5.505773885	7.005773885	UYTPUPDQBNUYGX-UHFFFAOYSA-N	20	positive
-leucine	[M+H]+	132.10191	9.326296805	8.576296805	10.07629681	ROHFNLRQFUQHCH-UHFFFAOYSA-N	20	positive
-norleucine	[M+H]+	132.10191	9.341396963	8.591396963	10.09139696	LRQKBLKVPFOOQJ-YFKPBYRVSA-N	20	positive
-isoleucine	[M+H]+	132.10191	9.716726546	8.966726546	10.46672655	AGPKZVBTJJNPAG-WHFBIAKZSA-N	20	positive
-serine 	[M+H]+	106.0498691	14.11753228	13.61753228	14.61753228	MTCFGRXMJLQNBG-UHFFFAOYSA-N	20	positive
-lysine	[M+H]+	147.1128	17.01131041	16.26131041	17.76131041	KDXKERNSBIXSRK-YFKPBYRVSA-N	20	positive
+label   compound_name   inchi_key       adduct  mz      rt_peak rt_min  rt_max  mz_tolerance    polarity
+adenine adenine GFFGJBXGBJISGV-UHFFFAOYSA-N     [M+H]+  136.06177       2.675523943     1.925523943     3.425523943     20      positive
+riboflavin      riboflavin      AUNGANRZJHBGPY-SCRDCRAPSA-N     [M+H]+  377.14556       4.559205568     3.809205568     5.309205568     20      positive
+guanine guanine UYTPUPDQBNUYGX-UHFFFAOYSA-N     [M+H]+  152.05669       6.255773885     5.505773885     7.005773885     20      positive
+leucine leucine ROHFNLRQFUQHCH-UHFFFAOYSA-N     [M+H]+  132.10191       9.326296805     8.576296805     10.07629681     20      positive
+norleucine      norleucine      LRQKBLKVPFOOQJ-YFKPBYRVSA-N     [M+H]+  132.10191       9.341396963     8.591396963     10.09139696     20      positive
+isoleucine      isoleucine      AGPKZVBTJJNPAG-WHFBIAKZSA-N     [M+H]+  132.10191       9.716726546     8.966726546     10.46672655     20      positive
+serine  serine  MTCFGRXMJLQNBG-UHFFFAOYSA-N     [M+H]+  106.0498691     14.11753228     13.61753228     14.61753228     5       positive
+lysine  lysine  KDXKERNSBIXSRK-YFKPBYRVSA-N     [M+H]+  147.1128        17.01131041     16.26131041     17.76131041     20      positive
 EOF
 
 echo "   Created ema_compounds_pos.tsv"
+
+cat > ema_compounds_neg.tsv << 'EOF'
+label   compound_name   inchi_key       adduct  mz      rt_peak rt_min  rt_max  mz_tolerance    polarity
+adenine adenine GFFGJBXGBJISGV-UHFFFAOYSA-N     [M-H]-  134.04722       2.677601998     1.927601998     3.427601998     5       negative
+riboflavin      riboflavin      AUNGANRZJHBGPY-SCRDCRAPSA-N     [M-H]-  375.13101       4.556357991     3.806357991     5.306357991     5       negative
+guanine guanine UYTPUPDQBNUYGX-UHFFFAOYSA-N     [M-H]-  150.04213       6.265359988     5.515359988     7.015359988     5       negative
+leucine leucine ROHFNLRQFUQHCH-UHFFFAOYSA-N     [M-H]-  130.08735       9.319656306     8.569656306     10.06965631     5       negative
+norleucine      norleucine      LRQKBLKVPFOOQJ-YFKPBYRVSA-N     [M-H]-  130.08735       9.336960779     8.586960779     10.08696078     5       negative
+isoleucine      isoleucine      AGPKZVBTJJNPAG-WHFBIAKZSA-N     [M-H]-  130.08735       9.70543744      8.95543744      10.45543744     5       negative
+histidine       histidine       HNDVDQJCIGZPNO-YFKPBYRVSA-N     [M-H]-  154.0622        14.87779878     14.12779878     15.62779878     5       negative
+lysine  lysine  KDXKERNSBIXSRK-YFKPBYRVSA-N     [M-H]-  145.09825       17.01238259     16.26238259     17.76238259     5       negative
+EOF
 
 echo ""
 echo "Creating MS2 references..."
@@ -673,6 +702,7 @@ extra_time = float("${SUBSET_EXTRA_TIME}")
 windows = []
 windows.extend(parse_windows(root / "qc_compounds_pos.tsv"))
 windows.extend(parse_windows(root / "ema_compounds_pos.tsv"))
+windows.extend(parse_windows(root / "ema_compounds_neg.tsv"))
 
 if not windows:
     print("No compound windows found; skipping h5 subsetting.")
@@ -714,6 +744,7 @@ COMPOUNDS:
         PATHS:
           - qc_compounds_pos.tsv
           - ema_compounds_pos.tsv
+          - ema_compounds_neg.tsv
 EOF
 
 # Create atlases configuration
@@ -729,6 +760,11 @@ ATLASES:
         path: ema_compounds_pos.tsv
         name: Dev HILICZ EMA Atlas Positive
         desc: Dev metabolite atlas for positive mode
+    NEG:
+      EMA:
+        path: ema_compounds_neg.tsv
+        name: Dev HILICZ EMA Atlas Negative
+        desc: Dev metabolite atlas for negative mode
 EOF
 
 # Create analysis configuration
@@ -765,13 +801,60 @@ WORKFLOWS:
         EMA:
           DEFAULT:
             ATLAS:
-              uid: atl-ref-ema-hilicz-pos-04fe39f125b24507adeebf7221c46ec1
+              uid: dev-ema-hilicz-pos
             PARAMS:
               include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
               exclude_lcmsruns:
                 data_extraction:
                   - QC
                   - NEG
+                gui: # INJBL, BLANK
+                id_sheet: # INJBL, BLANK, REFSTD
+                chromatograms: # INJBL, BLANK
+                id_plots: # INJBL, BLANK, REFSTD
+                data_sheets: # INJBL, BLANK
+              do_alignment: true
+              remove_unided_compounds: true
+              remove_flagged_compounds: true
+              only_keep_data_in_feature: false
+              apply_cross_polarity_curation: true
+              suggested_min_conf: 0.75
+              atlas_extra_time: 0
+              ms1_min_peak_intensity: 5e5
+              ms1_min_num_points: 5
+              ms1_mz_tolerance_ppm: 5.0
+              ms2_min_num_scans: 1
+              ms2_min_precursor_intensity: 0
+              ms2_min_score: 0.5
+              ms2_min_matching_frags: 1
+              ms2_mz_tolerance_ppm: 20.0
+              ms2_frag_mz_tolerance: 0.05
+              gui_require_all_evaluated: false
+              gui_top_n_hits: 10
+              gui_lcmsruns_colors:
+                ISTD: blue
+                QC: orange
+                EXCTRL: red
+                TXCTRL: green
+                REFSTD: black
+              note_options_overrides:
+                ms1_notes:
+                ms2_notes:
+                other_notes:
+              create_curation_notebooks: true
+              upload_to_gdrive: true
+              skip_outputs:
+      NEG:
+        EMA:
+          DEFAULT:
+            ATLAS:
+              uid: dev-ema-hilicz-neg
+            PARAMS:
+              include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+              exclude_lcmsruns:
+                data_extraction:
+                  - QC
+                  - POS
                 gui: # INJBL, BLANK
                 id_sheet: # INJBL, BLANK, REFSTD
                 chromatograms: # INJBL, BLANK
