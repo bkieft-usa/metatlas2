@@ -200,33 +200,35 @@ asparagine (U - 13C, 15N)	[M+H]+	139.06825	14.3680889	14.0680889	14.6680889	DCXY
 cystine (U - 13C, 15N)	[M+H]+	249.04532	16.9043083	16.6043083	17.2043083	LEVWYRKDKASIDU-OGYFDXEDSA-N	20	positive
 EOF
 
-echo "   Created qc_compounds_pos.tsv"
+echo "   Created atlases/qc_compounds_pos.tsv"
 
 cat > atlases/ema_compounds_pos.tsv << 'EOF'
-label   compound_name   inchi_key       adduct  mz      rt_peak rt_min  rt_max  mz_tolerance    polarity
-adenine adenine GFFGJBXGBJISGV-UHFFFAOYSA-N     [M+H]+  136.06177       2.675523943     1.925523943     3.425523943     20      positive
-riboflavin      riboflavin      AUNGANRZJHBGPY-SCRDCRAPSA-N     [M+H]+  377.14556       4.559205568     3.809205568     5.309205568     20      positive
-guanine guanine UYTPUPDQBNUYGX-UHFFFAOYSA-N     [M+H]+  152.05669       6.255773885     5.505773885     7.005773885     20      positive
-leucine leucine ROHFNLRQFUQHCH-UHFFFAOYSA-N     [M+H]+  132.10191       9.326296805     8.576296805     10.07629681     20      positive
-norleucine      norleucine      LRQKBLKVPFOOQJ-YFKPBYRVSA-N     [M+H]+  132.10191       9.341396963     8.591396963     10.09139696     20      positive
-isoleucine      isoleucine      AGPKZVBTJJNPAG-WHFBIAKZSA-N     [M+H]+  132.10191       9.716726546     8.966726546     10.46672655     20      positive
-serine  serine  MTCFGRXMJLQNBG-UHFFFAOYSA-N     [M+H]+  106.0498691     14.11753228     13.61753228     14.61753228     5       positive
-lysine  lysine  KDXKERNSBIXSRK-YFKPBYRVSA-N     [M+H]+  147.1128        17.01131041     16.26131041     17.76131041     20      positive
+label	compound_name	inchi_key	adduct	mz	rt_peak	rt_min	rt_max	mz_tolerance	polarity
+adenine	adenine	GFFGJBXGBJISGV-UHFFFAOYSA-N	[M+H]+	136.06177	2.675523943	1.925523943	3.425523943	20	positive
+riboflavin	riboflavin	AUNGANRZJHBGPY-SCRDCRAPSA-N	[M+H]+	377.14556	4.559205568	3.809205568	5.309205568	20	positive
+guanine	guanine	UYTPUPDQBNUYGX-UHFFFAOYSA-N	[M+H]+	152.05669	6.255773885	5.505773885	7.005773885	20	positive
+leucine	leucine	ROHFNLRQFUQHCH-UHFFFAOYSA-N	[M+H]+	132.10191	9.326296805	8.576296805	10.07629681	20	positive
+norleucine	norleucine	LRQKBLKVPFOOQJ-YFKPBYRVSA-N	[M+H]+	132.10191	9.341396963	8.591396963	10.09139696	20	positive
+isoleucine	isoleucine	AGPKZVBTJJNPAG-WHFBIAKZSA-N	[M+H]+	132.10191	9.716726546	8.966726546	10.46672655	20	positive
+serine	serine	MTCFGRXMJLQNBG-UHFFFAOYSA-N	[M+H]+	106.0498691	14.11753228	13.61753228	14.61753228	5	positive
+lysine	lysine	KDXKERNSBIXSRK-YFKPBYRVSA-N	[M+H]+	147.1128	17.01131041	16.26131041	17.76131041	20	positive
 EOF
 
-echo "   Created ema_compounds_pos.tsv"
+echo "   Created atlases/ema_compounds_pos.tsv"
 
 cat > atlases/ema_compounds_neg.tsv << 'EOF'
-label   compound_name   inchi_key       adduct  mz      rt_peak rt_min  rt_max  mz_tolerance    polarity
-adenine adenine GFFGJBXGBJISGV-UHFFFAOYSA-N     [M-H]-  134.04722       2.677601998     1.927601998     3.427601998     5       negative
-riboflavin      riboflavin      AUNGANRZJHBGPY-SCRDCRAPSA-N     [M-H]-  375.13101       4.556357991     3.806357991     5.306357991     5       negative
-guanine guanine UYTPUPDQBNUYGX-UHFFFAOYSA-N     [M-H]-  150.04213       6.265359988     5.515359988     7.015359988     5       negative
-leucine leucine ROHFNLRQFUQHCH-UHFFFAOYSA-N     [M-H]-  130.08735       9.319656306     8.569656306     10.06965631     5       negative
-norleucine      norleucine      LRQKBLKVPFOOQJ-YFKPBYRVSA-N     [M-H]-  130.08735       9.336960779     8.586960779     10.08696078     5       negative
-isoleucine      isoleucine      AGPKZVBTJJNPAG-WHFBIAKZSA-N     [M-H]-  130.08735       9.70543744      8.95543744      10.45543744     5       negative
-histidine       histidine       HNDVDQJCIGZPNO-YFKPBYRVSA-N     [M-H]-  154.0622        14.87779878     14.12779878     15.62779878     5       negative
-lysine  lysine  KDXKERNSBIXSRK-YFKPBYRVSA-N     [M-H]-  145.09825       17.01238259     16.26238259     17.76238259     5       negative
+label	compound_name	inchi_key	adduct	mz	rt_peak	rt_min	rt_max	mz_tolerance	polarity
+adenine	adenine	GFFGJBXGBJISGV-UHFFFAOYSA-N	[M-H]-	134.04722	2.677601998	1.927601998	3.427601998	5	negative
+riboflavin	riboflavin	AUNGANRZJHBGPY-SCRDCRAPSA-N	[M-H]-	375.13101	4.556357991	3.806357991	5.306357991	5	negative
+guanine	guanine	UYTPUPDQBNUYGX-UHFFFAOYSA-N	[M-H]-	150.04213	6.265359988	5.515359988	7.015359988	5	negative
+leucine	leucine	ROHFNLRQFUQHCH-UHFFFAOYSA-N	[M-H]-	130.08735	9.319656306	8.569656306	10.06965631	5	negative
+norleucine	norleucine	LRQKBLKVPFOOQJ-YFKPBYRVSA-N	[M-H]-	130.08735	9.336960779	8.586960779	10.08696078	5	negative
+isoleucine	isoleucine	AGPKZVBTJJNPAG-WHFBIAKZSA-N	[M-H]-	130.08735	9.70543744	8.95543744	10.45543744	5	negative
+histidine	histidine	HNDVDQJCIGZPNO-YFKPBYRVSA-N	[M-H]-	154.0622	14.87779878	14.12779878	15.62779878	5	negative
+lysine	lysine	KDXKERNSBIXSRK-YFKPBYRVSA-N	[M-H]-	145.09825	17.01238259	16.26238259	17.76238259	5	negative
 EOF
+
+echo "   Created atlases/ema_compounds_neg.tsv"
 
 echo ""
 echo "Creating MS2 references..."
