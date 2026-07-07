@@ -131,7 +131,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     fi
 
     echo "Copying fresh notebook to ${STANDALONE_DIR}..."
-    cp "${REPO_DIR}/local/standalone_dev_workflow.ipynb" "${STANDALONE_DIR}/standalone_dev_workflow.ipynb"
+    cp "${REPO_DIR}/local/local_workflow.ipynb" "${STANDALONE_DIR}/local_workflow.ipynb"
     echo ""
 
     # ── Pull latest image ──────────────────────────────────────────────────────

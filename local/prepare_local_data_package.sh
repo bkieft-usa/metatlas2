@@ -102,12 +102,16 @@ fi
 # Create output structure matching expected paths:
 # - raw_data/dev/{project_name}/   (h5 files live directly here)
 # - databases/main_db/
+# - databases/msms_refs/
 # - configs/
+# - atlases/
 # - projects/targeted_outputs/ (will be created by workflow)
 STANDALONE_PROJECT="20260101_JGI_XX_000000_STANDALONE-DEV_test_EXP000_HILICZ_TESTXXXX"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/raw_data/dev/${STANDALONE_PROJECT}"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/main_db"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/msms_refs"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/configs"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/atlases"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/projects/targeted_outputs"
 cd "${OUTPUT_DIR}/${PACKAGE_NAME}"
 
@@ -185,7 +189,7 @@ echo "-----------------------------------------"
 
 # Create positive mode compounds
 
-cat > qc_compounds_pos.tsv << 'EOF'
+cat > atlases/qc_compounds_pos.tsv << 'EOF'
 compound_name	adduct	mz	rt_peak	rt_min	rt_max	inchi_key	mz_tolerance	polarity
 ABMBA (unlabeled)	[M+H]+	229.9811	1.09380632	0.79380632	1.39380632	LCMZECCEEOQWLQ-UHFFFAOYSA-N	20	positive
 thymine (U - 13C, 15N)	[M+H]+	134.06104	1.25523106	0.95523106	1.55523106	RWQNBRDOKXIBIV-BNUYUSEDSA-N	20	positive
@@ -198,7 +202,7 @@ EOF
 
 echo "   Created qc_compounds_pos.tsv"
 
-cat > ema_compounds_pos.tsv << 'EOF'
+cat > atlases/ema_compounds_pos.tsv << 'EOF'
 label   compound_name   inchi_key       adduct  mz      rt_peak rt_min  rt_max  mz_tolerance    polarity
 adenine adenine GFFGJBXGBJISGV-UHFFFAOYSA-N     [M+H]+  136.06177       2.675523943     1.925523943     3.425523943     20      positive
 riboflavin      riboflavin      AUNGANRZJHBGPY-SCRDCRAPSA-N     [M+H]+  377.14556       4.559205568     3.809205568     5.309205568     20      positive
@@ -212,7 +216,7 @@ EOF
 
 echo "   Created ema_compounds_pos.tsv"
 
-cat > ema_compounds_neg.tsv << 'EOF'
+cat > atlases/ema_compounds_neg.tsv << 'EOF'
 label   compound_name   inchi_key       adduct  mz      rt_peak rt_min  rt_max  mz_tolerance    polarity
 adenine adenine GFFGJBXGBJISGV-UHFFFAOYSA-N     [M-H]-  134.04722       2.677601998     1.927601998     3.427601998     5       negative
 riboflavin      riboflavin      AUNGANRZJHBGPY-SCRDCRAPSA-N     [M-H]-  375.13101       4.556357991     3.806357991     5.306357991     5       negative
@@ -229,7 +233,7 @@ echo "Creating MS2 references..."
 echo "----------------------------------"
 
 # Create MS2 references file
-cat > ms2_references.json << 'EOF'
+cat > databases/msms_refs/ms2_references.json << 'EOF'
 {"ix": 14848, "database": "mona", "id": "KO003174", "name": "Ile", "decimal": 3.0, "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N", "precursor_mz": 132.0, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "30 V", "instrument": null, "instrument_type": "LC-ESI-QQ", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-3-4(2)5(7)6(8)9/h4-5H,3,7H2,1-2H3,(H,8,9)/t4-,5-/m0/s1", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])(C([H])([H])[H])C([H])([H])C([H])([H])[H]", "mz": [30.1, 41.0, 43.0, 44.1, 45.1, 55.2, 56.1, 57.2, 58.1, 59.1, 67.0, 68.0, 69.3, 73.0, 86.2, 97.1, 98.0, 99.9, 115.1], "intensities": [0.0, 8.0, 0.0, 17.0, 2.0, 4.0, 1.0, 5.0, 3.0, 2.0, 3.0, 0.0, 100.0, 3.0, 84.0, 0.0, 12.0, 0.0, 0.0]}
 {"ix": 15157, "database": "mona", "id": "MT000117", "name": "Leucine", "decimal": 1.0, "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N", "precursor_mz": 132.2, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": null, "collision_energy": "40", "instrument": null, "instrument_type": "LC-ESI-IT", "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-4(2)3-5(7)6(8)9/h4-5H,3,7H2,1-2H3,(H,8,9)", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])C([H])(C([H])([H])[H])C([H])([H])[H]", "mz": [86.0, 87.0], "intensities": [100.0, 10.0]}
 {"ix": 15160, "database": "mona", "id": "CE000494", "name": "Serine", "decimal": 6.0, "inchi_key": "MTCFGRXMJLQNBG-UHFFFAOYSA-N", "precursor_mz": 106.04987, "polarity": "positive", "adduct": "[M+H]+", "fragmentation_method": "HCD", "collision_energy": "35.0eV", "instrument": null, "instrument_type": "LC-ESI-ITFT", "formula": "C3H7NO3", "mono_isotopic_molecular_weight": 105.0425931, "inchi": "InChI=1S/C3H7NO3/c4-2(1-5)3(6)7/h2,5H,1,4H2,(H,6,7)", "smiles": "[H]OC(=O)C([H])(N([H])[H])C([H])([H])O[H]", "mz": [60.04466, 88.03948], "intensities": [75.0, 100.0]}
@@ -700,9 +704,9 @@ ppm_ms2 = float("${SUBSET_PPM_MS2}")
 extra_time = float("${SUBSET_EXTRA_TIME}")
 
 windows = []
-windows.extend(parse_windows(root / "qc_compounds_pos.tsv"))
-windows.extend(parse_windows(root / "ema_compounds_pos.tsv"))
-windows.extend(parse_windows(root / "ema_compounds_neg.tsv"))
+windows.extend(parse_windows(root / "atlases/qc_compounds_pos.tsv"))
+windows.extend(parse_windows(root / "atlases/ema_compounds_pos.tsv"))
+windows.extend(parse_windows(root / "atlases/ema_compounds_neg.tsv"))
 
 if not windows:
     print("No compound windows found; skipping h5 subsetting.")
@@ -742,9 +746,9 @@ COMPOUNDS:
     HILICZ:
       POS:
         PATHS:
-          - qc_compounds_pos.tsv
-          - ema_compounds_pos.tsv
-          - ema_compounds_neg.tsv
+          - atlases/qc_compounds_pos.tsv
+          - atlases/ema_compounds_pos.tsv
+          - atlases/ema_compounds_neg.tsv
 EOF
 
 # Create atlases configuration
@@ -753,16 +757,16 @@ ATLASES:
   HILICZ:
     POS:
       QC:
-        path: qc_compounds_pos.tsv
+        path: atlases/qc_compounds_pos.tsv
         name: Dev HILICZ QC Atlas Positive
         desc: Dev quality control compounds for RT alignment
       EMA:
-        path: ema_compounds_pos.tsv
+        path: atlases/ema_compounds_pos.tsv
         name: Dev HILICZ EMA Atlas Positive
         desc: Dev metabolite atlas for positive mode
     NEG:
       EMA:
-        path: ema_compounds_neg.tsv
+        path: atlases/ema_compounds_neg.tsv
         name: Dev HILICZ EMA Atlas Negative
         desc: Dev metabolite atlas for negative mode
 EOF
@@ -772,7 +776,7 @@ cat > configs/analysis_config.yaml << 'EOF'
 WORKFLOWS:
   PATHS:
     owner: dev
-    msms_refs_path: ms2_references.json
+    msms_refs_path: databases/msms_refs/ms2_references.json
     gdrive_subfolder: 
   RT_ALIGNMENT:
     HILICZ:
