@@ -622,7 +622,7 @@ WORKFLOWS:
     HILICZ:
       POS:
         EMA:
-          DEFAULT:
+          MAIN:
             ATLAS:
               uid: dev-ema-hilicz-pos
             PARAMS:
@@ -669,7 +669,7 @@ WORKFLOWS:
               skip_outputs:
       NEG:
         EMA:
-          DEFAULT:
+          MAIN:
             ATLAS:
               uid: dev-ema-hilicz-neg
             PARAMS:
