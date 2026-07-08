@@ -67,7 +67,7 @@ fi
 # Standalone mode setup
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    ZENODO_DOI="https://doi.org/10.5281/zenodo.21251252"
+    ZENODO_DOI="https://doi.org/10.5281/zenodo.21266682"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
     VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
 
