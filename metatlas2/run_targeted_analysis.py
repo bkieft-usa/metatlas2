@@ -54,20 +54,7 @@ def parse_args():
         p.add_argument("--skip-rt-align", action="store_true", default=False)
         p.add_argument("--skip-auto-id", action="store_true", default=False)
         p.add_argument("--skip-curation", action="store_true", default=False)
-        log_group = p.add_mutually_exclusive_group()
-        log_group.add_argument(
-            "--log-to-stdout",
-            dest="log_to_stdout",
-            action="store_true",
-            help="Enable stdout logging in addition to file logging (default).",
-        )
-        log_group.add_argument(
-            "--no-log-to-stdout",
-            dest="log_to_stdout",
-            action="store_false",
-            help="Disable stdout logging and write only to the log file in the project directory.",
-        )
-        p.set_defaults(log_to_stdout=True)
+        p.add_argument("--log-to-stdout", action="store_true", default=False, help="Write log output to stdout in addition to the project log file.")
 
     run_parser = subparsers.add_parser("run", help="Execute the pre-curation workflow directly")
     add_shared_args(run_parser)
@@ -108,7 +95,6 @@ def generate_slurm_script(args, paths) -> str:
     if args.skip_rt_align: extra_flags.append("--skip-rt-align")
     if args.skip_auto_id: extra_flags.append("--skip-auto-id")
     if args.skip_curation: extra_flags.append("--skip-curation")
-    if not args.log_to_stdout: extra_flags.append("--no-log-to-stdout")
     if args.analysis_subset: extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
     extra_flags_str = " \\\n ".join(extra_flags)
 
@@ -263,15 +249,12 @@ def main():
 
     args = parse_args()
 
-    if not args.log_to_stdout and args.command == "run": print("==------- Loading metatlas2 modules...")
     import metatlas2.load_tools as ldt
     import metatlas2.workflows as wfs
     import metatlas2.logging_config as lcf
 
-    if not args.log_to_stdout and args.command == "run": print("===------ Loading user-supplied config...")
     config = ldt.load_metatlas2_config(args.config)
 
-    if not args.log_to_stdout and args.command == "run": print("====----- Setting up project paths...")
     paths = set_up_paths(
         config=config,
         project_name=args.project,
@@ -279,82 +262,82 @@ def main():
         analysis_number=args.analysis_num,
     )
 
-    if not args.log_to_stdout and args.command == "run": print("=====---- Setting up workflow logging...")
     log_file = paths["log_path"]
-    lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
-    logger = lcf.get_logger("run_targeted_analysis")
-    logger.info("System set - starting pre-curation workflow")
+    workflow_log_to_stdout = args.log_to_stdout if args.command == "run" else False
+    with lcf.temporary_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=workflow_log_to_stdout, reconfigure_existing=True):
+        logger = lcf.get_logger("run_targeted_analysis")
+        logger.info("System set - starting pre-curation workflow")
 
-    if args.command == "submit":
-        out_path = generate_slurm_script(args, paths)
-        logger.info(f"Slurm script written to: {out_path}")
-        if args.script_only:
+        if args.command == "submit":
+            out_path = generate_slurm_script(args, paths)
+            logger.info(f"Slurm script written to: {out_path}")
+            if args.script_only:
+                return
+            logger.info("Submitting slurm script...")
+            result = subprocess.run(["sbatch", out_path], capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"Error submitting slurm script: {result.stderr.strip()}")
+                sys.exit(result.returncode)
+            else:
+                submission_output = result.stdout.strip()
+                logger.info(f"Slurm submission output: {submission_output}")
+
+                job_id_match = re.search(r"Submitted batch job\s+(\d+)", submission_output)
+                job_id = job_id_match.group(1) if job_id_match else "%j"
+                slurm_stdout = Path(paths["project_directory"]) / f"pre_curation_{job_id}.log"
+                slurm_stderr = Path(paths["project_directory"]) / f"pre_curation_{job_id}.err"
+                logger.info(f"Expected SLURM stdout: {slurm_stdout}")
+                logger.info(f"Expected SLURM stderr: {slurm_stderr}")
             return
-        logger.info("Submitting slurm script...")
-        result = subprocess.run(["sbatch", out_path], capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error(f"Error submitting slurm script: {result.stderr.strip()}")
-            sys.exit(result.returncode)
-        else:
-            submission_output = result.stdout.strip()
-            logger.info(f"Slurm submission output: {submission_output}")
 
-            job_id_match = re.search(r"Submitted batch job\s+(\d+)", submission_output)
-            job_id = job_id_match.group(1) if job_id_match else "%j"
-            slurm_stdout = Path(paths["project_directory"]) / f"pre_curation_{job_id}.log"
-            slurm_stderr = Path(paths["project_directory"]) / f"pre_curation_{job_id}.err"
-            logger.info(f"Expected SLURM stdout: {slurm_stdout}")
-            logger.info(f"Expected SLURM stderr: {slurm_stderr}")
-        return
+        if not args.skip_setup:
+            if not args.log_to_stdout and args.command == "run": print("======--- Setting up project specs...")
+            logger.info("------------ Running Project Setup")
+            wfs.run_project_setup(
+                project_name=args.project,
+                config=config,
+                paths=paths,
+                overwrite_existing=args.overwrite,
+                rt_alignment_number=args.rt_align_num,
+                analysis_number=args.analysis_num,
+            )
 
-    if not args.skip_setup:
-        if not args.log_to_stdout and args.command == "run": print("======--- Setting up project specs...")
-        logger.info("------------ Running Project Setup")
-        wfs.run_project_setup(
-            project_name=args.project,
-            config=config,
-            paths=paths,
-            overwrite_existing=args.overwrite,
-            rt_alignment_number=args.rt_align_num,
-            analysis_number=args.analysis_num,
-        )
+        if not args.skip_rt_align:
+            if not args.log_to_stdout and args.command == "run": print("=======-- Running RT alignment...")
+            logger.info("------------ Running RT Alignment ...")
+            wfs.run_rt_alignment(
+                project_name=args.project,
+                rt_alignment_number=args.rt_align_num,
+                analysis_number=args.analysis_num,
+            )
 
-    if not args.skip_rt_align:
-        if not args.log_to_stdout and args.command == "run": print("=======-- Running RT alignment...")
-        logger.info("------------ Running RT Alignment ...")
-        wfs.run_rt_alignment(
-            project_name=args.project,
-            rt_alignment_number=args.rt_align_num,
-            analysis_number=args.analysis_num,
-        )
+        if not args.skip_auto_id:
+            if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
+            logger.info("------------ Running Auto Identification")
+            wfs.run_auto_identification(
+                project_name=args.project,
+                rt_alignment_number=args.rt_align_num,
+                analysis_number=args.analysis_num,
+                analysis_subset=args.analysis_subset,
+                image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
+            )
 
-    if not args.skip_auto_id:
-        if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
-        logger.info("------------ Running Auto Identification")
-        wfs.run_auto_identification(
-            project_name=args.project,
-            rt_alignment_number=args.rt_align_num,
-            analysis_number=args.analysis_num,
-            analysis_subset=args.analysis_subset,
-            image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
-        )
+        ### NOT WORKING YET
+        if args.skip_curation:
+            logger.info("------------ Skipping curation step is not implemented yet.")
+        #     if not args.log_to_stdout and args.command == "run": print("========- Skipping curation step and running summary...")
+        #     logger.info("Skipping curation GUI and running summary.")
 
-    ### NOT WORKING YET
-    if args.skip_curation:
-        logger.info("------------ Skipping curation step is not implemented yet.")
-    #     if not args.log_to_stdout and args.command == "run": print("========- Skipping curation step and running summary...")
-    #     logger.info("Skipping curation GUI and running summary.")
+        #     wfs.run_analysis_summary(
+        #         config_path=os.path.abspath(args.config),
+        #         project_name=args.project,
+        #         rt_alignment_number=args.rt_align_num,
+        #         analysis_number=args.analysis_num,
+        #         post_autoid_atlas=paths["auto_ided_atlases_store_file"],
+        #     )
 
-    #     wfs.run_analysis_summary(
-    #         config_path=os.path.abspath(args.config),
-    #         project_name=args.project,
-    #         rt_alignment_number=args.rt_align_num,
-    #         analysis_number=args.analysis_num,
-    #         post_autoid_atlas=paths["auto_ided_atlases_store_file"],
-    #     )
-
-    if not args.log_to_stdout and args.command == "run": print("========= Pre-curation workflow complete!")
-    logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")
+        if not args.log_to_stdout and args.command == "run": print("========= Pre-curation workflow complete!")
+        logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")
 
 if __name__ == "__main__":
     main()

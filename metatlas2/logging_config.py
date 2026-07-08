@@ -1,6 +1,7 @@
 import logging
 import sys
 from pathlib import Path
+from contextlib import contextmanager
 
 # Global flag to track if logging has been initialized
 _logging_initialized = False
@@ -56,6 +57,84 @@ def _add_handlers(logger, formatter, log_level, log_to_stdout=True, log_file=Non
     for handler in logger.handlers:
         handler.setLevel(log_level)
         handler.setFormatter(formatter)
+
+
+def _iter_metatlas_logger_names():
+    names = [name for name in logging.Logger.manager.loggerDict if name == "metatlas2" or name.startswith("metatlas2.")]
+    return sorted(names)
+
+
+def _snapshot_logging_state():
+    logger_state = {}
+    for logger_name in _iter_metatlas_logger_names():
+        logger = logging.getLogger(logger_name)
+        logger_state[logger_name] = {
+            "level": logger.level,
+            "propagate": logger.propagate,
+            "handlers": list(logger.handlers),
+        }
+
+    return {
+        "initialized": _logging_initialized,
+        "global_log_level": _global_log_level,
+        "log_to_stdout": _log_to_stdout,
+        "log_file": _log_file,
+        "logger_state": logger_state,
+    }
+
+
+def _restore_logging_state(snapshot):
+    global _logging_initialized, _global_log_level, _log_to_stdout, _log_file
+
+    current_names = set(_iter_metatlas_logger_names()) | set(snapshot["logger_state"].keys())
+    for logger_name in current_names:
+        logger = logging.getLogger(logger_name)
+        saved = snapshot["logger_state"].get(logger_name)
+        current_handlers = list(logger.handlers)
+
+        if saved is None:
+            logger.handlers.clear()
+            logger.setLevel(logging.NOTSET)
+            logger.propagate = True
+            for handler in current_handlers:
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+            continue
+
+        logger.handlers[:] = list(saved["handlers"])
+        logger.setLevel(saved["level"])
+        logger.propagate = saved["propagate"]
+
+        for handler in current_handlers:
+            if handler not in saved["handlers"]:
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+
+    _logging_initialized = snapshot["initialized"]
+    _global_log_level = snapshot["global_log_level"]
+    _log_to_stdout = snapshot["log_to_stdout"]
+    _log_file = snapshot["log_file"]
+
+
+@contextmanager
+def temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, module_name=None, reconfigure_existing=True):
+    """Temporarily apply a logging configuration and restore the previous state afterward."""
+    snapshot = _snapshot_logging_state()
+    try:
+        setup_logging(
+            log_level=log_level,
+            log_file=log_file,
+            log_to_stdout=log_to_stdout,
+            module_name=module_name,
+            reconfigure_existing=reconfigure_existing,
+        )
+        yield
+    finally:
+        _restore_logging_state(snapshot)
 
 def setup_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, module_name=None, reconfigure_existing=True):
     """

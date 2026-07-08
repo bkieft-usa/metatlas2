@@ -100,23 +100,24 @@ def get_atlases(
     database_path: Optional[str] = None,
 ) -> None:
     """Extract atlas DataFrames by UID and save each to CSV."""
-    if not atlas_uids:
-        raise ValueError("At least one atlas UID is required.")
+    with lcf.temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, reconfigure_existing=True):
+        if not atlas_uids:
+            raise ValueError("At least one atlas UID is required.")
 
-    db = _resolve_database_path(database_path)
-    output_paths = _resolve_output_paths(atlas_uids, output_path)
+        db = _resolve_database_path(database_path)
+        output_paths = _resolve_output_paths(atlas_uids, output_path)
 
-    logger.info(
-        "Extracting %d atlas(es) from %s",
-        len(atlas_uids),
-        db,
-    )
+        logger.info(
+            "Extracting %d atlas(es) from %s",
+            len(atlas_uids),
+            db,
+        )
 
-    for atlas_uid, csv_path in zip(atlas_uids, output_paths):
-        atlas_df = dbi.get_atlas_compounds_table(db, atlas_uid)
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        atlas_df.to_csv(csv_path, index=False)
-        logger.info("Saved atlas %s to %s", atlas_uid, csv_path)
+        for atlas_uid, csv_path in zip(atlas_uids, output_paths):
+            atlas_df = dbi.get_atlas_compounds_table(db, atlas_uid)
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            atlas_df.to_csv(csv_path, index=False)
+            logger.info("Saved atlas %s to %s", atlas_uid, csv_path)
 
 
 def query_atlases(
@@ -128,38 +129,39 @@ def query_atlases(
     created_by: Optional[str] = None,
 ) -> None:
     """Print atlas metadata rows matching the supplied filter criteria."""
-    db = _resolve_database_path(database_path)
+    with lcf.temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, reconfigure_existing=True):
+        db = _resolve_database_path(database_path)
 
-    logger.info("Querying atlas metadata in %s", db)
+        logger.info("Querying atlas metadata in %s", db)
 
-    df = dbi.query_atlases_metadata(
-        database_path=db,
-        chromatography=chromatography,
-        polarity=polarity,
-        analysis_type=analysis_type,
-        analysis_name=analysis_name,
-        created_by=created_by,
-    )
+        df = dbi.query_atlases_metadata(
+            database_path=db,
+            chromatography=chromatography,
+            polarity=polarity,
+            analysis_type=analysis_type,
+            analysis_name=analysis_name,
+            created_by=created_by,
+        )
 
-    if df.empty:
-        print("No atlases found matching the supplied filters.")
-        return
+        if df.empty:
+            print("No atlases found matching the supplied filters.")
+            return
 
-    # Keep only columns that exist in the result (graceful for older DBs)
-    display_cols = [c for c in _QUERY_DISPLAY_COLUMNS if c in df.columns]
-    display_df = df[display_cols]
+        # Keep only columns that exist in the result (graceful for older DBs)
+        display_cols = [c for c in _QUERY_DISPLAY_COLUMNS if c in df.columns]
+        display_df = df[display_cols]
 
-    # Pretty-print with pandas; widen the display so UIDs aren't truncated
-    import pandas as pd
-    with pd.option_context(
-        "display.max_rows", None,
-        "display.max_columns", None,
-        "display.width", 0,
-        "display.max_colwidth", 80,
-    ):
-        print(display_df.to_string(index=False))
+        # Pretty-print with pandas; widen the display so UIDs aren't truncated
+        import pandas as pd
+        with pd.option_context(
+            "display.max_rows", None,
+            "display.max_columns", None,
+            "display.width", 0,
+            "display.max_colwidth", 80,
+        ):
+            print(display_df.to_string(index=False))
 
-    print(f"\n{len(df)} atlas(es) found.")
+        print(f"\n{len(df)} atlas(es) found.")
 
 
 # ---------------------------------------------------------------------------
