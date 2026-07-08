@@ -54,7 +54,20 @@ def parse_args():
         p.add_argument("--skip-rt-align", action="store_true", default=False)
         p.add_argument("--skip-auto-id", action="store_true", default=False)
         p.add_argument("--skip-curation", action="store_true", default=False)
-        p.add_argument("--log-to-stdout", action="store_true", default=False, help="Write log output to stdout instead of a log file in the project directory")
+        log_group = p.add_mutually_exclusive_group()
+        log_group.add_argument(
+            "--log-to-stdout",
+            dest="log_to_stdout",
+            action="store_true",
+            help="Enable stdout logging in addition to file logging (default).",
+        )
+        log_group.add_argument(
+            "--no-log-to-stdout",
+            dest="log_to_stdout",
+            action="store_false",
+            help="Disable stdout logging and write only to the log file in the project directory.",
+        )
+        p.set_defaults(log_to_stdout=True)
 
     run_parser = subparsers.add_parser("run", help="Execute the pre-curation workflow directly")
     add_shared_args(run_parser)
@@ -95,7 +108,7 @@ def generate_slurm_script(args, paths) -> str:
     if args.skip_rt_align: extra_flags.append("--skip-rt-align")
     if args.skip_auto_id: extra_flags.append("--skip-auto-id")
     if args.skip_curation: extra_flags.append("--skip-curation")
-    if args.log_to_stdout: extra_flags.append("--log-to-stdout")
+    if not args.log_to_stdout: extra_flags.append("--no-log-to-stdout")
     if args.analysis_subset: extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
     extra_flags_str = " \\\n ".join(extra_flags)
 
@@ -267,7 +280,7 @@ def main():
     )
 
     if not args.log_to_stdout and args.command == "run": print("=====---- Setting up workflow logging...")
-    log_file = None if args.log_to_stdout else paths["log_path"]
+    log_file = paths["log_path"]
     lcf.setup_logging(log_level=logging.INFO, log_file=log_file, log_to_stdout=args.log_to_stdout)
     logger = lcf.get_logger("run_targeted_analysis")
     logger.info("System set - starting pre-curation workflow")

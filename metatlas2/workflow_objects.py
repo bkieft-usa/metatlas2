@@ -6,6 +6,7 @@ import json
 import pandas as pd
 import os
 import yaml
+import sys
 from tqdm.auto import tqdm
 
 import metatlas2.database_interact as dbi
@@ -19,6 +20,11 @@ import metatlas2.note_options as gno
 import metatlas2.file_and_project_format as fpf
 logger = lcf.get_logger('workflow_objects')
 
+def should_disable_tqdm():
+    return (
+        "SLURM_JOB_ID" in os.environ
+        or not sys.stdout.isatty()
+    )
 
 @dataclass
 class TargetedAnalysis:
@@ -335,7 +341,7 @@ class Compound:
                 use_pubchem_cache=config.params.use_pubchem_cache,
                 update_pubchem_cache=config.params.update_pubchem_cache,
             )
-            for _, row in compounds_df.iterrows():
+            for _, row in tqdm(compounds_df.iterrows(), total=len(compounds_df), desc="Processing compounds", disable=should_disable_tqdm()):
                 try:
                     compound = cls.from_atlas_row(row)
                     compounds.append(compound)
@@ -576,6 +582,7 @@ class Atlas:
                     atlas_name=entry.name,
                     atlas_description=entry.desc,
                     analysis_type=analysis_type,
+                    analysis_name="MAIN",
                     chromatography=chrom,
                     polarity=pol,
                     atlas_file_path=entry.path,

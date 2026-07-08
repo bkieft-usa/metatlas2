@@ -8,7 +8,56 @@ _global_log_level = logging.INFO
 _log_to_stdout = True  # updated by setup_logging
 _log_file = None       # updated by setup_logging
 
-def setup_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, module_name=None):
+
+def _create_formatter():
+    return logging.Formatter(
+        fmt='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+
+def _has_stdout_handler(logger):
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+            return True
+    return False
+
+
+def _has_file_handler(logger, log_file):
+    if not log_file:
+        return False
+    target = Path(log_file).resolve()
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            try:
+                if Path(handler.baseFilename).resolve() == target:
+                    return True
+            except (OSError, RuntimeError):
+                continue
+    return False
+
+
+def _add_handlers(logger, formatter, log_level, log_to_stdout=True, log_file=None):
+    if log_to_stdout and not _has_stdout_handler(logger):
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
+    if log_file and not _has_file_handler(logger, log_file):
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    for handler in logger.handlers:
+        handler.setLevel(log_level)
+        handler.setFormatter(formatter)
+
+def setup_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, module_name=None, reconfigure_existing=True):
     """
     Set up consistent logging configuration across all metatlas2 modules.
     
@@ -17,6 +66,8 @@ def setup_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, mod
         log_file: Optional path to log file
         log_to_stdout: If True, write to stdout; if False, write only to log_file
         module_name: Name of the calling module (for logger naming)
+        reconfigure_existing: If True, clear/rebuild handlers. If False, preserve
+            existing handlers and only add missing requested handlers.
     
     Returns:
         logger: Configured logger instance
@@ -34,45 +85,33 @@ def setup_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, mod
     
     logger = logging.getLogger(logger_name)
     logger.setLevel(log_level)
-    
-    # Clear any existing handlers
-    logger.handlers.clear()
-    
+
     # Prevent propagation to avoid duplicate messages
     logger.propagate = False
-    
-    # Create formatter
-    formatter = logging.Formatter(
-        fmt='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # Console handler (only when log_to_stdout is requested)
-    if log_to_stdout:
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(log_level)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-    
-    # File handler (required when not logging to stdout)
+
+    formatter = _create_formatter()
+
+    if reconfigure_existing:
+        logger.handlers.clear()
+
+    _add_handlers(logger, formatter, log_level, log_to_stdout, log_file)
+
     if log_file:
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        logger.info(f"Logging to file: {log_path}")
-    
+        logger.info(f"Logging to file: {Path(log_file)}")
+
     # Configure all existing metatlas2 loggers
-    configure_existing_loggers(formatter, log_level, log_to_stdout, log_file)
+    configure_existing_loggers(
+        formatter,
+        log_level,
+        log_to_stdout,
+        log_file,
+        reset_handlers=reconfigure_existing,
+    )
     
     _logging_initialized = True
     return logger
 
-def configure_existing_loggers(formatter, log_level, log_to_stdout=True, log_file=None):
+def configure_existing_loggers(formatter, log_level, log_to_stdout=True, log_file=None, reset_handlers=True):
     """Configure any existing metatlas2 loggers that were created before setup_logging was called."""
     
     # Get all existing loggers
@@ -81,21 +120,13 @@ def configure_existing_loggers(formatter, log_level, log_to_stdout=True, log_fil
     
     for logger_name in existing_loggers:
         existing_logger = logging.getLogger(logger_name)
-        existing_logger.handlers.clear()  # Remove any existing handlers
         existing_logger.setLevel(log_level)
         existing_logger.propagate = False  # Prevent propagation to avoid duplicates
-        
-        if log_to_stdout:
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setLevel(log_level)
-            handler.setFormatter(formatter)
-            existing_logger.addHandler(handler)
-        
-        if log_file:
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setLevel(log_level)
-            file_handler.setFormatter(formatter)
-            existing_logger.addHandler(file_handler)
+
+        if reset_handlers:
+            existing_logger.handlers.clear()
+
+        _add_handlers(existing_logger, formatter, log_level, log_to_stdout, log_file)
 
 def ensure_logging_initialized():
     """Ensure logging is initialized with default settings if not already done."""
@@ -119,21 +150,8 @@ def get_logger(module_name, log_level=None):
         for handler in logger.handlers:
             handler.setLevel(log_level)
     else:
-        # Create handlers if none exist
-        formatter = logging.Formatter(
-            fmt='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        if _log_to_stdout:
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setLevel(log_level)
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        if _log_file:
-            file_handler = logging.FileHandler(_log_file)
-            file_handler.setLevel(log_level)
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
+        formatter = _create_formatter()
+        _add_handlers(logger, formatter, log_level, _log_to_stdout, _log_file)
         logger.propagate = False
     
     return logger

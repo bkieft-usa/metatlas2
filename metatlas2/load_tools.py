@@ -62,10 +62,6 @@ def load_msms_refs_file(
         + "..."
     )
 
-
-    # Normalize polarity to the long lowercase form used in the refs file
-    # ('positive'/'negative') so callers can pass 'POS'/'NEG', 'pos'/'neg',
-    # 'positive'/'negative', etc. without causing a silent mismatch.
     _POLARITY_MAP = {
         'pos': 'positive', 'positive': 'positive',
         'neg': 'negative', 'negative': 'negative',
@@ -162,7 +158,7 @@ def load_msms_refs_file(
             )
         if polarity_norm:
             parts.append(
-                f"polarity={polarity!r} (normalised to {polarity_norm!r}) filtered out {n_pol_filtered} record(s)"
+                f"polarity={polarity!r} (normalized to {polarity_norm!r}) filtered out {n_pol_filtered} record(s)"
             )
         detail = "; ".join(parts) if parts else "file may be empty or all records were unparseable"
         raise ValueError(

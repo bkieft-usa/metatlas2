@@ -873,7 +873,7 @@ def batch_save_compounds(
         for row in existing_result:
             existing_compounds[row[0]] = row[1]
 
-        logger.info(f"Found {len(existing_compounds)} existing compounds in database")
+        logger.debug(f"Found {len(existing_compounds)} existing compounds in database")
 
         # Process compound data and build inchi_key -> compound_uid mapping
         compound_records = []
