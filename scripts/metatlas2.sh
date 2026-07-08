@@ -252,9 +252,9 @@ elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" |
         /app/.venv/bin/python -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
 
 else # run main targeted pipeline
-    LOG_TO_STDOUT=false
+    LOG_TO_STDOUT=true
     for arg in "${PASSTHROUGH_ARGS[@]}"; do
-        [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
+        [[ "$arg" == "--no-log-to-stdout" ]] && LOG_TO_STDOUT=false && break
     done
     if [[ "${LOG_TO_STDOUT}" == "false" && "${SUBCOMMAND}" == "run" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then

@@ -15,10 +15,10 @@ services:
       --allow-root
       --IdentityProvider.token=''
       --ServerApp.password=''
+      --ServerApp.default_url='/lab/tree/local_workflow.ipynb'
       --ServerApp.root_dir=/data"
     ports:
       - "127.0.0.1:${STANDALONE_PORT:-8889}:8889"
-      # Expose Dash app port range (workflows._find_free_port tries 8050-8069)
       - "127.0.0.1:8050-8069:8050-8069"
     volumes:
       - ${REPO_DIR}:/repo:ro
@@ -29,13 +29,9 @@ services:
       METATLAS2_STANDALONE: "true"
       JUPYTERHUB_SERVICE_PREFIX: "/"
       USER: standalone
-      # Repo code takes priority over installed package
       PYTHONPATH: "/repo:/app"
       # Force Jupyter to use a clean config with no overrides
       JUPYTER_CONFIG_DIR: /tmp/jupyter_config
       JUPYTER_CONFIG_PATH: /tmp/jupyter_config
-    # Tells Docker to use host networking mode on Linux,
-    # which sidesteps bridge networking issues entirely
-    # On Mac, host networking isn't supported so we fall back to port mapping above
     network_mode: ${NETWORK_MODE:-bridge}
     restart: "no"
