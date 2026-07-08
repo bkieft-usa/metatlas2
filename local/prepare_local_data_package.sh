@@ -103,6 +103,7 @@ fi
 # - raw_data/dev/{project_name}/   (h5 files live directly here)
 # - databases/main_db/
 # - databases/msms_refs/
+# - databases/modelseed_db/
 # - configs/
 # - atlases/
 # - projects/targeted_outputs/ (will be created by workflow)
@@ -110,6 +111,7 @@ STANDALONE_PROJECT="20260101_JGI_XX_000000_STANDALONE-DEV_test_EXP000_HILICZ_TES
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/raw_data/dev/${STANDALONE_PROJECT}"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/main_db"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/msms_refs"
+mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/modelseed_db"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/configs"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/atlases"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/projects/targeted_outputs"
