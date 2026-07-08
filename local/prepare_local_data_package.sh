@@ -350,6 +350,20 @@ EOF
 
 echo "   Created ms2_references.json"
 
+# Create modelseed cache
+cat > databases/modelseed_db/modelseed.tsv << 'EOF'
+id	abbreviation	name	formula	mass	source	inchikey	charge	is_core	is_obsolete	linked_compound	is_cofactor	deltag	deltagerr	pka	pkb	abstract_compound	comprised_of	aliases	smiles	notes
+cpd00128	ade	Adenine	C5H5N5	135.0	Primary Database	GFFGJBXGBJISGV-UHFFFAOYSA-N	0	1	0	null	0	122.4	0.39	1:9:9.90;1:10:19.90	1:3:-7.90;1:5:4.25;1:7:-0.52;1:10:-6.30	null	null	Name: 6-Aminopurine; 6-aminopurine; Adenine; adenine|AraCyc: ADENINE|BiGG: ade|BrachyCyc: ADENINE|KEGG: C00147|MetaCyc: ADENINE	Nc1ncnc2[nH]cnc12	GC|EQ|EQU
+cpd00207	gua	Guanine	C5H5N5O	151.0	Primary Database	UYTPUPDQBNUYGX-UHFFFAOYSA-N	0	1	0	null	0	28.4	2.51	1:4:9.38;1:9:10.72	1:3:-2.27;1:6:0.96;1:11:-5.55	null	null	Name: 2-Amino-6-hydroxypurine; GNN; Guanine; guanine|AraCyc: GUANINE|BiGG: gua|BrachyCyc: GUANINE|KEGG: C00242|MetaCyc: GUANINE	Nc1nc2[nH]cnc2c(=O)[nH]1	GC|EQ
+cpd00322	ile-L	L-Isoleucine	C6H13NO2	131.0	Primary Database	AGPKZVBTJJNPAG-WHFBIAKZSA-N	0	1	0	null	0	44.41	0.71	1:7:2.79	1:4:9.59	null	null	Name: 2-Amino-3-methylvaleric acid; L-Isoleucine; L-ile; L-isoleucine; ile; iso-leucine; l-iso-leucine|AraCyc: ILE|BiGG: ile__L|BrachyCyc: ILE|KEGG: C00407|MetaCyc: ILE	CC[C@H](C)[C@H]([NH3+])C(=O)[O-]	GC|EQ|EQU
+cpd01327	L-Norleucine	L-Norleucine	C6H13NO2	131.0	Primary Database	LRQKBLKVPFOOQJ-YFKPBYRVSA-N	0	1	0	null	0	44.4	0.39	1:5:2.79	1:4:9.53	null	null	Name: (S)-2-Aminohexanoic acid; L-2-Aminohexanoate; L-2-Aminohexanoic acid; L-2-aminohexanoate; L-2-aminohexanoic acid; L-Aminohexanoate; L-Aminohexanoic acid; L-Norleucine; L-aminohexanoate; L-aminohexanoic acid; L-norleucine|CornCyc: L-2-AMINOHEXANOATE|EcoCyc: L-2-AMINOHEXANOATE|KEGG: C01933|MetaCyc: L-2-AMINOHEXANOATE|PlantCyc: L-2-AMINOHEXANOATE	CCCC[C@H]([NH3+])C(=O)[O-]	GC|EQ|EQU
+cpd15143	cll_94	Leucine	C6H13NO2	131.0	Primary Database	ROHFNLRQFUQHCH-UHFFFAOYSA-N	0	1	0	null	0	-84.87	0.45	1:6:2.79	1:4:9.52	null	null	Name: Leucine|JM_Creinhardtii: Leu; Leu_c|KEGG: C16439|iAG612: cbs_399|iAO358: cll_94	CC(C)CC([NH3+])C(=O)[O-]	GC
+cpd28171	Serines	Serines	C3H7NO3	105.0	Primary Database	MTCFGRXMJLQNBG-UHFFFAOYSA-N	0	1	0	null	0	-124.15	0.31	1:5:15.17;1:6:2.03	1:4:8.93;1:5:-2.85	null	null	Name: Serines|AraCyc: Serines|BrachyCyc: Serines|ChlamyCyc: Serines|CornCyc: Serines|MetaCyc: Serines	[NH3+]C(CO)C(=O)[O-]	GC
+cpd30743	DL-Serine	DL-Serine	C3H7NO3	105.0	Primary Database	MTCFGRXMJLQNBG-UHFFFAOYSA-N	0	1	0	null	0	-124.15	0.31	1:5:2.03;1:7:15.17	1:4:8.93;1:7:-2.85	null	null	Name: 2-Amino-3-hydroxypropionic acid; 3-Hydroxyalanine; DL-Serine|KEGG: C00716	[NH3+]C(CO)C(=O)[O-]	GC
+EOF
+
+echo "   Created modelseed.tsv"
+
 if [[ "$SUBSET_H5" == true ]]; then
     echo ""
     echo "Subsetting copied h5 files..."
@@ -602,7 +616,7 @@ WORKFLOWS:
       ATLAS:
         uid: dev-qc-hilicz-pos
       PARAMS:
-          upload_to_gdrive: true
+          upload_to_gdrive: false	
           include_lcmsruns: # 'QC'
           exclude_lcmsruns:
             - NEG
@@ -643,13 +657,13 @@ WORKFLOWS:
               apply_cross_polarity_curation: true
               suggested_min_conf: 0.75
               atlas_extra_time: 0
-              ms1_min_peak_intensity: 2e5
-              ms1_min_num_points: 2
+              ms1_min_peak_intensity: 1e4
+              ms1_min_num_points: 1
               ms1_mz_tolerance_ppm: 5.0
               ms2_min_num_scans: 1
               ms2_min_precursor_intensity: 0
               ms2_min_score: 0.0
-              ms2_min_matching_frags: 1
+              ms2_min_matching_frags: 0
               ms2_mz_tolerance_ppm: 20.0
               ms2_frag_mz_tolerance: 0.05
               gui_require_all_evaluated: false
@@ -665,7 +679,7 @@ WORKFLOWS:
                 ms2_notes:
                 other_notes:
               create_curation_notebooks: true
-              upload_to_gdrive: true
+              upload_to_gdrive: false	
               skip_outputs:
       NEG:
         EMA:
@@ -690,13 +704,13 @@ WORKFLOWS:
               apply_cross_polarity_curation: true
               suggested_min_conf: 0.75
               atlas_extra_time: 0
-              ms1_min_peak_intensity: 2e5
-              ms1_min_num_points: 2
+              ms1_min_peak_intensity: 1e4
+              ms1_min_num_points: 1
               ms1_mz_tolerance_ppm: 5.0
-              ms2_min_num_scans: 1
+              ms2_min_num_scans: 0
               ms2_min_precursor_intensity: 0
               ms2_min_score: 0.0
-              ms2_min_matching_frags: 1
+              ms2_min_matching_frags: 0
               ms2_mz_tolerance_ppm: 20.0
               ms2_frag_mz_tolerance: 0.05
               gui_require_all_evaluated: false
@@ -712,7 +726,7 @@ WORKFLOWS:
                 ms2_notes:
                 other_notes:
               create_curation_notebooks: true
-              upload_to_gdrive: true
+              upload_to_gdrive: false	
               skip_outputs:
 EOF
 
