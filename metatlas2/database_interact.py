@@ -228,6 +228,84 @@ def create_new_atlas_from_dataframe(
     )
     return atlas_obj
 
+def enrich_atlas_df_with_compound_metadata(atlas_df: pd.DataFrame, main_db_path: str) -> pd.DataFrame:
+    """Fill missing compound metadata fields on atlas rows from main DB compounds."""
+    if atlas_df.empty:
+        return atlas_df
+    if not main_db_path:
+        logger.warning("No main_db_path available; skipping atlas compound metadata enrichment.")
+        return atlas_df
+    if "compound_uid" not in atlas_df.columns:
+        logger.warning("Atlas dataframe has no compound_uid column; skipping metadata enrichment.")
+        return atlas_df
+
+    compound_uids = [
+        str(uid) for uid in atlas_df["compound_uid"].dropna().tolist()
+        if str(uid).strip()
+    ]
+    if not compound_uids:
+        return atlas_df
+
+    # Preserve order while deduplicating for the SQL IN lookup.
+    compound_uids = list(dict.fromkeys(compound_uids))
+
+    try:
+        import metatlas2.database_interact as dbi
+
+        placeholders = ", ".join(["?"] * len(compound_uids))
+        with dbi.get_db_connection(main_db_path, read_only=True) as conn:
+            cmp_df = conn.execute(
+                f"""
+                    SELECT
+                        compound_uid,
+                        COALESCE(formula, '')                         AS formula,
+                        COALESCE(smiles, '')                          AS smiles,
+                        COALESCE(inchi, '')                           AS inchi,
+                        COALESCE(pubchem_cid, '')                     AS pubchem_cid,
+                        COALESCE(mono_isotopic_molecular_weight, 0.0) AS mono_isotopic_molecular_weight,
+                        COALESCE(iupac_name, '')                      AS iupac_name
+                    FROM compounds
+                    WHERE compound_uid IN ({placeholders})
+                """,
+                compound_uids,
+            ).df()
+    except Exception as exc:
+        logger.warning("Failed to enrich atlas metadata from main DB: %s", exc)
+        return atlas_df
+
+    if cmp_df.empty:
+        logger.warning("No compound metadata rows found in main DB for atlas compound_uids.")
+        return atlas_df
+
+    merged = atlas_df.copy().merge(cmp_df, on="compound_uid", how="left", suffixes=("", "_main"))
+    text_cols = ["formula", "smiles", "inchi", "pubchem_cid", "iupac_name"]
+
+    for col in text_cols:
+        main_col = f"{col}_main"
+        if main_col not in merged.columns:
+            continue
+        left = merged[col] if col in merged.columns else pd.Series([""] * len(merged), index=merged.index)
+        left = left.fillna("").astype(str)
+        right = merged[main_col].fillna("").astype(str)
+        merged[col] = np.where(left.str.strip() != "", left, right)
+        merged.drop(columns=[main_col], inplace=True, errors="ignore")
+
+    mass_main_col = "mono_isotopic_molecular_weight_main"
+    mass_col = "mono_isotopic_molecular_weight"
+    if mass_main_col in merged.columns:
+        left_mass = pd.to_numeric(merged[mass_col], errors="coerce") if mass_col in merged.columns else pd.Series(np.nan, index=merged.index)
+        right_mass = pd.to_numeric(merged[mass_main_col], errors="coerce")
+        merged[mass_col] = np.where(left_mass.notna() & (left_mass > 0), left_mass, right_mass)
+        merged.drop(columns=[mass_main_col], inplace=True, errors="ignore")
+
+    with_smiles = int((merged.get("smiles", pd.Series(dtype=str)).fillna("").astype(str).str.strip() != "").sum())
+    with_formula = int((merged.get("formula", pd.Series(dtype=str)).fillna("").astype(str).str.strip() != "").sum())
+    logger.info(
+        "Atlas metadata enrichment complete: %d/%d rows have smiles, %d/%d have formula.",
+        with_smiles, len(merged), with_formula, len(merged)
+    )
+    return merged
+
 def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: str = None) -> pd.DataFrame:
     """
     Extract all compound information for a given atlas UID from the database.
@@ -264,11 +342,11 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         COALESCE(mzrt.compound_name, c.compound_name) AS compound_name,
                         c.inchi_key,
                         c.inchi,
-                        COALESCE(c.formula, '')                          AS formula,
-                        COALESCE(c.smiles, '')                           AS smiles,
-                        COALESCE(c.pubchem_cid, '')                      AS pubchem_cid,
-                        COALESCE(c.mono_isotopic_molecular_weight, 0.0)  AS mono_isotopic_molecular_weight,
-                        COALESCE(c.iupac_name, '')                       AS iupac_name,
+                        COALESCE(c.formula, '') AS formula,
+                        COALESCE(c.smiles, '') AS smiles,
+                        COALESCE(c.pubchem_cid, '') AS pubchem_cid,
+                        COALESCE(c.mono_isotopic_molecular_weight, 0.0) AS mono_isotopic_molecular_weight,
+                        COALESCE(c.iupac_name, '') AS iupac_name,
                         mzrt.adduct,
                         mzrt.mz,
                         mzrt.rt_peak,
@@ -279,8 +357,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.prev_mz_rt_uid,
                         mzrt.identification_notes,
                         mzrt.source,
-                        mzrt.polarity        AS mzrt_polarity,
-                        mzrt.chromatography  AS mzrt_chromatography
+                        mzrt.polarity AS mzrt_polarity,
+                        mzrt.chromatography AS mzrt_chromatography
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     JOIN compounds c ON aca.compound_uid = c.compound_uid
@@ -315,8 +393,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.prev_mz_rt_uid,
                         mzrt.identification_notes,
                         mzrt.source,
-                        mzrt.polarity        AS mzrt_polarity,
-                        mzrt.chromatography  AS mzrt_chromatography
+                        mzrt.polarity AS mzrt_polarity,
+                        mzrt.chromatography AS mzrt_chromatography
                     FROM atlases a
                     JOIN atlas_compound_associations aca ON a.atlas_uid = aca.atlas_uid
                     LEFT JOIN compound_mzrt mzrt ON aca.mz_rt_uid = mzrt.mz_rt_uid
@@ -338,11 +416,11 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                             compound_name  AS main_compound_name,
                             inchi_key,
                             inchi,
-                            COALESCE(formula, '')                          AS formula,
-                            COALESCE(smiles, '')                           AS smiles,
-                            COALESCE(pubchem_cid, '')                      AS pubchem_cid,
-                            COALESCE(mono_isotopic_molecular_weight, 0.0)  AS mono_isotopic_molecular_weight,
-                            COALESCE(iupac_name, '')                       AS iupac_name
+                            COALESCE(formula, '') AS formula,
+                            COALESCE(smiles, '') AS smiles,
+                            COALESCE(pubchem_cid, '') AS pubchem_cid,
+                            COALESCE(mono_isotopic_molecular_weight, 0.0) AS mono_isotopic_molecular_weight,
+                            COALESCE(iupac_name, '') AS iupac_name
                         FROM compounds
                         WHERE compound_uid IN ({placeholders})
                     """, compound_uids).df()
@@ -2113,13 +2191,13 @@ def _get_opposite_polarity_curation(
         logger.info(
             f"No curated {opposite_polarity}-polarity entries found for "
             f"RTA{rt_alignment_number} and TGA{analysis_number} with attributes "
-            f"{chromatography} {opposite_polarity} {analysis_type} {analysis_name}."
+            f"{chromatography}-{opposite_polarity}-{analysis_type}-{analysis_name}."
         )
     else:
         logger.info(
             f"Found {len(df)} curated {opposite_polarity}-polarity entries for "
             f"RTA{rt_alignment_number} and TGA{analysis_number} with attributes "
-            f"{chromatography} {opposite_polarity} {analysis_type} {analysis_name}."
+            f"{chromatography}-{opposite_polarity}-{analysis_type}-{analysis_name}."
         )
     return df
 

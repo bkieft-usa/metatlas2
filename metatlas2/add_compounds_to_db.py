@@ -20,11 +20,11 @@ def add_compounds_to_db(
         reconfigure_existing=False,
     ):
         logger = lcf.get_logger('workflow_objects')
-    logger.info("Adding compounds from config file to database...")
-    Compound.create_from_config(
-        config_path=config_path,
-        overwrite_db=overwrite_db
-    )
+        logger.info("Adding compounds from config file to database...")
+        Compound.create_from_config(
+            config_path=config_path,
+            overwrite_db=overwrite_db
+        )
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Add compounds to the database from a config file.')

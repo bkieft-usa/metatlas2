@@ -18,12 +18,11 @@ def add_atlases_to_db(
         log_to_stdout=True,
         reconfigure_existing=False,
     ):
-        config_dir = Path(config_path).parent
         logger = lcf.get_logger('workflow_objects')
-    logger.info("Adding atlases from config file to database...")
-    Atlas.create_from_config(
-        config_path=config_path
-    )
+        logger.info("Adding atlases from config file to database...")
+        Atlas.create_from_config(
+            config_path=config_path
+        )
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Add atlases to the database from a config file.')

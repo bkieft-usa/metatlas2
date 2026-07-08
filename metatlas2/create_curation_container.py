@@ -26,6 +26,10 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     """
     logger.info("Loading experimental data and atlas for curation metadata creation...")
     atlas_df = auto_id_obj.auto_ided_atlas_obj.to_dataframe()
+    atlas_df = dbi.enrich_atlas_df_with_compound_metadata(
+        atlas_df,
+        auto_id_obj.paths.get("main_db_path", ""),
+    )
     ms1_df = auto_id_obj.experimental_data.ms1_df
 
     logger.info("Building indices and isomer map...")

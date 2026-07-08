@@ -629,7 +629,11 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
     ax.axis("off")
 
     def _fmt(val, fmt=None):
-        if val is None or (isinstance(val, str) and not val.strip()) or _safe_isnan(val):
+        if val is None:
+            return "N/A"
+        if isinstance(val, str):
+            return val if val.strip() else "N/A"
+        if _safe_isnan(val):
             return "N/A"
         try:
             return fmt.format(val) if fmt else str(val)
@@ -2879,7 +2883,7 @@ def make_metabomap(
 
     group_to_cols: Dict[str, List[str]] = {}
     for col in sample_data_cols:
-        grp = _sample_group_from_col(col)
+        grp = fpf.get_file_parts(col, "sample_name")
         if grp is not None and not any(ex in grp for ex in _EXCLUDE_GROUPS):
             group_to_cols.setdefault(grp, []).append(col)
 
