@@ -736,6 +736,66 @@ echo "   Created configs/compounds_config.yaml"
 echo "   Created configs/atlases_config.yaml"
 echo "   Created configs/analysis_config.yaml"
 
+cat > configs/parquet_query.yaml << 'EOF'
+# ==============================================================================
+# QUERY PARAMETERS
+# ==============================================================================
+# Instructions: 
+# 1. Uncomment the parameter you want to filter by.
+# 2. For float columns, use suffixes: _min (>=), _max (<=), _abs_gt (abs >)
+# 3. For string columns, just use the column name for equality (==) or _in for lists.
+# ==============================================================================
+
+# --- GLOBAL / GRAIN ---
+row_kind: "compound_lfc" # Options: "compound_file", "compound_lfc"
+
+# --- COMPOUND_LFC SPECIFIC ---
+# condition_1: "T1-256534-8-WT-RE"
+# condition_2: "T1-256534-8-Tr-RE"
+# log2_fold_change_abs_gt: 1.5
+# log2_fold_change_min: 2.0
+
+# --- SHARED STRINGS (Equality or _in) ---
+# mz_rt_uid: "UID123"
+# compound_name: "Glucose"
+# identified_metabolite: "Glucose"
+# label: "CustomLabel"
+# inchi_key: "XXXXX"
+# formula: "C6H12O6"
+# smiles: "..."
+# inchi: "..."
+# pubchem_cid: "123"
+# iupac_name: "..."
+# polarity: "POS"
+# adduct: "[M+H]+"
+# msi_level: "Level 1"
+# msi_level_in: ["Level 1", "Exceeds Level 1"]
+# control_filter: "Pass"
+# best_ms2_file: "file_01.mzML"
+# msms_file: "file_01.mzML"
+
+# --- SHARED FLOATS (Use _min, _max, _abs_gt) ---
+# atlas_mz_min: 300
+# atlas_mz_max: 400
+# atlas_rt_peak_min: 1.2
+# atlas_rt_peak_max: 2.5
+# best_ms2_score_min: 0.8
+# best_ms2_mz_ppm_error_max: 5.0
+# best_ms2_rt_error_abs_gt: 1.0
+# total_score_min: 2.0
+# mz_quality_min: 0.7
+# rt_quality_min: 0.7
+# msms_quality_min: 0.7
+
+# --- FILE-SPECIFIC FLOATS ---
+# peak_height_min: 1000
+# peak_area_min: 50000
+# measured_rt_min: 1.1
+# measured_mz_min: 300.1
+EOF
+
+echo "    Created configs/parquet_query.yaml"
+
 echo ""
 echo "Creating tarball..."
 echo "---------------------------"
