@@ -10,6 +10,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks, peak_widths
 from scipy.signal._peak_finding_utils import PeakPropertyWarning
 
+import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('curation_creator')
 
@@ -67,12 +68,6 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
             'other_notes': '',
             'identification_notes': atlas_row.get('identification_notes', ''),
             'analyst_notes': '',
-            'best_ms1_file': '',
-            'best_ms1_rt': 0.0,
-            'best_ms1_mz': 0.0,
-            'best_ms1_intensity': 0.0,
-            'best_ms1_ppm_error': 0.0,
-            'best_ms1_rt_error': 0.0,
             'max_eic_rt': [],
             'max_eic_intensity': [],
             'isomers': isomer_dict.get(uid, []),
@@ -123,8 +118,6 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
         return {}
 
     # Setup variables
-    best_file_info = None
-    max_height = -np.inf
     atlas_mz = atlas_row.get('mz', 0.0)
     atlas_rt_peak = atlas_row.get('rt_peak', 0.0)
     atlas_rt_min = atlas_row.get('rt_min', 0.0)
@@ -169,18 +162,6 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
                 idx = np.argmax(in_feature_ints)
                 h = in_feature_ints[idx]
                 per_file_peak_rts.append(float(in_feature_rts[idx]))
-                if h > max_height:
-                    max_height = h
-                    centroid = (in_feature_ints * in_feature_mzs).sum() / sum_int
-                    best_file_info = {
-                        'best_ms1_file': filename,
-                        'best_ms1_rt': float(in_feature_rts[idx]),
-                        'best_ms1_mz': float(centroid),
-                        'best_ms1_intensity': float(h),
-                        'best_ms1_ppm_error': float((centroid - atlas_mz) / atlas_mz * 1e6) if atlas_mz else 0.0,
-                        'best_ms1_rt_error': float(in_feature_rts[idx] - atlas_rt_peak)
-                    }
-
     if stage == "manual_curation_creator":
         if not rt_arrays or not in_feature_rt:
             return {}
@@ -223,7 +204,7 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
         ) if avg_trace_data else None
 
     # Assemble result
-    res = best_file_info.copy() if best_file_info else {}
+    res = {}
     if stage == "manual_curation_creator":
         res.update({
             'mz': win_mz_mean,

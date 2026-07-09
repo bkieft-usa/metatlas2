@@ -82,13 +82,13 @@ def build_dash_app(
 
     # Index MS1 data
     for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms1_df.groupby(["mz_rt_uid"], observed=True):
-        if isinstance(mz_rt_uid, tuple) and len(mz_rt_uid) == 1:
+        if len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
         ms1_by_compound[mz_rt_uid] = group
 
     # Index MS2 data
     for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms2_df.groupby(["mz_rt_uid"], observed=True):
-        if isinstance(mz_rt_uid, tuple) and len(mz_rt_uid) == 1:
+        if len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
         ms2_by_compound[mz_rt_uid] = group
 
@@ -120,7 +120,7 @@ def build_dash_app(
         ms2_note = normalize_note_value(row.get("ms2_notes"), analysis_gui_obj.notes["ms2_notes"])
         ms1_note = normalize_note_value(row.get("ms1_notes"), analysis_gui_obj.notes["ms1_notes"])
         other_notes_raw = row.get("other_notes", [])
-        if other_notes_raw is None or other_notes_raw == "" or (isinstance(other_notes_raw, float) and np.isnan(other_notes_raw)):
+        if other_notes_raw is None or other_notes_raw == "":
             other_note = []
         else:
             try:
@@ -162,7 +162,7 @@ def build_dash_app(
         return new_state
 
     def _ensure_valid_state(state):
-        if isinstance(state, dict) and "compound_idx" in state:
+        if "compound_idx" in state:
             if not isinstance(state.get("ms2_idx_by_ce"), dict):
                 patched = dict(state)
                 patched["ms2_idx_by_ce"] = {}
@@ -558,7 +558,6 @@ def build_dash_app(
         creation:
           - rt_peak  = mean of each file's highest-intensity in-window RT point
           - mz       = mean of all in-window mzs across all files
-          - best_*   = values from the single file with the highest peak intensity
 
         The analyst's [rt_min, rt_max] window replaces the original in_feature
         mask: any point within the new window is treated as in-feature.
@@ -603,12 +602,6 @@ def build_dash_app(
             "mz": metrics.get("mz"),
             "rt_error": metrics.get("rt_error"),
             "mz_error": metrics.get("mz_error"),
-            "best_ms1_file": metrics.get("best_ms1_file"),
-            "best_ms1_rt": metrics.get("best_ms1_rt"),
-            "best_ms1_mz": metrics.get("best_ms1_mz"),
-            "best_ms1_intensity": metrics.get("best_ms1_intensity"),
-            "best_ms1_ppm_error": metrics.get("best_ms1_ppm_error"),
-            "best_ms1_rt_error": metrics.get("best_ms1_rt_error"),
         }
 
     def _flush_to_db(state):
@@ -661,12 +654,6 @@ def build_dash_app(
                         "rt_peak": row.get("rt_peak", None),
                         "rt_error": row.get("rt_error", None),
                         "mz_error": row.get("mz_error", None),
-                        "best_ms1_file": row.get("best_ms1_file", None),
-                        "best_ms1_rt": row.get("best_ms1_rt", None),
-                        "best_ms1_mz": row.get("best_ms1_mz", None),
-                        "best_ms1_intensity": row.get("best_ms1_intensity", None),
-                        "best_ms1_ppm_error": row.get("best_ms1_ppm_error", None),
-                        "best_ms1_rt_error": row.get("best_ms1_rt_error", None),
                         "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
                         "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
                         "other_notes": " // ".join(state.get("other_note", [])),
@@ -686,12 +673,6 @@ def build_dash_app(
                             "rt_peak": window_metrics["rt_peak"],
                             "rt_error": window_metrics["rt_error"],
                             "mz_error": window_metrics["mz_error"],
-                            "best_ms1_file": window_metrics["best_ms1_file"],
-                            "best_ms1_rt": window_metrics["best_ms1_rt"],
-                            "best_ms1_mz": window_metrics["best_ms1_mz"],
-                            "best_ms1_intensity": window_metrics["best_ms1_intensity"],
-                            "best_ms1_ppm_error": window_metrics["best_ms1_ppm_error"],
-                            "best_ms1_rt_error": window_metrics["best_ms1_rt_error"],
                             "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
                             "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
                             "other_notes": " // ".join(state.get("other_note", [])),
@@ -788,25 +769,23 @@ def build_dash_app(
 
         # Determine y_max as the highest intensity point of all files within the current window
         y_min_positive_data = None
-        max_eic_rt = row.get("max_eic_rt", [])
-        max_eic_intensity = row.get("max_eic_intensity", [])
-        # Use only EIC points within the current RT window
-        if len(max_eic_rt) > 0 and len(max_eic_intensity) > 0 and len(max_eic_rt) == len(max_eic_intensity):
-            expanded_rt_min = state["rt_min"] - 1
-            expanded_rt_max = state["rt_max"] + 1
-            filtered_intensity = [y for x, y in zip(max_eic_rt, max_eic_intensity) if expanded_rt_min <= x <= expanded_rt_max]
-            if filtered_intensity:
-                y_max_data = max(filtered_intensity)
-            else:
-                y_max_data = 0.0
+        expanded_rt_min = state["rt_min"] - 1
+        expanded_rt_max = state["rt_max"] + 1
+        windowed_intensities = []
+        for _, r in sub.iterrows():
+            rt_list = r.get("spec_rts", [])
+            int_list = r.get("spec_ints", [])
+            if len(rt_list) == 0 or len(int_list) == 0:
+                continue
+            rt_arr = np.asarray(rt_list)
+            int_arr = np.asarray(int_list)
+            mask = (rt_arr >= expanded_rt_min) & (rt_arr <= expanded_rt_max)
+            if np.any(mask):
+                windowed_intensities.extend([float(v) for v in int_arr[mask] if np.isfinite(v)])
+        if windowed_intensities:
+            y_max_data = float(max(windowed_intensities))
         else:
-            y_max_data = row.get("best_ms1_intensity", np.nan)
-            if pd.isna(y_max_data):
-                y_max_data = 0.0
-            else:
-                y_max_data = float(y_max_data)
-            if not np.isfinite(y_max_data) or y_max_data <= 0:
-                y_max_data = 1.0
+            y_max_data = 1.0
         # Store in state for consistency across redraws when RT changes
         if "cached_y_max" not in state or state.get("force_y_recalc", False):
             state["cached_y_max"] = y_max_data
@@ -910,8 +889,8 @@ def build_dash_app(
                     showlegend=False,
                     hoverinfo="skip",
                 ))
-                rt_str = f"{iso['rt']:.3f}" if isinstance(iso['rt'], (int, float)) else "?"
-                mz_str = f"{iso['mz']:.4f}" if isinstance(iso['mz'], (int, float)) else "?"
+                rt_str = f"{iso['rt']:.3f}"
+                mz_str = f"{iso['mz']:.4f}"
                 # iso['display_idx'] is now 1-based
                 isomer_lines.append(
                     f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
@@ -1105,7 +1084,7 @@ def build_dash_app(
                 if _rt is None or (isinstance(_rt, float) and np.isnan(_rt)):
                     continue
                 _hits = _scan_row.get("hits", [])
-                if isinstance(_hits, list) and len(_hits) > 0 and isinstance(_hits[0], dict):
+                if len(_hits) > 0:
                     _score = _hits[0].get("score", None)
                     _score_str = f"{_score:.4f}" if isinstance(_score, (int, float)) and np.isfinite(_score) else "NA"
                 else:

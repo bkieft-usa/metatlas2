@@ -11,6 +11,7 @@ import copy
 import getpass
 import shutil
 import time
+from IPython.display import display
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -1243,12 +1244,6 @@ def _create_database_tables(conn, db_type: str = "main"):
                 other_notes             VARCHAR,
                 identification_notes    VARCHAR,
                 analyst_notes           VARCHAR,
-                best_ms1_file           VARCHAR,
-                best_ms1_rt             REAL,
-                best_ms1_mz             REAL,
-                best_ms1_intensity      REAL,
-                best_ms1_ppm_error      REAL,
-                best_ms1_rt_error       REAL,
                 max_eic_rt              REAL[],
                 max_eic_intensity       REAL[],
                 isomers                 VARCHAR,
@@ -2063,8 +2058,7 @@ def save_auto_identification_results_to_db(auto_id_obj):
         "mz_tolerance", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
         "mz", "rt_peak", "rt_min", "rt_max", "initial_rt_min", "initial_rt_max",
         "rt_error", "mz_error", "ms1_notes", "ms2_notes", "other_notes",
-        "identification_notes", "analyst_notes", "best_ms1_file", "best_ms1_rt",
-        "best_ms1_mz", "best_ms1_intensity", "best_ms1_ppm_error", "best_ms1_rt_error",
+        "identification_notes", "analyst_notes",
         "max_eic_rt", "max_eic_intensity", "isomers", "suggested_rt_min",
         "suggested_rt_max", "suggested_rt_peak", "rt_suggestion_confidence",
         "formula", "smiles", "inchi", "pubchem_cid", "mono_isotopic_molecular_weight", "iupac_name",
@@ -2091,7 +2085,9 @@ def save_auto_identification_results_to_db(auto_id_obj):
         if not curation_df.empty:
             logger.info("Saving manual curation entries to database...")
             col_select = ", ".join(manual_curation_columns)
-            conn.execute(f"INSERT INTO manual_curation SELECT {col_select} FROM curation_df")
+            conn.execute(
+                f"INSERT INTO manual_curation ({col_select}) SELECT {col_select} FROM curation_df"
+            )
 
         if not ms1_df.empty:
             logger.info("Saving MS1 data entries to database...")
@@ -2221,7 +2217,7 @@ def _apply_cross_polarity_curation(
     if opposite_polarity_df.empty:
         return 0
 
-    # Build lookup keyed on (compound_name, inchi_key, atlas_rt_peak).
+    # Build lookup keyed on (compound_name, inchi_key) ######, atlas_rt_peak).
     # Adducts differ across polarities so they are excluded from the key.
     opp_lookup = {}
     for _, row in opposite_polarity_df.iterrows():
@@ -2229,7 +2225,7 @@ def _apply_cross_polarity_curation(
         if not name:
             logger.warning(f"Skipping row with missing compound name: {row.to_dict()}")
             continue
-        key = (name, row["inchi_key"], row["atlas_rt_peak"])
+        key = (name, row["inchi_key"]) #, row["atlas_rt_peak"])
         if key not in opp_lookup:
             opp_lookup[key] = row
 
@@ -2242,16 +2238,12 @@ def _apply_cross_polarity_curation(
         if not name:
             logger.warning(f"Skipping row with missing compound name: {row.to_dict()}")
             continue
-        key = (name, row["inchi_key"], row.get("atlas_rt_peak"))
+        key = (name, row["inchi_key"]) #, row["atlas_rt_peak"])
         if key not in opp_lookup:
             continue
 
         ms2_note_val = row.get("ms2_notes", "")
         if ms2_note_val != "":
-            logger.info(
-                f"Skipping cross-polarity RT transfer for {row['inchi_key']}"
-                f"because ms2_notes already has value: '{ms2_note_val}'"
-            )
             continue  # already curated — do not overwrite
 
         opp_row = opp_lookup[key]
@@ -2260,8 +2252,8 @@ def _apply_cross_polarity_curation(
         obj.experimental_data.curation_df.at[idx, "rt_max"] = opp_row["rt_max"]
         obj.experimental_data.curation_df.at[idx, "ms1_notes"] = opp_row["ms1_notes"]
         obj.experimental_data.curation_df.at[idx, "ms2_notes"] = opp_row["ms2_notes"]
-        obj.experimental_data.curation_df.at[idx, "analyst_notes"] = opp_row["analyst_notes"]
-        obj.experimental_data.curation_df.at[idx, "identification_notes"] = opp_row["identification_notes"] + " (curation transferred from opposite-polarity compound)"
+        obj.experimental_data.curation_df.at[idx, "analyst_notes"] = opp_row["analyst_notes"] + " (curation transferred from opposite-polarity compound)"
+        obj.experimental_data.curation_df.at[idx, "identification_notes"] = opp_row["identification_notes"]
         obj.experimental_data.curation_df.at[idx, "other_notes"] = opp_row["other_notes"]
 
         uid = row.get("mz_rt_uid")
@@ -2313,7 +2305,7 @@ def _transfer_istd_curation(
                 merged[istd_col], 
                 merged[col]
             )
-            merged['identification_notes'] = merged['identification_notes'] + " (curation transferred from ISTD compound)"
+            merged['analyst_notes'] = merged['analyst_notes'] + " (curation transferred from ISTD compound)"
     
     obj.experimental_data.curation_df = merged[[c for c in merged.columns if not c.endswith('_istd')]]
 
@@ -2580,7 +2572,7 @@ def _get_max_score(hits_data):
     hits_list = _deserialize_hits_value(hits_data)
     if not hits_list:
         return -1.0
-    return max((float(h.get('score', -1.0)) for h in hits_list if isinstance(h, dict)), default=-1.0)
+    return max((float(h.get('score', -1.0)) for h in hits_list), default=-1.0)
 
 
 def _get_max_frags(hits_data):
@@ -2588,7 +2580,7 @@ def _get_max_frags(hits_data):
     hits_list = _deserialize_hits_value(hits_data)
     if not hits_list:
         return -1
-    return max((int(h.get('num_matches', -1)) for h in hits_list if isinstance(h, dict)), default=-1)
+    return max((int(h.get('num_matches', -1)) for h in hits_list), default=-1)
 
 def _update_infeature_tag(
     obj: "AnalysisSummary"
@@ -2677,14 +2669,12 @@ def _filter_to_infeature_data(
     if not obj.experimental_data.ms1_df.empty:
         def filter_ms1_row(row):
             mask = row['in_feature']
-            if isinstance(mask, list) and isinstance(row['spec_rts'], list):
-                filtered = {k: row[k] for k in obj.experimental_data.ms1_df.columns}
-                filtered['spec_rts'] = [v for v, m in zip(row['spec_rts'], mask) if m]
-                filtered['spec_mzs'] = [v for v, m in zip(row['spec_mzs'], mask) if m]
-                filtered['spec_ints'] = [v for v, m in zip(row['spec_ints'], mask) if m]
-                filtered['in_feature'] = [True] * len(filtered['spec_rts'])
-                return filtered
-            return row.to_dict()
+            filtered = {k: row[k] for k in obj.experimental_data.ms1_df.columns}
+            filtered['spec_rts'] = [v for v, m in zip(row['spec_rts'], mask) if m]
+            filtered['spec_mzs'] = [v for v, m in zip(row['spec_mzs'], mask) if m]
+            filtered['spec_ints'] = [v for v, m in zip(row['spec_ints'], mask) if m]
+            filtered['in_feature'] = [True] * len(filtered['spec_rts'])
+            return filtered
 
         obj.experimental_data.ms1_df = pd.DataFrame(obj.experimental_data.ms1_df.apply(filter_ms1_row, axis=1).tolist())
 
@@ -2725,8 +2715,8 @@ def _apply_override_ms_filters(
     # MS1 filtering
     if not obj.experimental_data.ms1_df.empty and ms1_filter:
         logger.info(f"Applying MS1 override filters: min_num_points={ms1_min_pts}, min_peak_intensity={ms1_min_int}...")
-        max_ints = obj.experimental_data.ms1_df['spec_ints'].apply(lambda x: np.max(x) if (isinstance(x, list) and len(x)>0) else 0)
-        num_pts = obj.experimental_data.ms1_df['spec_ints'].apply(lambda x: len(x) if isinstance(x, list) else 0)
+        max_ints = obj.experimental_data.ms1_df['spec_ints'].apply(lambda x: np.max(x) if len(x)>0 else 0)
+        num_pts = obj.experimental_data.ms1_df['spec_ints'].apply(lambda x: len(x))
         mask = pd.Series([True] * len(obj.experimental_data.ms1_df))
         if ms1_min_pts is not None:
             mask &= num_pts >= ms1_min_pts
@@ -2778,6 +2768,7 @@ def _transfer_cross_polarity_curation(
         opp_polarity_df = _get_opposite_polarity_curation(
             obj=obj
         )
+        #display(opp_polarity_df)
         if not opp_polarity_df.empty:
             n_cross = _apply_cross_polarity_curation(
                 obj=obj,

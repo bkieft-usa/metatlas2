@@ -145,6 +145,7 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         else summary_obj.ta.params.get("gui_require_all_evaluated", False)
     )
     if not force_eval:
+        _populate_summary_best_ms1_metrics(summary_obj)
         return
 
     if summary_obj.experimental_data.curation_df is None or summary_obj.experimental_data.curation_df.empty:
@@ -492,8 +493,8 @@ def _plot_mirror(
 
     scale = 1.0
     if ref_mz and ref_int:
-        qry_int_valid = [v for v in qry_int if v is not None and not (isinstance(v, float) and np.isnan(v))]
-        ref_int_valid = [v for v in ref_int if v is not None and not (isinstance(v, float) and np.isnan(v))]
+        qry_int_valid = [v for v in qry_int if v is not None and not np.isnan(v)]
+        ref_int_valid = [v for v in ref_int if v is not None and not np.isnan(v)]
         max_ref = max(ref_int_valid) if ref_int_valid else 0.0
         max_qry = max(qry_int_valid) if qry_int_valid else 0.0
         scale = (max_qry / max_ref) if max_ref > 0 else 1.0
@@ -541,8 +542,8 @@ def _plot_mirror(
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     ax.tick_params(labelsize=14)
 
-    score_str = f"{score:.3f}" if (isinstance(score, (int, float)) and not np.isnan(score)) else "N/A"
-    rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
+    score_str = f"{score:.3f}" if not np.isnan(score) else "N/A"
+    rt_str = f"{rt:.2f}" if not np.isnan(rt) else "N/A"
     ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     ax.text(0.5, 1.07, f"Score: {score_str}", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
     ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
@@ -564,7 +565,7 @@ def _plot_raw_ms2(
     ax.set_ylabel("Intensity", fontsize=14)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     ax.tick_params(labelsize=14)
-    rt_str = f"{rt:.2f}" if (isinstance(rt, (int, float)) and not np.isnan(rt)) else "N/A"
+    rt_str = f"{rt:.2f}" if not np.isnan(rt) else "N/A"
     ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
     ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
@@ -653,6 +654,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
         ("Atlas RT peak", _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
         ("Measured RT", _fmt(mc_row.get("rt_peak"), "{:.3f} min")),
+        ("Max Intensity, ", _fmt(mc_row.get("best_ms1_intensity"), "{:.0f}")),
         ("RT Δ", _fmt(mc_row.get("rt_error"), "{:.3f}")),
     ]
 
@@ -927,6 +929,8 @@ def make_final_id_sheet(
     output_filename: str = "Final_Identifications.xlsx",
     overwrite: bool = True,
 ) -> None:
+
+    _populate_summary_best_ms1_metrics(summary_obj)
 
     output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
     chromatography = summary_obj.chromatography
@@ -1416,10 +1420,10 @@ def _total_score_and_msi(
 ) -> Tuple[float, str]:
     """Compute total ID score (0-3) and MSI level string.
     """
-    scores = [v for v in [msms_q, mz_q, rt_q] if isinstance(v, float) and not np.isnan(v)]
+    scores = [v for v in [msms_q, mz_q, rt_q] if not np.isnan(v)]
     total = float(np.nansum([msms_q, mz_q, rt_q]))
 
-    if isinstance(msms_q, float) and msms_q == -1:
+    if msms_q == -1:
         msi = "REMOVE, INVALIDATED BY BAD MSMS MATCH"
     elif len(scores) > 0 and statistics.median(scores) < 1:
         msi = "putative"
@@ -1667,7 +1671,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
         v
         for item in file_items
         for v in _as_list(item.get("spec_ints"))
-        if v is not None and not (isinstance(v, float) and np.isnan(v))
+        if v is not None and not np.isnan(v)
     ]
     y_max_global = float(max(all_intensities)) if all_intensities else None
 
@@ -1706,7 +1710,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
                 ax = axes_flat[slot_idx]
                 fname_s = _strip_non_chars(_short_fname(item["filename"]))
                 spec_ints = _as_list(item.get("spec_ints"))
-                valid_ints = [v for v in spec_ints if v is not None and not (isinstance(v, float) and np.isnan(v))]
+                valid_ints = [v for v in spec_ints if v is not None and not np.isnan(v)]
                 y_max_indep = float(max(valid_ints)) if valid_ints else None
                 group_name = item.get("group_name") or _file_group(item.get("filename", ""))
                 _render_eic_thumbnail(
@@ -1806,7 +1810,7 @@ def _render_eic_thumbnail(
     # RT vlines: rt_min = red dashed, rt_peak = black dotted, rt_max = black dashed
     _vline = lambda val, color, ls: (
         ax.axvline(val, color=color, linewidth=0.8, linestyle=ls)
-        if val is not None and not (isinstance(val, float) and np.isnan(val))
+        if val is not None and not np.isnan(val)
         else None
     )
     _vline(rt_min, "red", "--")
@@ -1873,7 +1877,7 @@ def _plot_compound_boxplot(
         group_rows = compound_metrics.loc[compound_metrics["file_group"] == g]
         vals = group_rows[metric].dropna().tolist()
         if log_scale:
-            vals = [np.log10(v) for v in vals if isinstance(v, (int, float)) and v > 0]
+            vals = [np.log10(v) for v in vals if v is not None and v > 0]
         n_files = len(group_rows)
         data_per_group.append(vals if vals else [0.0] * max(n_files, 1))
         valid_groups.append(g)
@@ -1883,7 +1887,7 @@ def _plot_compound_boxplot(
                 ha="center", va="center", fontsize=8, color="gray")
         title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
         if metric == "mz_centroid":
-            title_bottom = f"m/z centroid: {atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'}"
+            title_bottom = f"m/z centroid: {atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'}"
             ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
         else:
             ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
@@ -1912,7 +1916,7 @@ def _plot_compound_boxplot(
             s=8, color="steelblue", alpha=0.65, zorder=3,
         )
 
-    if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)):
+    if atlas_ref is not None and not np.isnan(atlas_ref):
         ref_val = np.log10(atlas_ref) if (log_scale and atlas_ref > 0) else atlas_ref
         ax.axhline(ref_val, color="red", linestyle="--", linewidth=0.8, alpha=0.8,
                    label=f"Atlas {atlas_ref:.5g}")
@@ -1926,7 +1930,7 @@ def _plot_compound_boxplot(
     # Title formatting: large top line, smaller below
     title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
     if metric == "mz_centroid":
-        mz_val = atlas_ref if atlas_ref is not None and not (isinstance(atlas_ref, float) and np.isnan(atlas_ref)) else 'N/A'
+        mz_val = atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
         title_bottom = f"m/z centroid: {mz_val}"
         ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
     else:
@@ -2267,7 +2271,7 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
 
         # Coerce to float arrays, replacing None/nan with 0 for intensities
         rts  = [float(v) if v is not None else float("nan") for v in spec_rts]
-        ints = [float(v) if v is not None else 0.0           for v in spec_ints]
+        ints = [float(v) if v is not None else 0.0 for v in spec_ints]
         mzs  = [float(v) if v is not None else float("nan") for v in spec_mzs]
 
         if not ints or max(ints) == 0:
@@ -2304,6 +2308,75 @@ def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
         })
 
     return pd.DataFrame(records)
+
+
+def _populate_summary_best_ms1_metrics(summary_obj: "AnalysisSummary") -> None:
+    """Populate best_ms1_* columns from the summary-stage filtered MS1 table.
+
+    The summary script is the first place where we want these values to exist.
+    They are derived from the already-filtered per-file MS1 metrics so they stay
+    consistent with peak-height summaries and the final identification table.
+    """
+    curation_df = summary_obj.experimental_data.curation_df
+    if curation_df is None or curation_df.empty:
+        return
+
+    curation_df = curation_df.drop(
+        columns=[
+            "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
+            "best_ms1_ppm_error", "best_ms1_rt_error",
+            "_peak_height_cmp", "filename", "rt_peak", "mz_peak", "peak_height",
+        ],
+        errors="ignore",
+    ).copy()
+
+    if summary_obj.per_file_metrics_df is None or summary_obj.per_file_metrics_df.empty:
+        summary_obj.per_file_metrics_df = _build_per_file_metrics_df(
+            summary_obj.experimental_data.ms1_df
+        )
+
+    per_file_df = summary_obj.per_file_metrics_df
+    if per_file_df is None or per_file_df.empty:
+        for col in [
+            "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
+            "best_ms1_ppm_error", "best_ms1_rt_error",
+        ]:
+            if col not in curation_df.columns:
+                curation_df[col] = "" if col == "best_ms1_file" else np.nan
+        summary_obj.experimental_data.curation_df = curation_df
+        return
+
+    pf = per_file_df.copy()
+    pf["_peak_height_cmp"] = pd.to_numeric(pf["peak_height"], errors="coerce").fillna(-np.inf)
+    pf = pf.sort_values(["mz_rt_uid", "_peak_height_cmp", "filename"], ascending=[True, False, True])
+    best_rows = pf.drop_duplicates(subset=["mz_rt_uid"], keep="first").set_index("mz_rt_uid")
+
+    best_cols = best_rows[["filename", "rt_peak", "mz_peak", "peak_height"]].rename(
+        columns={
+            "filename": "best_ms1_file",
+            "rt_peak": "best_ms1_rt",
+            "mz_peak": "best_ms1_mz",
+            "peak_height": "best_ms1_intensity",
+        }
+    )
+
+    curation_df = curation_df.merge(best_cols, left_on="mz_rt_uid", right_index=True, how="left")
+    curation_df["best_ms1_file"] = curation_df["best_ms1_file"].fillna("").astype(str)
+    for col in ["best_ms1_rt", "best_ms1_mz", "best_ms1_intensity"]:
+        curation_df[col] = pd.to_numeric(curation_df[col], errors="coerce")
+
+    atlas_mz = pd.to_numeric(curation_df.get("atlas_mz"), errors="coerce")
+    atlas_rt_peak = pd.to_numeric(curation_df.get("atlas_rt_peak"), errors="coerce")
+    valid_mz = curation_df["best_ms1_mz"].notna() & atlas_mz.notna() & (atlas_mz != 0)
+    curation_df["best_ms1_ppm_error"] = np.where(
+        valid_mz,
+        (curation_df["best_ms1_mz"] - atlas_mz) / atlas_mz * 1e6,
+        np.nan,
+    )
+    curation_df["best_ms1_rt_error"] = curation_df["best_ms1_rt"] - atlas_rt_peak
+
+    curation_df.drop(columns=[c for c in ["_peak_height_cmp", "filename", "rt_peak", "mz_peak", "peak_height"] if c in curation_df.columns], inplace=True)
+    summary_obj.experimental_data.curation_df = curation_df
 
 
 def make_data_sheets(

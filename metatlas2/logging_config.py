@@ -223,14 +223,12 @@ def get_logger(module_name, log_level=None):
     ensure_logging_initialized()
     logger = logging.getLogger(f"metatlas2.{module_name}")
     logger.setLevel(log_level)
-    
-    # ALWAYS update handlers to current level
-    if logger.handlers:
-        for handler in logger.handlers:
-            handler.setLevel(log_level)
-    else:
-        formatter = _create_formatter()
-        _add_handlers(logger, formatter, log_level, _log_to_stdout, _log_file)
-        logger.propagate = False
+
+    # Keep logger handlers synchronized with current global logging targets.
+    # This is idempotent and ensures a file handler is added when _log_file
+    # is set after a logger already existed.
+    formatter = _create_formatter()
+    _add_handlers(logger, formatter, log_level, _log_to_stdout, _log_file)
+    logger.propagate = False
     
     return logger
