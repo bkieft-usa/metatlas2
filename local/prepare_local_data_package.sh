@@ -618,7 +618,7 @@ WORKFLOWS:
       ATLAS:
         uid: dev-qc-hilicz-pos
       PARAMS:
-          upload_to_gdrive: false	
+          upload_to_gdrive: false
           include_lcmsruns: # 'QC'
           exclude_lcmsruns:
             - NEG
@@ -681,7 +681,7 @@ WORKFLOWS:
                 ms2_notes:
                 other_notes:
               create_curation_notebooks: true
-              upload_to_gdrive: false	
+              upload_to_gdrive: false
               skip_outputs:
       NEG:
         EMA:
@@ -728,7 +728,7 @@ WORKFLOWS:
                 ms2_notes:
                 other_notes:
               create_curation_notebooks: true
-              upload_to_gdrive: false	
+              upload_to_gdrive: false
               skip_outputs:
 EOF
 

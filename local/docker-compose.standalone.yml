@@ -15,6 +15,7 @@ services:
       --allow-root
       --IdentityProvider.token=''
       --ServerApp.password=''
+      --MultiKernelManager.default_kernel_name='metatlas2-standalone'
       --ServerApp.default_url='/lab/tree/local_workflow.ipynb'
       --ServerApp.root_dir=/data"
     ports:
