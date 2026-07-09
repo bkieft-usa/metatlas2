@@ -8,6 +8,8 @@ import os
 import yaml
 import sys
 from tqdm.auto import tqdm
+import pyarrow.dataset as ds
+import pyarrow.compute as pc
 
 import metatlas2.database_interact as dbi
 import metatlas2.load_tools as ldt
@@ -1002,3 +1004,80 @@ class AnalysisSummary:
             / f"{self.ta.chromatography}-{self.ta.polarity}-{self.ta.analysis_type}-{self.ta.analysis_name}"
         )
         os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
+
+class ParquetQueryInterpreter:
+    def __init__(self, parquet_path: Path):
+        parquet_path = Path(parquet_path)
+        if parquet_path.is_dir():
+            self.dataset = ds.dataset(parquet_path, format="parquet", partitioning=None)
+        else:
+            self.dataset = ds.dataset([parquet_path], format="parquet", partitioning=None)
+
+    def _translate_to_expression(self, param_name: str, value: Any):
+        """
+        Translates a YAML key into a PyArrow Dataset Expression.
+        """
+        # Determine Operator and Column Name
+        if param_name.endswith("_min"):
+            col, op = param_name[:-4], ">="
+        elif param_name.endswith("_max"):
+            col, op = param_name[:-4], "<="
+        elif param_name.endswith("_abs_gt"):
+            col, op = param_name[:-7], "abs_gt"
+        elif param_name.endswith("_abs_lt"):
+            col, op = param_name[:-7], "abs_lt"
+        elif param_name.endswith("_in"):
+            col, op = param_name[:-3], "in"
+        else:
+            col, op = param_name, "=="
+
+        field = ds.field(col)
+
+        # PyArrow Expression
+        if op == "==":
+            return field == value
+        elif op == ">=":
+            return field >= value
+        elif op == "<=":
+            return field <= value
+        elif op == "in":
+            val_list = value if isinstance(value, list) else [value]
+            return field.isin(val_list)
+        elif op == "abs_gt":
+            return (field > value) | (field < -value)
+        elif op == "abs_lt":
+            return (field < value) & (field > -value)
+        
+        return None
+
+    def execute_from_params(self, params_path: Path) -> pd.DataFrame:
+        with open(params_path, "r") as f:
+            params = yaml.safe_load(f) or {}
+
+        # Build a list of PyArrow expressions
+        expressions = []
+        for param_name, value in params.items():
+            if value is None:
+                continue
+            
+            try:
+                expr = self._translate_to_expression(param_name, value)
+                if expr is not None:
+                    expressions.append(expr)
+            except Exception as e:
+                print(f"Skipping parameter {param_name} due to error: {e}")
+
+        # Combine all expressions with "AND" logic
+        final_filter = None
+        for expr in expressions:
+            if final_filter is None:
+                final_filter = expr
+            else:
+                final_filter = final_filter & expr
+
+        if final_filter is not None:
+            table = self.dataset.to_table(filter=final_filter)
+        else:
+            table = self.dataset.to_table()
+
+        return table.to_pandas()

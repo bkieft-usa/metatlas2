@@ -4,6 +4,7 @@ import socket
 import threading, time, os
 from IPython.display import display, HTML
 from pathlib import Path
+import pandas as pd
 
 from werkzeug.serving import make_server
 
@@ -377,3 +378,14 @@ def run_analysis_summary(
     )
 
     logger.info(f"Analysis summary procedure complete for RTA{summary_obj.rt_alignment_number} and TGA{summary_obj.analysis_number}!")
+
+def run_parquet_query(
+    parquet_path: str, 
+    params_path: str
+) -> pd.DataFrame:
+
+    from metatlas2.workflow_objects import ParquetQueryInterpreter
+
+    engine = ParquetQueryInterpreter(Path(parquet_path))
+    
+    return engine.execute_from_params(Path(params_path))

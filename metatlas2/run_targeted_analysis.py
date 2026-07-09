@@ -186,6 +186,7 @@ def set_up_paths(
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.json"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"
+    parquet_output_dir = f"{data_dir}/projects/parquet_outputs/"
     modelseed_table_path = f"{data_dir}/databases/modelseed_db/modelseed.tsv"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
@@ -194,6 +195,7 @@ def set_up_paths(
             "main_db_path": str(main_db_path),
             "pubchem_cache_path": str(pubchem_cache_path),
             "modelseed_table_path": str(modelseed_table_path),
+            "parquet_output_dir": str(parquet_output_dir),
         }
 
     owner = config.owner
@@ -226,6 +228,7 @@ def set_up_paths(
         "msms_refs_path": msms_refs_path_resolved,
         "pubchem_cache_path": str(pubchem_cache_path),
         "modelseed_table_path": str(modelseed_table_path),
+        "parquet_output_dir": str(parquet_output_dir),
         "rt_alignment_output_dir": str(rta_dir),
         "rt_alignment_results_dir": str(rta_dir / "rt_alignment_results"),
         "aligned_atlases_store_file": str(rta_dir / "rt_aligned_atlases.csv"),
@@ -239,6 +242,7 @@ def set_up_paths(
     if not Path(paths["main_db_path"]).exists():
         raise ValueError(f"Main database not found: {paths['main_db_path']}")
 
+    parquet_output_dir.mkdir(parents=True, exist_ok=True)
     project_output_dir.mkdir(parents=True, exist_ok=True)
     rta_dir.mkdir(parents=True, exist_ok=True)
     analysis_dir.mkdir(parents=True, exist_ok=True)

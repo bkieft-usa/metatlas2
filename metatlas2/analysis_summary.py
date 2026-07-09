@@ -234,6 +234,21 @@ def _as_list(value) -> list:
     except TypeError:
         return []
 
+
+def _jsonable_list(value) -> list:
+    """Return a list with numpy scalars coerced to native Python values.
+
+    This prevents ``json.dumps`` failures like ``TypeError: Object of type
+    float32 is not JSON serializable`` when dataframe cells contain numpy
+    scalar dtypes.
+    """
+    out = []
+    for elem in _as_list(value):
+        if isinstance(elem, np.generic):
+            elem = elem.item()
+        out.append(elem)
+    return out
+
 ###############################################
 #### Identification Figure
 ###############################################
@@ -3004,35 +3019,113 @@ def make_metabomap(
 #### Make parquet files
 ###############################################
 
+_COMPOUND_FILE_STR_COLS = [
+    "mz_rt_uid", "compound_name", "identified_metabolite", "label", "inchi_key", "formula", "smiles",
+    "inchi", "pubchem_cid", "iupac_name", "polarity", "adduct", "best_ms1_file",
+    "filename", "file_group", "ms1_notes", "ms2_notes",
+    "msi_level", "control_filter", "overlapping_compound", "overlapping_inchi_keys",
+    "isomer_details", "identification_notes", "analyst_notes", "other_notes",
+    "best_ms2_file", "best_ms2_num_ions", "best_ms2_matching_ions",
+    "best_ms2_spectrum_rt_mz", "ms1_spectrum_rt_i", "msms_file", "msms_numberofions", "msms_matchingions",
+]
+
+_COMPOUND_FILE_FLOAT_COLS = [
+    "compound_index",
+    "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+    "rt_min", "rt_max", "exact_mass",
+    "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
+    "best_ms1_ppm_error", "best_ms1_rt_error",
+    "best_ms2_rt", "best_ms2_score", "best_ms2_mz",
+    "best_ms2_mz_ppm_error", "best_ms2_mz_error_da", "best_ms2_rt_error",
+    "peak_height", "peak_area", "rt_peak", "rt_centroid",
+    "mz_peak", "mz_centroid", "measured_rt", "measured_mz",
+    "mz_theoretical", "mz_measured", "mz_error", "mz_ppmerror",
+    "rt_theoretical", "rt_error", "msms_rt",
+    "msms_score", "mz_quality", "rt_quality", "msms_quality",
+    "total_score",
+]
+
+_COMPOUND_LFC_STR_COLS = [
+    "mz_rt_uid", "inchi_key", "compound_name", "control_filter",
+    "condition_1", "condition_2", "adduct", "formula", "smiles", "inchi",
+    "pubchem_cid", "iupac_name", "ms1_notes", "ms2_notes", "msi_level",
+    "identification_notes", "analyst_notes", "other_notes",
+    "best_ms2_file", "best_ms2_num_ions", "best_ms2_matching_ions", "best_ms2_spectrum_rt_mz",
+    "msms_file", "msms_numberofions", "msms_matchingions",
+]
+
+_COMPOUND_LFC_FLOAT_COLS = [
+    "compound_index",
+    "log2_fold_change",
+    "rt_min", "rt_max",
+    "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity", "best_ms1_ppm_error", "best_ms1_rt_error",
+    "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+    "best_ms2_rt", "best_ms2_score", "best_ms2_mz",
+    "best_ms2_mz_ppm_error", "best_ms2_mz_error_da", "best_ms2_rt_error",
+    "msms_score", "msms_rt",
+    "mz_theoretical", "mz_measured", "mz_error", "mz_ppmerror", "rt_theoretical", "rt_error",
+]
+
+
+def _build_unified_schema_map_df() -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    seen: dict[str, dict[str, str]] = {}
+
+    def _add(cols: list[str], dtype: str, row_kind: str) -> None:
+        for idx, col in enumerate(cols):
+            if col not in seen:
+                seen[col] = {
+                    "column_name": col,
+                    "dtype": dtype,
+                    "row_kinds": row_kind,
+                    "compound_file_position": "",
+                    "compound_lfc_position": "",
+                }
+            else:
+                existing = set(filter(None, seen[col]["row_kinds"].split("|")))
+                existing.add(row_kind)
+                seen[col]["row_kinds"] = "|".join(sorted(existing))
+            seen[col][f"{row_kind}_position"] = str(idx)
+
+    _add(_COMPOUND_FILE_STR_COLS, "string", "compound_file")
+    _add(_COMPOUND_FILE_FLOAT_COLS, "float", "compound_file")
+    _add(_COMPOUND_LFC_STR_COLS, "string", "compound_lfc")
+    _add(_COMPOUND_LFC_FLOAT_COLS, "float", "compound_lfc")
+
+    seen["row_kind"] = {
+        "column_name": "row_kind",
+        "dtype": "string",
+        "row_kinds": "compound_file|compound_lfc",
+        "compound_file_position": "",
+        "compound_lfc_position": "",
+    }
+
+    rows.extend(seen.values())
+    rows.sort(key=lambda r: r["column_name"])
+    return pd.DataFrame(rows)
+
+
+def _write_unified_schema_map(partition_dir: Path, data_output_name: str) -> None:
+    schema_df = _build_unified_schema_map_df()
+    schema_csv = partition_dir / f"{data_output_name}-results.schema_map.csv"
+    schema_json = partition_dir / f"{data_output_name}-results.schema_map.json"
+    schema_df.to_csv(schema_csv, index=False)
+    schema_df.to_json(schema_json, orient="records", indent=2)
+
+
 def make_analysis_parquet(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
 ) -> None:
-    """Write two unified Parquet files for downstream querying.
+    """Write one unified Parquet file for downstream querying.
 
-    Output layout
-    -------------
+    ANALYSIS-DETAILS-results.parquet
+        One flat table containing both file-grain compound rows and
+        compound-level log-fold-change rows. Rows are tagged with
+        ``row_kind`` so queries can filter to either grain.
 
-        <analysis_output_dir>/
-        └── parquet_results/
-            └── chromatography=<CHROM>/
-                └── polarity=<POL>/
-                    └── analysis_type=<TYPE>/
-                        └── analysis_name=<NAME>/
-                            ├── compound_per_file.parquet
-                            └── compound_lfc.parquet
-
-    Files
-    -----
-    compound_per_file.parquet
-        One row per compound per LC-MS file.  Sorted by ``atlas_mz`` so that
-        mz ± tolerance queries benefit from row-group statistics.
-
-    compound_lfc.parquet
-        One row per compound per condition-pair (long format).  Sorted by
-        (condition_1, condition_2, atlas_mz).
-
-    Both files carry project-level key-value metadata in the Parquet footer from project_name
+    The partition directories are still useful because they give cheap
+    filtering on chromatography, polarity, analysis type, and analysis name.
 
     Parameters
     ----------
@@ -3040,43 +3133,38 @@ def make_analysis_parquet(
         Configured :class:`AnalysisSummary` object after curation data has
         been loaded.
     overwrite:
-        When *False*, skips writing if both output files already exist.
+        When *False*, skips writing if the unified parquet already exists.
     """
 
-    analysis_output_dir = Path(summary_obj.paths["analysis_results_output_dir"]).parent
-    chrom = summary_obj.chromatography
-    polarity = summary_obj.polarity
-    analysis_type = summary_obj.analysis_type
-    analysis_name = summary_obj.analysis_name
+    parquet_output_dir = Path(summary_obj.paths["parquet_output_dir"])
+    data_output_name = f"{summary_obj.project_name}-
+                         {summary_obj.rt_alignment_number}-
+                         {summary_obj.analysis_number}-
+                         {summary_obj.chromatography}-
+                         {summary_obj.polarity}-
+                         {summary_obj.analysis_type}-
+                         {summary_obj.analysis_name}
+                        "
 
-    partition_dir = (
-        analysis_output_dir
-        / "parquet_results"
-        / f"chromatography={chrom}"
-        / f"polarity={polarity}"
-        / f"analysis_type={analysis_type}"
-        / f"analysis_name={analysis_name}"
-    )
-
-    per_file_path = partition_dir / "compound_per_file.parquet"
-    lfc_path = partition_dir / "compound_lfc.parquet"
-
-    if not overwrite and per_file_path.exists() and lfc_path.exists():
-        logger.info(
-            "Overwriting disabled: existing Parquet files in %s will be used.", partition_dir
-        )
+    partition_dir = (parquet_output_dir / "parquet_results")
+    unified_path = partition_dir / f"{data_output_name}-results.parquet"
+    if not overwrite and unified_path.exists():
+        logger.info("Overwriting disabled: existing Parquet file in %s will be used.", partition_dir)
         return
-
     partition_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Writing analysis Parquet files to %s", partition_dir)
+
+    ## Note: this is good for debugging schema issues, but it will break the parquet querier because it puts csv/json files in the dir
+    #_write_unified_schema_map(partition_dir, data_output_name)
+    #logger.info("Wrote unified parquet schema map files for %s to %s", data_output_name, partition_dir)
 
     # Start with analysis-level fields always available from summary_obj
     footer_meta: dict[bytes, bytes] = {
         b"project_name":         str(summary_obj.project_name or "").encode(),
-        b"chromatography":       chrom.encode(),
-        b"polarity":             polarity.encode(),
-        b"analysis_type":        analysis_type.encode(),
-        b"analysis_name":        analysis_name.encode(),
+        b"chromatography":       summary_obj.chromatography.encode(),
+        b"polarity":             summary_obj.polarity.encode(),
+        b"analysis_type":        summary_obj.analysis_type.encode(),
+        b"analysis_name":        summary_obj.analysis_name.encode(),
         b"rt_alignment_number":  str(summary_obj.rt_alignment_number or "").encode(),
         b"analysis_number":      str(summary_obj.analysis_number or "").encode(),
         b"created_date":         datetime.date.today().isoformat().encode(),
@@ -3101,35 +3189,127 @@ def make_analysis_parquet(
         use_dictionary=True,
     )
 
-    # compound_per_file
-    logger.info("Building compound_per_file table...")
-    per_file_table = _build_compound_per_file_table(summary_obj)
+    logger.info("Building unified analysis table...")
+    unified_table = _build_unified_analysis_table(summary_obj)
 
-    if per_file_table.num_rows > 0:
-        per_file_table = _attach_meta(per_file_table)
-        pq.write_table(per_file_table, per_file_path, **_WRITE_KWARGS)
+    if unified_table.num_rows > 0:
+        unified_table = _attach_meta(unified_table)
+        pq.write_table(unified_table, unified_path, **_WRITE_KWARGS)
         logger.info(
-            "Wrote compound_per_file.parquet (%d rows, %d columns) → %s",
-            per_file_table.num_rows, per_file_table.num_columns, per_file_path,
+            f"Wrote {unified_path.stem} (%d rows, %d columns) → %s",
+            unified_table.num_rows, unified_table.num_columns, unified_path,
         )
     else:
-        logger.warning("compound_per_file table is empty — file not written.")
+        logger.warning("Unified analysis table is empty — file not written.")
 
-    # compound_lfc
-    logger.info("Building compound_lfc table...")
+    logger.info("Analysis Parquet export complete")
+
+def _build_unified_analysis_table(
+    summary_obj: "AnalysisSummary",
+) -> pa.Table:
+    """Build one flat table containing both per-file and LFC rows.
+
+    The output uses a shared schema with a ``row_kind`` column so root-level
+    parquet scans can load the whole analysis without choosing between the
+    former ``compound_per_file`` and ``compound_lfc`` files. Partition
+    directories are retained for cheap pruning on chromatography, polarity,
+    analysis type, and analysis name.
+
+    Returns
+    -------
+    pa.Table
+    """
+    per_file_table = _build_compound_per_file_table(summary_obj)
     lfc_table = _build_compound_lfc_table(summary_obj)
 
-    if lfc_table.num_rows > 0:
-        lfc_table = _attach_meta(lfc_table)
-        pq.write_table(lfc_table, lfc_path, **_WRITE_KWARGS)
-        logger.info(
-            "Wrote compound_lfc.parquet (%d rows, %d columns) → %s",
-            lfc_table.num_rows, lfc_table.num_columns, lfc_path,
-        )
+    frames: list[pd.DataFrame] = []
+    if per_file_table.num_rows > 0:
+        per_file_df = per_file_table.to_pandas()
+        per_file_df["row_kind"] = "compound_file"
+        frames.append(per_file_df)
     else:
-        logger.warning("compound_lfc table is empty — file not written.")
+        logger.warning("compound_per_file table is empty — file-grain rows will be omitted.")
 
-    logger.info("Analysis Parquet export complete → %s", partition_dir)
+    if lfc_table.num_rows > 0:
+        lfc_df = lfc_table.to_pandas()
+        lfc_df["row_kind"] = "compound_lfc"
+        frames.append(lfc_df)
+    else:
+        logger.warning("compound_lfc table is empty — lfc rows will be omitted.")
+
+    if not frames:
+        return pa.table({})
+
+    unified_cols = list(dict.fromkeys(
+        _COMPOUND_FILE_STR_COLS
+        + _COMPOUND_FILE_FLOAT_COLS
+        + _COMPOUND_LFC_STR_COLS
+        + _COMPOUND_LFC_FLOAT_COLS
+        + ["row_kind"]
+    ))
+    unified_df = pd.concat(
+        [df.reindex(columns=unified_cols) for df in frames],
+        ignore_index=True,
+        sort=False,
+    )
+    return pa.Table.from_pandas(unified_df, preserve_index=False)
+
+
+def _build_best_ms2_summary_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
+    """Return one-row-per-compound best-MS2 metrics for parquet export.
+
+    Includes best hit score metadata and a compact spectrum payload encoded as
+    JSON ``[[rt_list], [mz_list]]`` where ``rt_list`` repeats the scan RT for
+    each matched m/z from the best hit query-aligned spectrum.
+    """
+    ms2_df = summary_obj.experimental_data.ms2_df
+    if ms2_df is None or ms2_df.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for uid, grp in ms2_df.groupby("mz_rt_uid", sort=False):
+        best_score = -np.inf
+        best_scan_row = None
+        best_hit = None
+
+        for _, scan_row in grp.iterrows():
+            hits = _as_list(scan_row.get("hits"))
+            if not hits:
+                continue
+            top_hit = hits[0]
+            score = float(top_hit.get("score", -np.inf))
+            if score > best_score:
+                best_score = score
+                best_scan_row = scan_row
+                best_hit = top_hit
+
+        if best_hit is None or best_scan_row is None:
+            continue
+
+        scan_rt = float(best_scan_row.get("scan_rt", np.nan))
+        q_mz = np.array(_as_list(best_hit.get("query_aligned", [[], []])[0]), dtype=float)
+        valid_mz = q_mz[np.isfinite(q_mz)].tolist() if q_mz.size > 0 else []
+        rt_list = [scan_rt] * len(valid_mz)
+
+        matched_frags = _as_list(best_hit.get("matched_fragments"))
+        num_matches = int(best_hit.get("num_matches", 0))
+        ref_frags = int(best_hit.get("ref_frags", 0))
+
+        rows.append(
+            {
+                "mz_rt_uid": str(uid),
+                "best_ms2_file": os.path.basename(str(best_scan_row.get("filename", ""))),
+                "best_ms2_rt": scan_rt,
+                "best_ms2_score": float(best_hit.get("score", np.nan)),
+                "best_ms2_mz": float(best_hit.get("mz_measured", np.nan)),
+                "best_ms2_num_ions": f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches),
+                "best_ms2_matching_ions": ",".join(f"{float(m):.3f}" for m in matched_frags) if matched_frags else "",
+                "best_ms2_spectrum_rt_mz": json.dumps([_jsonable_list(rt_list), _jsonable_list(valid_mz)]),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
 
 def _build_compound_per_file_table(
     summary_obj: "AnalysisSummary",
@@ -3169,7 +3349,7 @@ def _build_compound_per_file_table(
     # Build quality-score lookup from curation_df
     chromatography = summary_obj.chromatography
     quality_rows: list[dict] = []
-    for _, mc_row in mc.iterrows():
+    for cmp_idx, mc_row in mc.iterrows():
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
         mz_measured     = float(mc_row.get("mz", np.nan))
@@ -3192,15 +3372,38 @@ def _build_compound_per_file_table(
         total_score, msi_level = _total_score_and_msi(msms_q, mz_q, rt_q)
 
         quality_rows.append({
+            "compound_index": int(cmp_idx) + 1,
             "mz_rt_uid":    mz_rt_uid,
             "compound_name": str(mc_row.get("compound_name", "")),
+            "identified_metabolite": str(mc_row.get("compound_name", "")),
+            "label": str(mc_row.get("compound_name", "")),
             "inchi_key":    str(mc_row.get("inchi_key", "")),
             "formula":      str(mc_row.get("formula", "")),
+            "smiles":       str(mc_row.get("smiles", "")),
+            "inchi":        str(mc_row.get("inchi", "")),
+            "pubchem_cid":  str(mc_row.get("pubchem_cid", "")),
+            "iupac_name":   str(mc_row.get("iupac_name", "")),
+            "polarity":     str(mc_row.get("polarity", "")),
             "adduct":       str(mc_row.get("adduct", "")),
             "atlas_mz":     mz_theoretical,
             "atlas_rt_peak": float(mc_row.get("atlas_rt_peak", np.nan)),
             "atlas_rt_min":  float(mc_row.get("atlas_rt_min", np.nan)),
             "atlas_rt_max":  float(mc_row.get("atlas_rt_max", np.nan)),
+            "rt_min":       float(mc_row.get("rt_min", np.nan)),
+            "rt_max":       float(mc_row.get("rt_max", np.nan)),
+            "exact_mass":   float(mc_row.get("mono_isotopic_molecular_weight", np.nan)),
+            "overlapping_compound": str(mc_row.get("overlapping_compound", "")),
+            "overlapping_inchi_keys": str(mc_row.get("overlapping_inchi_keys", "")),
+            "isomer_details": str(mc_row.get("isomer_details", "")),
+            "identification_notes": str(mc_row.get("identification_notes", "")),
+            "analyst_notes": str(mc_row.get("analyst_notes", "")),
+            "other_notes": str(mc_row.get("other_notes", "")),
+            "best_ms1_file": str(mc_row.get("best_ms1_file", "")),
+            "best_ms1_rt":   float(mc_row.get("best_ms1_rt", np.nan)),
+            "best_ms1_mz":   float(mc_row.get("best_ms1_mz", np.nan)),
+            "best_ms1_intensity": float(mc_row.get("best_ms1_intensity", np.nan)),
+            "best_ms1_ppm_error": float(mc_row.get("best_ms1_ppm_error", np.nan)),
+            "best_ms1_rt_error": float(mc_row.get("best_ms1_rt_error", np.nan)),
             "ms1_notes":    str(mc_row.get("ms1_notes", "") or ""),
             "ms2_notes":    ms2_notes,
             "msms_score":   float(mc_row.get("msms_score", np.nan)) if "msms_score" in mc_row else np.nan,
@@ -3230,19 +3433,60 @@ def _build_compound_per_file_table(
     # Merge per_file_df with quality metadata
     merged = per_file_df.merge(quality_df, on="mz_rt_uid", how="left")
 
+    # Add per-sample MS1 spectrum payload as JSON [[rt],[i]].
+    ms1_all_df = summary_obj.experimental_data.ms1_df
+    if ms1_all_df is not None and not ms1_all_df.empty:
+        spec_cols = ["mz_rt_uid", "filename", "spec_rts", "spec_ints"]
+        spec_df = ms1_all_df[spec_cols].copy() if all(c in ms1_all_df.columns for c in spec_cols) else pd.DataFrame(columns=spec_cols)
+        if not spec_df.empty:
+            spec_df = spec_df.drop_duplicates(subset=["mz_rt_uid", "filename"], keep="first")
+            merged = merged.merge(spec_df, on=["mz_rt_uid", "filename"], how="left")
+            merged["ms1_spectrum_rt_i"] = merged.apply(
+                lambda r: json.dumps([_jsonable_list(r.get("spec_rts")), _jsonable_list(r.get("spec_ints"))]),
+                axis=1,
+            )
+            merged.drop(columns=["spec_rts", "spec_ints"], inplace=True, errors="ignore")
+    if "ms1_spectrum_rt_i" not in merged.columns:
+        merged["ms1_spectrum_rt_i"] = ""
+
+    # Add best-MS2 per-compound fields and derived error metrics.
+    best_ms2_df = _build_best_ms2_summary_df(summary_obj)
+    if not best_ms2_df.empty:
+        merged = merged.merge(best_ms2_df, on="mz_rt_uid", how="left")
+
+    if "best_ms2_spectrum_rt_mz" not in merged.columns:
+        merged["best_ms2_spectrum_rt_mz"] = ""
+
+    atlas_mz_num = pd.to_numeric(merged.get("atlas_mz"), errors="coerce")
+    best_ms2_mz_num = pd.to_numeric(merged.get("best_ms2_mz"), errors="coerce")
+    valid_mz = atlas_mz_num.notna() & (atlas_mz_num != 0) & best_ms2_mz_num.notna()
+    merged["best_ms2_mz_ppm_error"] = np.where(
+        valid_mz,
+        (best_ms2_mz_num - atlas_mz_num) / atlas_mz_num * 1e6,
+        np.nan,
+    )
+    merged["best_ms2_mz_error_da"] = np.where(
+        valid_mz,
+        np.abs(best_ms2_mz_num - atlas_mz_num),
+        np.nan,
+    )
+    merged["best_ms2_rt_error"] = pd.to_numeric(merged.get("best_ms2_rt"), errors="coerce") - pd.to_numeric(merged.get("atlas_rt_peak"), errors="coerce")
+
+    # Final-ID aliases to make parquet and spreadsheet columns line up.
+    merged["msms_file"] = merged.get("best_ms2_file", "")
+    merged["msms_rt"] = pd.to_numeric(merged.get("best_ms2_rt"), errors="coerce")
+    merged["msms_numberofions"] = merged.get("best_ms2_num_ions", "")
+    merged["msms_matchingions"] = merged.get("best_ms2_matching_ions", "")
+    merged["mz_theoretical"] = pd.to_numeric(merged.get("atlas_mz"), errors="coerce")
+    merged["mz_measured"] = pd.to_numeric(merged.get("best_ms2_mz"), errors="coerce")
+    merged["mz_error"] = pd.to_numeric(merged.get("best_ms2_mz_error_da"), errors="coerce")
+    merged["mz_ppmerror"] = pd.to_numeric(merged.get("best_ms2_mz_ppm_error"), errors="coerce")
+    merged["rt_theoretical"] = pd.to_numeric(merged.get("atlas_rt_peak"), errors="coerce")
+    merged["rt_error"] = pd.to_numeric(merged.get("best_ms2_rt_error"), errors="coerce")
+
     # Select and type-cast columns
-    str_cols = [
-        "mz_rt_uid", "compound_name", "inchi_key", "formula", "adduct",
-        "filename", "file_group", "ms1_notes", "ms2_notes",
-        "msi_level", "control_filter",
-    ]
-    float_cols = [
-        "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
-        "peak_height", "peak_area", "rt_peak", "rt_centroid",
-        "mz_peak", "mz_centroid",
-        "msms_score", "mz_quality", "rt_quality", "msms_quality",
-        "total_score",
-    ]
+    str_cols = _COMPOUND_FILE_STR_COLS
+    float_cols = _COMPOUND_FILE_FLOAT_COLS
 
     for col in str_cols:
         if col not in merged.columns:
@@ -3253,6 +3497,16 @@ def _build_compound_per_file_table(
         if col not in merged.columns:
             merged[col] = np.nan
         merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+    merged["measured_mz"] = merged["mz_peak"]
+    merged["measured_rt"] = merged["rt_peak"]
+
+    for col in [
+        "ms1_spectrum_rt_i", "best_ms2_spectrum_rt_mz", "msms_file",
+        "msms_numberofions", "msms_matchingions", "best_ms2_file",
+        "best_ms2_num_ions", "best_ms2_matching_ions",
+    ]:
+        merged[col] = merged[col].fillna("").astype(str)
 
     merged = merged[str_cols + float_cols]
 
@@ -3295,7 +3549,10 @@ def _build_compound_lfc_table(
     lfc_df = pd.read_csv(lfc_csv)
 
     # Identify identity columns vs LFC columns
-    _ID_COLS = {"inchi_key", "compound_name", "control_filter", "chosen_adduct", "chosen_polarity"}
+    _ID_COLS = {
+        "compound_index", "mz_rt_uid", "inchi_key", "compound_name", "adduct",
+        "control_filter", "chosen_adduct", "chosen_polarity",
+    }
     id_cols  = [c for c in lfc_df.columns if c in _ID_COLS]
     lfc_cols = [c for c in lfc_df.columns if c not in _ID_COLS]
 
@@ -3320,26 +3577,69 @@ def _build_compound_lfc_table(
     # ── Join compound quantitative metadata from curation_df ─────────────────
     mc = summary_obj.experimental_data.curation_df
     if mc is not None and not mc.empty:
-        mc_slim = (
-            mc.reset_index(drop=True)[[
-                "inchi_key", "adduct", "formula",
-                "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
-            ]]
-            .drop_duplicates(subset=["inchi_key"])
+        mc_slim_cols = [
+            "mz_rt_uid", "inchi_key", "compound_name", "adduct", "formula", "smiles", "inchi",
+            "pubchem_cid", "iupac_name", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+            "rt_min", "rt_max", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
+            "best_ms1_ppm_error", "best_ms1_rt_error", "msms_score", "ms1_notes", "ms2_notes",
+            "identification_notes", "analyst_notes", "other_notes", "msi_level",
+        ]
+        mc_slim_cols = [c for c in mc_slim_cols if c in mc.columns]
+        mc_slim = mc.reset_index(drop=True)[mc_slim_cols].drop_duplicates(subset=[c for c in ["mz_rt_uid", "inchi_key", "adduct"] if c in mc_slim_cols])
+
+        if "mz_rt_uid" in long_df.columns and "mz_rt_uid" in mc_slim.columns:
+            long_df = long_df.merge(mc_slim, on="mz_rt_uid", how="left", suffixes=("", "_mc"))
+        else:
+            long_df = long_df.merge(mc_slim, on="inchi_key", how="left", suffixes=("", "_mc"))
+
+        # Fill core identity columns from curation metadata when missing.
+        for col in ("compound_name", "adduct"):
+            mc_col = f"{col}_mc"
+            if mc_col in long_df.columns:
+                long_df[col] = long_df[col].where(long_df[col].notna() & (long_df[col].astype(str) != ""), long_df[mc_col])
+                long_df.drop(columns=[mc_col], inplace=True, errors="ignore")
+
+        # Best-MS2 payload and errors.
+        best_ms2_df = _build_best_ms2_summary_df(summary_obj)
+        if not best_ms2_df.empty and "mz_rt_uid" in long_df.columns:
+            long_df = long_df.merge(best_ms2_df, on="mz_rt_uid", how="left")
+
+        atlas_mz_num = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
+        best_ms2_mz_num = pd.to_numeric(long_df.get("best_ms2_mz"), errors="coerce")
+        valid_mz = atlas_mz_num.notna() & (atlas_mz_num != 0) & best_ms2_mz_num.notna()
+        long_df["best_ms2_mz_ppm_error"] = np.where(
+            valid_mz,
+            (best_ms2_mz_num - atlas_mz_num) / atlas_mz_num * 1e6,
+            np.nan,
         )
-        long_df = long_df.merge(mc_slim, on="inchi_key", how="left")
+        long_df["best_ms2_mz_error_da"] = np.where(
+            valid_mz,
+            np.abs(best_ms2_mz_num - atlas_mz_num),
+            np.nan,
+        )
+        long_df["best_ms2_rt_error"] = pd.to_numeric(long_df.get("best_ms2_rt"), errors="coerce") - pd.to_numeric(long_df.get("atlas_rt_peak"), errors="coerce")
+
+        long_df["msms_file"] = long_df.get("best_ms2_file", "")
+        long_df["msms_rt"] = pd.to_numeric(long_df.get("best_ms2_rt"), errors="coerce")
+        long_df["msms_numberofions"] = long_df.get("best_ms2_num_ions", "")
+        long_df["msms_matchingions"] = long_df.get("best_ms2_matching_ions", "")
+        long_df["mz_theoretical"] = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
+        long_df["mz_measured"] = pd.to_numeric(long_df.get("best_ms2_mz"), errors="coerce")
+        long_df["mz_error"] = pd.to_numeric(long_df.get("best_ms2_mz_error_da"), errors="coerce")
+        long_df["mz_ppmerror"] = pd.to_numeric(long_df.get("best_ms2_mz_ppm_error"), errors="coerce")
+        long_df["rt_theoretical"] = pd.to_numeric(long_df.get("atlas_rt_peak"), errors="coerce")
+        long_df["rt_error"] = pd.to_numeric(long_df.get("best_ms2_rt_error"), errors="coerce")
     else:
-        for col in ("adduct", "formula", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max"):
+        for col in (
+            "adduct", "formula", "smiles", "inchi", "pubchem_cid", "iupac_name",
+            "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
+            "best_ms2_file", "best_ms2_num_ions", "best_ms2_matching_ions", "best_ms2_spectrum_rt_mz",
+            "msms_file", "msms_numberofions", "msms_matchingions",
+        ):
             long_df[col] = np.nan if col.startswith("atlas") else ""
 
-    str_cols = [
-        "inchi_key", "compound_name", "control_filter",
-        "condition_1", "condition_2", "adduct", "formula",
-    ]
-    float_cols = [
-        "log2_fold_change",
-        "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
-    ]
+    str_cols = _COMPOUND_LFC_STR_COLS
+    float_cols = _COMPOUND_LFC_FLOAT_COLS
 
     for col in str_cols:
         if col not in long_df.columns:
