@@ -2696,7 +2696,157 @@ def load_and_filter_for_summary(summary_obj, update_raw_in_feature=False):
 
     _filter_to_infeature_data(summary_obj)
 
+    _build_per_file_metrics_df(summary_obj)
+
+    _build_best_ms1_metrics_df(summary_obj)
+
+    _merge_best_ms1_metrics_with_curation_df(summary_obj)
+
     return
+
+def _merge_best_ms1_metrics_with_curation_df(summary_obj: "AnalysisSummary") -> None:
+    """Return curation rows with best-MS1 cache columns merged in.
+    """
+    curation_df = summary_obj.experimental_data.curation_df
+    if curation_df is None or curation_df.empty:
+        return curation_df
+    merged = curation_df.copy()
+
+    best_ms1_df = summary_obj.best_ms1_metrics_df
+    if best_ms1_df is None or best_ms1_df.empty:
+        return merged
+
+    merged = merged.merge(
+        best_ms1_df,
+        on="mz_rt_uid",
+        how="left",
+    )
+
+    summary_obj.experimental_data.curation_df = merged
+
+    return
+
+
+def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
+    """
+    Return an independent dataframe of best-MS1 metrics keyed by mz_rt_uid.
+    """
+    logger.info("Building best MS1 metrics dataframe...")
+    curation_df = summary_obj.experimental_data.curation_df
+    per_file_df = summary_obj.per_file_metrics_df
+    if curation_df is None or curation_df.empty:
+        summary_obj.best_ms1_metrics_df = pd.DataFrame()
+        return
+    if per_file_df is None or per_file_df.empty:
+        summary_obj.best_ms1_metrics_df = pd.DataFrame()
+        return
+    
+    metric_cols = [
+        "mz_rt_uid",
+        "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
+        "best_ms1_ppm_error", "best_ms1_rt_error",
+    ]
+
+    pf = summary_obj.per_file_metrics_df.copy()
+    pf["_peak_height_cmp"] = pd.to_numeric(pf["peak_height"], errors="coerce").fillna(-np.inf)
+    pf = pf.sort_values(["mz_rt_uid", "_peak_height_cmp", "filename"], ascending=[True, False, True])
+
+    best_rows = pf.drop_duplicates("mz_rt_uid", keep="first")[
+        ["mz_rt_uid", "filename", "rt_peak", "mz_peak", "peak_height"]
+    ].rename(columns={
+        "filename": "best_ms1_file",
+        "rt_peak": "best_ms1_rt",
+        "mz_peak": "best_ms1_mz",
+        "peak_height": "best_ms1_intensity",
+    })
+
+    atlas_cols = [c for c in ["mz_rt_uid", "atlas_mz", "atlas_rt_peak"] if c in curation_df.columns]
+    atlas_lookup = curation_df[atlas_cols].drop_duplicates("mz_rt_uid")
+
+    best_metrics_df = best_rows.merge(atlas_lookup, on="mz_rt_uid", how="left")
+
+    atlas_mz = pd.to_numeric(best_metrics_df.get("atlas_mz"), errors="coerce")
+    atlas_rt_peak = pd.to_numeric(best_metrics_df.get("atlas_rt_peak"), errors="coerce")
+    valid_mz = best_metrics_df["best_ms1_mz"].notna() & atlas_mz.notna() & (atlas_mz != 0)
+    best_metrics_df["best_ms1_ppm_error"] = np.where(
+        valid_mz,
+        (best_metrics_df["best_ms1_mz"] - atlas_mz) / atlas_mz * 1e6,
+        np.nan,
+    )
+    best_metrics_df["best_ms1_rt_error"] = best_metrics_df["best_ms1_rt"] - atlas_rt_peak
+
+    summary_obj.best_ms1_metrics_df = best_metrics_df[metric_cols]
+    logger.info(f"Best MS1 metrics dataframe built with {len(summary_obj.best_ms1_metrics_df)} rows.")
+    return
+
+def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
+    """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
+
+    Each row of *ms1_df* represents one compound x one file, with list columns
+    ``spec_rts``, ``spec_ints``, and ``spec_mzs`` (already filtered to the
+    in-feature RT window).  Returns a long-format DataFrame with one row per
+    (compound, file) and columns:
+
+    * ``mz_rt_uid``, ``inchi_key``, ``adduct``, ``filename``
+    * ``peak_height``  - maximum intensity in the window
+    * ``peak_area``    - sum of intensities (proxy for area)
+    * ``rt_peak``      - RT at the intensity maximum
+    * ``rt_centroid``  - intensity-weighted mean RT
+    * ``mz_peak``      - m/z at the intensity maximum
+    * ``mz_centroid``  - intensity-weighted mean m/z
+    """
+    logger.info("Building per-file metrics dataframe...")
+    ms1_df = summary_obj.experimental_data.ms1_df
+    if ms1_df is None or ms1_df.empty:
+        return pd.DataFrame()
+
+    records = []
+    for _, row in tqdm(ms1_df.iterrows(), total=len(ms1_df), desc="Computing per-file metrics"):
+        spec_rts  = _as_list(row.get("spec_rts"))
+        spec_ints = _as_list(row.get("spec_ints"))
+        spec_mzs  = _as_list(row.get("spec_mzs"))
+
+        # Coerce to float arrays, replacing None/nan with 0 for intensities
+        rts  = [float(v) if v is not None else float("nan") for v in spec_rts]
+        ints = [float(v) if v is not None else 0.0 for v in spec_ints]
+        mzs  = [float(v) if v is not None else float("nan") for v in spec_mzs]
+
+        if not ints or max(ints) == 0:
+            peak_height = peak_area = rt_peak = rt_centroid = mz_peak = mz_centroid = float("nan")
+        else:
+            peak_idx = int(np.argmax(ints))
+            peak_height = ints[peak_idx]
+            peak_area = float(np.nansum(ints))
+            rt_peak = rts[peak_idx] if peak_idx < len(rts) else float("nan")
+            mz_peak = mzs[peak_idx] if peak_idx < len(mzs) else float("nan")
+            rt_centroid = (
+                float(np.nansum([r * i for r, i in zip(rts, ints)]) / peak_area)
+                if peak_area > 0 else float("nan")
+            )
+            mz_centroid = (
+                float(np.nansum([m * i for m, i in zip(mzs, ints)]) / peak_area)
+                if peak_area > 0 and mzs else float("nan")
+            )
+
+        fname = row.get("filename", "")
+        records.append({
+            "mz_rt_uid":   row.get("mz_rt_uid", ""),
+            "inchi_key":   row.get("inchi_key", ""),
+            "adduct":      row.get("adduct", ""),
+            "filename":    fname,
+            "file_group":  _file_group(fname),
+            "peak_height": peak_height,
+            "peak_area":   peak_area,
+            "rt_peak":     rt_peak,
+            "rt_centroid": rt_centroid,
+            "mz_peak":     mz_peak,
+            "mz_centroid": mz_centroid,
+        })
+
+    summary_obj.per_file_metrics_df = pd.DataFrame(records)
+    logger.info(f"Per-file metrics dataframe built with {len(summary_obj.per_file_metrics_df)} rows.")
+    return
+
 
 def _apply_override_ms_filters(
     obj: "AnalysisGUI"

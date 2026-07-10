@@ -981,6 +981,7 @@ class AnalysisSummary:
     manually_curated_atlas_obj: Optional[Atlas] = None
     experimental_data: Optional[ExperimentalData] = None
     per_file_metrics_df: Optional[pd.DataFrame] = None
+    best_ms1_metrics_df: Optional[pd.DataFrame] = None
     notes: Dict[str, Any] = field(default_factory=dict)
     override_parameters: Dict[str, Any] = field(default_factory=dict)
     paths: Dict[str, str] = field(default_factory=dict)

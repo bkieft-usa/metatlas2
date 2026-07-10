@@ -145,7 +145,6 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         else summary_obj.ta.params.get("gui_require_all_evaluated", False)
     )
     if not force_eval:
-        _populate_summary_best_ms1_metrics(summary_obj)
         return
 
     if summary_obj.experimental_data.curation_df is None or summary_obj.experimental_data.curation_df.empty:
@@ -276,11 +275,6 @@ def make_identification_figure(
         color_map = summary_obj.ta.params["gui_lcmsruns_colors"]
 
     manual_curation_df = summary_obj.experimental_data.curation_df
-    if manual_curation_df is None or manual_curation_df.empty:
-        logger.error("No manual curation entries found - nothing to plot.")
-        return
-    manual_curation_df = manual_curation_df.reset_index(drop=True)
-
     ms1_all_df = summary_obj.experimental_data.ms1_df
     ms2_all_df = summary_obj.experimental_data.ms2_df
 
@@ -667,9 +661,8 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("m/z ppm Δ", _fmt(mc_row.get("mz_error"), "{:.1f} ppm")),
         ("Atlas RT range", f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
         ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
-        ("Atlas RT peak", _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
+        ("Atlas RT", _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
         ("Measured RT", _fmt(mc_row.get("rt_peak"), "{:.3f} min")),
-        ("Max Intensity, ", _fmt(mc_row.get("best_ms1_intensity"), "{:.0f}")),
         ("RT Δ", _fmt(mc_row.get("rt_error"), "{:.3f}")),
     ]
 
@@ -945,8 +938,6 @@ def make_final_id_sheet(
     overwrite: bool = True,
 ) -> None:
 
-    _populate_summary_best_ms1_metrics(summary_obj)
-
     output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
     chromatography = summary_obj.chromatography
     analysis_info = (
@@ -964,10 +955,6 @@ def make_final_id_sheet(
         return
 
     manual_curation_df = summary_obj.experimental_data.curation_df
-    if manual_curation_df is None or manual_curation_df.empty:
-        logger.error("No manual curation entries found - nothing to export.")
-        return
-    manual_curation_df = manual_curation_df.reset_index(drop=True)
 
     compound_info_map: dict[str, tuple] = {}
     mass_map: dict[str, Optional[float]] = {}
@@ -2017,12 +2004,6 @@ def make_boxplots(
         logger.error("No manual curation entries found - nothing to plot.")
         return
 
-    # Build per_file_metrics_df lazily if not already populated
-    if summary_obj.per_file_metrics_df is None or summary_obj.per_file_metrics_df.empty:
-        logger.info("per_file_metrics_df not set — computing from ms1_df...")
-        summary_obj.per_file_metrics_df = _build_per_file_metrics_df(
-            summary_obj.experimental_data.ms1_df
-        )
     per_file_df = summary_obj.per_file_metrics_df
 
     # Build atlas lookup
@@ -2259,140 +2240,6 @@ def make_best_ms2_hit_fragment_ions_csv(
         len(result_df), output_file,
     )
 
-def _build_per_file_metrics_df(ms1_df: pd.DataFrame) -> pd.DataFrame:
-    """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
-
-    Each row of *ms1_df* represents one compound x one file, with list columns
-    ``spec_rts``, ``spec_ints``, and ``spec_mzs`` (already filtered to the
-    in-feature RT window).  Returns a long-format DataFrame with one row per
-    (compound, file) and columns:
-
-    * ``mz_rt_uid``, ``inchi_key``, ``adduct``, ``filename``
-    * ``peak_height``  - maximum intensity in the window
-    * ``peak_area``    - sum of intensities (proxy for area)
-    * ``rt_peak``      - RT at the intensity maximum
-    * ``rt_centroid``  - intensity-weighted mean RT
-    * ``mz_peak``      - m/z at the intensity maximum
-    * ``mz_centroid``  - intensity-weighted mean m/z
-    """
-    if ms1_df is None or ms1_df.empty:
-        return pd.DataFrame()
-
-    records = []
-    for _, row in ms1_df.iterrows():
-        spec_rts  = _as_list(row.get("spec_rts"))
-        spec_ints = _as_list(row.get("spec_ints"))
-        spec_mzs  = _as_list(row.get("spec_mzs"))
-
-        # Coerce to float arrays, replacing None/nan with 0 for intensities
-        rts  = [float(v) if v is not None else float("nan") for v in spec_rts]
-        ints = [float(v) if v is not None else 0.0 for v in spec_ints]
-        mzs  = [float(v) if v is not None else float("nan") for v in spec_mzs]
-
-        if not ints or max(ints) == 0:
-            peak_height = peak_area = rt_peak = rt_centroid = mz_peak = mz_centroid = float("nan")
-        else:
-            peak_idx = int(np.argmax(ints))
-            peak_height = ints[peak_idx]
-            peak_area = float(np.nansum(ints))
-            rt_peak = rts[peak_idx]  if peak_idx < len(rts)  else float("nan")
-            mz_peak = mzs[peak_idx]  if peak_idx < len(mzs)  else float("nan")
-            total_int = peak_area
-            rt_centroid = (
-                float(np.nansum([r * i for r, i in zip(rts, ints)]) / total_int)
-                if total_int > 0 else float("nan")
-            )
-            mz_centroid = (
-                float(np.nansum([m * i for m, i in zip(mzs, ints)]) / total_int)
-                if total_int > 0 and mzs else float("nan")
-            )
-
-        fname = row.get("filename", "")
-        records.append({
-            "mz_rt_uid":   row.get("mz_rt_uid", ""),
-            "inchi_key":   row.get("inchi_key", ""),
-            "adduct":      row.get("adduct", ""),
-            "filename":    fname,
-            "file_group":  _file_group(fname),
-            "peak_height": peak_height,
-            "peak_area":   peak_area,
-            "rt_peak":     rt_peak,
-            "rt_centroid": rt_centroid,
-            "mz_peak":     mz_peak,
-            "mz_centroid": mz_centroid,
-        })
-
-    return pd.DataFrame(records)
-
-
-def _populate_summary_best_ms1_metrics(summary_obj: "AnalysisSummary") -> None:
-    """Populate best_ms1_* columns from the summary-stage filtered MS1 table.
-
-    The summary script is the first place where we want these values to exist.
-    They are derived from the already-filtered per-file MS1 metrics so they stay
-    consistent with peak-height summaries and the final identification table.
-    """
-    curation_df = summary_obj.experimental_data.curation_df
-    if curation_df is None or curation_df.empty:
-        return
-
-    curation_df = curation_df.drop(
-        columns=[
-            "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
-            "best_ms1_ppm_error", "best_ms1_rt_error",
-            "_peak_height_cmp", "filename", "rt_peak", "mz_peak", "peak_height",
-        ],
-        errors="ignore",
-    ).copy()
-
-    if summary_obj.per_file_metrics_df is None or summary_obj.per_file_metrics_df.empty:
-        summary_obj.per_file_metrics_df = _build_per_file_metrics_df(
-            summary_obj.experimental_data.ms1_df
-        )
-
-    per_file_df = summary_obj.per_file_metrics_df
-    if per_file_df is None or per_file_df.empty:
-        for col in [
-            "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
-            "best_ms1_ppm_error", "best_ms1_rt_error",
-        ]:
-            if col not in curation_df.columns:
-                curation_df[col] = "" if col == "best_ms1_file" else np.nan
-        summary_obj.experimental_data.curation_df = curation_df
-        return
-
-    pf = per_file_df.copy()
-    pf["_peak_height_cmp"] = pd.to_numeric(pf["peak_height"], errors="coerce").fillna(-np.inf)
-    pf = pf.sort_values(["mz_rt_uid", "_peak_height_cmp", "filename"], ascending=[True, False, True])
-    best_rows = pf.drop_duplicates(subset=["mz_rt_uid"], keep="first").set_index("mz_rt_uid")
-
-    best_cols = best_rows[["filename", "rt_peak", "mz_peak", "peak_height"]].rename(
-        columns={
-            "filename": "best_ms1_file",
-            "rt_peak": "best_ms1_rt",
-            "mz_peak": "best_ms1_mz",
-            "peak_height": "best_ms1_intensity",
-        }
-    )
-
-    curation_df = curation_df.merge(best_cols, left_on="mz_rt_uid", right_index=True, how="left")
-    curation_df["best_ms1_file"] = curation_df["best_ms1_file"].fillna("").astype(str)
-    for col in ["best_ms1_rt", "best_ms1_mz", "best_ms1_intensity"]:
-        curation_df[col] = pd.to_numeric(curation_df[col], errors="coerce")
-
-    atlas_mz = pd.to_numeric(curation_df.get("atlas_mz"), errors="coerce")
-    atlas_rt_peak = pd.to_numeric(curation_df.get("atlas_rt_peak"), errors="coerce")
-    valid_mz = curation_df["best_ms1_mz"].notna() & atlas_mz.notna() & (atlas_mz != 0)
-    curation_df["best_ms1_ppm_error"] = np.where(
-        valid_mz,
-        (curation_df["best_ms1_mz"] - atlas_mz) / atlas_mz * 1e6,
-        np.nan,
-    )
-    curation_df["best_ms1_rt_error"] = curation_df["best_ms1_rt"] - atlas_rt_peak
-
-    curation_df.drop(columns=[c for c in ["_peak_height_cmp", "filename", "rt_peak", "mz_peak", "peak_height"] if c in curation_df.columns], inplace=True)
-    summary_obj.experimental_data.curation_df = curation_df
-
 
 def make_data_sheets(
     summary_obj: "AnalysisSummary",
@@ -2419,13 +2266,6 @@ def make_data_sheets(
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - data sheets not written.")
         return
-
-    # Build per_file_metrics_df lazily if not already populated
-    if summary_obj.per_file_metrics_df is None or summary_obj.per_file_metrics_df.empty:
-        logger.info("per_file_metrics_df not set — computing from ms1_df...")
-        summary_obj.per_file_metrics_df = _build_per_file_metrics_df(
-            summary_obj.experimental_data.ms1_df
-        )
 
     per_file_df = summary_obj.per_file_metrics_df
     if per_file_df is None or per_file_df.empty:
@@ -3137,14 +2977,13 @@ def make_analysis_parquet(
     """
 
     parquet_output_dir = Path(summary_obj.paths["parquet_output_dir"])
-    data_output_name = f"{summary_obj.project_name}-
-                         {summary_obj.rt_alignment_number}-
-                         {summary_obj.analysis_number}-
-                         {summary_obj.chromatography}-
-                         {summary_obj.polarity}-
-                         {summary_obj.analysis_type}-
-                         {summary_obj.analysis_name}
-                        "
+    data_output_name =  f"{summary_obj.project_name}-" \
+                        f"{summary_obj.rt_alignment_number}-" \
+                        f"{summary_obj.analysis_number}-" \
+                        f"{summary_obj.chromatography}-" \
+                        f"{summary_obj.polarity}-" \
+                        f"{summary_obj.analysis_type}-" \
+                        f"{summary_obj.analysis_name}"
 
     partition_dir = (parquet_output_dir / "parquet_results")
     unified_path = partition_dir / f"{data_output_name}-results.parquet"
@@ -3328,11 +3167,6 @@ def _build_compound_per_file_table(
     -------
     pa.Table
     """
-    if summary_obj.per_file_metrics_df is None or summary_obj.per_file_metrics_df.empty:
-        logger.info("per_file_metrics_df not set — computing from ms1_df...")
-        summary_obj.per_file_metrics_df = _build_per_file_metrics_df(
-            summary_obj.experimental_data.ms1_df
-        )
 
     per_file_df = summary_obj.per_file_metrics_df
     if per_file_df is None or per_file_df.empty:
@@ -3340,11 +3174,6 @@ def _build_compound_per_file_table(
         return pa.table({})
 
     mc = summary_obj.experimental_data.curation_df
-    if mc is None or mc.empty:
-        logger.warning("curation_df is empty — compound_per_file table will be empty.")
-        return pa.table({})
-
-    mc = mc.reset_index(drop=True)
 
     # Build quality-score lookup from curation_df
     chromatography = summary_obj.chromatography

@@ -186,7 +186,6 @@ def set_up_paths(
     main_db_path = f"{data_dir}/databases/main_db/metatlas.duckdb"
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.json"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"
-    parquet_output_dir = f"{data_dir}/projects/parquet_outputs/"
     modelseed_table_path = f"{data_dir}/databases/modelseed_db/modelseed.tsv"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
@@ -195,7 +194,6 @@ def set_up_paths(
             "main_db_path": str(main_db_path),
             "pubchem_cache_path": str(pubchem_cache_path),
             "modelseed_table_path": str(modelseed_table_path),
-            "parquet_output_dir": str(parquet_output_dir),
         }
 
     owner = config.owner
@@ -205,6 +203,7 @@ def set_up_paths(
     if user is None:
         raise ValueError("USER environment variable is not set")
     project_output_dir = Path(project_output_path) / owner / user / project_name
+    parquet_output_dir = Path(f"{data_dir}/projects/parquet_outputs/")
     try:
         project_short = str(project_name.split("_")[4]) + "_RTA" + str(rt_alignment_number) + "_TGA" + str(analysis_number)
     except Exception as e:
