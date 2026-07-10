@@ -663,6 +663,8 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
 
     rt_delta_abs = abs(atlas_rt - rt_meas) if not (_safe_isnan(atlas_rt) or _safe_isnan(rt_meas)) else float("nan")
 
+    best_intensity = _safe_float(mc_row.get("best_ms1_intensity"))
+
     rows = [
         ("Compound", _fmt(mc_row.get("compound_name", "Undefined"))),
         ("Formula", _fmt(mc_row.get("formula"))),
@@ -677,6 +679,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("Atlas RT", _fmt(atlas_rt, "{:.3f} min")),
         ("Measured RT", _fmt(rt_meas, "{:.3f} min")),
         ("RT Δ", _fmt(rt_delta_abs, "{:.3f}")),
+        ("Max Intensity", _fmt(best_intensity, "{:.3e}") if not _safe_isnan(best_intensity) else "N/A"),
     ]
 
     y_pos = 1.03
@@ -1986,9 +1989,9 @@ def make_boxplots(
 
     per_file_df = summary_obj.per_file_metrics_df
 
-    # Build atlas lookup
-    atlas_lookup: Dict[Tuple[str, str], Dict[str, float]] = {
-        (mc.get("inchi_key", ""), mc.get("adduct", "")): {
+    # Build atlas lookup keyed by mz_rt_uid (the true unique compound identifier)
+    atlas_lookup: Dict[str, Dict[str, float]] = {
+        mc.get("mz_rt_uid", ""): {
             "atlas_mz":      float(mc.get("atlas_mz", np.nan)),
             "atlas_rt_peak": float(mc.get("atlas_rt_peak", np.nan)),
         }
@@ -2008,11 +2011,11 @@ def make_boxplots(
         metric_dir.mkdir(parents=True, exist_ok=True)
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
-    # Pre-group per_file_df
+    # Pre-group per_file_df by mz_rt_uid (unique per compound, unlike inchi_key+adduct)
     if per_file_df is not None and not per_file_df.empty:
         pf_groups: dict = {
             key: grp.reset_index(drop=True)
-            for key, grp in per_file_df.groupby(["inchi_key", "adduct"], sort=False)
+            for key, grp in per_file_df.groupby("mz_rt_uid", sort=False)
         }
     else:
         pf_groups = {}
@@ -2025,16 +2028,16 @@ def make_boxplots(
         compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
-        key = (inchi_key, adduct)
+        mz_rt_uid = mc_row.get("mz_rt_uid", "")
 
         tasks.append({
             "compound_name": compound_name,
             "adduct": adduct,
             "inchi_key": inchi_key,
             "compound_idx": cmp_idx,
-            "atlas_ref_dict": atlas_lookup.get(key, {}),
+            "atlas_ref_dict": atlas_lookup.get(mz_rt_uid, {}),
             "metric_configs": metric_configs_with_dirs,
-            "cmp_metrics": pf_groups.get(key, empty_df),
+            "cmp_metrics": pf_groups.get(mz_rt_uid, empty_df),
         })
 
     if not tasks:
