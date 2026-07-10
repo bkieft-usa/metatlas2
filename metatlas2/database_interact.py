@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from contextlib import contextmanager
 from tqdm.auto import tqdm
 
+import metatlas2.file_and_project_format as fpf
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('database_interact')
@@ -2771,8 +2772,6 @@ def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
         "peak_height": "best_ms1_intensity",
     })
 
-    # Top-3 files by peak_height per compound: average their mz_centroid (mz_measured).
-    # Mirrors the legacy algorithm: if >3 files, keep only the top-3 by intensity.
     def _top3_mz_avg(grp: pd.DataFrame) -> pd.Series:
         grp_sorted = grp.sort_values("_peak_height_cmp", ascending=False)
         top3 = grp_sorted.head(3)
@@ -2781,7 +2780,11 @@ def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
             "top3_mz_centroid_avg": float(valid_mz.mean()) if len(valid_mz) > 0 else np.nan,
         })
 
-    top3_agg = pf.groupby("mz_rt_uid", sort=False).apply(_top3_mz_avg).reset_index()
+    top3_agg = (
+        pf.groupby("mz_rt_uid", sort=False)
+        .apply(_top3_mz_avg, include_groups=False)
+        .reset_index()
+    )
 
     atlas_cols = [c for c in ["mz_rt_uid", "atlas_mz", "atlas_rt_peak"] if c in curation_df.columns]
     atlas_lookup = curation_df[atlas_cols].drop_duplicates("mz_rt_uid")
@@ -2878,12 +2881,13 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
             )
 
         fname = row.get("filename", "")
+        fgroup = fpf.get_file_parts(fname, "sample_name")
         records.append({
             "mz_rt_uid":   row.get("mz_rt_uid", ""),
             "inchi_key":   row.get("inchi_key", ""),
             "adduct":      row.get("adduct", ""),
             "filename":    fname,
-            "file_group":  _file_group(fname),
+            "file_group":  fgroup,
             "peak_height": peak_height,
             "peak_area":   peak_area,
             "rt_peak":     rt_peak,

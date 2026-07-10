@@ -1575,7 +1575,7 @@ def make_eic_thumbnails(
                     "filename": f_path,
                     "spec_rts": rts,
                     "spec_ints": ints,
-                    "group_name": _file_group(f_path),
+                    "group_name": fpf.get_file_parts(f_path, "sample_name"),
                 })
 
             def _alphanum_key(text: str) -> list:
@@ -1680,7 +1680,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     group_bg_palette = ["#F3F8FF", "#EEFCF1", "#FFF8EA", "#FFF1F1", "#F5F0FF"]
     group_to_color: dict[str, str] = {}
     for item in file_items:
-        group_name = item.get("group_name") or _file_group(item.get("filename", ""))
+        group_name = item.get("group_name")
         if group_name not in group_to_color:
             group_to_color[group_name] = group_bg_palette[len(group_to_color) % len(group_bg_palette)]
 
@@ -1707,7 +1707,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
                 spec_ints = _as_list(item.get("spec_ints"))
                 valid_ints = [v for v in spec_ints if v is not None and not np.isnan(v)]
                 y_max_indep = float(max(valid_ints)) if valid_ints else None
-                group_name = item.get("group_name") or _file_group(item.get("filename", ""))
+                group_name = item.get("group_name")
                 _render_eic_thumbnail(
                     ax,
                     _as_list(item.get("spec_rts")),
@@ -1742,19 +1742,6 @@ def _compound_pdf_worker(kwargs: dict) -> str:
         pdf_indep.close()
 
     return kwargs["compound_name"]
-
-
-def _file_group(filename: str) -> str:
-    """Return the file group label from the stem's 13th underscore-separated segment (index 12).
-
-    Falls back to the full stem when the filename has fewer than 13 segments.
-    """
-    if not filename:
-        return "unknown"
-    stem = os.path.splitext(os.path.basename(filename))[0]
-    parts = stem.split("_")
-    return parts[12] if len(parts) > 12 else stem
-
 
 def _short_fname(filename: str) -> str:
     """Return an abbreviated label: the 13th and 16th underscore-separated parts of the stem.
@@ -3499,12 +3486,17 @@ def _build_compound_lfc_table(
             np.abs(lfc_top3_mz - lfc_atlas_mz) / lfc_atlas_mz * 1e6,
             np.nan,
         )
-        # rt_error uses curation_df.rt_peak (mean of per-file peak RTs from analyze_ms1())
-        lfc_top3_rt = pd.to_numeric(long_df.get("rt_peak"), errors="coerce")
-        lfc_atlas_rt = pd.to_numeric(long_df.get("atlas_rt_peak"), errors="coerce")
+
+        def _numeric_col(df, col):
+            if col in df.columns:
+                return pd.to_numeric(df[col], errors="coerce")
+            return pd.Series(np.nan, index=df.index, dtype="float64")
+
+        lfc_top3_rt = _numeric_col(long_df, "top3_rt")
+        lfc_atlas_rt = _numeric_col(long_df, "atlas_rt_peak")
         long_df["rt_theoretical"] = lfc_atlas_rt
         long_df["rt_error"] = np.where(
-            lfc_top3_rt.notna() & lfc_atlas_rt.notna(),
+            pd.notna(lfc_top3_rt) & pd.notna(lfc_atlas_rt),
             np.abs(lfc_top3_rt - lfc_atlas_rt),
             np.nan,
         )
