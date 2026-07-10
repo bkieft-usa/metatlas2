@@ -2730,6 +2730,13 @@ def _merge_best_ms1_metrics_with_curation_df(summary_obj: "AnalysisSummary") -> 
 def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     """
     Return an independent dataframe of best-MS1 metrics keyed by mz_rt_uid.
+
+    Per-compound aggregates:
+      - best_ms1_*           : metrics from the single file with the highest peak_height
+      - top3_mz_centroid_avg : mean mz_centroid across the top-3 files by peak_height
+                               (or all files when ≤ 3 files have data); used as mz_measured
+    rt_measured uses curation_df.rt_peak directly (mean of per-file peak RTs computed
+    by analyze_ms1(), i.e. the mean of each file's highest-intensity in-window RT point).
     """
     logger.info("Building best MS1 metrics dataframe...")
     curation_df = summary_obj.experimental_data.curation_df
@@ -2740,33 +2747,55 @@ def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     if per_file_df is None or per_file_df.empty:
         summary_obj.best_ms1_metrics_df = pd.DataFrame()
         return
-    
+
     metric_cols = [
         "mz_rt_uid",
-        "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
+        "best_ms1_file", "best_ms1_rt", "best_ms1_mz", "best_ms1_mz_centroid",
+        "best_ms1_intensity",
         "best_ms1_ppm_error", "best_ms1_rt_error",
+        "top3_mz_centroid_avg",
     ]
 
     pf = summary_obj.per_file_metrics_df.copy()
     pf["_peak_height_cmp"] = pd.to_numeric(pf["peak_height"], errors="coerce").fillna(-np.inf)
     pf = pf.sort_values(["mz_rt_uid", "_peak_height_cmp", "filename"], ascending=[True, False, True])
 
+    # Best single file (highest peak_height)
     best_rows = pf.drop_duplicates("mz_rt_uid", keep="first")[
-        ["mz_rt_uid", "filename", "rt_peak", "mz_peak", "peak_height"]
+        ["mz_rt_uid", "filename", "rt_peak", "mz_peak", "mz_centroid", "peak_height"]
     ].rename(columns={
-        "filename": "best_ms1_file",
-        "rt_peak": "best_ms1_rt",
-        "mz_peak": "best_ms1_mz",
+        "filename":    "best_ms1_file",
+        "rt_peak":     "best_ms1_rt",
+        "mz_peak":     "best_ms1_mz",
+        "mz_centroid": "best_ms1_mz_centroid",
         "peak_height": "best_ms1_intensity",
     })
+
+    # Top-3 files by peak_height per compound: average their mz_centroid (mz_measured).
+    # Mirrors the legacy algorithm: if >3 files, keep only the top-3 by intensity.
+    def _top3_mz_avg(grp: pd.DataFrame) -> pd.Series:
+        grp_sorted = grp.sort_values("_peak_height_cmp", ascending=False)
+        top3 = grp_sorted.head(3)
+        valid_mz = top3["mz_centroid"].dropna()
+        return pd.Series({
+            "top3_mz_centroid_avg": float(valid_mz.mean()) if len(valid_mz) > 0 else np.nan,
+        })
+
+    top3_agg = pf.groupby("mz_rt_uid", sort=False).apply(_top3_mz_avg).reset_index()
 
     atlas_cols = [c for c in ["mz_rt_uid", "atlas_mz", "atlas_rt_peak"] if c in curation_df.columns]
     atlas_lookup = curation_df[atlas_cols].drop_duplicates("mz_rt_uid")
 
-    best_metrics_df = best_rows.merge(atlas_lookup, on="mz_rt_uid", how="left")
+    best_metrics_df = (
+        best_rows
+        .merge(top3_agg, on="mz_rt_uid", how="left")
+        .merge(atlas_lookup, on="mz_rt_uid", how="left")
+    )
 
     atlas_mz = pd.to_numeric(best_metrics_df.get("atlas_mz"), errors="coerce")
     atlas_rt_peak = pd.to_numeric(best_metrics_df.get("atlas_rt_peak"), errors="coerce")
+
+    # best_ms1_ppm_error / best_ms1_rt_error: errors for the single best file
     valid_mz = best_metrics_df["best_ms1_mz"].notna() & atlas_mz.notna() & (atlas_mz != 0)
     best_metrics_df["best_ms1_ppm_error"] = np.where(
         valid_mz,
@@ -2779,6 +2808,18 @@ def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     logger.info(f"Best MS1 metrics dataframe built with {len(summary_obj.best_ms1_metrics_df)} rows.")
     return
 
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, list):
+        return value
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
 def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
 
@@ -2789,11 +2830,16 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
 
     * ``mz_rt_uid``, ``inchi_key``, ``adduct``, ``filename``
     * ``peak_height``  - maximum intensity in the window
-    * ``peak_area``    - sum of intensities (proxy for area)
+    * ``peak_area``    - trapezoid-rule integrated area under the EIC curve
     * ``rt_peak``      - RT at the intensity maximum
     * ``rt_centroid``  - intensity-weighted mean RT
     * ``mz_peak``      - m/z at the intensity maximum
     * ``mz_centroid``  - intensity-weighted mean m/z
+
+    Note: ``rt_centroid`` and ``mz_centroid`` use the sum of intensities
+    (``np.nansum(ints)``) as the weight denominator, not ``peak_area``, so
+    that the centroid is a true intensity-weighted mean regardless of the
+    RT spacing between scan points.
     """
     logger.info("Building per-file metrics dataframe...")
     ms1_df = summary_obj.experimental_data.ms1_df
@@ -2816,16 +2862,19 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
         else:
             peak_idx = int(np.argmax(ints))
             peak_height = ints[peak_idx]
-            peak_area = float(np.nansum(ints))
+            peak_area = float(np.trapezoid(ints, rts))
             rt_peak = rts[peak_idx] if peak_idx < len(rts) else float("nan")
             mz_peak = mzs[peak_idx] if peak_idx < len(mzs) else float("nan")
+            # Use sum of intensities as the weight denominator for centroids
+            # (intensity-weighted mean, independent of RT spacing)
+            int_sum = float(np.nansum(ints))
             rt_centroid = (
-                float(np.nansum([r * i for r, i in zip(rts, ints)]) / peak_area)
-                if peak_area > 0 else float("nan")
+                float(np.nansum([r * i for r, i in zip(rts, ints)]) / int_sum)
+                if int_sum > 0 else float("nan")
             )
             mz_centroid = (
-                float(np.nansum([m * i for m, i in zip(mzs, ints)]) / peak_area)
-                if peak_area > 0 and mzs else float("nan")
+                float(np.nansum([m * i for m, i in zip(mzs, ints)]) / int_sum)
+                if int_sum > 0 and mzs else float("nan")
             )
 
         fname = row.get("filename", "")

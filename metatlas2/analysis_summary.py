@@ -214,13 +214,6 @@ def _safe_isnan(value) -> bool:
 
 
 def _as_list(value) -> list:
-    """Safely coerce *value* to a plain Python list.
-
-    Handles the common case where a DataFrame cell contains a numpy array,
-    a Python list, ``None``, or a scalar.  Using ``value or []`` raises
-    ``ValueError`` when *value* is a numpy array with more than one element
-    because Python cannot determine the truth value of such an array.
-    """
     if value is None:
         return []
     if isinstance(value, np.ndarray):
@@ -635,7 +628,14 @@ def _plot_eic(
         spine.set_linewidth(1.2)
 
 def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
-    """Render a two-column key/value table of compound metadata."""
+    """Render a two-column key/value table of compound metadata.
+
+    Uses the same ground-truth metrics as the Final ID sheet:
+      - Measured m/z  = top3_mz_centroid_avg (mean mz_centroid of top-3 files by peak_height)
+      - m/z ppm Δ     = absolute ppm error vs atlas_mz
+      - Measured RT   = curation_df.rt_peak (mean of per-file peak RTs from analyze_ms1())
+      - RT Δ          = absolute RT error vs atlas_rt_peak
+    """
     ax.axis("off")
 
     def _fmt(val, fmt=None):
@@ -650,20 +650,33 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         except (ValueError, TypeError):
             return str(val)
 
+    # Use top-3 MS1 averages — consistent with Final ID sheet ground-truth values
+    atlas_mz   = _safe_float(mc_row.get("atlas_mz"))
+    mz_meas    = _safe_float(mc_row.get("top3_mz_centroid_avg"))
+    atlas_rt   = _safe_float(mc_row.get("atlas_rt_peak"))
+    rt_meas    = _safe_float(mc_row.get("rt_peak"))
+
+    if not _safe_isnan(mz_meas) and not _safe_isnan(atlas_mz) and atlas_mz != 0:
+        mz_ppm_abs = abs(mz_meas - atlas_mz) / atlas_mz * 1e6
+    else:
+        mz_ppm_abs = float("nan")
+
+    rt_delta_abs = abs(atlas_rt - rt_meas) if not (_safe_isnan(atlas_rt) or _safe_isnan(rt_meas)) else float("nan")
+
     rows = [
         ("Compound", _fmt(mc_row.get("compound_name", "Undefined"))),
         ("Formula", _fmt(mc_row.get("formula"))),
         ("Adduct", _fmt(mc_row.get("adduct"))),
         ("Polarity", _fmt(mc_row.get("polarity"))),
         ("Chromatography", _fmt(mc_row.get("chromatography"))),
-        ("Atlas m/z", _fmt(mc_row.get("atlas_mz"), "{:.4f}")),
-        ("Measured m/z", _fmt(mc_row.get("mz"), "{:.4f}")),
-        ("m/z ppm Δ", _fmt(mc_row.get("mz_error"), "{:.1f} ppm")),
+        ("Atlas m/z", _fmt(atlas_mz, "{:.4f}")),
+        ("Measured m/z", _fmt(mz_meas, "{:.4f}")),
+        ("m/z ppm Δ", _fmt(mz_ppm_abs, "{:.1f} ppm")),
         ("Atlas RT range", f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
         ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
-        ("Atlas RT", _fmt(mc_row.get("atlas_rt_peak"), "{:.3f} min")),
-        ("Measured RT", _fmt(mc_row.get("rt_peak"), "{:.3f} min")),
-        ("RT Δ", _fmt(mc_row.get("rt_error"), "{:.3f}")),
+        ("Atlas RT", _fmt(atlas_rt, "{:.3f} min")),
+        ("Measured RT", _fmt(rt_meas, "{:.3f} min")),
+        ("RT Δ", _fmt(rt_delta_abs, "{:.3f}")),
     ]
 
     y_pos = 1.03
@@ -974,9 +987,8 @@ def make_final_id_sheet(
         except (TypeError, ValueError):
             mass_map[ik] = None
 
-    # --- Build MS2 lookup maps ---
+    # --- Build MS2 lookup map (best hit per compound for MSMS columns only) ---
     ms2_best: dict[str, dict] = {}       # mz_rt_uid -> best hit dict + scan metadata
-    ms2_top3_mz_avg: dict[str, float] = {}  # mz_rt_uid -> mean mz of top 3 hits
 
     ms2_df = summary_obj.experimental_data.ms2_df
     if not ms2_df.empty:
@@ -1001,19 +1013,6 @@ def make_final_id_sheet(
 
             if best_hit_data is not None:
                 ms2_best[uid] = best_hit_data
-
-                # Top-3 mz average: pull from the best scan's hits list
-                # We already know the best scan — re-fetch its hits
-                best_scan_row = grp.loc[
-                    grp["filename"] == best_hit_data["filename"]
-                ].iloc[0]
-                top3_hits = _as_list(best_scan_row.get("hits"))[:3]
-                valid_mzs = [
-                    float(h["mz_measured"]) for h in top3_hits
-                    if np.isfinite(float(h.get("mz_measured", np.nan)))
-                ]
-                if valid_mzs:
-                    ms2_top3_mz_avg[uid] = float(np.mean(valid_mzs))
 
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
 
@@ -1046,18 +1045,27 @@ def make_final_id_sheet(
         rt_theoretical = float(mc_row.get("atlas_rt_peak", np.nan))
 
         # --- MS1 metrics ---
-        mz_measured_ms1 = float(mc_row.get("mz", np.nan))
-        ppm_error_ms1 = float(mc_row.get("mz_error", np.nan))
-        rt_measured = float(mc_row.get("rt_peak", np.nan))
-        rt_error = float(mc_row.get("rt_error", np.nan))
+        # mz_measured: top3_mz_centroid_avg — mean mz_centroid of top-3 files by peak_height
+        # rt_measured: curation_df.rt_peak  — mean of per-file peak RTs from analyze_ms1()
+        mz_measured = float(mc_row.get("top3_mz_centroid_avg", np.nan))
+        rt_measured  = float(mc_row.get("rt_peak", np.nan))
         best_ms1_rt = float(mc_row.get("best_ms1_rt", np.nan))
         best_ms1_intensity = float(mc_row.get("best_ms1_intensity", np.nan))
         best_ms1_file = mc_row.get("best_ms1_file", "")
 
+        # Compute MS1-based m/z and RT errors (absolute values)
+        if not np.isnan(mz_measured) and not np.isnan(mz_theoretical) and mz_theoretical != 0:
+            ppm_error_ms1 = abs(mz_measured - mz_theoretical) / mz_theoretical * 1e6
+            mz_error_da   = abs(mz_theoretical - mz_measured)
+        else:
+            ppm_error_ms1 = np.nan
+            mz_error_da   = np.nan
+
+        rt_error = abs(rt_theoretical - rt_measured) if not (np.isnan(rt_theoretical) or np.isnan(rt_measured)) else np.nan
+
         ms2_notes = str(mc_row.get("ms2_notes", "") or "")
 
-        # --- MS2 metrics (default to MS1 values if no MS2 available) ---
-        mz_measured_ms2 = mz_measured_ms1
+        # --- MS2 metrics (MSMS columns only — mz/rt quality uses MS1 above) ---
         msms_file = ""
         msms_rt = np.nan
         msms_score = np.nan
@@ -1069,11 +1077,6 @@ def make_final_id_sheet(
             msms_file = str(best_hit.get("filename", ""))
             msms_rt = float(best_hit.get("scan_rt", np.nan))
             msms_score = float(best_hit.get("score", np.nan))
-
-            try:
-                mz_measured_ms2 = float(best_hit.get("mz_measured", mz_measured_ms1))
-            except (TypeError, ValueError):
-                mz_measured_ms2 = mz_measured_ms1
 
             num_matches = int(best_hit.get("num_matches", 0))
             ref_frags = int(best_hit.get("ref_frags", 0))
@@ -1100,18 +1103,8 @@ def make_final_id_sheet(
                 if "1.0, single ion match" in ms2_notes or "0.5, single ion match" in ms2_notes:
                     ms2_notes = ms2_notes + note_tag
 
-        # Top-3 MS2 mz average overrides single-scan mz when available
-        mz_measured_ms2 = float(ms2_top3_mz_avg.get(mz_rt_uid, mz_measured_ms2))
-
-        # Recompute ppm and Da errors using the final mz_measured_ms2
-        if not np.isnan(mz_measured_ms2) and not np.isnan(mz_theoretical) and mz_theoretical != 0:
-            ppm_error_ms2 = (mz_measured_ms2 - mz_theoretical) / mz_theoretical * 1e6
-            mz_error_da = abs(mz_theoretical - mz_measured_ms2)
-        else:
-            ppm_error_ms2 = np.nan
-            mz_error_da = np.nan
-
-        mz_q = _mz_quality(ppm_error_ms2, mz_error_da)
+        # Quality scores — all MS1-based (absolute errors)
+        mz_q = _mz_quality(ppm_error_ms1, mz_error_da)
         rt_q = _rt_quality(rt_error, chromatography)
 
         try:
@@ -1161,10 +1154,10 @@ def make_final_id_sheet(
             # ION INFORMATION
             "mz_adduct":              adduct,
             "mz_theoretical":         _safe_round(mz_theoretical, 4),
-            "mz_measured":            _safe_round(mz_measured_ms2, 4),
+            "mz_measured":            _safe_round(mz_measured, 4),
             # M/Z EVALUATION
             "mz_error":               _safe_round(mz_error_da, 4),
-            "mz_ppmerror":            _safe_round(ppm_error_ms2, 4),
+            "mz_ppmerror":            _safe_round(ppm_error_ms1, 4),
             # CHROMATOGRAPHIC PEAK INFORMATION
             "rt_min":                 _safe_round(float(mc_row.get("rt_min", np.nan)), 2),
             "rt_max":                 _safe_round(float(mc_row.get("rt_max", np.nan)), 2),
@@ -1393,9 +1386,9 @@ def _mz_quality(ppm_error: float, mz_delta: float) -> float:
     """Return 0/0.5/1 mz quality score from ppm and absolute mass error."""
     if np.isnan(ppm_error) or np.isnan(mz_delta):
         return np.nan
-    if ppm_error <= 5 or mz_delta <= 0.0015:
+    if abs(ppm_error) <= 5 or abs(mz_delta) <= 0.0015:
         return 1.0
-    if ppm_error <= 10:
+    if abs(ppm_error) <= 10:
         return 0.5
     return 0.0
 
@@ -1405,15 +1398,15 @@ def _rt_quality(rt_error: float, chromatography: str) -> float:
         return np.nan
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
     if is_c18:
-        if rt_error <= 0.25:
+        if abs(rt_error) <= 0.25:
             return 1.0
-        if rt_error <= 0.5:
+        if abs(rt_error) <= 0.5:
             return 0.5
         return 0.0
     else:
-        if rt_error <= 0.5:
+        if abs(rt_error) <= 0.5:
             return 1.0
-        if rt_error <= 2.0:
+        if abs(rt_error) <= 2.0:
             return 0.5
         return 0.0
 
@@ -3175,23 +3168,29 @@ def _build_compound_per_file_table(
 
     mc = summary_obj.experimental_data.curation_df
 
-    # Build quality-score lookup from curation_df
+    # Build quality-score lookup from curation_df.
+    # mz_measured uses top3_mz_centroid_avg (mean mz_centroid of top-3 files by peak_height).
+    # rt_measured uses curation_df.rt_peak (mean of per-file peak RTs from analyze_ms1()).
+    # Errors are absolute values.
     chromatography = summary_obj.chromatography
     quality_rows: list[dict] = []
     for cmp_idx, mc_row in mc.iterrows():
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
-        mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
-        mz_measured     = float(mc_row.get("mz", np.nan))
-        rt_error        = float(mc_row.get("rt_error", np.nan))
+        mz_theoretical   = float(mc_row.get("atlas_mz", np.nan))
+        rt_theoretical   = float(mc_row.get("atlas_rt_peak", np.nan))
+        mz_measured_ms1  = float(mc_row.get("top3_mz_centroid_avg", np.nan))
+        rt_measured_ms1  = float(mc_row.get("rt_peak", np.nan))
 
-        if not np.isnan(mz_measured) and not np.isnan(mz_theoretical) and mz_theoretical != 0:
-            ppm_err = (mz_measured - mz_theoretical) / mz_theoretical * 1e6
-            da_err  = abs(mz_theoretical - mz_measured)
+        if not np.isnan(mz_measured_ms1) and not np.isnan(mz_theoretical) and mz_theoretical != 0:
+            ppm_err = abs(mz_measured_ms1 - mz_theoretical) / mz_theoretical * 1e6
+            da_err  = abs(mz_theoretical - mz_measured_ms1)
         else:
             ppm_err = da_err = np.nan
 
+        rt_error_ms1 = abs(rt_theoretical - rt_measured_ms1) if not (np.isnan(rt_theoretical) or np.isnan(rt_measured_ms1)) else np.nan
+
         mz_q  = _mz_quality(ppm_err, da_err)
-        rt_q  = _rt_quality(rt_error, chromatography)
+        rt_q  = _rt_quality(rt_error_ms1, chromatography)
         ms2_notes = str(mc_row.get("ms2_notes", "") or "")
         try:
             msms_q = float(ms2_notes.split(",")[0])
@@ -3230,12 +3229,13 @@ def _build_compound_per_file_table(
             "best_ms1_file": str(mc_row.get("best_ms1_file", "")),
             "best_ms1_rt":   float(mc_row.get("best_ms1_rt", np.nan)),
             "best_ms1_mz":   float(mc_row.get("best_ms1_mz", np.nan)),
+            "best_ms1_mz_centroid": float(mc_row.get("best_ms1_mz_centroid", np.nan)),
             "best_ms1_intensity": float(mc_row.get("best_ms1_intensity", np.nan)),
             "best_ms1_ppm_error": float(mc_row.get("best_ms1_ppm_error", np.nan)),
             "best_ms1_rt_error": float(mc_row.get("best_ms1_rt_error", np.nan)),
+            "top3_mz_centroid_avg": float(mc_row.get("top3_mz_centroid_avg", np.nan)),
             "ms1_notes":    str(mc_row.get("ms1_notes", "") or ""),
             "ms2_notes":    ms2_notes,
-            "msms_score":   float(mc_row.get("msms_score", np.nan)) if "msms_score" in mc_row else np.nan,
             "mz_quality":   mz_q,
             "rt_quality":   rt_q,
             "msms_quality": msms_q,
@@ -3302,16 +3302,43 @@ def _build_compound_per_file_table(
     merged["best_ms2_rt_error"] = pd.to_numeric(merged.get("best_ms2_rt"), errors="coerce") - pd.to_numeric(merged.get("atlas_rt_peak"), errors="coerce")
 
     # Final-ID aliases to make parquet and spreadsheet columns line up.
+    # mz_measured / mz_error / mz_ppmerror use the MS1 top-3 average (top3_mz_centroid_avg).
+    # rt_error uses the absolute MS1-based RT error (|atlas_rt_peak - rt_peak|) where
+    # rt_peak is the mean of per-file peak RTs from analyze_ms1().
+    # MS2-derived values are retained in best_ms2_* columns for reference.
     merged["msms_file"] = merged.get("best_ms2_file", "")
     merged["msms_rt"] = pd.to_numeric(merged.get("best_ms2_rt"), errors="coerce")
+    merged["msms_score"] = pd.to_numeric(merged.get("best_ms2_score"), errors="coerce")
     merged["msms_numberofions"] = merged.get("best_ms2_num_ions", "")
     merged["msms_matchingions"] = merged.get("best_ms2_matching_ions", "")
     merged["mz_theoretical"] = pd.to_numeric(merged.get("atlas_mz"), errors="coerce")
-    merged["mz_measured"] = pd.to_numeric(merged.get("best_ms2_mz"), errors="coerce")
-    merged["mz_error"] = pd.to_numeric(merged.get("best_ms2_mz_error_da"), errors="coerce")
-    merged["mz_ppmerror"] = pd.to_numeric(merged.get("best_ms2_mz_ppm_error"), errors="coerce")
-    merged["rt_theoretical"] = pd.to_numeric(merged.get("atlas_rt_peak"), errors="coerce")
-    merged["rt_error"] = pd.to_numeric(merged.get("best_ms2_rt_error"), errors="coerce")
+
+    # MS1-based mz_measured: top-3-by-peak-height mean mz_centroid
+    top3_mz = pd.to_numeric(merged.get("top3_mz_centroid_avg"), errors="coerce")
+    atlas_mz_num = pd.to_numeric(merged.get("atlas_mz"), errors="coerce")
+    merged["mz_measured"] = top3_mz
+    valid_ms1_mz = top3_mz.notna() & atlas_mz_num.notna() & (atlas_mz_num != 0)
+    merged["mz_error"] = np.where(
+        valid_ms1_mz,
+        np.abs(top3_mz - atlas_mz_num),
+        np.nan,
+    )
+    merged["mz_ppmerror"] = np.where(
+        valid_ms1_mz,
+        np.abs(top3_mz - atlas_mz_num) / atlas_mz_num * 1e6,
+        np.nan,
+    )
+
+    # MS1-based rt_error: absolute difference between atlas RT peak and curation_df.rt_peak
+    # (rt_peak = mean of per-file peak RTs from analyze_ms1())
+    ms1_rt = pd.to_numeric(merged.get("rt_peak"), errors="coerce")
+    atlas_rt_num = pd.to_numeric(merged.get("atlas_rt_peak"), errors="coerce")
+    merged["rt_theoretical"] = atlas_rt_num
+    merged["rt_error"] = np.where(
+        ms1_rt.notna() & atlas_rt_num.notna(),
+        np.abs(ms1_rt - atlas_rt_num),
+        np.nan,
+    )
 
     # Select and type-cast columns
     str_cols = _COMPOUND_FILE_STR_COLS
@@ -3410,7 +3437,9 @@ def _build_compound_lfc_table(
             "mz_rt_uid", "inchi_key", "compound_name", "adduct", "formula", "smiles", "inchi",
             "pubchem_cid", "iupac_name", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
             "rt_min", "rt_max", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
-            "best_ms1_ppm_error", "best_ms1_rt_error", "msms_score", "ms1_notes", "ms2_notes",
+            "best_ms1_ppm_error", "best_ms1_rt_error",
+            "top3_mz_centroid_avg",
+            "ms1_notes", "ms2_notes",
             "identification_notes", "analyst_notes", "other_notes", "msi_level",
         ]
         mc_slim_cols = [c for c in mc_slim_cols if c in mc.columns]
@@ -3450,14 +3479,35 @@ def _build_compound_lfc_table(
 
         long_df["msms_file"] = long_df.get("best_ms2_file", "")
         long_df["msms_rt"] = pd.to_numeric(long_df.get("best_ms2_rt"), errors="coerce")
+        long_df["msms_score"] = pd.to_numeric(long_df.get("best_ms2_score"), errors="coerce")
         long_df["msms_numberofions"] = long_df.get("best_ms2_num_ions", "")
         long_df["msms_matchingions"] = long_df.get("best_ms2_matching_ions", "")
         long_df["mz_theoretical"] = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
-        long_df["mz_measured"] = pd.to_numeric(long_df.get("best_ms2_mz"), errors="coerce")
-        long_df["mz_error"] = pd.to_numeric(long_df.get("best_ms2_mz_error_da"), errors="coerce")
-        long_df["mz_ppmerror"] = pd.to_numeric(long_df.get("best_ms2_mz_ppm_error"), errors="coerce")
-        long_df["rt_theoretical"] = pd.to_numeric(long_df.get("atlas_rt_peak"), errors="coerce")
-        long_df["rt_error"] = pd.to_numeric(long_df.get("best_ms2_rt_error"), errors="coerce")
+
+        # MS1-based mz_measured / rt_error — consistent with compound_per_file table
+        lfc_top3_mz = pd.to_numeric(long_df.get("top3_mz_centroid_avg"), errors="coerce")
+        lfc_atlas_mz = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
+        long_df["mz_measured"] = lfc_top3_mz
+        lfc_valid_mz = lfc_top3_mz.notna() & lfc_atlas_mz.notna() & (lfc_atlas_mz != 0)
+        long_df["mz_error"] = np.where(
+            lfc_valid_mz,
+            np.abs(lfc_top3_mz - lfc_atlas_mz),
+            np.nan,
+        )
+        long_df["mz_ppmerror"] = np.where(
+            lfc_valid_mz,
+            np.abs(lfc_top3_mz - lfc_atlas_mz) / lfc_atlas_mz * 1e6,
+            np.nan,
+        )
+        # rt_error uses curation_df.rt_peak (mean of per-file peak RTs from analyze_ms1())
+        lfc_top3_rt = pd.to_numeric(long_df.get("rt_peak"), errors="coerce")
+        lfc_atlas_rt = pd.to_numeric(long_df.get("atlas_rt_peak"), errors="coerce")
+        long_df["rt_theoretical"] = lfc_atlas_rt
+        long_df["rt_error"] = np.where(
+            lfc_top3_rt.notna() & lfc_atlas_rt.notna(),
+            np.abs(lfc_top3_rt - lfc_atlas_rt),
+            np.nan,
+        )
     else:
         for col in (
             "adduct", "formula", "smiles", "inchi", "pubchem_cid", "iupac_name",
