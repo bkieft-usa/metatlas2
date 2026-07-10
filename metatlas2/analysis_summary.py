@@ -1988,6 +1988,10 @@ def make_boxplots(
         return
 
     per_file_df = summary_obj.per_file_metrics_df
+    if per_file_df is None or per_file_df.empty:
+        logger.info("per_file_metrics_df not yet built — building now from ms1_df...")
+        dbi._build_per_file_metrics_df(summary_obj)
+        per_file_df = summary_obj.per_file_metrics_df
 
     # Build atlas lookup keyed by mz_rt_uid (the true unique compound identifier)
     atlas_lookup: Dict[str, Dict[str, float]] = {
@@ -2013,13 +2017,32 @@ def make_boxplots(
 
     # Pre-group per_file_df by mz_rt_uid (unique per compound, unlike inchi_key+adduct)
     if per_file_df is not None and not per_file_df.empty:
+        logger.info(
+            "per_file_metrics_df has %d rows, %d unique mz_rt_uids, columns: %s",
+            len(per_file_df), per_file_df["mz_rt_uid"].nunique(), list(per_file_df.columns),
+        )
         pf_groups: dict = {
             key: grp.reset_index(drop=True)
             for key, grp in per_file_df.groupby("mz_rt_uid", sort=False)
         }
     else:
+        logger.warning("per_file_metrics_df is None or empty — boxplots will show no data.")
         pf_groups = {}
     empty_df = pd.DataFrame()
+
+    mc_uids = set(manual_curation_df["mz_rt_uid"].dropna().unique())
+    pf_uids = set(pf_groups.keys())
+    matched = mc_uids & pf_uids
+    logger.info(
+        "mz_rt_uid overlap: %d curation UIDs, %d per_file UIDs, %d matched",
+        len(mc_uids), len(pf_uids), len(matched),
+    )
+    if mc_uids and not matched:
+        logger.warning(
+            "No mz_rt_uid overlap between curation_df and per_file_metrics_df! "
+            "Sample curation UIDs: %s | Sample per_file UIDs: %s",
+            list(mc_uids)[:3], list(pf_uids)[:3],
+        )
 
     # One task per compound
     tasks: list[dict] = []
