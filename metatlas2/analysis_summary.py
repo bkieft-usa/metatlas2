@@ -1850,7 +1850,6 @@ def _plot_compound_boxplot(
     """
     rng = np.random.default_rng(seed=42)
     groups = sorted(compound_metrics["file_group"].dropna().unique()) if not compound_metrics.empty else []
-
     data_per_group: List[List[float]] = []
     valid_groups: List[str] = []
     for g in groups:
@@ -1875,7 +1874,6 @@ def _plot_compound_boxplot(
         return
 
     positions = list(range(len(valid_groups)))
-    print(data_per_group)
     ax.boxplot(
         data_per_group,
         positions=positions,
@@ -1936,12 +1934,9 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     cmp_metrics = kwargs["cmp_metrics"]
 
     safe_stem = f"{_display_compound_idx(cmp_idx):04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
-
     for metric, log_scale, ylabel, atlas_attr, metric_dir_str in metric_configs:
         pdf_path = Path(metric_dir_str) / f"{safe_stem}.pdf"
-
         atlas_ref = atlas_ref_dict.get(atlas_attr) if atlas_attr else None
-
         fig, ax = plt.subplots(figsize=(10, 6))
         fig.subplots_adjust(bottom=0.2, left=0.12, right=0.97, top=0.88)
         try:
@@ -1988,7 +1983,7 @@ def make_boxplots(
     # Build atlas lookup keyed by mz_rt_uid (the true unique compound identifier)
     atlas_lookup: Dict[str, Dict[str, float]] = {
         mc.get("mz_rt_uid", ""): {
-            "atlas_mz":      float(mc.get("atlas_mz", np.nan)),
+            "atlas_mz": float(mc.get("atlas_mz", np.nan)),
             "atlas_rt_peak": float(mc.get("atlas_rt_peak", np.nan)),
         }
         for _, mc in manual_curation_df.iterrows()
@@ -1997,9 +1992,9 @@ def make_boxplots(
     # Create metric output dirs upfront, store paths as strings
     _METRIC_CONFIGS = [
         ("peak_height", False, "Peak Height (intensity)", None),
-        ("peak_height", True,  "Peak Height (log₁₀)",     None),
-        ("rt_peak",     False, "RT Peak (min)",           "atlas_rt_peak"),
-        ("mz_centroid", False, "m/z Centroid",            "atlas_mz"),
+        ("peak_height", True,  "Peak Height (log₁₀)", None),
+        ("rt_peak", False, "RT Peak (min)", "atlas_rt_peak"),
+        ("mz_centroid", False, "m/z Centroid", "atlas_mz"),
     ]
     metric_configs_with_dirs: list[tuple] = []
     for metric, log_scale, ylabel, atlas_attr in _METRIC_CONFIGS:
