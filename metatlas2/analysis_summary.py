@@ -344,8 +344,6 @@ def make_identification_figure(
 
 def _identification_figure_worker(kwargs: dict) -> str:
     """Worker: generate and save one identification figure PDF."""
-    import matplotlib
-    matplotlib.use("Agg")
 
     mc_row = pd.Series(kwargs["mc_row_dict"])
     fig_path = Path(kwargs["fig_path"])
@@ -1647,9 +1645,6 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     _GRID_ROWS = 5
     _PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
 
-    import matplotlib
-    matplotlib.use("Agg")
-
     path_shared = Path(kwargs["path_shared"])
     path_indep = Path(kwargs["path_indep"])
 
@@ -1880,7 +1875,7 @@ def _plot_compound_boxplot(
         return
 
     positions = list(range(len(valid_groups)))
-
+    print(data_per_group)
     ax.boxplot(
         data_per_group,
         positions=positions,
@@ -1931,8 +1926,6 @@ def _plot_compound_boxplot(
 
 def _boxplot_compound_worker(kwargs: dict) -> str:
     """Worker: generate all metric boxplot PDFs for one compound."""
-    import matplotlib
-    matplotlib.use("Agg")
 
     compound_name = kwargs["compound_name"]
     adduct = kwargs["adduct"]
@@ -1979,9 +1972,9 @@ def make_boxplots(
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Exporting identification figures to %s", output_dir)
+    logger.info("Exporting boxplot figures to %s", output_dir)
 
-    manual_curation_df = summary_obj.experimental_data.curation_df.reset_index(drop=True)
+    manual_curation_df = summary_obj.experimental_data.curation_df
 
     if manual_curation_df is None or manual_curation_df.empty:
         logger.error("No manual curation entries found - nothing to plot.")
@@ -1989,9 +1982,8 @@ def make_boxplots(
 
     per_file_df = summary_obj.per_file_metrics_df
     if per_file_df is None or per_file_df.empty:
-        logger.info("per_file_metrics_df not yet built — building now from ms1_df...")
-        dbi._build_per_file_metrics_df(summary_obj)
-        per_file_df = summary_obj.per_file_metrics_df
+        logger.warning("per_file_metrics_df is None or empty — boxplots will show no data.")
+        return
 
     # Build atlas lookup keyed by mz_rt_uid (the true unique compound identifier)
     atlas_lookup: Dict[str, Dict[str, float]] = {
@@ -2016,19 +2008,14 @@ def make_boxplots(
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
     # Pre-group per_file_df by mz_rt_uid (unique per compound, unlike inchi_key+adduct)
-    if per_file_df is not None and not per_file_df.empty:
-        logger.info(
-            "per_file_metrics_df has %d rows, %d unique mz_rt_uids, columns: %s",
-            len(per_file_df), per_file_df["mz_rt_uid"].nunique(), list(per_file_df.columns),
-        )
-        pf_groups: dict = {
-            key: grp.reset_index(drop=True)
-            for key, grp in per_file_df.groupby("mz_rt_uid", sort=False)
-        }
-    else:
-        logger.warning("per_file_metrics_df is None or empty — boxplots will show no data.")
-        pf_groups = {}
-    empty_df = pd.DataFrame()
+    logger.info(
+        "per_file_metrics_df has %d rows, %d unique mz_rt_uids, columns: %s",
+        len(per_file_df), per_file_df["mz_rt_uid"].nunique(), list(per_file_df.columns),
+    )
+    pf_groups: dict = {
+        key: grp.reset_index(drop=True)
+        for key, grp in per_file_df.groupby("mz_rt_uid", sort=False)
+    }
 
     mc_uids = set(manual_curation_df["mz_rt_uid"].dropna().unique())
     pf_uids = set(pf_groups.keys())
@@ -2060,7 +2047,7 @@ def make_boxplots(
             "compound_idx": cmp_idx,
             "atlas_ref_dict": atlas_lookup.get(mz_rt_uid, {}),
             "metric_configs": metric_configs_with_dirs,
-            "cmp_metrics": pf_groups.get(mz_rt_uid, empty_df),
+            "cmp_metrics": pf_groups.get(mz_rt_uid, pd.DataFrame()),
         })
 
     if not tasks:
