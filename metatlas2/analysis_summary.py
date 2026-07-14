@@ -199,11 +199,6 @@ def _safe_float(value, default: float = np.nan) -> float:
 
 def _safe_isnan(value) -> bool:
     """Return True if *value* is NaN, None, or cannot be coerced to a float.
-
-    Unlike ``np.isnan``, this never raises for non-numeric types (strings,
-    None, objects).  None is treated as NaN because aligned mz/intensity
-    arrays use None as a sentinel (JSON round-trip converts float nan →
-    null → Python None) to indicate "no peak at this position".
     """
     if value is None:
         return True
@@ -339,7 +334,7 @@ def make_identification_figure(
                 pbar.set_postfix(compound=name, refresh=False)
                 pbar.update(1)
     pbar.close()
-    logger.info("Identification figure export complete → %s", output_dir)
+    logger.info("Identification figure export complete")
 
 
 def _identification_figure_worker(kwargs: dict) -> str:
@@ -2002,11 +1997,6 @@ def make_boxplots(
         metric_dir.mkdir(parents=True, exist_ok=True)
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
-    # Pre-group per_file_df by mz_rt_uid (unique per compound, unlike inchi_key+adduct)
-    logger.info(
-        "per_file_metrics_df has %d rows, %d unique mz_rt_uids, columns: %s",
-        len(per_file_df), per_file_df["mz_rt_uid"].nunique(), list(per_file_df.columns),
-    )
     pf_groups: dict = {
         key: grp.reset_index(drop=True)
         for key, grp in per_file_df.groupby("mz_rt_uid", sort=False)
@@ -2015,10 +2005,7 @@ def make_boxplots(
     mc_uids = set(manual_curation_df["mz_rt_uid"].dropna().unique())
     pf_uids = set(pf_groups.keys())
     matched = mc_uids & pf_uids
-    logger.info(
-        "mz_rt_uid overlap: %d curation UIDs, %d per_file UIDs, %d matched",
-        len(mc_uids), len(pf_uids), len(matched),
-    )
+
     if mc_uids and not matched:
         logger.warning(
             "No mz_rt_uid overlap between curation_df and per_file_metrics_df! "
@@ -2075,7 +2062,7 @@ def make_boxplots(
 
     pbar.close()
 
-    logger.info("Boxplot PDFs complete → %s", output_dir)
+    logger.info("Boxplot PDFs complete")
 
 ###############################################
 #### Table Exporters
@@ -2223,10 +2210,7 @@ def make_best_ms2_hit_fragment_ions_csv(
         return
 
     result_df.to_csv(output_file, index=False)
-    logger.info(
-        "Exported best MS2 hit fragment ions CSV (%d compounds) → %s",
-        len(result_df), output_file,
-    )
+    logger.info(f"Exported best MS2 hit fragment ions CSV ({len(result_df)} compounds)")
 
 
 def make_data_sheets(
@@ -2310,13 +2294,7 @@ def make_data_sheets(
         )
         wide.columns.name = None
         wide.to_csv(csv_path, index=False)
-        logger.info(
-            "Exported %s data sheet (%d compounds x %d files) → %s",
-            metric,
-            len(wide),
-            len(wide.columns) - len(present_idx),
-            csv_path,
-        )
+        logger.info(f"Exported {metric} data sheet ({len(wide)} compounds x {len(wide.columns) - len(present_idx)} files)")
 
     logger.info("Data sheets written to %s", output_dir)
 
@@ -2439,7 +2417,6 @@ def make_peak_height_filtered_csv(
 
     n_before = len(df_agg)
     df_agg = df_agg.groupby(group_keys, sort=False).max().reset_index()
-    logger.info("inchi_key row merge: %d → %d rows.", n_before, len(df_agg))
 
     # Re-attach chosen metadata columns
     def _lookup(row, mapping, default=""):
@@ -2469,10 +2446,7 @@ def make_peak_height_filtered_csv(
 
     # Export
     df_agg.to_csv(output_csv, index=False)
-    logger.info(
-        "Exported filtered peak height (%d compounds x %d files) → %s",
-        len(df_agg), len(df_agg.columns) - len(ordered_meta), output_csv,
-    )
+    logger.info(f"Exported filtered peak height ({len(df_agg)} compounds x {len(df_agg.columns) - len(ordered_meta)} files)")
 
 
 def make_log_fold_changes_csv(
@@ -2589,12 +2563,7 @@ def make_log_fold_changes_csv(
         n_comparisons += 1
 
     pd.DataFrame(lfc_records).to_csv(output_csv, sep=",", index=False)
-    logger.info(
-        "Exported group-level log fold changes (%d compounds x %d group comparisons) → %s",
-        len(df),
-        n_comparisons,
-        output_csv,
-    )
+    logger.info(f"Exported group-level log fold changes ({len(df)} compounds x {n_comparisons} group comparisons)")
 
 def _get_modelseed_compounds(cache_path: Path) -> pd.DataFrame:
     """Load the ModelSEED compounds table, fetching and caching it if needed.
@@ -2610,20 +2579,20 @@ def _get_modelseed_compounds(cache_path: Path) -> pd.DataFrame:
         "master/Biochemistry/compounds.tsv"
     )
     if cache_path.exists():
-        logger.info("Loading ModelSEED compounds from local cache: %s", cache_path)
+        logger.info(f"Loading ModelSEED compounds from local cache: {cache_path}")
     else:
-        logger.info("Fetching ModelSEED compounds table from %s", _MODELSEED_COMPOUNDS_URL)
+        logger.info(f"Fetching ModelSEED compounds table from {_MODELSEED_COMPOUNDS_URL}")
         resp = requests.get(_MODELSEED_COMPOUNDS_URL, timeout=30)
         resp.raise_for_status()
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(resp.text, encoding="utf-8")
-        logger.info("Saved ModelSEED compounds cache → %s", cache_path)
+        logger.info(f"Saved ModelSEED compounds cache to {cache_path}")
 
     return pd.read_csv(cache_path, sep="\t", low_memory=False)
 
 
 def _build_inchikey_to_cpd(cache_path: Path) -> dict[str, str]:
-    """Return a mapping of InChIKey → semicolon-joined ModelSEED CPD IDs.
+    """Return a mapping of InChIKey to semicolon-joined ModelSEED CPD IDs.
 
     Rows with no InChIKey are dropped immediately to reduce memory usage.
     When multiple CPD IDs share the same InChIKey, all are retained and
@@ -2653,10 +2622,6 @@ def _build_inchikey_to_cpd(cache_path: Path) -> dict[str, str]:
     )
 
     n_multi = sum(1 for v in mapping.values() if ";" in v)
-    logger.info(
-        "Built InChIKey→CPD mapping: %d unique InChIKeys (%d with multiple CPD IDs).",
-        len(mapping), n_multi,
-    )
     return mapping
 
 def make_metabomap(
@@ -2788,10 +2753,7 @@ def make_metabomap(
 
     merged_data_df.insert(1, "cpd_id", merged_data_df["inchi_key"].map(inchikey_to_cpd))
     merged_data_df.to_csv(merged_tsv, sep="\t", index=False)
-    logger.info(
-        "Wrote merged_peak_heights.tsv (%d compounds x %d sample columns) → %s",
-        len(merged_data_df), len(present_sample_cols), merged_tsv,
-    )
+    logger.info(f"Wrote merged_peak_heights.tsv ({len(merged_data_df)} compounds x {len(present_sample_cols)} sample columns)")
 
     # ── 5. Group sample columns by sample_name (index 12) and compute LFC ────
     _LFC_META = {"inchi_key", "cpd_id", "compound_name", "chosen_adduct", "chosen_polarity"}
@@ -2837,10 +2799,7 @@ def make_metabomap(
         n_comparisons += 1
 
     pd.DataFrame(lfc_records).to_csv(lfc_tsv, sep="\t", index=False)
-    logger.info(
-        "Wrote log_fold_changes.tsv (%d compounds x %d group comparisons) → %s",
-        len(merged_data_df), n_comparisons, lfc_tsv,
-    )
+    logger.info(f"Wrote log_fold_changes.tsv ({len(merged_data_df)} compounds x {n_comparisons} group comparisons)")
 
 
 ###############################################
@@ -3022,10 +2981,7 @@ def make_analysis_parquet(
     if unified_table.num_rows > 0:
         unified_table = _attach_meta(unified_table)
         pq.write_table(unified_table, unified_path, **_WRITE_KWARGS)
-        logger.info(
-            f"Wrote {unified_path.stem} (%d rows, %d columns) → %s",
-            unified_table.num_rows, unified_table.num_columns, unified_path,
-        )
+        logger.info(f"Wrote {unified_path.stem} ({unified_table.num_rows} rows, {unified_table.num_columns} columns)")
     else:
         logger.warning("Unified analysis table is empty — file not written.")
 
@@ -3411,7 +3367,7 @@ def _build_compound_lfc_table(
         logger.warning("No LFC columns found in %s — compound_lfc table will be empty.", lfc_csv)
         return pa.table({})
 
-    # Melt wide → long: each LFC column becomes one row
+    # Melt wide to long: each LFC column becomes one row
     long_df = lfc_df.melt(
         id_vars=id_cols,
         value_vars=lfc_cols,
