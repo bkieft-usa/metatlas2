@@ -131,7 +131,9 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     fi
 
     echo "Copying fresh notebook to ${STANDALONE_DIR}..."
-    cp "${REPO_DIR}/local/local_workflow.ipynb" "${STANDALONE_DIR}/local_workflow.ipynb"
+    mkdir -p "${STANDALONE_DIR}/notebooks"
+    cp "${REPO_DIR}/local/local_workflow.ipynb" "${STANDALONE_DIR}/notebooks/local_workflow.ipynb"
+    cp "${REPO_DIR}/local/parquet_query.ipynb" "${STANDALONE_DIR}/notebooks/parquet_query.ipynb"
     echo ""
 
     # ── Pull latest image ──────────────────────────────────────────────────────

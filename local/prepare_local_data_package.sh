@@ -746,8 +746,15 @@ cat > configs/parquet_query.yaml << 'EOF'
 # 3. For string columns, just use the column name for equality (==) or _in for lists.
 # ==============================================================================
 
+# --- EXAMPLE QUERY ---
+row_kind: "compound_lfc"
+condition_1: "T1-256534-8-WT-RE"
+condition_2: "T1-256534-8-Tr-RE"
+log2_fold_change_abs_gt: 1.0
+# should show two compounds, adenine and riboflavin
+
 # --- GLOBAL / GRAIN ---
-row_kind: "compound_lfc" # Options: "compound_file", "compound_lfc"
+#row_kind: "compound_lfc" # Options: "compound_file", "compound_lfc"
 
 # --- COMPOUND_LFC SPECIFIC ---
 # condition_1: "T1-256534-8-WT-RE"
