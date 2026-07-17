@@ -1,3 +1,4 @@
+.DS_Store
 !tests/fixtures/data/
 .venv/
 __pycache__/
