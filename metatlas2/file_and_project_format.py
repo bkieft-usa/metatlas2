@@ -55,7 +55,7 @@ def get_file_parts(name: str, part: str):
     """Return the named capture group *part* from a file stem or project name.
     """
     try:
-        name = os.path.basename(name).strip()
+        #name = os.path.basename(name).strip()
         if ".h5" not in name:
             name += ".h5"
         match = FILE_PATTERN.match(name)
