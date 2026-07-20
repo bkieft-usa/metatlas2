@@ -194,59 +194,6 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         + " | ".join(details)
     )
 
-def _safe_float(value, default: float = np.nan) -> float:
-    """Coerce *value* to float, returning *default* on failure."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        logger.warning(f"Value is not a valid float: {value}")
-        return float(default)
-
-
-def _safe_isnan(value) -> bool:
-    """Return True if *value* is NaN, None, or cannot be coerced to a float.
-
-    Unlike ``np.isnan``, this never raises for non-numeric types (strings,
-    None, objects).  None is treated as NaN because aligned mz/intensity
-    arrays use None as a sentinel (JSON round-trip converts float nan →
-    null → Python None) to indicate "no peak at this position".
-    """
-    if value is None:
-        return True
-    try:
-        return np.isnan(float(value))
-    except (TypeError, ValueError):
-        return True
-
-
-def _as_list(value) -> list:
-    if value is None:
-        return []
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, list):
-        return value
-    # scalar or other iterable — wrap in list so callers always get a list
-    try:
-        return list(value)
-    except TypeError:
-        return []
-
-
-def _jsonable_list(value) -> list:
-    """Return a list with numpy scalars coerced to native Python values.
-
-    This prevents ``json.dumps`` failures like ``TypeError: Object of type
-    float32 is not JSON serializable`` when dataframe cells contain numpy
-    scalar dtypes.
-    """
-    out = []
-    for elem in _as_list(value):
-        if isinstance(elem, np.generic):
-            elem = elem.item()
-        out.append(elem)
-    return out
-
 ###############################################
 #### Identification Figure
 ###############################################
