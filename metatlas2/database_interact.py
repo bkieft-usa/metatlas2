@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 import duckdb
@@ -14,20 +16,16 @@ import time
 from IPython.display import display
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any
 from contextlib import contextmanager
 from tqdm.auto import tqdm
 
 import metatlas2.file_and_project_format as fpf
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
+from metatlas2.workflow_objects import AtlasStage
+from metatlas2.utils import should_disable_tqdm, as_list, get_provenance
 logger = lcf.get_logger('database_interact')
-
-def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
 
 @contextmanager
 def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 10, initial_retry_delay: float = 0.5):
@@ -102,47 +100,51 @@ def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 
     if last_error:
         raise last_error
 
-def get_provenance():
-    """Get provenance information for database records."""
-    return {
-        "analyst": getpass.getuser(),
-        "timestamp": datetime.now().isoformat()
+def _generate_uid(entity_type: str, decorator: str | None = None) -> str:
+    """Generate a unique identifier for a database entity.
+
+    Args:
+        entity_type: One of the keys in ``_UID_PREFIX``.
+        decorator:   Optional human-readable segment inserted between the
+                     prefix and the random hex tail (only used for entity
+                     types that support it).
+
+    Returns:
+        A string UID of the form ``<prefix>[-<decorator>]-<32-hex-chars>``.
+
+    Raises:
+        ValueError: If *entity_type* is not a recognised key.
+    """
+
+    _UID_PREFIX: dict[str, tuple[str, bool]] = {
+        "ref_atlas":         ("atl-ref", True),
+        "rt_atlas":          ("atl-rta", True),
+        "autoid_atlas":      ("atl-aid", True),
+        "curated_atlas":     ("atl-mcr", True),
+        "mz_rt":             ("mzrt", True),
+        "compound":          ("cmp", False),
+        "association":       ("assoc", False),
+        "rt_alignment":      ("rta", False),
+        "config":            ("cfg", False),
+        "ms1_data":          ("ms1", False),
+        "ms2_data":          ("ms2", False),
+        "ms2_hits":          ("ms2-hits",  False),
+        "manual_curation":   ("mcr", False),
+        "project":           ("prj", False),
+        "workflow_stage_run":("wfr", False),
     }
 
-def _generate_uid(entity_type: str, decorator: str = None) -> str:
-    """Generate a unique identifier for database entities."""
-    if entity_type == "ref_atlas":
-        return f"atl-ref-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-ref-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "rt_atlas":
-        return f"atl-rta-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-rta-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "autoid_atlas":
-        return f"atl-aid-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-aid-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "curated_atlas":
-        return f"atl-mcr-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"atl-mcr-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "mz_rt":
-        return f"mzrt-{decorator}-{uuid.uuid4().hex[:32]}" if decorator else f"mzrt-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "compound":
-        return f"cmp-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "association":
-        return f"assoc-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "rt_alignment":
-        return f"rta-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "config":
-        return f"cfg-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "ms1_data":
-        return f"ms1-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "ms2_data":
-        return f"ms2-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "ms2_hits":
-        return f"ms2-hits-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "manual_curation":
-        return f"mcr-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "project":
-        return f"prj-{uuid.uuid4().hex[:32]}"
-    elif entity_type == "workflow_stage_run":
-        return f"wfr-{uuid.uuid4().hex[:32]}"
-    else:
-        raise ValueError(f"Unknown entity type: {entity_type}")
+    entry = _UID_PREFIX.get(entity_type)
+    if entry is None:
+        raise ValueError(
+            f"Unknown entity type: {entity_type!r}. "
+            f"Valid types: {sorted(_UID_PREFIX)}"
+        )
+    prefix, accepts_decorator = entry
+    rand = uuid.uuid4().hex[:32]
+    if accepts_decorator and decorator:
+        return f"{prefix}-{decorator}-{rand}"
+    return f"{prefix}-{rand}"
 
 def create_new_atlas_from_dataframe(
     atlas_df: pd.DataFrame, 
@@ -260,12 +262,12 @@ def enrich_atlas_df_with_compound_metadata(atlas_df: pd.DataFrame, main_db_path:
                 f"""
                     SELECT
                         compound_uid,
-                        COALESCE(formula, '')                         AS formula,
-                        COALESCE(smiles, '')                          AS smiles,
-                        COALESCE(inchi, '')                           AS inchi,
-                        COALESCE(pubchem_cid, '')                     AS pubchem_cid,
+                        COALESCE(formula, '') AS formula,
+                        COALESCE(smiles, '') AS smiles,
+                        COALESCE(inchi, '') AS inchi,
+                        COALESCE(pubchem_cid, '') AS pubchem_cid,
                         COALESCE(mono_isotopic_molecular_weight, 0.0) AS mono_isotopic_molecular_weight,
-                        COALESCE(iupac_name, '')                      AS iupac_name
+                        COALESCE(iupac_name, '') AS iupac_name
                     FROM compounds
                     WHERE compound_uid IN ({placeholders})
                 """,
@@ -340,6 +342,12 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.analysis_type,
                         a.analysis_name,
                         a.atlas_type,
+                        a.source_atlas_uid,
+                        a.rt_alignment_number,
+                        a.analysis_number,
+                        a.created_by,
+                        a.created_date,
+                        a.source,
                         c.compound_uid,
                         COALESCE(mzrt.compound_name, c.compound_name) AS compound_name,
                         c.inchi_key,
@@ -355,10 +363,11 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.rt_min,
                         mzrt.rt_max,
                         mzrt.mz_tolerance,
+                        mzrt.rt_space,
                         mzrt.mz_rt_uid,
                         mzrt.prev_mz_rt_uid,
+                        mzrt.confidence,
                         mzrt.identification_notes,
-                        mzrt.source,
                         mzrt.polarity AS mzrt_polarity,
                         mzrt.chromatography AS mzrt_chromatography
                     FROM atlases a
@@ -383,6 +392,12 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.analysis_type,
                         a.analysis_name,
                         a.atlas_type,
+                        a.source_atlas_uid,
+                        a.rt_alignment_number,
+                        a.analysis_number,
+                        a.created_by,
+                        a.created_date,
+                        a.source,
                         aca.compound_uid,
                         mzrt.compound_name,
                         mzrt.adduct,
@@ -391,10 +406,11 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         mzrt.rt_min,
                         mzrt.rt_max,
                         mzrt.mz_tolerance,
+                        mzrt.rt_space,
                         mzrt.mz_rt_uid,
                         mzrt.prev_mz_rt_uid,
+                        mzrt.confidence,
                         mzrt.identification_notes,
-                        mzrt.source,
                         mzrt.polarity AS mzrt_polarity,
                         mzrt.chromatography AS mzrt_chromatography
                     FROM atlases a
@@ -456,11 +472,11 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
 
 def query_atlases_metadata(
     database_path: str,
-    chromatography: Optional[str] = None,
-    polarity: Optional[str] = None,
-    analysis_type: Optional[str] = None,
-    analysis_name: Optional[str] = None,
-    created_by: Optional[str] = None,
+    chromatography: str | None = None,
+    polarity: str | None = None,
+    analysis_type: str | None = None,
+    analysis_name: str | None = None,
+    created_by: str | None = None,
 ) -> pd.DataFrame:
     """
     Query the atlases table and return metadata rows matching the supplied filters.
@@ -482,8 +498,8 @@ def query_atlases_metadata(
         all columns from the ``atlases`` table.  Returns an empty DataFrame
         when no atlases match.
     """
-    conditions: List[str] = []
-    params: List[str] = []
+    conditions: list[str] = []
+    params: list[str] = []
 
     filter_map = {
         "chromatography": chromatography,
@@ -746,7 +762,7 @@ def get_rt_alignment_model_from_db(
     
     return model_dict
 
-def _prepare_compound_record_from_dict(compound_data: Dict) -> Optional[Tuple]:
+def _prepare_compound_record_from_dict(compound_data: dict) -> tuple | None:
     """Prepare compound record from dictionary data."""
     try:
         prov = get_provenance()
@@ -833,7 +849,7 @@ def save_project_to_main_db(
 def save_lcmsruns_to_db(
     project_db_path: str,
     project_name: str,
-    lcmsruns_list: List[Dict],
+    lcmsruns_list: list[dict],
     overwrite_existing: bool = False
 ) -> int:
     with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
@@ -875,11 +891,11 @@ def save_lcmsruns_to_db(
 
 def get_lcmsruns_from_db(
     project_db_path: str,
-    file_types: Optional[List[str]] = None,
+    file_types: list[str] | None = None,
     file_format: str = "h5",
     chromatography: str = None,
     polarity: str = None
-) -> List["LCMSRun"]:
+) -> list["LCMSRun"]:
     from metatlas2.workflow_objects import LCMSRun
 
     # Normalization
@@ -921,7 +937,7 @@ def get_lcmsruns_from_db(
 
 def batch_save_compounds(
     db_path: str,
-    compounds: List["Compound"],
+    compounds: list["Compound"],
 ) -> int:
     """
     Schema-compliant batch save for compounds and references from raw input data.
@@ -1272,8 +1288,8 @@ def save_config_to_db(
     project_db_path: str,
     config: "Metatlas2Config",
     rt_alignment_number: int,
-    analysis_number: Optional[int] = None,
-    paths: Optional[Dict] = None,
+    analysis_number: int | None = None,
+    paths: dict | None = None,
 ) -> str:
     """
     Snapshot the current config object and computed paths dict into the
@@ -1342,8 +1358,8 @@ def save_config_to_db(
 def load_config_from_db(
     project_db_path: str,
     rt_alignment_number: int,
-    analysis_number: Optional[int] = None,
-) -> Optional["Metatlas2Config"]:
+    analysis_number: int | None = None,
+) -> "Metatlas2Config | None":
     """
     Load and parse a :class:`Metatlas2Config` from the ``project_config`` table.
 
@@ -1390,8 +1406,8 @@ def load_config_from_db(
 def load_paths_from_db(
     project_db_path: str,
     rt_alignment_number: int,
-    analysis_number: Optional[int] = None,
-) -> Optional[Dict]:
+    analysis_number: int | None = None,
+) -> dict | None:
     """
     Load the serialised ``paths`` dict from the ``project_config`` table.
 
@@ -1432,7 +1448,7 @@ def load_paths_from_db(
 
 def update_config_overrides(
     obj: "AnalysisSummary",
-    stage: str = 'AUTO_IDED',
+    stage: AtlasStage | str = AtlasStage.AUTO_IDED,
 ) -> None:
     """
     Persist analyst override parameters onto the matching ``workflow_runs`` row.
@@ -1459,7 +1475,7 @@ def update_config_overrides(
 
 def register_workflow_run(
     atlas_obj: "Atlas",
-    obj: Union["RTAlign", "AutoIdentification", "AnalysisSummary"],
+    obj: "RTAlign" | "AutoIdentification" | "AnalysisSummary",
     stage: str,
 ) -> str:
     """
@@ -1473,7 +1489,7 @@ def register_workflow_run(
         """, (
             run_uid,
             obj.rt_alignment_number,
-            obj.analysis_number if stage != "RT_ALIGNED" else None,
+            obj.analysis_number if stage != AtlasStage.RT_ALIGNED else None,
             atlas_obj.chromatography,
             atlas_obj.polarity,
             atlas_obj.analysis_type,
@@ -1497,7 +1513,7 @@ def count_workflow_runs(
     project_db_path: str,
     rt_alignment_number: int,
     stage: str,
-    analysis_number: Optional[int] = None,
+    analysis_number: int | None = None,
 ) -> int:
     """
     Find out if a stage has already been run and produced data for a given RTA+TGA combination by counting matching rows in the ``workflow_runs`` table.
@@ -1543,7 +1559,7 @@ def _atlas_matches_subset(atlas_to_autoid: dict, analysis_subset: list) -> bool:
     return False
 
 def get_atlas_uid_from_stage(
-    obj: Union["AnalysisSummary", "AutoIdentification", "AnalysisGUI"],
+    obj: "AnalysisSummary" | "AutoIdentification" | "AnalysisGUI",
     stage: str,
 ) -> dict:
     """
@@ -1557,7 +1573,7 @@ def get_atlas_uid_from_stage(
     """
     logger.info(f"Querying workflow_runs to get Atlas UID...")
     try:
-        analysis_number = obj.analysis_number if stage != "RT_ALIGNED" else None
+        analysis_number = obj.analysis_number if stage != AtlasStage.RT_ALIGNED else None
         with get_db_connection(obj.paths['project_db_path'], read_only=True) as conn:
             df = conn.execute("""
                 SELECT atlas_uid, chromatography, polarity,
@@ -1776,7 +1792,7 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
         return {row[0]: row[1] for row in rows}
 
 def clone_atlas(
-    obj: Union["RTAlign", "AutoID", "ManualCuration"],
+    obj: "RTAlign" | "AutoID" | "ManualCuration",
     stage: str,
     ta: "TargetedAnalysis",
 ) -> "Atlas":
@@ -1785,17 +1801,17 @@ def clone_atlas(
     This is used as a starting point for creating new atlases after workflow stages, where we want to keep the same compound_mzrts but update the values based on curation results.
     """
     source_atlas = None
-    if stage == 'RT_ALIGNED':
+    if stage == AtlasStage.RT_ALIGNED:
         mzrt_decorator = "rta"
         atlas_cat = "rt_atlas"
         atlas_name_suffix = " (post-rt-alignment)"
         source_atlas = obj.unaligned_atlas_obj # creates aligned_atlas_obj
-    elif stage == 'AUTO_IDED':
+    elif stage == AtlasStage.AUTO_IDED:
         mzrt_decorator = "aid"
         atlas_cat = "autoid_atlas"
         atlas_name_suffix = " (post-auto-identification)"
         source_atlas = obj.aligned_atlas_obj # creates auto_ided_atlas_obj
-    elif stage == 'MANUALLY_CURATED':
+    elif stage == AtlasStage.MANUALLY_CURATED:
         mzrt_decorator = "mcr"
         atlas_cat = "curated_atlas"
         atlas_name_suffix = " (post-manual-curation)"
@@ -1850,7 +1866,7 @@ def check_require_evaluated(obj: "ManualCuration"):
             )
 
 def update_compound_mzrt_for_atlas(
-    obj: Union["RTAlign", "AutoID", "ManualCuration"],
+    obj: "RTAlign" | "AutoID" | "ManualCuration",
     mz_rt_update_df: pd.DataFrame, 
     stage: str,
 ) -> "Atlas":
@@ -1862,18 +1878,18 @@ def update_compound_mzrt_for_atlas(
 
     """
     atlas_to_update = None
-    if stage == "RT_ALIGNED":
+    if stage == AtlasStage.RT_ALIGNED:
         atlas_to_update = obj.aligned_atlas_obj
-    elif stage == "AUTO_IDED":
+    elif stage == AtlasStage.AUTO_IDED:
         atlas_to_update = obj.auto_ided_atlas_obj
-    elif stage == "MANUALLY_CURATED":
+    elif stage == AtlasStage.MANUALLY_CURATED:
         atlas_to_update = obj.manually_curated_atlas_obj
     
     logger.info(f"Updating compound_mzrts from {atlas_to_update.atlas_uid} for stage {stage}")
     mz_rt_update_lookup = {row['mz_rt_uid']: row for row in mz_rt_update_df.to_dict('records')}
     new_compound_mzrts = {}
     for _, cmzrt in tqdm(atlas_to_update.compound_mzrts.items(), desc="Updating compound_mzrts", disable=should_disable_tqdm()):
-        lookup_key = cmzrt.prev_mz_rt_uid if stage == 'MANUALLY_CURATED' else cmzrt.mz_rt_uid # Use parent uid for cloned atlas in the mc stage
+        lookup_key = cmzrt.prev_mz_rt_uid if stage == AtlasStage.MANUALLY_CURATED else cmzrt.mz_rt_uid # Use parent uid for cloned atlas in the mc stage
         mz_rt_update_row = mz_rt_update_lookup.get(lookup_key)
         if mz_rt_update_row is not None:
             cmzrt.mz = float(mz_rt_update_row.get('mz', cmzrt.mz))
@@ -1890,7 +1906,7 @@ def update_compound_mzrt_for_atlas(
     save_atlas_to_db_and_disk(obj, atlas_to_update, stage)
 
 def save_atlas_to_db_and_disk(
-    obj: Union["RTAlign", "AutoID", "ManualCuration"],
+    obj: "RTAlign" | "AutoID" | "ManualCuration",
     atlas_to_update: "Atlas",
     stage: str,
 ) -> None:
@@ -1915,12 +1931,12 @@ def save_atlas_to_db_and_disk(
         stage=stage,
     )
     logger.info("Saving curated Atlas data to TSV...")
-    if stage == 'AUTO_IDED':
+    if stage == AtlasStage.AUTO_IDED:
         ldt.save_atlas_data_to_tsv(
             atlas_obj=atlas_to_update,
             output_path=obj.paths['analysis_results_output_dir']
         )
-    elif stage == 'RT_ALIGNED':
+    elif stage == AtlasStage.RT_ALIGNED:
         ldt.save_atlas_data_to_tsv(
             atlas_obj=atlas_to_update,
             output_path=obj.paths['rt_alignment_results_dir']
@@ -1981,37 +1997,68 @@ def write_curation_updates_to_db(
         )
 
 def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
+    """Display a summary table of auto-identification results to the logger.
+
+    Counts MS1 scan points, MS2 scan points, and MS2 library hits per
+    compound using the DataFrame-based :class:`ExperimentalData` API.
     """
-    Display a summary table of auto identification results to the logger.
-    Shows number of compounds, MS1/MS2 datapoints, MS2 hits, etc.
-    """
+    dataset = auto_id_obj.experimental_data
+    if dataset is None:
+        logger.warning("display_auto_id_summary: experimental_data is None — nothing to display.")
+        return
+
+    curation_df = dataset.curation_df
+    ms1_df      = dataset.ms1_df
+    ms2_df      = dataset.ms2_df
+
+    if curation_df is None or curation_df.empty:
+        logger.info("display_auto_id_summary: no curation entries to summarise.")
+        return
+
+    # Pre-aggregate MS1 scan-point counts per mz_rt_uid
+    if ms1_df is not None and not ms1_df.empty and "mz_rt_uid" in ms1_df.columns:
+        ms1_counts = (
+            ms1_df.groupby("mz_rt_uid")["spec_rts"]
+            .apply(lambda s: sum(len(as_list(v)) for v in s))
+            .rename("ms1_count")
+        )
+    else:
+        ms1_counts = pd.Series(dtype=int, name="ms1_count")
+
+    # Pre-aggregate MS2 scan counts and hit counts per mz_rt_uid
+    if ms2_df is not None and not ms2_df.empty and "mz_rt_uid" in ms2_df.columns:
+        ms2_counts = ms2_df.groupby("mz_rt_uid").size().rename("ms2_count")
+        ms2_hit_counts = (
+            ms2_df.groupby("mz_rt_uid")["hits"]
+            .apply(lambda s: sum(len(_deserialize_hits_value(v)) for v in s))
+            .rename("ms2_hit_count")
+        )
+    else:
+        ms2_counts     = pd.Series(dtype=int, name="ms2_count")
+        ms2_hit_counts = pd.Series(dtype=int, name="ms2_hit_count")
 
     summary_rows = []
-    for ci in auto_id_obj.experimental_data.curation_df:
-        mz_rt_uid = ci.mz_rt_uid
-
-        ms1_count = sum(
-            len(ms1.data) for ms1 in auto_id_obj.experimental_data.ms1_data
-            if ms1.mz_rt_uid == mz_rt_uid
-        )
-        ms2_count = sum(
-            len(ms2.data) for ms2 in auto_id_obj.experimental_data.ms2_data
-            if ms2.mz_rt_uid == mz_rt_uid
-        )
-        ms2_hits_count = sum(
-            len(ms2_hit.data) for ms2_hit in auto_id_obj.experimental_data.ms2_hits
-            if ms2_hit.mz_rt_uid == mz_rt_uid
-        )
-
+    for _, row in curation_df.iterrows():
+        uid = row.get("mz_rt_uid", "")
         summary_rows.append({
-            "mz_rt_uid": mz_rt_uid,
-            "compound_name": getattr(ci, 'compound_name', ''),
-            "MS1 datapoints": ms1_count,
-            "MS2 datapoints": ms2_count,
-            "MS2 hits": ms2_hits_count,
+            "mz_rt_uid":      uid,
+            "compound_name":  row.get("compound_name", ""),
+            "MS1 datapoints": int(ms1_counts.get(uid, 0)),
+            "MS2 datapoints": int(ms2_counts.get(uid, 0)),
+            "MS2 hits":       int(ms2_hit_counts.get(uid, 0)),
         })
 
-    return
+    if summary_rows:
+        header = f"{'compound_name':<40} {'MS1':>6} {'MS2':>6} {'hits':>6}"
+        logger.info("Auto-ID summary:\n%s", header)
+        for r in summary_rows:
+            logger.info(
+                "  %-40s %6d %6d %6d",
+                r["compound_name"][:40],
+                r["MS1 datapoints"],
+                r["MS2 datapoints"],
+                r["MS2 hits"],
+            )
 
 
 ########################################################
@@ -2502,7 +2549,7 @@ def get_ms2_data_for_compound(
             placeholders = ", ".join(["?"] * len(mz_rt_uids))
             query += f" AND mz_rt_uid IN ({placeholders})"
             params.extend(mz_rt_uids)
-        query += " ORDER BY file_path, rt"
+        query += " ORDER BY filename, scan_rt"
         with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute(query, params).df()
     except Exception as e:
@@ -2811,18 +2858,6 @@ def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     logger.info(f"Best MS1 metrics dataframe built with {len(summary_obj.best_ms1_metrics_df)} rows.")
     return
 
-def _as_list(value) -> list:
-    if value is None:
-        return []
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, list):
-        return value
-    try:
-        return list(value)
-    except TypeError:
-        return []
-
 def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
 
@@ -2851,9 +2886,9 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
 
     records = []
     for _, row in tqdm(ms1_df.iterrows(), total=len(ms1_df), desc="Computing per-file metrics"):
-        spec_rts  = _as_list(row.get("spec_rts"))
-        spec_ints = _as_list(row.get("spec_ints"))
-        spec_mzs  = _as_list(row.get("spec_mzs"))
+        spec_rts  = as_list(row.get("spec_rts"))
+        spec_ints = as_list(row.get("spec_ints"))
+        spec_mzs  = as_list(row.get("spec_mzs"))
 
         # Coerce to float arrays, replacing None/nan with 0 for intensities
         rts  = [float(v) if v is not None else float("nan") for v in spec_rts]
@@ -2971,7 +3006,6 @@ def _transfer_cross_polarity_curation(
         opp_polarity_df = _get_opposite_polarity_curation(
             obj=obj
         )
-        #display(opp_polarity_df)
         if not opp_polarity_df.empty:
             n_cross = _apply_cross_polarity_curation(
                 obj=obj,
@@ -2995,9 +3029,9 @@ def load_and_filter_for_gui(analysis_gui_obj):
     return
 
 def _load_data_from_db(
-    obj: Union["AnalysisGUI", "AnalysisSummary"],
-    atlas_uids: List[str],
-) -> List[str]:
+    obj: "AnalysisGUI" | "AnalysisSummary",
+    atlas_uids: list[str],
+) -> list[str]:
     """
     Load manual_curation, ms1_data, and ms2_data rows for the given
     ``atlas_uids`` from the project database using fully parameterized queries
@@ -3039,6 +3073,23 @@ def _load_data_from_db(
     if not ms2_df.empty and "hits" in ms2_df.columns:
         ms2_df = ms2_df.copy()
         ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
+
+    # Coerce DuckDB REAL[] array columns to plain Python lists on read-back.
+    # ms1_data list columns
+    _MS1_LIST_COLS = ("spec_rts", "spec_ints", "spec_mzs", "in_feature")
+    if not ms1_df.empty:
+        ms1_df = ms1_df.copy()
+        for _col in _MS1_LIST_COLS:
+            if _col in ms1_df.columns:
+                ms1_df[_col] = ms1_df[_col].apply(as_list)
+
+    # manual_curation REAL[] columns
+    _MC_LIST_COLS = ("max_eic_rt", "max_eic_intensity")
+    if not curation_df.empty:
+        curation_df = curation_df.copy()
+        for _col in _MC_LIST_COLS:
+            if _col in curation_df.columns:
+                curation_df[_col] = curation_df[_col].apply(as_list)
 
     logger.info(
         f"Loaded {len(curation_df)} manual curation entries "

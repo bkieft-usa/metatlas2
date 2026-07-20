@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import subprocess
@@ -5,7 +7,10 @@ import sys
 import os
 import re
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from metatlas2.workflow_objects import PathsConfig
 
 SLURM_TEMPLATE = """\
 #!/bin/bash
@@ -170,11 +175,17 @@ def get_project_db_path(project_name: str) -> str:
 
 def set_up_paths(
     config: "Metatlas2Config",
-    project_name: str = None,
-    rt_alignment_number: int = None,
-    analysis_number: int = None,
-) -> Dict[str, str]:
-    """Build all workflow paths and create all output directories for a run."""
+    project_name: str | None = None,
+    rt_alignment_number: int | None = None,
+    analysis_number: int | None = None,
+) -> "PathsConfig":
+    """Build all workflow paths and create all output directories for a run.
+
+    Returns a :class:`~metatlas2.workflow_objects.PathsConfig` TypedDict
+    containing every filesystem path needed by the workflow.  The dict is
+    structurally compatible with plain ``dict[str, str]`` so existing code
+    that accesses paths by key continues to work unchanged.
+    """
 
     data_dir = os.environ.get("METATLAS_DATA_DIR")
     if data_dir is None:

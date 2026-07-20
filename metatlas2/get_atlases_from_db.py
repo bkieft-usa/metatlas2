@@ -26,8 +26,9 @@ metatlas2.sh get-atlases query
 
 import argparse
 import sys
+from __future__ import annotations
+
 from pathlib import Path
-from typing import List, Optional
 
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
@@ -53,13 +54,13 @@ _QUERY_DISPLAY_COLUMNS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_csv_values(raw_value: str) -> List[str]:
+def _parse_csv_values(raw_value: str) -> list[str]:
     """Parse a comma-separated CLI argument into non-empty values."""
     values = [value.strip() for value in raw_value.split(",")]
     return [value for value in values if value]
 
 
-def _resolve_output_paths(atlas_uids: List[str], output_path: Optional[str]) -> List[Path]:
+def _resolve_output_paths(atlas_uids: list[str], output_path: str | None) -> list[Path]:
     """Resolve output CSV paths for each atlas UID."""
     if not output_path:
         return [Path.home() / f"{uid}.csv" for uid in atlas_uids]
@@ -82,7 +83,7 @@ def _resolve_output_paths(atlas_uids: List[str], output_path: Optional[str]) -> 
     return [output / f"{uid}.csv" for uid in atlas_uids]
 
 
-def _resolve_database_path(database_path: Optional[str]) -> str:
+def _resolve_database_path(database_path: str | None) -> str:
     """Return *database_path* unchanged, or look it up from the environment."""
     if database_path is not None:
         return database_path
@@ -95,9 +96,9 @@ def _resolve_database_path(database_path: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def get_atlases(
-    atlas_uids: List[str],
-    output_path: Optional[str] = None,
-    database_path: Optional[str] = None,
+    atlas_uids: list[str],
+    output_path: str | None = None,
+    database_path: str | None = None,
 ) -> None:
     """Extract atlas DataFrames by UID and save each to CSV."""
     with lcf.temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, reconfigure_existing=True):
@@ -121,12 +122,12 @@ def get_atlases(
 
 
 def query_atlases(
-    database_path: Optional[str] = None,
-    chromatography: Optional[str] = None,
-    polarity: Optional[str] = None,
-    analysis_type: Optional[str] = None,
-    analysis_name: Optional[str] = None,
-    created_by: Optional[str] = None,
+    database_path: str | None = None,
+    chromatography: str | None = None,
+    polarity: str | None = None,
+    analysis_type: str | None = None,
+    analysis_name: str | None = None,
+    created_by: str | None = None,
 ) -> None:
     """Print atlas metadata rows matching the supplied filter criteria."""
     with lcf.temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, reconfigure_existing=True):

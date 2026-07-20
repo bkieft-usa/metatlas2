@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 import sys
@@ -11,10 +13,10 @@ from pathlib import Path
 from contextlib import contextmanager
 import tqdm as tqdm_module
 from scipy.optimize import linear_sum_assignment
-from typing import Dict
 
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
+from metatlas2.utils import should_disable_tqdm
 
 logger = lcf.get_logger('ms2_hit_detection')
 
@@ -29,12 +31,6 @@ def _suppress_tqdm():
         yield
     finally:
         tqdm_module.tqdm.__init__ = original_init
-
-def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
 
 def _no_match_alignment(query_mz, query_int, ref_mz, ref_int) -> Dict:
     """Fallback alignment when no peaks match (or on error)."""
@@ -271,7 +267,7 @@ def _assign_hits(ms2_df, results_map):
     hits_col = [[] for _ in range(len(ms2_df))]
     uid_col = ms2_df['mz_rt_uid'].tolist()
     filename_col = ms2_df['filename'].tolist()
-    group_counter: Dict[tuple, int] = {}
+    group_counter: dict[tuple, int] = {}
     for row_idx in range(len(ms2_df)):
         key = (uid_col[row_idx], filename_col[row_idx])
         hits_list = results_map.get(key, [])

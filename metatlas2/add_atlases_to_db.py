@@ -1,7 +1,7 @@
 import argparse
 from pathlib import Path
 import logging
-from metatlas2.workflow_objects import Atlas
+from metatlas2.workflow_objects import NewAtlasesConfig
 import metatlas2.logging_config as lcf
 
 def add_atlases_to_db(
@@ -20,9 +20,7 @@ def add_atlases_to_db(
     ):
         logger = lcf.get_logger('workflow_objects')
         logger.info("Adding atlases from config file to database...")
-        Atlas.create_from_config(
-            config_path=config_path
-        )
+        NewAtlasesConfig.from_yaml(config_path).execute()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Add atlases to the database from a config file.')

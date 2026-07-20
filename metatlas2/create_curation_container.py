@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import json
 import pandas as pd
 import numpy as np
 import sys
 import os
-from typing import Dict, Optional, List, Any
+from typing import Any
 from tqdm.auto import tqdm
 import warnings
 from scipy.ndimage import gaussian_filter1d
@@ -12,13 +14,8 @@ from scipy.signal._peak_finding_utils import PeakPropertyWarning
 
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
+from metatlas2.utils import should_disable_tqdm
 logger = lcf.get_logger('curation_creator')
-
-def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
 
 def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
     """
@@ -263,7 +260,7 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
 
     return res
 
-def _build_isomer_dict(atlas_obj: "Atlas") -> Dict[str, List[Dict[str, Any]]]:
+def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
     atlas_df = atlas_obj.to_dataframe().reset_index(drop=True)
     n = len(atlas_df)
     mzs = atlas_df["mz"].to_numpy(dtype=float)

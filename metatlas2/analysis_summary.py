@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import datetime
 import itertools
 import shutil
-from typing import Optional, List, Tuple, Dict
 from pathlib import Path
 import json
 import os
@@ -34,6 +35,14 @@ from metatlas2.note_options import (
     get_notes_opts,
     should_require_note_selection,
 )
+from metatlas2.utils import (
+    should_disable_tqdm,
+    safe_float,
+    safe_isnan,
+    as_list,
+    jsonable_list,
+)
+from metatlas2.workflow_objects import MS2Hit
 logger = lcf.get_logger('analysis_summary')
 
 def run_all_summaries(
@@ -109,9 +118,6 @@ def run_all_summaries(
 ###############################################
 #### Global helpers
 ###############################################
-
-def should_disable_tqdm():
-    return "SLURM_JOB_ID" in os.environ
 
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
@@ -199,6 +205,11 @@ def _safe_float(value, default: float = np.nan) -> float:
 
 def _safe_isnan(value) -> bool:
     """Return True if *value* is NaN, None, or cannot be coerced to a float.
+
+    Unlike ``np.isnan``, this never raises for non-numeric types (strings,
+    None, objects).  None is treated as NaN because aligned mz/intensity
+    arrays use None as a sentinel (JSON round-trip converts float nan →
+    null → Python None) to indicate "no peak at this position".
     """
     if value is None:
         return True
@@ -243,7 +254,7 @@ def _jsonable_list(value) -> list:
 def make_identification_figure(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
-    max_workers: Optional[int] = None,
+    max_workers: int | None = None,
 ) -> None:
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "identification_figures"
     if overwrite and output_dir.exists():
@@ -269,7 +280,7 @@ def make_identification_figure(
     total_files = ms1_all_df["filename"].nunique() if (ms1_all_df is not None and not ms1_all_df.empty) else 0
     logger.info("Plotting %d compounds across %d files.", len(manual_curation_df), total_files)
 
-    def _pregroup(df: Optional[pd.DataFrame]) -> dict:
+    def _pregroup(df: pd.DataFrame | None) -> dict:
         if df is None or df.empty:
             return {}
         return {
@@ -351,23 +362,14 @@ def _identification_figure_worker(kwargs: dict) -> str:
     ms1_df = kwargs["ms1_df"]
     ms2_df = kwargs["ms2_df"]
 
-    top3: list[dict] = []
-    best_scan_row = None
-    if not ms2_df.empty:            
+    top3: list[MS2Hit] = []
+    if not ms2_df.empty:
         best_score = -np.inf
         for _, scan_row in ms2_df.iterrows():
-            hits = _as_list(scan_row.get("hits", [])) if "hits" in scan_row else []
-            if hits:
-                score = float(hits[0].get("score", -np.inf))
-                if score > best_score:
-                    best_score = score
-                    best_scan_row = scan_row
-        if best_scan_row is not None:
-            top3 = _as_list(best_scan_row.get("hits", []))[:3]
-            # Attach scan-level metadata the hit dicts don't carry
-            for hit in top3:
-                hit.setdefault("scan_rt", float(best_scan_row.get("scan_rt", np.nan)))
-                hit.setdefault("filename", str(best_scan_row.get("filename", "")))
+            hits = MS2Hit.list_from_scan_row(scan_row)
+            if hits and hits[0].has_score and hits[0].score > best_score:
+                best_score = hits[0].score
+                top3 = hits[:3]
 
     fig = plt.figure(figsize=(25, 15))
     gs = fig.add_gridspec(
@@ -437,20 +439,20 @@ def _identification_figure_worker(kwargs: dict) -> str:
     plt.close(fig)
     return compound_name
 
-def _plot_ms2(ax, panel_idx: int, top3: list[dict], ms2_df: pd.DataFrame) -> None:
+def _plot_ms2(ax, panel_idx: int, top3: list[MS2Hit], ms2_df: pd.DataFrame) -> None:
     """Populate one MS2 mirror panel."""
     _MIRROR_TITLES = ["Best MS2 Match", "2nd Best MS2 Match", "3rd Best MS2 Match"]
     title = _MIRROR_TITLES[panel_idx]
 
     if panel_idx < len(top3):
         hit = top3[panel_idx]
-        q_mz, q_int = _as_list(hit["query_aligned"][0]), _as_list(hit["query_aligned"][1])
-        r_mz, r_int = _as_list(hit["ref_aligned"][0]),   _as_list(hit["ref_aligned"][1])
         _plot_mirror(
-            ax, q_mz, q_int, r_mz, r_int,
-            frag_colors=hit.get("fragment_colors"),
-            score=float(hit.get("score", np.nan)),
-            rt=float(hit.get("scan_rt", np.nan)),
+            ax,
+            hit.aligned.query_mzs, hit.aligned.query_ints,
+            hit.aligned.ref_mzs,   hit.aligned.ref_ints,
+            frag_colors=hit.aligned.fragment_colors,
+            score=hit.score,
+            rt=hit.scan_rt,
             title=title,
         )
     elif panel_idx == 0 and not ms2_df.empty:
@@ -458,8 +460,8 @@ def _plot_ms2(ax, panel_idx: int, top3: list[dict], ms2_df: pd.DataFrame) -> Non
         raw_row = ms2_df.iloc[0]
         _plot_raw_ms2(
             ax,
-            mz_arr=_as_list(raw_row.get("data_frags", [])),
-            int_arr=_as_list(raw_row.get("frag_ints", [])),
+            mz_arr=as_list(raw_row.get("frag_mzs", [])),
+            int_arr=as_list(raw_row.get("frag_ints", [])),
             rt=float(raw_row.get("scan_rt", np.nan)),
             title=title,
         )
@@ -470,7 +472,7 @@ def _plot_mirror(
     ax,
     qry_mz: list, qry_int: list,
     ref_mz: list, ref_int: list,
-    frag_colors: Optional[list] = None,
+    frag_colors: list | None = None,
     score: float = np.nan,
     rt: float = np.nan,
     title: str = "",
@@ -483,7 +485,7 @@ def _plot_mirror(
 
     if qry_mz and qry_int:
         for mz, intensity, color in zip(qry_mz, qry_int, frag_colors):
-            if not _safe_isnan(mz) and not _safe_isnan(intensity):
+            if not safe_isnan(mz) and not safe_isnan(intensity):
                 ax.bar(float(mz), float(intensity), color=color, width=1.1, alpha=0.85)
 
     scale = 1.0
@@ -494,7 +496,7 @@ def _plot_mirror(
         max_qry = max(qry_int_valid) if qry_int_valid else 0.0
         scale = (max_qry / max_ref) if max_ref > 0 else 1.0
         for mz, intensity, color in zip(ref_mz, ref_int, frag_colors):
-            if not _safe_isnan(mz) and not _safe_isnan(intensity):
+            if not safe_isnan(mz) and not safe_isnan(intensity):
                 ax.bar(float(mz), -float(intensity) * scale, color=color, width=1.1, alpha=0.6)
 
     if qry_mz and qry_int:
@@ -572,7 +574,7 @@ def _plot_eic(
     ms1_compound_df: pd.DataFrame,
     mc_row: pd.Series,
     log_scale: bool = False,
-    color_map: Optional[dict] = None,
+    color_map: dict | None = None,
 ) -> None:
     """Plot EIC traces for all files of one compound.
 
@@ -585,20 +587,20 @@ def _plot_eic(
     rt_max = mc_row.get("rt_max", np.nan)
     rt_peak = mc_row.get("atlas_rt_peak", np.nan)
 
-    if not _safe_isnan(rt_min):
-        ax.axvline(_safe_float(rt_min), color="red", linestyle="--", linewidth=1.5, alpha=0.7)
-    if not _safe_isnan(rt_max):
-        ax.axvline(_safe_float(rt_max), color="red", linestyle="--", linewidth=1.5, alpha=0.7)
-    if not _safe_isnan(rt_peak):
-        ax.axvline(_safe_float(rt_peak), color="black", linestyle=":", linewidth=1.5, alpha=0.7)
+    if not safe_isnan(rt_min):
+        ax.axvline(safe_float(rt_min), color="red", linestyle="--", linewidth=1.5, alpha=0.7)
+    if not safe_isnan(rt_max):
+        ax.axvline(safe_float(rt_max), color="red", linestyle="--", linewidth=1.5, alpha=0.7)
+    if not safe_isnan(rt_peak):
+        ax.axvline(safe_float(rt_peak), color="black", linestyle=":", linewidth=1.5, alpha=0.7)
 
     if ms1_compound_df.empty:
         ax.text(0.5, 0.5, "No MS1 data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=14, color="gray")
     else:
         for _, row in ms1_compound_df.iterrows():
-            spec_rts = _as_list(row.get("spec_rts", []))
-            spec_ints = _as_list(row.get("spec_ints", []))
+            spec_rts = as_list(row.get("spec_rts", []))
+            spec_ints = as_list(row.get("spec_ints", []))
             if not spec_rts or not spec_ints:
                 continue
             color = _get_file_color(row.get("filename", ""), color_map)
@@ -636,7 +638,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
             return "N/A"
         if isinstance(val, str):
             return val if val.strip() else "N/A"
-        if _safe_isnan(val):
+        if safe_isnan(val):
             return "N/A"
         try:
             return fmt.format(val) if fmt else str(val)
@@ -644,19 +646,19 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
             return str(val)
 
     # Use top-3 MS1 averages — consistent with Final ID sheet ground-truth values
-    atlas_mz   = _safe_float(mc_row.get("atlas_mz"))
-    mz_meas    = _safe_float(mc_row.get("top3_mz_centroid_avg"))
-    atlas_rt   = _safe_float(mc_row.get("atlas_rt_peak"))
-    rt_meas    = _safe_float(mc_row.get("rt_peak"))
+    atlas_mz   = safe_float(mc_row.get("atlas_mz"))
+    mz_meas    = safe_float(mc_row.get("top3_mz_centroid_avg"))
+    atlas_rt   = safe_float(mc_row.get("atlas_rt_peak"))
+    rt_meas    = safe_float(mc_row.get("rt_peak"))
 
-    if not _safe_isnan(mz_meas) and not _safe_isnan(atlas_mz) and atlas_mz != 0:
+    if not safe_isnan(mz_meas) and not safe_isnan(atlas_mz) and atlas_mz != 0:
         mz_ppm_abs = abs(mz_meas - atlas_mz) / atlas_mz * 1e6
     else:
         mz_ppm_abs = float("nan")
 
-    rt_delta_abs = abs(atlas_rt - rt_meas) if not (_safe_isnan(atlas_rt) or _safe_isnan(rt_meas)) else float("nan")
+    rt_delta_abs = abs(atlas_rt - rt_meas) if not (safe_isnan(atlas_rt) or safe_isnan(rt_meas)) else float("nan")
 
-    best_intensity = _safe_float(mc_row.get("best_ms1_intensity"))
+    best_intensity = safe_float(mc_row.get("best_ms1_intensity"))
 
     rows = [
         ("Compound", _fmt(mc_row.get("compound_name", "Undefined"))),
@@ -672,7 +674,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         ("Atlas RT", _fmt(atlas_rt, "{:.3f} min")),
         ("Measured RT", _fmt(rt_meas, "{:.3f} min")),
         ("RT Δ", _fmt(rt_delta_abs, "{:.3f}")),
-        ("Max Intensity", _fmt(best_intensity, "{:.3e}") if not _safe_isnan(best_intensity) else "N/A"),
+        ("Max Intensity", _fmt(best_intensity, "{:.3e}") if not safe_isnan(best_intensity) else "N/A"),
     ]
 
     y_pos = 1.03
@@ -687,7 +689,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
 
 def _plot_hit_info_table(
     ax,
-    top3: list[dict],
+    top3: list[MS2Hit],
     mc_row: pd.Series,
     ms2_df: pd.DataFrame,
 ) -> None:
@@ -701,41 +703,35 @@ def _plot_hit_info_table(
 
     best_hit = top3[0]
 
-    raw_name = os.path.basename(str(best_hit.get("filename", "")))
+    raw_name = os.path.basename(best_hit.filename)
 
-    def _to_float(value, default=np.nan):
-        try:
-            return float(value)
-        except Exception:
-            return float(default)
-
-    atlas_mz = _to_float(mc_row.get("atlas_mz"))
-    measured_mz = _to_float(best_hit.get("mz_measured"))
+    atlas_mz = safe_float(mc_row.get("atlas_mz"))
+    measured_mz = best_hit.mz_measured
     ppm_error = (
         (measured_mz - atlas_mz) / atlas_mz * 1e6
-        if (not _safe_isnan(measured_mz) and not _safe_isnan(atlas_mz) and atlas_mz != 0)
+        if (not safe_isnan(measured_mz) and not safe_isnan(atlas_mz) and atlas_mz != 0)
         else np.nan
     )
-    atlas_rt = _to_float(mc_row.get("atlas_rt_peak"))
-    measured_rt = _to_float(best_hit.get("scan_rt"))
+    atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
+    measured_rt = best_hit.scan_rt
     rt_error = (
         measured_rt - atlas_rt
-        if (not _safe_isnan(measured_rt) and not _safe_isnan(atlas_rt))
+        if (not safe_isnan(measured_rt) and not safe_isnan(atlas_rt))
         else np.nan
     )
-    score = _to_float(best_hit.get("score"))
-    num_matches = int(best_hit.get("num_matches", 0))
-    ref_frags = int(best_hit.get("ref_frags", 0))
+    score = best_hit.score
+    num_matches = best_hit.num_matches
+    ref_frags = best_hit.ref_frags
 
-    matched_frags = _as_list(best_hit.get("matched_fragments"))
+    matched_frags = best_hit.matched_fragments
     frag_str = ", ".join(f"{m:.3f}" for m in matched_frags) if matched_frags else "N/A"
 
     def _v(val, fmt):
-        if val is None or _safe_isnan(val):
+        if val is None or safe_isnan(val):
             return "N/A"
         return fmt.format(val)
 
-    score_str = f"{score:.4f}\n({num_matches}/{ref_frags})" if not _safe_isnan(score) else "N/A"
+    score_str = f"{score:.4f}\n({num_matches}/{ref_frags})" if not safe_isnan(score) else "N/A"
 
     FRAG_WRAP_WIDTH = 80
     frag_lines = textwrap.wrap(frag_str, width=FRAG_WRAP_WIDTH) if frag_str != "N/A" else ["N/A"]
@@ -799,12 +795,12 @@ def _plot_hit_info_table(
     line_spacing = 0.07
 
     if len(top3) >= 2:
-        second_file = os.path.basename(str(top3[1].get("filename", "")))
+        second_file = os.path.basename(top3[1].filename)
         ax.text(0, additional_info_y, f"2nd best: {second_file}",
                 fontsize=13, ha="left", va="top", transform=ax.transAxes)
 
     if len(top3) >= 3:
-        third_file = os.path.basename(str(top3[2].get("filename", "")))
+        third_file = os.path.basename(top3[2].filename)
         ax.text(0, additional_info_y - line_spacing, f"3rd best: {third_file}",
                 fontsize=13, ha="left", va="top", transform=ax.transAxes)
 
@@ -821,7 +817,7 @@ def _plot_hit_info_table(
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
-def _get_file_color(filename: str, color_map: Optional[Dict[str, str]] = None) -> str:
+def _get_file_color(filename: str, color_map: dict[str, str] | None = None) -> str:
     """Determine color for a file based on color mapping.
     """
     if color_map is None:
@@ -851,15 +847,15 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
 
 def _plot_structure(
     ax,
-    smiles: Optional[str],
-    inchi: Optional[str],
+    smiles: str | None,
+    inchi: str | None,
     inchi_key: str,
     size: int = 500,
 ) -> None:
     """Draw molecular structure using RDKit's MolToImage (requires libXrender, available in container)."""
     ax.axis("off")
 
-    def _clean_chemical_text(value: Optional[str]) -> Optional[str]:
+    def _clean_chemical_text(value: str | None) -> str | None:
         """Return a usable string chemical identifier, else None."""
         if value is None:
             return None
@@ -966,7 +962,7 @@ def make_final_id_sheet(
     manual_curation_df = summary_obj.experimental_data.curation_df
 
     compound_info_map: dict[str, tuple] = {}
-    mass_map: dict[str, Optional[float]] = {}
+    mass_map: dict[str, float | None] = {}
     for _, _row in manual_curation_df.iterrows():
         ik = _row.get("inchi_key", "")
         if not ik or ik in compound_info_map:
@@ -990,25 +986,16 @@ def make_final_id_sheet(
     if not ms2_df.empty:
         for uid, grp in ms2_df.groupby("mz_rt_uid", sort=False):
             best_score = -np.inf
-            best_hit_data = None
+            best_hit: MS2Hit | None = None
 
             for _, scan_row in grp.iterrows():
-                hits_list = _as_list(scan_row.get("hits"))
-                if not hits_list:
-                    continue
-                top_hit = hits_list[0]
-                score = float(top_hit.get("score", -np.inf))
-                if score > best_score:
-                    best_score = score
-                    best_hit_data = {
-                        **top_hit,
-                        # Attach scan-level metadata that isn't in the hit dict
-                        "filename": scan_row.get("filename", ""),
-                        "scan_rt": float(scan_row.get("scan_rt", np.nan)),
-                    }
+                hits = MS2Hit.list_from_scan_row(scan_row)
+                if hits and hits[0].has_score and hits[0].score > best_score:
+                    best_score = hits[0].score
+                    best_hit = hits[0]
 
-            if best_hit_data is not None:
-                ms2_best[uid] = best_hit_data
+            if best_hit is not None:
+                ms2_best[uid] = best_hit
 
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
 
@@ -1070,21 +1057,21 @@ def make_final_id_sheet(
 
         best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is not None:
-            msms_file = str(best_hit.get("filename", ""))
-            msms_rt = float(best_hit.get("scan_rt", np.nan))
-            msms_score = float(best_hit.get("score", np.nan))
+            msms_file = best_hit.filename
+            msms_rt = best_hit.scan_rt
+            msms_score = best_hit.score
 
-            num_matches = int(best_hit.get("num_matches", 0))
-            ref_frags = int(best_hit.get("ref_frags", 0))
+            num_matches = best_hit.num_matches
+            ref_frags = best_hit.ref_frags
             msms_num_ions = f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches)
 
-            matched_frags = _as_list(best_hit.get("matched_fragments"))
+            matched_frags = best_hit.matched_fragments
             msms_matching_ions = (
                 ",".join(f"{m:.3f}" for m in matched_frags) if matched_frags else "N/A"
             )
 
             # Single-ion match precursor check
-            if num_matches == 1 and not np.isnan(msms_score) and matched_frags:
+            if num_matches == 1 and best_hit.has_score and matched_frags:
                 single_ion = float(matched_frags[0])
                 ppm_tol = float(mc_row.get("mz_tolerance", 5.0))
                 precursor_match = (
@@ -1408,7 +1395,7 @@ def _rt_quality(rt_error: float, chromatography: str) -> float:
 
 def _total_score_and_msi(
     msms_q: float, mz_q: float, rt_q: float
-) -> Tuple[float, str]:
+) -> tuple[float, str]:
     """Compute total ID score (0-3) and MSI level string.
     """
     scores = [v for v in [msms_q, mz_q, rt_q] if not np.isnan(v)]
@@ -1426,8 +1413,8 @@ def _total_score_and_msi(
 
 def _compute_all_overlapping_compounds(
     manual_curation_df: pd.DataFrame,
-    mass_map: dict[str, Optional[float]],
-) -> dict[int, Tuple[str, str]]:
+    mass_map: dict[str, float | None],
+) -> dict[int, tuple[str, str]]:
     """Compute every compound's overlapping set in one vectorized pass.
 
     Parameters
@@ -1470,7 +1457,7 @@ def _compute_all_overlapping_compounds(
     overlap = rt_overlap & (mz_similar | mass_similar) & ~both_mass_zero
     np.fill_diagonal(overlap, True)
 
-    result: dict[int, Tuple[str, str]] = {}
+    result: dict[int, tuple[str, str]] = {}
     for i in range(n):
         js = np.where(overlap[i])[0]
         if len(js) <= 1:
@@ -1489,7 +1476,7 @@ def _compute_all_overlapping_compounds(
 def make_eic_thumbnails(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
-    max_workers: Optional[int] = None,
+    max_workers: int | None = None,
 ) -> None:
     """Generate per-compound EIC thumbnail PDFs in two output folders (parallelised)."""
 
@@ -1658,7 +1645,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     all_intensities = [
         v
         for item in file_items
-        for v in _as_list(item.get("spec_ints"))
+        for v in as_list(item.get("spec_ints"))
         if v is not None and not np.isnan(v)
     ]
     y_max_global = float(max(all_intensities)) if all_intensities else None
@@ -1697,13 +1684,13 @@ def _compound_pdf_worker(kwargs: dict) -> str:
             for slot_idx, item in enumerate(page_items):
                 ax = axes_flat[slot_idx]
                 fname_s = _strip_non_chars(_short_fname(item["filename"]))
-                spec_ints = _as_list(item.get("spec_ints"))
+                spec_ints = as_list(item.get("spec_ints"))
                 valid_ints = [v for v in spec_ints if v is not None and not np.isnan(v)]
                 y_max_indep = float(max(valid_ints)) if valid_ints else None
                 group_name = item.get("group_name")
                 _render_eic_thumbnail(
                     ax,
-                    _as_list(item.get("spec_rts")),
+                    as_list(item.get("spec_rts")),
                     spec_ints,
                     rt_min,
                     rt_peak,
@@ -1759,8 +1746,8 @@ def _render_eic_thumbnail(
     rt_peak: float,
     rt_max: float,
     fname_short: str,
-    y_max: Optional[float],
-    bg_color: Optional[str] = None,
+    y_max: float | None,
+    bg_color: str | None = None,
 ) -> None:
     """Draw one EIC thumbnail onto *ax*.
 
@@ -1819,7 +1806,7 @@ def _plot_compound_boxplot(
     compound_metrics: pd.DataFrame,
     metric: str,
     log_scale: bool,
-    atlas_ref: Optional[float],
+    atlas_ref: float | None,
     compound_name: str,
     adduct: str,
     ylabel: str,
@@ -1845,8 +1832,8 @@ def _plot_compound_boxplot(
     """
     rng = np.random.default_rng(seed=42)
     groups = sorted(compound_metrics["file_group"].dropna().unique()) if not compound_metrics.empty else []
-    data_per_group: List[List[float]] = []
-    valid_groups: List[str] = []
+    data_per_group: list[list[float]] = []
+    valid_groups: list[str] = []
     for g in groups:
         group_rows = compound_metrics.loc[compound_metrics["file_group"] == g]
         vals = group_rows[metric].dropna().tolist()
@@ -1950,7 +1937,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
 def make_boxplots(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
-    max_workers: Optional[int] = None,
+    max_workers: int | None = None,
 ) -> None:
 
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "boxplots"
@@ -1976,7 +1963,7 @@ def make_boxplots(
         return
 
     # Build atlas lookup keyed by mz_rt_uid (the true unique compound identifier)
-    atlas_lookup: Dict[str, Dict[str, float]] = {
+    atlas_lookup: dict[str, dict[str, float]] = {
         mc.get("mz_rt_uid", ""): {
             "atlas_mz": float(mc.get("atlas_mz", np.nan)),
             "atlas_rt_peak": float(mc.get("atlas_rt_peak", np.nan)),
@@ -2114,7 +2101,7 @@ def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
     output_filename: str = "best_ms2_hit_fragment_ions.csv",
     overwrite: bool = True,
-    min_fragment_intensity: Optional[float] = 1e4,
+    min_fragment_intensity: float | None = 1e4,
 ) -> None:
 
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
@@ -2135,26 +2122,18 @@ def make_best_ms2_hit_fragment_ions_csv(
         return
 
     ms2_df = summary_obj.experimental_data.ms2_df
-    ms2_best: dict[str, dict] = {}
+    ms2_best: dict[str, MS2Hit] = {}
     if ms2_df is not None and not ms2_df.empty:
         for uid, grp in ms2_df.groupby("mz_rt_uid", sort=False):
             best_score = -np.inf
-            best_hit_data: Optional[dict] = None
+            best_hit: MS2Hit | None = None
             for _, scan_row in grp.iterrows():
-                hits = _as_list(scan_row.get("hits"))
-                if not hits:
-                    continue
-                # hits are pre-sorted best-first; index 0 is the top hit
-                top_score = float(hits[0].get("score", -np.inf))
-                if top_score > best_score:
-                    best_score = top_score
-                    best_hit_data = {
-                        **hits[0],
-                        "filename": scan_row.get("filename", ""),
-                        "scan_rt":  float(scan_row.get("scan_rt", np.nan)),
-                    }
-            if best_hit_data is not None:
-                ms2_best[uid] = best_hit_data
+                hits = MS2Hit.list_from_scan_row(scan_row)
+                if hits and hits[0].has_score and hits[0].score > best_score:
+                    best_score = hits[0].score
+                    best_hit = hits[0]
+            if best_hit is not None:
+                ms2_best[uid] = best_hit
 
     rows: list[dict] = []
     for cmp_idx, mc_row in tqdm(
@@ -2172,7 +2151,8 @@ def make_best_ms2_hit_fragment_ions_csv(
         if best_hit is None:
             continue
 
-        q_mz_all, q_int_all = np.array(_as_list(best_hit["query_aligned"][0]), dtype=float), np.array(_as_list(best_hit["query_aligned"][1]), dtype=float)
+        q_mz_all = np.array(best_hit.aligned.query_mzs, dtype=float)
+        q_int_all = np.array(best_hit.aligned.query_ints, dtype=float)
 
         if q_mz_all.size > 0:
             valid     = ~np.isnan(q_mz_all)
@@ -2378,7 +2358,7 @@ def make_peak_height_filtered_csv(
     group_keys    = ["inchi_key", "compound_name", "control_filter"]
 
     # Determine the best adduct per (inchi_key, compound_name, control_filter)
-    chosen_adduct_map: Dict[tuple, str] = {}
+    chosen_adduct_map: dict[tuple, str] = {}
     if "adduct" in df.columns and selector_cols:
         sel_score = df[selector_cols].max(axis=1, skipna=True).fillna(-np.inf)
         tmp = df[group_keys + ["adduct"]].copy()
@@ -2391,8 +2371,8 @@ def make_peak_height_filtered_csv(
             chosen_adduct_map[key] = row["adduct"]
 
     # Preserve compound_index and mz_rt_uid for the best-scoring row per group
-    chosen_index_map: Dict[tuple, int] = {}
-    chosen_uid_map:   Dict[tuple, str] = {}
+    chosen_index_map: dict[tuple, int] = {}
+    chosen_uid_map:   dict[tuple, str] = {}
     if selector_cols:
         sel_score = df[selector_cols].max(axis=1, skipna=True).fillna(-np.inf)
         tmp2 = df[group_keys].copy()
@@ -2509,8 +2489,8 @@ def make_log_fold_changes_csv(
     data_num = df[data_cols].apply(pd.to_numeric, errors="coerce")
 
     # ── Group replicate columns by sample_name (13th underscore-split field) ──
-    group_to_cols: Dict[str, List[str]] = {}
-    ungrouped_cols: List[str] = []
+    group_to_cols: dict[str, list[str]] = {}
+    ungrouped_cols: list[str] = []
     for col in data_num.columns:
         grp = fpf.get_file_parts(col, "sample_name")
         if grp is not None:
@@ -2545,12 +2525,12 @@ def make_log_fold_changes_csv(
         logger.info("  Group '%s': %d replicate(s) — %s", grp, len(cols), cols)
 
     # ── Compute per-group mean across replicates ──────────────────────────────
-    group_means: Dict[str, np.ndarray] = {}
+    group_means: dict[str, np.ndarray] = {}
     for grp, cols in group_to_cols.items():
         group_means[grp] = data_num[cols].mean(axis=1).to_numpy(dtype=float)
 
     # ── Build output: id columns + pairwise LFC columns ──────────────────────
-    lfc_records: Dict[str, object] = {col: df[col].to_numpy() for col in id_cols}
+    lfc_records: dict[str, object] = {col: df[col].to_numpy() for col in id_cols}
 
     n_comparisons = 0
     for g1, g2 in itertools.combinations(group_means.keys(), 2):
@@ -2759,7 +2739,7 @@ def make_metabomap(
     _LFC_META = {"inchi_key", "cpd_id", "compound_name", "chosen_adduct", "chosen_polarity"}
     sample_data_cols = [c for c in merged_data_df.columns if c not in _LFC_META]
 
-    group_to_cols: Dict[str, List[str]] = {}
+    group_to_cols: dict[str, list[str]] = {}
     for col in sample_data_cols:
         grp = fpf.get_file_parts(col, "sample_name")
         if grp is not None and not any(ex in grp for ex in _EXCLUDE_GROUPS):
@@ -2779,12 +2759,12 @@ def make_metabomap(
 
     data_num = merged_data_df[sample_data_cols].apply(pd.to_numeric, errors="coerce")
 
-    group_means: Dict[str, np.ndarray] = {
+    group_means: dict[str, np.ndarray] = {
         grp: data_num[cols].mean(axis=1).to_numpy(dtype=float)
         for grp, cols in group_to_cols.items()
     }
 
-    lfc_records: Dict[str, object] = {
+    lfc_records: dict[str, object] = {
         col: merged_data_df[col].to_numpy()
         for col in ["inchi_key", "cpd_id", "compound_name"]
     }
@@ -3052,42 +3032,36 @@ def _build_best_ms2_summary_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     rows: list[dict] = []
     for uid, grp in ms2_df.groupby("mz_rt_uid", sort=False):
         best_score = -np.inf
-        best_scan_row = None
-        best_hit = None
+        best_hit: MS2Hit | None = None
 
         for _, scan_row in grp.iterrows():
-            hits = _as_list(scan_row.get("hits"))
-            if not hits:
-                continue
-            top_hit = hits[0]
-            score = float(top_hit.get("score", -np.inf))
-            if score > best_score:
-                best_score = score
-                best_scan_row = scan_row
-                best_hit = top_hit
+            hits = MS2Hit.list_from_scan_row(scan_row)
+            if hits and hits[0].has_score and hits[0].score > best_score:
+                best_score = hits[0].score
+                best_hit = hits[0]
 
-        if best_hit is None or best_scan_row is None:
+        if best_hit is None:
             continue
 
-        scan_rt = float(best_scan_row.get("scan_rt", np.nan))
-        q_mz = np.array(_as_list(best_hit.get("query_aligned", [[], []])[0]), dtype=float)
+        scan_rt = best_hit.scan_rt
+        q_mz = np.array(best_hit.aligned.query_mzs, dtype=float)
         valid_mz = q_mz[np.isfinite(q_mz)].tolist() if q_mz.size > 0 else []
         rt_list = [scan_rt] * len(valid_mz)
 
-        matched_frags = _as_list(best_hit.get("matched_fragments"))
-        num_matches = int(best_hit.get("num_matches", 0))
-        ref_frags = int(best_hit.get("ref_frags", 0))
+        matched_frags = best_hit.matched_fragments
+        num_matches = best_hit.num_matches
+        ref_frags = best_hit.ref_frags
 
         rows.append(
             {
                 "mz_rt_uid": str(uid),
-                "best_ms2_file": os.path.basename(str(best_scan_row.get("filename", ""))),
+                "best_ms2_file": os.path.basename(best_hit.filename),
                 "best_ms2_rt": scan_rt,
-                "best_ms2_score": float(best_hit.get("score", np.nan)),
-                "best_ms2_mz": float(best_hit.get("mz_measured", np.nan)),
+                "best_ms2_score": best_hit.score,
+                "best_ms2_mz": best_hit.mz_measured,
                 "best_ms2_num_ions": f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches),
                 "best_ms2_matching_ions": ",".join(f"{float(m):.3f}" for m in matched_frags) if matched_frags else "",
-                "best_ms2_spectrum_rt_mz": json.dumps([_jsonable_list(rt_list), _jsonable_list(valid_mz)]),
+                "best_ms2_spectrum_rt_mz": json.dumps([jsonable_list(rt_list), jsonable_list(valid_mz)]),
             }
         )
 
@@ -3222,7 +3196,7 @@ def _build_compound_per_file_table(
             spec_df = spec_df.drop_duplicates(subset=["mz_rt_uid", "filename"], keep="first")
             merged = merged.merge(spec_df, on=["mz_rt_uid", "filename"], how="left")
             merged["ms1_spectrum_rt_i"] = merged.apply(
-                lambda r: json.dumps([_jsonable_list(r.get("spec_rts")), _jsonable_list(r.get("spec_ints"))]),
+                lambda r: json.dumps([jsonable_list(r.get("spec_rts")), jsonable_list(r.get("spec_ints"))]),
                 axis=1,
             )
             merged.drop(columns=["spec_rts", "spec_ints"], inplace=True, errors="ignore")

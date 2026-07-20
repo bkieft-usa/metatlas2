@@ -1,7 +1,7 @@
 import argparse
 from pathlib import Path
 import logging
-from metatlas2.workflow_objects import Compound
+from metatlas2.workflow_objects import NewCompoundsConfig
 import metatlas2.logging_config as lcf
 
 def add_compounds_to_db(
@@ -21,10 +21,7 @@ def add_compounds_to_db(
     ):
         logger = lcf.get_logger('workflow_objects')
         logger.info("Adding compounds from config file to database...")
-        Compound.create_from_config(
-            config_path=config_path,
-            overwrite_db=overwrite_db
-        )
+        NewCompoundsConfig.from_yaml(config_path).execute(overwrite_db=overwrite_db)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Add compounds to the database from a config file.')

@@ -1,5 +1,8 @@
-from typing import Dict, Any
+from __future__ import annotations
+
+from typing import Any
 import logging
+
 import socket
 import threading, time, os
 from IPython.display import display, HTML
@@ -25,10 +28,10 @@ logger = lcf.get_logger('workflows')
 def run_project_setup(
     project_name: str,
     config: "Metatlas2Config",
-    paths: Dict[str, str],
+    paths: "PathsConfig",
     overwrite_existing: bool = False,
-    rt_alignment_number: int = None,
-    analysis_number: int = None,
+    rt_alignment_number: int | None = None,
+    analysis_number: int | None = None,
 ) -> None:
 
     from metatlas2.workflow_objects import Project
@@ -50,7 +53,7 @@ def run_rt_alignment(
     analysis_number: int,
 ) -> None:
 
-    from metatlas2.workflow_objects import RTAlign, Atlas
+    from metatlas2.workflow_objects import RTAlign, Atlas, AtlasStage
 
     rt_align_obj = RTAlign()
 
@@ -87,6 +90,7 @@ def run_rt_alignment(
     logger.info("Passing Atlas and LCMSRuns to data extractor...")
     edh.extract_data_from_raw(
         obj=rt_align_obj,
+        stage="rt_alignment",
     )
 
     logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
@@ -115,7 +119,7 @@ def run_rt_alignment(
         logger.info(f"Cloning config Atlas {rt_align_obj.unaligned_atlas_obj.atlas_uid} for RT alignment stage...")
         rt_align_obj.aligned_atlas_obj = dbi.clone_atlas(
             obj=rt_align_obj,
-            stage='RT_ALIGNED',
+            stage=AtlasStage.RT_ALIGNED,
             ta=ta
         )
 
@@ -128,7 +132,7 @@ def run_rt_alignment(
         dbi.update_compound_mzrt_for_atlas(
             obj=rt_align_obj,
             mz_rt_update_df=rt_shifted_data,
-            stage='RT_ALIGNED',
+            stage=AtlasStage.RT_ALIGNED,
         )
 
     if rt_align_obj.rt_alignment_params.get('upload_to_gdrive', False):
@@ -141,9 +145,9 @@ def run_auto_identification(
     analysis_number: int = None,
     analysis_subset: list = None,
     image_tag: str = "latest",
-) -> Dict[str, int]:
+) -> dict[str, int]:
 
-    from metatlas2.workflow_objects import Atlas, AutoIdentification
+    from metatlas2.workflow_objects import Atlas, AutoIdentification, AtlasStage
 
     auto_id_obj = AutoIdentification()
 
@@ -168,7 +172,7 @@ def run_auto_identification(
 
         autoid_atlas_info = dbi.get_atlas_uid_from_stage(
             obj=auto_id_obj,
-            stage='RT_ALIGNED'
+            stage=AtlasStage.RT_ALIGNED
         )
         if not autoid_atlas_info: continue
 
@@ -181,7 +185,7 @@ def run_auto_identification(
         logger.info(f"Cloning aligned Atlas {auto_id_obj.aligned_atlas_obj.atlas_uid} for auto identification stage...")
         auto_id_obj.auto_ided_atlas_obj = dbi.clone_atlas(
             obj=auto_id_obj,
-            stage='AUTO_IDED',
+            stage=AtlasStage.AUTO_IDED,
             ta=ta
         )
 
@@ -197,6 +201,7 @@ def run_auto_identification(
         logger.info("Passing Atlas and LCMSRuns to data extractor...")
         edh.extract_data_from_raw(
             obj=auto_id_obj,
+            stage="auto_identification",
         )
 
         logger.info("Passing ExperimentalData to MS2 hit finder...")
@@ -218,7 +223,7 @@ def run_auto_identification(
         dbi.update_compound_mzrt_for_atlas(
             obj=auto_id_obj,
             mz_rt_update_df=auto_id_obj.experimental_data.curation_df,
-            stage='AUTO_IDED',
+            stage=AtlasStage.AUTO_IDED,
         )
 
         logger.info("Passing Atlas object to curation notebook generator...")
@@ -229,12 +234,12 @@ def run_auto_identification(
     return
 
 def run_analysis_gui(
-    run_parameters: Dict[str, Any],
-    override_parameters: Dict[str, Any] = None,
+    run_parameters: dict[str, Any],
+    override_parameters: dict[str, Any] = None,
     dash_app_port: int = 8050,
 ) -> "CurationApp":
 
-    from metatlas2.workflow_objects import Atlas, AnalysisGUI
+    from metatlas2.workflow_objects import Atlas, AnalysisGUI, AtlasStage
 
     analysis_gui_obj = AnalysisGUI()
 
@@ -246,7 +251,7 @@ def run_analysis_gui(
     logger.info("Looking up Atlas UID for manual curation stage from database based on config parameters...")
     curation_atlas_info = dbi.get_atlas_uid_from_stage(
         obj=analysis_gui_obj,
-        stage='AUTO_IDED', # updated data during GUI only lives in curation_df for now
+        stage=AtlasStage.AUTO_IDED, # updated data during GUI only lives in curation_df for now
     )
     if curation_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
         logger.warning(f"Atlas UID for manual curation stage from database {curation_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
@@ -305,12 +310,12 @@ def run_analysis_gui(
     return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
 
 def run_analysis_summary(
-    run_parameters: Dict[str, Any],
-    override_parameters: Dict[str, Any] = None,
+    run_parameters: dict[str, Any],
+    override_parameters: dict[str, Any] = None,
     overwrite: bool = False,
 ) -> None:
 
-    from metatlas2.workflow_objects import Atlas, AnalysisSummary
+    from metatlas2.workflow_objects import Atlas, AnalysisSummary, AtlasStage
 
     summary_obj = AnalysisSummary()
     
@@ -322,7 +327,7 @@ def run_analysis_summary(
     logger.info("Looking up Atlas UID for analysis summary stage from database based on config parameters...")
     summary_atlas_info = dbi.get_atlas_uid_from_stage(
         obj=summary_obj,
-        stage='AUTO_IDED', # start with auto ided atlas again (like GUI), but this time clone and update based on mc GUI (curation_df)
+        stage=AtlasStage.AUTO_IDED, # start with auto ided atlas again (like GUI), but this time clone and update based on mc GUI (curation_df)
     )
     if summary_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
         logger.warning(f"Atlas UID for summary stage from database {summary_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
@@ -338,7 +343,7 @@ def run_analysis_summary(
     logger.info(f"Cloning aligned Atlas {summary_obj.auto_ided_atlas_obj.atlas_uid} for analysis summary stage...")
     summary_obj.manually_curated_atlas_obj = dbi.clone_atlas(
         obj=summary_obj,
-        stage='MANUALLY_CURATED',
+        stage=AtlasStage.MANUALLY_CURATED,
         ta=summary_obj.ta
     )
 
@@ -356,14 +361,14 @@ def run_analysis_summary(
     dbi.update_compound_mzrt_for_atlas(
         obj=summary_obj,
         mz_rt_update_df=summary_obj.experimental_data.curation_df,
-        stage='MANUALLY_CURATED',
+        stage=AtlasStage.MANUALLY_CURATED,
     )
 
     if summary_obj.override_parameters:
         logger.info("Persisting GUI override parameters to workflow_runs table...")
         dbi.update_config_overrides(
             obj=summary_obj,
-            stage='MANUALLY_CURATED',
+            stage=AtlasStage.MANUALLY_CURATED,
         )
 
     logger.info("Creating and saving summary files and figures to output directory...")

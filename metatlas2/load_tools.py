@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 import os
@@ -9,7 +11,7 @@ from pathlib import Path
 import grp
 import subprocess
 from matchms import Spectrum
-from typing import Dict, Any
+from typing import Any
 
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
@@ -173,7 +175,7 @@ def load_msms_refs_file(
 
     return refs_by_inchi_key
 
-def _validate_rt_alignment_params(params: Dict[str, Any], location: str) -> Dict[str, Any]:
+def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict[str, Any]:
     """Validate and coerce a single PARAMS block from RT_ALIGNMENT.
     """
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', False))
@@ -195,7 +197,7 @@ def _validate_rt_alignment_params(params: Dict[str, Any], location: str) -> Dict
     return params
 
 
-def _validate_targeted_analysis_params(params: Dict[str, Any], location: str) -> Dict[str, Any]:
+def _validate_targeted_analysis_params(params: dict[str, Any], location: str) -> dict[str, Any]:
     """Validate and coerce a single PARAMS block from TARGETED_ANALYSES.
     """
     params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_ANALYSES
@@ -248,7 +250,7 @@ def _validate_targeted_analysis_params(params: Dict[str, Any], location: str) ->
     return params
 
 
-def _build_metatlas2_config(raw: Dict[str, Any], source_name: str) -> "Metatlas2Config":
+def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2Config":
     """Build a Metatlas2Config from parsed YAML content."""
     from metatlas2.workflow_objects import Metatlas2Config, TargetedAnalysis
 
@@ -260,7 +262,7 @@ def _build_metatlas2_config(raw: Dict[str, Any], source_name: str) -> "Metatlas2
             raise ValueError(f"Missing required WORKFLOWS subsection: {subsection}")
 
     # ── RT_ALIGNMENT ───────────────────────────────────────────────────────
-    rt_alignment_config: Dict[str, Any] = {}
+    rt_alignment_config: dict[str, Any] = {}
     for chromatography, chrom_cfg in raw['WORKFLOWS']['RT_ALIGNMENT'].items():
         location = f"RT_ALIGNMENT {chromatography}"
         if 'ATLAS' not in chrom_cfg:
@@ -307,7 +309,7 @@ def _build_metatlas2_config(raw: Dict[str, Any], source_name: str) -> "Metatlas2
                         params=params,
                     ))
 
-    paths_config: Dict[str, Any] = dict(raw['WORKFLOWS'].get('PATHS') or {})
+    paths_config: dict[str, Any] = dict(raw['WORKFLOWS'].get('PATHS') or {})
 
     logger.info(
         f"Loaded config from {source_name}: "
@@ -462,7 +464,7 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
 def save_atlas_metadata_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
     """Save Atlas metadata to CSV file."""
     logger.info(f"Saving Atlas data to {output_path}...")
-    atlas_info = atlas_obj.to_dict()
+    atlas_info = atlas_obj.to_metadata_dict()
     file_exists = os.path.isfile(output_path)
     with open(output_path, "a", newline='') as f:
         writer = csv.DictWriter(f, fieldnames=atlas_info.keys())

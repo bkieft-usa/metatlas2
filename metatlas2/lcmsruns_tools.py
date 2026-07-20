@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from pathlib import Path
-from typing import List, Any, Dict
+from typing import Any
 from collections import Counter
 import metatlas2.file_and_project_format as fpf
 import metatlas2.logging_config as lcf
@@ -15,7 +17,7 @@ ANALYSIS_TYPE_MAP = {
     'refstd': ['refstd', 'standard'],
 }
 
-def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> List[Dict]:
+def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[Dict]:
     project_path = Path(project_raw_files_path)
     if not project_path.exists():
         raise FileNotFoundError(f"Project path does not exist: {project_path}")
@@ -75,14 +77,14 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> List[Dict]:
     return lcmsruns
 
 def filter_lcmsruns_list(
-    lcmsruns: List[Any], 
-    include_file_type: List[str] = None,
-    exclude_file_type: List[str] = None,
+    lcmsruns: list[Any], 
+    include_file_type: list[str] = None,
+    exclude_file_type: list[str] = None,
     file_format: str = "h5",
     chromatography: str = None,
     polarity: str = None,
     ms_level: str = None
-) -> List[Any]:
+) -> list[Any]:
 
     # Normalize and lowercase all filter inputs
     if chromatography:

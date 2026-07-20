@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 import sys
 import os
 from pathlib import Path
-from typing import Dict, Tuple
 from tqdm.auto import tqdm
 import json
 
@@ -13,13 +14,8 @@ from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
 
 import metatlas2.logging_config as lcf
+from metatlas2.utils import should_disable_tqdm
 logger = lcf.get_logger('rt_align_tools')
-
-def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
 
 def calculate_model_values_from_existing(model_dict: Dict) -> Dict:
     """
@@ -190,7 +186,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
 
 def build_rt_alignment_model(
     rt_align_obj: "RTAlign"
-) -> Tuple[Dict, pd.DataFrame, pd.DataFrame]:
+) -> tuple[Dict, pd.DataFrame, pd.DataFrame]:
     """
     Build RT alignment model directly from ExperimentalData and Atlas.
     Args:

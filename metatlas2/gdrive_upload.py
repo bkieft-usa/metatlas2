@@ -1,5 +1,7 @@
 """Transfer files to Google Drive using rclone."""
 
+from __future__ import annotations
+
 import configparser
 import json
 import logging
@@ -10,10 +12,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from subprocess import PIPE, Popen
-from typing import List, Optional, Tuple, Union
 
 from IPython.display import HTML, display
 from tqdm.auto import tqdm
+
+from metatlas2.utils import should_disable_tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +39,8 @@ RCLONE_UPLOAD_EXCLUDES = [
 #  Low-level rclone helpers                                           #
 # ------------------------------------------------------------------ #
 
-def should_disable_tqdm():
-    return (
-        "SLURM_JOB_ID" in os.environ
-        or not sys.stdout.isatty()
-    )
 
-def _rclone_config_file() -> Optional[str]:
+def _rclone_config_file() -> str | None:
     """Return the path to the rclone config file, or None if not found."""
     try:
         result = subprocess.check_output([RCLONE_PATH, "config", "file"], text=True)
@@ -52,7 +50,7 @@ def _rclone_config_file() -> Optional[str]:
     return lines[-1] if lines else None
 
 
-def _get_drive_name_for_id(folder_id: str) -> Optional[str]:
+def _get_drive_name_for_id(folder_id: str) -> str | None:
     """
     Look up the rclone remote name corresponding to a Google Drive folder ID.
     Returns None if the config file is missing or the ID is not found.
@@ -111,7 +109,7 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
         logger.warning("rclone binary not found at %s — skipping upload.", RCLONE_PATH)
 
 
-def _has_drive_access(drive: str) -> Tuple[bool, Optional[str]]:
+def _has_drive_access(drive: str) -> tuple[bool, str | None]:
     """Return whether the configured remote is accessible and an optional error message."""
     cmd = [RCLONE_PATH, "lsjson", "--dirs-only", f"{drive}:"]
     try:
@@ -126,7 +124,7 @@ def _has_drive_access(drive: str) -> Tuple[bool, Optional[str]]:
         return False, message
 
 
-def _get_drive_id_for_path(drive: str, dest_path: Path) -> Optional[str]:
+def _get_drive_id_for_path(drive: str, dest_path: Path) -> str | None:
     """
     Return the Google Drive folder ID for *drive*:*dest_path*.
     Returns None if the folder cannot be found.
@@ -147,7 +145,7 @@ def _get_drive_id_for_path(drive: str, dest_path: Path) -> Optional[str]:
     return None
 
 
-def _drive_path_to_url(drive: str, dest_path: Path) -> Optional[str]:
+def _drive_path_to_url(drive: str, dest_path: Path) -> str | None:
     """Return a browser URL for *drive*:*dest_path*, or None on failure."""
     folder_id = _get_drive_id_for_path(drive, dest_path)
     if folder_id is None:
@@ -156,7 +154,7 @@ def _drive_path_to_url(drive: str, dest_path: Path) -> Optional[str]:
 
 
 def copy_outputs_to_google_drive(
-    obj: Union["RTAlign", "AnalysisSummary"],
+    obj: "RTAlign" | "AnalysisSummary",
     stage: "ANALYSIS_SUMMARY",
     overwrite: bool = False
 ) -> None:

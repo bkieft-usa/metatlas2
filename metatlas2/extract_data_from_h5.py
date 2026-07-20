@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 import os
@@ -6,14 +8,11 @@ from tqdm.auto import tqdm
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Union
 
 import metatlas2.logging_config as lcf
 import metatlas2.load_tools as ldt
+from metatlas2.utils import should_disable_tqdm
 logger = lcf.get_logger('extract_data_from_h5')
-
-def should_disable_tqdm():
-    return ("SLURM_JOB_ID" in os.environ or not sys.stdout.isatty())
 
 def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
     read_key = key + "_mz" if mz_bounds is not None else key
@@ -382,16 +381,43 @@ def _join_metadata(ms1_df, ms2_df, atlas):
         ms2_df = ms2_df.merge(meta_df, on="mz_rt_uid", how="left")
     return ms1_df, ms2_df
 
+_VALID_STAGES = frozenset({"rt_alignment", "auto_identification"})
+
 def extract_data_from_raw(
-    obj: Union["RTAlign", "AutoIdentification"]
-):
+    obj: "RTAlign" | "AutoIdentification",
+    stage: str,
+) -> None:
+    """Extract MS1 and MS2 data from raw HDF5 files and attach to *obj*.
+
+    Args:
+        obj:   Either an :class:`RTAlign` or :class:`AutoIdentification`
+               workflow object that has already been set up (atlas and
+               lcmsruns populated).
+        stage: ``"rt_alignment"`` or ``"auto_identification"``.  Passed
+               explicitly so the function does not need to inspect *obj*
+               with fragile ``hasattr`` checks.
+
+    Raises:
+        ValueError: If *stage* is not one of the recognised values.
+        FileNotFoundError: If any raw HDF5 file is missing from disk.
+    """
     from metatlas2.workflow_objects import ExperimentalData
-    
-    stage = "rt_alignment" if hasattr(obj, "rt_alignment_params") else "auto_identification"
-    atlas = obj.align_atlas_obj if stage == "rt_alignment" else obj.auto_ided_atlas_obj
+
+    if stage not in _VALID_STAGES:
+        raise ValueError(
+            f"Invalid stage {stage!r}. Expected one of: {sorted(_VALID_STAGES)}"
+        )
+
+    if stage == "rt_alignment":
+        atlas = obj.align_atlas_obj
+        lcmsruns = obj.aligner_lcmsruns
+        wp = obj.rt_alignment_params
+    else:
+        atlas = obj.auto_ided_atlas_obj
+        lcmsruns = obj.autoid_lcmsruns
+        wp = obj.ta.params
+
     polarity = "positive" if atlas.polarity.lower() == "pos" else "negative" if atlas.polarity.lower() == "neg" else atlas.polarity.lower()
-    lcmsruns = obj.aligner_lcmsruns if stage == "rt_alignment" else obj.autoid_lcmsruns
-    wp = obj.rt_alignment_params if stage == "rt_alignment" else obj.ta.params
     
     used_params = [
         "atlas_extra_time", "ms1_mz_tolerance_ppm", "only_keep_data_in_feature",
