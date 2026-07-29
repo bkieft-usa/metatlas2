@@ -2125,9 +2125,9 @@ def make_best_ms2_hit_fragment_ions_csv(
             "compound_index": cmp_idx_display,
             "compound_name":  compound_name,
             "adduct":         adduct,
-            "filename":       os.path.basename(str(best_hit.get("filename", ""))),
-            "rt_peak":        best_hit.get("scan_rt", np.nan),
-            "mz_peak":        best_hit.get("mz_measured", np.nan),
+            "filename":       os.path.basename(str(best_hit.filename)),
+            "rt_peak":        best_hit.scan_rt,
+            "mz_peak":        best_hit.mz_measured,
             "spectrum":       raw_spectrum_output,
         })
 

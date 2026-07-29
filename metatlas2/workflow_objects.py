@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import math
 import pandas as pd
+import os
 import yaml
 from tqdm.auto import tqdm
 import pyarrow.dataset as ds
