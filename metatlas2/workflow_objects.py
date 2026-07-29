@@ -21,6 +21,7 @@ import metatlas2.logging_config as lcf
 import metatlas2.run_targeted_analysis as rtg
 import metatlas2.note_options as gno
 import metatlas2.file_and_project_format as fpf
+import metatlas2.parquet_schemas as psa
 from metatlas2.utils import should_disable_tqdm, as_list
 logger = lcf.get_logger('workflow_objects')
 
@@ -1214,18 +1215,18 @@ class AnalysisSummary(CurationStageBase):
         os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
 
 class ParquetQueryInterpreter:
-    def __init__(self, parquet_path: Path):
-        parquet_path = Path(parquet_path)
-        if parquet_path.is_dir():
-            self.dataset = ds.dataset(parquet_path, format="parquet", partitioning=None)
-        else:
-            self.dataset = ds.dataset([parquet_path], format="parquet", partitioning=None)
+    def __init__(self, project_root: Path, grain: str = "compound_lfc"):
+        if grain not in psa._GRAIN_SUBDIR:
+            raise ValueError(f"grain must be one of {list(psa._GRAIN_SUBDIR)}, got {grain!r}")
+
+        dataset_dir = Path(project_root) / "parquet_results" / psa._GRAIN_SUBDIR[grain]
+        if not dataset_dir.exists():
+            raise FileNotFoundError(f"No dataset found at {dataset_dir}")
+
+        self.grain = grain
+        self.dataset = ds.dataset(dataset_dir, format="parquet", partitioning=psa._PARTITIONING)
 
     def _translate_to_expression(self, param_name: str, value: Any):
-        """
-        Translates a YAML key into a PyArrow Dataset Expression.
-        """
-        # Determine Operator and Column Name
         if param_name.endswith("_min"):
             col, op = param_name[:-4], ">="
         elif param_name.endswith("_max"):
@@ -1241,7 +1242,6 @@ class ParquetQueryInterpreter:
 
         field = ds.field(col)
 
-        # PyArrow Expression
         if op == "==":
             return field == value
         elif op == ">=":
@@ -1255,37 +1255,100 @@ class ParquetQueryInterpreter:
             return (field > value) | (field < -value)
         elif op == "abs_lt":
             return (field < value) & (field > -value)
-        
+
         return None
 
-    def execute_from_params(self, params_path: Path) -> pd.DataFrame:
-        with open(params_path, "r") as f:
-            params = yaml.safe_load(f) or {}
+    @staticmethod
+    def _handle_condition_pair(value: list) -> "ds.Expression":
+        """Symmetric match: rows where {condition_1, condition_2} == set(value),
+        regardless of which one was stored first. No sign assumption —
+        pair with an *_abs_gt / *_abs_lt filter on log2_fold_change for
+        magnitude-only comparisons."""
+        c1_val, c2_val = value
+        c1, c2 = ds.field("condition_1"), ds.field("condition_2")
+        return ((c1 == c1_val) & (c2 == c2_val)) | ((c1 == c2_val) & (c2 == c1_val))
 
-        # Build a list of PyArrow expressions
+    @staticmethod
+    def _handle_lfc_directional_min(value: dict) -> "ds.Expression":
+        """Directional threshold: log2_fold_change of `treatment` relative to
+        `control` >= threshold, correctly sign-flipping depending on which
+        order the pair was stored in during the melt."""
+        treatment = value["treatment"]
+        control = value["control"]
+        threshold = value["threshold"]
+        c1, c2 = ds.field("condition_1"), ds.field("condition_2")
+        lfc = ds.field("log2_fold_change")
+        return (
+            ((c1 == treatment) & (c2 == control) & (lfc >= threshold))
+            | ((c1 == control) & (c2 == treatment) & (lfc <= -threshold))
+        )
+
+    def _build_filter(self, params: dict):
+        schema_cols = set(self.dataset.schema.names)  # includes partition cols via hive partitioning
         expressions = []
+
         for param_name, value in params.items():
-            if value is None:
+            if param_name == "grain" or value is None:
                 continue
-            
+
             try:
-                expr = self._translate_to_expression(param_name, value)
+                if param_name in self._SPECIAL_HANDLERS:
+                    # composite handlers reference columns that must exist for this grain
+                    required = {"condition_1", "condition_2"} if param_name in (
+                        "condition_pair", "lfc_directional_min"
+                    ) else set()
+                    missing = required - schema_cols
+                    if missing:
+                        print(f"Skipping '{param_name}': columns {missing} not present in grain "
+                            f"'{self.grain}' (this key is compound_lfc-only).")
+                        continue
+                    handler = getattr(self, self._SPECIAL_HANDLERS[param_name])
+                    expr = handler(value)
+                else:
+                    col = self._strip_suffix(param_name)
+                    if col not in schema_cols:
+                        print(f"Skipping '{param_name}': column '{col}' not present in grain "
+                            f"'{self.grain}'. Check which section of the YAML this belongs to.")
+                        continue
+                    expr = self._translate_to_expression(param_name, value)
+
                 if expr is not None:
                     expressions.append(expr)
             except Exception as e:
                 print(f"Skipping parameter {param_name} due to error: {e}")
 
-        # Combine all expressions with "AND" logic
         final_filter = None
         for expr in expressions:
-            if final_filter is None:
-                final_filter = expr
-            else:
-                final_filter = final_filter & expr
+            final_filter = expr if final_filter is None else final_filter & expr
+        return final_filter
 
-        if final_filter is not None:
-            table = self.dataset.to_table(filter=final_filter)
-        else:
-            table = self.dataset.to_table()
+    @staticmethod
+    def _strip_suffix(param_name: str) -> str:
+        for suffix in ("_min", "_max", "_abs_gt", "_abs_lt", "_in"):
+            if param_name.endswith(suffix):
+                return param_name[: -len(suffix)]
+        return param_name
 
+    def execute(self, params: dict) -> pd.DataFrame:
+        final_filter = self._build_filter(params)
+        table = (
+            self.dataset.to_table(filter=final_filter)
+            if final_filter is not None
+            else self.dataset.to_table()
+        )
         return table.to_pandas()
+
+    @classmethod
+    def execute_from_params_file(cls, project_root: Path, params_path: Path) -> pd.DataFrame:
+        with open(params_path, "r") as f:
+            params = yaml.safe_load(f) or {}
+        grain = params.get("grain", "compound_lfc")
+        engine = cls(Path(project_root), grain)
+        return engine.execute(params)
+
+
+def run_parquet_query(project_root: str, params_path: str) -> pd.DataFrame:
+    from metatlas2.workflow_objects import ParquetQueryInterpreter
+    return ParquetQueryInterpreter.execute_from_params_file(
+        Path(project_root), Path(params_path)
+    )

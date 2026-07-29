@@ -385,12 +385,23 @@ def run_analysis_summary(
     logger.info(f"Analysis summary procedure complete for RTA{summary_obj.rt_alignment_number} and TGA{summary_obj.analysis_number}!")
 
 def run_parquet_query(
-    parquet_path: str, 
-    params_path: str
+    project_root: str,
+    params_path: str,
 ) -> pd.DataFrame:
+    """Run a YAML-configured query against a project's Parquet results.
 
+    Parameters
+    ----------
+    project_root:
+        Path to the directory that *contains* ``parquet_results/`` for a
+        given project — i.e. ``summary_obj.paths["parquet_output_dir"]``.
+        NOT the flat "parquet_outputs" folder used by the old schema.
+    params_path:
+        Path to a YAML file whose top-level ``grain`` key selects
+        ``compound_file`` or ``compound_lfc``, plus any filter params.
+    """
     from metatlas2.workflow_objects import ParquetQueryInterpreter
 
-    engine = ParquetQueryInterpreter(Path(parquet_path))
-    
-    return engine.execute_from_params(Path(params_path))
+    return ParquetQueryInterpreter.execute_from_params_file(
+        Path(project_root), Path(params_path)
+    )

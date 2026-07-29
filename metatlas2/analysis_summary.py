@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.dataset as ds
+
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib.backends.backend_pdf import PdfPages
@@ -30,6 +32,7 @@ import metatlas2.database_interact as dbi
 import metatlas2.file_and_project_format as fpf
 import metatlas2.gdrive_upload as gdu
 import metatlas2.logging_config as lcf
+import metatlas2.parquet_schemas as psa
 from metatlas2.note_options import (
     get_note_options_and_hotkeys,
     get_notes_opts,
@@ -2733,237 +2736,357 @@ def make_metabomap(
 #### Make parquet files
 ###############################################
 
-_COMPOUND_FILE_STR_COLS = [
-    "mz_rt_uid", "compound_name", "identified_metabolite", "label", "inchi_key", "formula", "smiles",
-    "inchi", "pubchem_cid", "iupac_name", "polarity", "adduct", "best_ms1_file",
-    "filename", "file_group", "ms1_notes", "ms2_notes",
-    "msi_level", "control_filter", "overlapping_compound", "overlapping_inchi_keys",
-    "isomer_details", "identification_notes", "analyst_notes", "other_notes",
-    "best_ms2_file", "best_ms2_num_ions", "best_ms2_matching_ions",
-    "best_ms2_spectrum_rt_mz", "ms1_spectrum_rt_i", "msms_file", "msms_numberofions", "msms_matchingions",
-]
+# def _build_unified_schema_map_df() -> pd.DataFrame:
+#     rows: list[dict[str, str]] = []
+#     seen: dict[str, dict[str, str]] = {}
 
-_COMPOUND_FILE_FLOAT_COLS = [
-    "compound_index",
-    "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
-    "rt_min", "rt_max", "exact_mass",
-    "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
-    "best_ms1_ppm_error", "best_ms1_rt_error",
-    "best_ms2_rt", "best_ms2_score", "best_ms2_mz",
-    "best_ms2_mz_ppm_error", "best_ms2_mz_error_da", "best_ms2_rt_error",
-    "peak_height", "peak_area", "rt_peak", "rt_centroid",
-    "mz_peak", "mz_centroid", "measured_rt", "measured_mz",
-    "mz_theoretical", "mz_measured", "mz_error", "mz_ppmerror",
-    "rt_theoretical", "rt_error", "msms_rt",
-    "msms_score", "mz_quality", "rt_quality", "msms_quality",
-    "total_score",
-]
+#     def _add(cols: list[str], dtype: str, row_kind: str) -> None:
+#         for idx, col in enumerate(cols):
+#             if col not in seen:
+#                 seen[col] = {
+#                     "column_name": col,
+#                     "dtype": dtype,
+#                     "row_kinds": row_kind,
+#                     "compound_file_position": "",
+#                     "compound_lfc_position": "",
+#                 }
+#             else:
+#                 existing = set(filter(None, seen[col]["row_kinds"].split("|")))
+#                 existing.add(row_kind)
+#                 seen[col]["row_kinds"] = "|".join(sorted(existing))
+#             seen[col][f"{row_kind}_position"] = str(idx)
 
-_COMPOUND_LFC_STR_COLS = [
-    "mz_rt_uid", "inchi_key", "compound_name", "control_filter",
-    "condition_1", "condition_2", "adduct", "formula", "smiles", "inchi",
-    "pubchem_cid", "iupac_name", "ms1_notes", "ms2_notes", "msi_level",
-    "identification_notes", "analyst_notes", "other_notes",
-    "best_ms2_file", "best_ms2_num_ions", "best_ms2_matching_ions", "best_ms2_spectrum_rt_mz",
-    "msms_file", "msms_numberofions", "msms_matchingions",
-]
+#     _add(_COMPOUND_FILE_STR_COLS, "string", "compound_file")
+#     _add(_COMPOUND_FILE_FLOAT_COLS, "float", "compound_file")
+#     _add(_COMPOUND_LFC_STR_COLS, "string", "compound_lfc")
+#     _add(_COMPOUND_LFC_FLOAT_COLS, "float", "compound_lfc")
 
-_COMPOUND_LFC_FLOAT_COLS = [
-    "compound_index",
-    "log2_fold_change",
-    "rt_min", "rt_max",
-    "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity", "best_ms1_ppm_error", "best_ms1_rt_error",
-    "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
-    "best_ms2_rt", "best_ms2_score", "best_ms2_mz",
-    "best_ms2_mz_ppm_error", "best_ms2_mz_error_da", "best_ms2_rt_error",
-    "msms_score", "msms_rt",
-    "mz_theoretical", "mz_measured", "mz_error", "mz_ppmerror", "rt_theoretical", "rt_error",
-]
+#     seen["row_kind"] = {
+#         "column_name": "row_kind",
+#         "dtype": "string",
+#         "row_kinds": "compound_file|compound_lfc",
+#         "compound_file_position": "",
+#         "compound_lfc_position": "",
+#     }
+
+#     rows.extend(seen.values())
+#     rows.sort(key=lambda r: r["column_name"])
+#     return pd.DataFrame(rows)
 
 
-def _build_unified_schema_map_df() -> pd.DataFrame:
-    rows: list[dict[str, str]] = []
-    seen: dict[str, dict[str, str]] = {}
+# def _write_unified_schema_map(partition_dir: Path, data_output_name: str) -> None:
+#     schema_df = _build_unified_schema_map_df()
+#     schema_csv = partition_dir / f"{data_output_name}-results.schema_map.csv"
+#     schema_json = partition_dir / f"{data_output_name}-results.schema_map.json"
+#     schema_df.to_csv(schema_csv, index=False)
+#     schema_df.to_json(schema_json, orient="records", indent=2)
 
-    def _add(cols: list[str], dtype: str, row_kind: str) -> None:
-        for idx, col in enumerate(cols):
-            if col not in seen:
-                seen[col] = {
-                    "column_name": col,
-                    "dtype": dtype,
-                    "row_kinds": row_kind,
-                    "compound_file_position": "",
-                    "compound_lfc_position": "",
-                }
-            else:
-                existing = set(filter(None, seen[col]["row_kinds"].split("|")))
-                existing.add(row_kind)
-                seen[col]["row_kinds"] = "|".join(sorted(existing))
-            seen[col][f"{row_kind}_position"] = str(idx)
 
-    _add(_COMPOUND_FILE_STR_COLS, "string", "compound_file")
-    _add(_COMPOUND_FILE_FLOAT_COLS, "float", "compound_file")
-    _add(_COMPOUND_LFC_STR_COLS, "string", "compound_lfc")
-    _add(_COMPOUND_LFC_FLOAT_COLS, "float", "compound_lfc")
+# def make_analysis_parquet(
+#     summary_obj: "AnalysisSummary",
+#     overwrite: bool = True,
+# ) -> None:
+#     """Write one unified Parquet file for downstream querying.
 
-    seen["row_kind"] = {
-        "column_name": "row_kind",
-        "dtype": "string",
-        "row_kinds": "compound_file|compound_lfc",
-        "compound_file_position": "",
-        "compound_lfc_position": "",
+#     ANALYSIS-DETAILS-results.parquet
+#         One flat table containing both file-grain compound rows and
+#         compound-level log-fold-change rows. Rows are tagged with
+#         ``row_kind`` so queries can filter to either grain.
+
+#     The partition directories are still useful because they give cheap
+#     filtering on chromatography, polarity, analysis type, and analysis name.
+
+#     Parameters
+#     ----------
+#     summary_obj:
+#         Configured :class:`AnalysisSummary` object after curation data has
+#         been loaded.
+#     overwrite:
+#         When *False*, skips writing if the unified parquet already exists.
+#     """
+
+#     parquet_output_dir = Path(summary_obj.paths["parquet_output_dir"])
+#     data_output_name =  f"{summary_obj.project_name}-" \
+#                         f"{summary_obj.rt_alignment_number}-" \
+#                         f"{summary_obj.analysis_number}-" \
+#                         f"{summary_obj.chromatography}-" \
+#                         f"{summary_obj.polarity}-" \
+#                         f"{summary_obj.analysis_type}-" \
+#                         f"{summary_obj.analysis_name}"
+
+#     partition_dir = (parquet_output_dir / "parquet_results")
+#     unified_path = partition_dir / f"{data_output_name}-results.parquet"
+#     if not overwrite and unified_path.exists():
+#         logger.info("Overwriting disabled: existing Parquet file in %s will be used.", partition_dir)
+#         return
+#     partition_dir.mkdir(parents=True, exist_ok=True)
+#     logger.info("Writing analysis Parquet files to %s", partition_dir)
+
+#     ## Note: this is good for debugging schema issues, but it will break the parquet querier because it puts csv/json files in the dir
+#     _write_unified_schema_map(partition_dir, data_output_name)
+#     logger.info("Wrote unified parquet schema map files for %s to %s", data_output_name, partition_dir)
+
+#     # Start with analysis-level fields always available from summary_obj
+#     footer_meta: dict[bytes, bytes] = {
+#         b"project_name":         str(summary_obj.project_name or "").encode(),
+#         b"chromatography":       summary_obj.chromatography.encode(),
+#         b"polarity":             summary_obj.polarity.encode(),
+#         b"analysis_type":        summary_obj.analysis_type.encode(),
+#         b"analysis_name":        summary_obj.analysis_name.encode(),
+#         b"rt_alignment_number":  str(summary_obj.rt_alignment_number or "").encode(),
+#         b"analysis_number":      str(summary_obj.analysis_number or "").encode(),
+#         b"created_date":         datetime.date.today().isoformat().encode(),
+#     }
+
+#     # Overlay all fields parsed from the project name
+#     parsed_meta = _parse_project_metadata(summary_obj.project_name)
+#     for key, val in parsed_meta.items():
+#         footer_meta[key.encode()] = val.encode()
+
+#     def _attach_meta(table: pa.Table) -> pa.Table:
+#         existing = table.schema.metadata or {}
+#         return table.replace_schema_metadata({**existing, **footer_meta})
+
+#     # Write settings
+#     _WRITE_KWARGS = dict(
+#         compression="zstd",
+#         compression_level=3,
+#         write_statistics=True,
+#         row_group_size=100_000,
+#         data_page_size=1 * 1024 * 1024,
+#         use_dictionary=True,
+#     )
+
+#     logger.info("Building unified analysis table...")
+#     unified_table = _build_unified_analysis_table(summary_obj)
+
+#     if unified_table.num_rows > 0:
+#         unified_table = _attach_meta(unified_table)
+#         pq.write_table(unified_table, unified_path, **_WRITE_KWARGS)
+#         logger.info(f"Wrote {unified_path.stem} ({unified_table.num_rows} rows, {unified_table.num_columns} columns)")
+#     else:
+#         logger.warning("Unified analysis table is empty — file not written.")
+
+#     logger.info("Analysis Parquet export complete")
+
+# def _build_unified_analysis_table(
+#     summary_obj: "AnalysisSummary",
+# ) -> pa.Table:
+#     """Build one flat table containing both per-file and LFC rows.
+
+#     The output uses a shared schema with a ``row_kind`` column so root-level
+#     parquet scans can load the whole analysis without choosing between the
+#     former ``compound_per_file`` and ``compound_lfc`` files. Partition
+#     directories are retained for cheap pruning on chromatography, polarity,
+#     analysis type, and analysis name.
+
+#     Returns
+#     -------
+#     pa.Table
+#     """
+#     per_file_table = _build_compound_per_file_table(summary_obj)
+#     lfc_table = _build_compound_lfc_table(summary_obj)
+
+#     frames: list[pd.DataFrame] = []
+#     if per_file_table.num_rows > 0:
+#         per_file_df = per_file_table.to_pandas()
+#         per_file_df["row_kind"] = "compound_file"
+#         frames.append(per_file_df)
+#     else:
+#         logger.warning("compound_per_file table is empty — file-grain rows will be omitted.")
+
+#     if lfc_table.num_rows > 0:
+#         lfc_df = lfc_table.to_pandas()
+#         lfc_df["row_kind"] = "compound_lfc"
+#         frames.append(lfc_df)
+#     else:
+#         logger.warning("compound_lfc table is empty — lfc rows will be omitted.")
+
+#     if not frames:
+#         return pa.table({})
+
+#     unified_cols = list(dict.fromkeys(
+#         _COMPOUND_FILE_STR_COLS
+#         + _COMPOUND_FILE_FLOAT_COLS
+#         + _COMPOUND_LFC_STR_COLS
+#         + _COMPOUND_LFC_FLOAT_COLS
+#         + ["row_kind"]
+#     ))
+#     unified_df = pd.concat(
+#         [df.reindex(columns=unified_cols) for df in frames],
+#         ignore_index=True,
+#         sort=False,
+#     )
+#     return pa.Table.from_pandas(unified_df, preserve_index=False)
+
+
+def _build_schema_map_df(str_cols: list[str], float_cols: list[str], table_name: str) -> pd.DataFrame:
+    """Schema map for a single dataset grain (compound_file or compound_lfc).
+
+    Partition columns are documented separately with source='partition_directory'
+    because Arrow strips them from the physical Parquet files on write; they are
+    only reconstructed by Hive-aware readers (pyarrow.dataset, or DuckDB's
+    read_parquet(..., hive_partitioning=true)). Reading a leaf file directly
+    with pyarrow.parquet.read_table will NOT surface them.
+    """
+    rows: list[dict] = []
+    for idx, col in enumerate(str_cols):
+        rows.append({"column_name": col, "dtype": "string", "table": table_name,
+                     "position": idx, "source": "stored"})
+    for idx, col in enumerate(float_cols):
+        rows.append({"column_name": col, "dtype": "float", "table": table_name,
+                     "position": idx, "source": "stored"})
+    for pcol in psa._PARTITION_COLS_DESC:
+        rows.append({"column_name": pcol["column_name"], "dtype": pcol["dtype"],
+                     "table": table_name, "position": "", "source": "partition_directory"})
+
+    df = pd.DataFrame(rows)
+    df.sort_values("column_name", inplace=True)
+    return df
+
+
+def _write_schema_maps(schema_dir: Path, project_name: str) -> None:
+    schema_dir.mkdir(parents=True, exist_ok=True)
+
+    file_schema = _build_schema_map_df(psa._COMPOUND_FILE_STR_COLS, psa._COMPOUND_FILE_FLOAT_COLS, "compound_file")
+    lfc_schema = _build_schema_map_df(psa._COMPOUND_LFC_STR_COLS, psa._COMPOUND_LFC_FLOAT_COLS, "compound_lfc")
+
+    file_schema.to_csv(schema_dir / f"{project_name}-compound_file.schema_map.csv", index=False)
+    file_schema.to_json(schema_dir / f"{project_name}-compound_file.schema_map.json", orient="records", indent=2)
+    lfc_schema.to_csv(schema_dir / f"{project_name}-compound_lfc.schema_map.csv", index=False)
+    lfc_schema.to_json(schema_dir / f"{project_name}-compound_lfc.schema_map.json", orient="records", indent=2)
+
+def _with_partition_columns(table: pa.Table, summary_obj: "AnalysisSummary") -> pa.Table:
+    partition_values = {
+        "chromatography": summary_obj.chromatography,
+        "polarity": summary_obj.polarity,
+        "analysis_type": summary_obj.analysis_type,
+        "analysis_name": summary_obj.analysis_name,
     }
+    collisions = [c for c in partition_values if c in table.column_names]
+    if collisions:
+        raise ValueError(
+            f"Partition column(s) {collisions} already exist in the source table. "
+            "Remove them from the grain-builder output before writing, since "
+            "pyarrow.dataset partitioning requires unambiguous field names."
+        )
 
-    rows.extend(seen.values())
-    rows.sort(key=lambda r: r["column_name"])
-    return pd.DataFrame(rows)
+    n = table.num_rows
+    for name, value in partition_values.items():
+        table = table.append_column(name, pa.array([value] * n))
+    return table
+
+def _partition_leaf_dir(root: Path, summary_obj: "AnalysisSummary") -> Path:
+    return (
+        root
+        / f"chromatography={summary_obj.chromatography}"
+        / f"polarity={summary_obj.polarity}"
+        / f"analysis_type={summary_obj.analysis_type}"
+        / f"analysis_name={summary_obj.analysis_name}"
+    )
 
 
-def _write_unified_schema_map(partition_dir: Path, data_output_name: str) -> None:
-    schema_df = _build_unified_schema_map_df()
-    schema_csv = partition_dir / f"{data_output_name}-results.schema_map.csv"
-    schema_json = partition_dir / f"{data_output_name}-results.schema_map.json"
-    schema_df.to_csv(schema_csv, index=False)
-    schema_df.to_json(schema_json, orient="records", indent=2)
+def _build_footer_metadata(summary_obj: "AnalysisSummary") -> dict[bytes, bytes]:
+    footer_meta: dict[bytes, bytes] = {
+        b"project_name":        str(summary_obj.project_name or "").encode(),
+        b"rt_alignment_number": str(summary_obj.rt_alignment_number or "").encode(),
+        b"analysis_number":     str(summary_obj.analysis_number or "").encode(),
+        b"created_date":        datetime.date.today().isoformat().encode(),
+    }
+    for key, val in _parse_project_metadata(summary_obj.project_name).items():
+        footer_meta[key.encode()] = val.encode()
+    return footer_meta
 
+def _parse_project_metadata(project_name: str) -> dict[str, str]:
+
+    if not project_name:
+        return {}
+    try:
+        parsed = fpf.PROJECT_PATTERN.match(project_name)
+        if not parsed:
+            logger.warning(
+                "project_name '%s' does not match PROJECT_PATTERN — "
+                "project metadata will not be added to Parquet footer.",
+                project_name,
+            )
+            return {}
+        return {k: str(v) for k, v in parsed.groupdict().items() if v is not None}
+    except Exception as exc:
+        logger.warning(
+            "Could not parse project metadata from '%s': %s — "
+            "project metadata will not be added to Parquet footer.",
+            project_name, exc,
+        )
+        return {}
 
 def make_analysis_parquet(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
 ) -> None:
-    """Write one unified Parquet file for downstream querying.
-
-    ANALYSIS-DETAILS-results.parquet
-        One flat table containing both file-grain compound rows and
-        compound-level log-fold-change rows. Rows are tagged with
-        ``row_kind`` so queries can filter to either grain.
-
-    The partition directories are still useful because they give cheap
-    filtering on chromatography, polarity, analysis type, and analysis name.
-
-    Parameters
-    ----------
-    summary_obj:
-        Configured :class:`AnalysisSummary` object after curation data has
-        been loaded.
-    overwrite:
-        When *False*, skips writing if the unified parquet already exists.
-    """
-
     parquet_output_dir = Path(summary_obj.paths["parquet_output_dir"])
-    data_output_name =  f"{summary_obj.project_name}-" \
-                        f"{summary_obj.rt_alignment_number}-" \
-                        f"{summary_obj.analysis_number}-" \
-                        f"{summary_obj.chromatography}-" \
-                        f"{summary_obj.polarity}-" \
-                        f"{summary_obj.analysis_type}-" \
-                        f"{summary_obj.analysis_name}"
+    results_root = parquet_output_dir / "parquet_results"
+    schema_dir = parquet_output_dir / "schema_maps"
 
-    partition_dir = (parquet_output_dir / "parquet_results")
-    unified_path = partition_dir / f"{data_output_name}-results.parquet"
-    if not overwrite and unified_path.exists():
-        logger.info("Overwriting disabled: existing Parquet file in %s will be used.", partition_dir)
-        return
-    partition_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("Writing analysis Parquet files to %s", partition_dir)
+    if not overwrite:
+        file_leaf = _partition_leaf_dir(results_root / "compound_file", summary_obj)
+        lfc_leaf = _partition_leaf_dir(results_root / "compound_lfc", summary_obj)
+        if any(file_leaf.glob("*.parquet")) and any(lfc_leaf.glob("*.parquet")):
+            logger.info(
+                "Overwriting disabled: existing partition data found for %s/%s/%s/%s.",
+                summary_obj.chromatography, summary_obj.polarity,
+                summary_obj.analysis_type, summary_obj.analysis_name,
+            )
+            return
 
-    ## Note: this is good for debugging schema issues, but it will break the parquet querier because it puts csv/json files in the dir
-    #_write_unified_schema_map(partition_dir, data_output_name)
-    #logger.info("Wrote unified parquet schema map files for %s to %s", data_output_name, partition_dir)
+    _write_schema_maps(schema_dir, summary_obj.project_name)
+    logger.info("Wrote schema map files to %s", schema_dir)
 
-    # Start with analysis-level fields always available from summary_obj
-    footer_meta: dict[bytes, bytes] = {
-        b"project_name":         str(summary_obj.project_name or "").encode(),
-        b"chromatography":       summary_obj.chromatography.encode(),
-        b"polarity":             summary_obj.polarity.encode(),
-        b"analysis_type":        summary_obj.analysis_type.encode(),
-        b"analysis_name":        summary_obj.analysis_name.encode(),
-        b"rt_alignment_number":  str(summary_obj.rt_alignment_number or "").encode(),
-        b"analysis_number":      str(summary_obj.analysis_number or "").encode(),
-        b"created_date":         datetime.date.today().isoformat().encode(),
-    }
+    footer_meta = _build_footer_metadata(summary_obj)
 
-    # Overlay all fields parsed from the project name
-    parsed_meta = _parse_project_metadata(summary_obj.project_name)
-    for key, val in parsed_meta.items():
-        footer_meta[key.encode()] = val.encode()
-
-    def _attach_meta(table: pa.Table) -> pa.Table:
-        existing = table.schema.metadata or {}
-        return table.replace_schema_metadata({**existing, **footer_meta})
-
-    # Write settings
-    _WRITE_KWARGS = dict(
+    parquet_format = ds.ParquetFileFormat()
+    write_options = parquet_format.make_write_options(
         compression="zstd",
         compression_level=3,
         write_statistics=True,
-        row_group_size=100_000,
-        data_page_size=1 * 1024 * 1024,
         use_dictionary=True,
+        data_page_size=1 * 1024 * 1024,
     )
 
-    logger.info("Building unified analysis table...")
-    unified_table = _build_unified_analysis_table(summary_obj)
+    def _write_grain(build_fn, grain_name: str) -> None:
+        logger.info("Building %s table...", grain_name)
+        table = build_fn(summary_obj)
+        if table.num_rows == 0:
+            logger.warning("%s table is empty — file not written.", grain_name)
+            return
 
-    if unified_table.num_rows > 0:
-        unified_table = _attach_meta(unified_table)
-        pq.write_table(unified_table, unified_path, **_WRITE_KWARGS)
-        logger.info(f"Wrote {unified_path.stem} ({unified_table.num_rows} rows, {unified_table.num_columns} columns)")
-    else:
-        logger.warning("Unified analysis table is empty — file not written.")
+        table = _with_partition_columns(table, summary_obj)
+        existing = table.schema.metadata or {}
+        table = table.replace_schema_metadata({**existing, **footer_meta})
+
+        ds.write_dataset(
+            table,
+            results_root / grain_name,
+            format="parquet",
+            partitioning=psa._PARTITIONING,
+            file_options=write_options,
+            basename_template=(
+                f"{summary_obj.project_name}-{summary_obj.rt_alignment_number}-"
+                f"{summary_obj.analysis_number}-{{i}}.parquet"
+            ),
+            max_rows_per_group=100_000,
+            existing_data_behavior="delete_matching",
+        )
+        logger.info(
+            "Wrote %s (%d rows, %d columns) to partition %s/%s/%s/%s",
+            grain_name, table.num_rows, table.num_columns,
+            summary_obj.chromatography, summary_obj.polarity,
+            summary_obj.analysis_type, summary_obj.analysis_name,
+        )
+
+    _write_grain(_build_compound_per_file_table, "compound_file")
+    _write_grain(_build_compound_lfc_table, "compound_lfc")
 
     logger.info("Analysis Parquet export complete")
-
-def _build_unified_analysis_table(
-    summary_obj: "AnalysisSummary",
-) -> pa.Table:
-    """Build one flat table containing both per-file and LFC rows.
-
-    The output uses a shared schema with a ``row_kind`` column so root-level
-    parquet scans can load the whole analysis without choosing between the
-    former ``compound_per_file`` and ``compound_lfc`` files. Partition
-    directories are retained for cheap pruning on chromatography, polarity,
-    analysis type, and analysis name.
-
-    Returns
-    -------
-    pa.Table
-    """
-    per_file_table = _build_compound_per_file_table(summary_obj)
-    lfc_table = _build_compound_lfc_table(summary_obj)
-
-    frames: list[pd.DataFrame] = []
-    if per_file_table.num_rows > 0:
-        per_file_df = per_file_table.to_pandas()
-        per_file_df["row_kind"] = "compound_file"
-        frames.append(per_file_df)
-    else:
-        logger.warning("compound_per_file table is empty — file-grain rows will be omitted.")
-
-    if lfc_table.num_rows > 0:
-        lfc_df = lfc_table.to_pandas()
-        lfc_df["row_kind"] = "compound_lfc"
-        frames.append(lfc_df)
-    else:
-        logger.warning("compound_lfc table is empty — lfc rows will be omitted.")
-
-    if not frames:
-        return pa.table({})
-
-    unified_cols = list(dict.fromkeys(
-        _COMPOUND_FILE_STR_COLS
-        + _COMPOUND_FILE_FLOAT_COLS
-        + _COMPOUND_LFC_STR_COLS
-        + _COMPOUND_LFC_FLOAT_COLS
-        + ["row_kind"]
-    ))
-    unified_df = pd.concat(
-        [df.reindex(columns=unified_cols) for df in frames],
-        ignore_index=True,
-        sort=False,
-    )
-    return pa.Table.from_pandas(unified_df, preserve_index=False)
-
 
 def _build_best_ms2_summary_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     """Return one-row-per-compound best-MS2 metrics for parquet export.
@@ -3040,10 +3163,16 @@ def _build_compound_per_file_table(
 
     mc = summary_obj.experimental_data.curation_df
 
-    # Build quality-score lookup from curation_df.
-    # mz_measured uses top3_mz_centroid_avg (mean mz_centroid of top-3 files by peak_height).
-    # rt_measured uses curation_df.rt_peak (mean of per-file peak RTs from analyze_ms1()).
-    # Errors are absolute values.
+    # check for unexpected polarity values in curation_df
+    row_polarities = mc["polarity"].dropna().unique() if "polarity" in mc.columns else []
+    unexpected = [p for p in row_polarities if p != summary_obj.polarity]
+    if unexpected:
+        raise ValueError(
+            "curation_df contains polarity values %s that differ from summary_obj.polarity=%s; "
+            "these rows may belong to the wrong partition.",
+            unexpected, summary_obj.polarity,
+        )
+
     chromatography = summary_obj.chromatography
     quality_rows: list[dict] = []
     for cmp_idx, mc_row in mc.iterrows():
@@ -3083,7 +3212,6 @@ def _build_compound_per_file_table(
             "inchi":        str(mc_row.get("inchi", "")),
             "pubchem_cid":  str(mc_row.get("pubchem_cid", "")),
             "iupac_name":   str(mc_row.get("iupac_name", "")),
-            "polarity":     str(mc_row.get("polarity", "")),
             "adduct":       str(mc_row.get("adduct", "")),
             "atlas_mz":     mz_theoretical,
             "atlas_rt_peak": float(mc_row.get("atlas_rt_peak", np.nan)),
@@ -3213,8 +3341,8 @@ def _build_compound_per_file_table(
     )
 
     # Select and type-cast columns
-    str_cols = _COMPOUND_FILE_STR_COLS
-    float_cols = _COMPOUND_FILE_FLOAT_COLS
+    str_cols = psa._COMPOUND_FILE_STR_COLS
+    float_cols = psa._COMPOUND_FILE_FLOAT_COLS
 
     for col in str_cols:
         if col not in merged.columns:
@@ -3394,8 +3522,8 @@ def _build_compound_lfc_table(
         ):
             long_df[col] = np.nan if col.startswith("atlas") else ""
 
-    str_cols = _COMPOUND_LFC_STR_COLS
-    float_cols = _COMPOUND_LFC_FLOAT_COLS
+    str_cols = psa._COMPOUND_LFC_STR_COLS
+    float_cols = psa._COMPOUND_LFC_FLOAT_COLS
 
     for col in str_cols:
         if col not in long_df.columns:
@@ -3418,26 +3546,3 @@ def _build_compound_lfc_table(
     )
 
     return pa.Table.from_pandas(long_df, preserve_index=False)
-
-
-def _parse_project_metadata(project_name: str) -> dict[str, str]:
-
-    if not project_name:
-        return {}
-    try:
-        parsed = fpf.PROJECT_PATTERN.match(project_name)
-        if not parsed:
-            logger.warning(
-                "project_name '%s' does not match PROJECT_PATTERN — "
-                "project metadata will not be added to Parquet footer.",
-                project_name,
-            )
-            return {}
-        return {k: str(v) for k, v in parsed.groupdict().items() if v is not None}
-    except Exception as exc:
-        logger.warning(
-            "Could not parse project metadata from '%s': %s — "
-            "project metadata will not be added to Parquet footer.",
-            project_name, exc,
-        )
-        return {}
