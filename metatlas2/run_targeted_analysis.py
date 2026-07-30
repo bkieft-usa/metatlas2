@@ -198,6 +198,7 @@ def set_up_paths(
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.json"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"
     modelseed_table_path = f"{data_dir}/databases/modelseed_db/modelseed.tsv"
+    parquet_output_path = f"{data_dir}/projects/parquet_outputs/"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
         return {
@@ -214,7 +215,7 @@ def set_up_paths(
     if user is None:
         raise ValueError("USER environment variable is not set")
     project_output_dir = Path(project_output_path) / owner / user / project_name
-    parquet_output_dir = Path(f"{data_dir}/projects/parquet_outputs/")
+    parquet_output_dir = Path(parquet_output_path) # / owner / user / project_name
     try:
         project_short = str(project_name.split("_")[4]) + "_RTA" + str(rt_alignment_number) + "_TGA" + str(analysis_number)
     except Exception as e:

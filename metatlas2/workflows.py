@@ -387,6 +387,7 @@ def run_analysis_summary(
 def run_parquet_query(
     project_root: str,
     params_path: str,
+    query_name: str
 ) -> pd.DataFrame:
     """Run a YAML-configured query against a project's Parquet results.
 
@@ -399,9 +400,11 @@ def run_parquet_query(
     params_path:
         Path to a YAML file whose top-level ``grain`` key selects
         ``compound_file`` or ``compound_lfc``, plus any filter params.
+    query_name:
+        The name of the query to execute from the YAML file.
     """
     from metatlas2.workflow_objects import ParquetQueryInterpreter
 
     return ParquetQueryInterpreter.execute_from_params_file(
-        Path(project_root), Path(params_path)
+        Path(project_root), Path(params_path), query_name
     )

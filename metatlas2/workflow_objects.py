@@ -21,7 +21,7 @@ import metatlas2.logging_config as lcf
 import metatlas2.run_targeted_analysis as rtg
 import metatlas2.note_options as gno
 import metatlas2.file_and_project_format as fpf
-import metatlas2.parquet_schemas as psa
+import metatlas2.parquet_interact as pqi
 from metatlas2.utils import should_disable_tqdm, as_list
 logger = lcf.get_logger('workflow_objects')
 
@@ -1215,38 +1215,35 @@ class AnalysisSummary(CurationStageBase):
         os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
 
 class ParquetQueryInterpreter:
-    def __init__(self, project_root: Path, grain: str = "compound_lfc"):
-        if grain not in psa._GRAIN_SUBDIR:
-            raise ValueError(f"grain must be one of {list(psa._GRAIN_SUBDIR)}, got {grain!r}")
+    def __init__(self, parquet_output_path: Path, grain: str = "compound_lfc"):
+        if grain not in pqi._GRAIN_SUBDIR:
+            raise ValueError(f"grain must be one of {list(pqi._GRAIN_SUBDIR)}, got {grain!r}")
 
-        dataset_dir = Path(project_root) / "parquet_results" / psa._GRAIN_SUBDIR[grain]
+        dataset_dir = Path(parquet_output_path) / pqi._GRAIN_SUBDIR[grain]
         if not dataset_dir.exists():
             raise FileNotFoundError(f"No dataset found at {dataset_dir}")
 
         self.grain = grain
-        self.dataset = ds.dataset(dataset_dir, format="parquet", partitioning=psa._PARTITIONING)
+        self.dataset = ds.dataset(dataset_dir, format="parquet", partitioning=pqi._PARTITIONING)
+
+    # Longest / most specific suffixes must be checked first.
+    _SUFFIX_ORDER = ("_abs_min", "_abs_max", "_abs_gt", "_abs_lt", "_min", "_max", "_in")
 
     def _translate_to_expression(self, param_name: str, value: Any):
-        if param_name.endswith("_min"):
-            col, op = param_name[:-4], ">="
-        elif param_name.endswith("_max"):
-            col, op = param_name[:-4], "<="
-        elif param_name.endswith("_abs_gt"):
-            col, op = param_name[:-7], "abs_gt"
-        elif param_name.endswith("_abs_lt"):
-            col, op = param_name[:-7], "abs_lt"
-        elif param_name.endswith("_in"):
-            col, op = param_name[:-3], "in"
-        else:
-            col, op = param_name, "=="
+        col, op = param_name, "=="
+        for suffix in self._SUFFIX_ORDER:
+            if param_name.endswith(suffix):
+                col = param_name[: -len(suffix)]
+                op = suffix.lstrip("_")
+                break
 
         field = ds.field(col)
 
         if op == "==":
             return field == value
-        elif op == ">=":
+        elif op == "min":
             return field >= value
-        elif op == "<=":
+        elif op == "max":
             return field <= value
         elif op == "in":
             val_list = value if isinstance(value, list) else [value]
@@ -1255,15 +1252,21 @@ class ParquetQueryInterpreter:
             return (field > value) | (field < -value)
         elif op == "abs_lt":
             return (field < value) & (field > -value)
+        elif op == "abs_min":
+            # inclusive: abs(field) >= value
+            return (field >= value) | (field <= -value)
+        elif op == "abs_max":
+            # inclusive: abs(field) <= value
+            return (field <= value) & (field >= -value)
 
         return None
 
     @staticmethod
     def _handle_condition_pair(value: list) -> "ds.Expression":
         """Symmetric match: rows where {condition_1, condition_2} == set(value),
-        regardless of which one was stored first. No sign assumption —
-        pair with an *_abs_gt / *_abs_lt filter on log2_fold_change for
-        magnitude-only comparisons."""
+        regardless of which one was stored first. Pair with log2_fold_change
+        _abs_min / _abs_gt for magnitude-only comparisons, or use plain
+        condition_1/condition_2 keys if you need a specific stored order."""
         c1_val, c2_val = value
         c1, c2 = ds.field("condition_1"), ds.field("condition_2")
         return ((c1 == c1_val) & (c2 == c2_val)) | ((c1 == c2_val) & (c2 == c1_val))
@@ -1284,7 +1287,7 @@ class ParquetQueryInterpreter:
         )
 
     def _build_filter(self, params: dict):
-        schema_cols = set(self.dataset.schema.names)  # includes partition cols via hive partitioning
+        schema_cols = set(self.dataset.schema.names)
         expressions = []
 
         for param_name, value in params.items():
@@ -1292,23 +1295,22 @@ class ParquetQueryInterpreter:
                 continue
 
             try:
-                if param_name in self._SPECIAL_HANDLERS:
-                    # composite handlers reference columns that must exist for this grain
+                if param_name in pqi._SPECIAL_HANDLERS:
                     required = {"condition_1", "condition_2"} if param_name in (
                         "condition_pair", "lfc_directional_min"
                     ) else set()
                     missing = required - schema_cols
                     if missing:
                         print(f"Skipping '{param_name}': columns {missing} not present in grain "
-                            f"'{self.grain}' (this key is compound_lfc-only).")
+                              f"'{self.grain}' (this key is compound_lfc-only).")
                         continue
-                    handler = getattr(self, self._SPECIAL_HANDLERS[param_name])
+                    handler = getattr(self, pqi._SPECIAL_HANDLERS[param_name])
                     expr = handler(value)
                 else:
                     col = self._strip_suffix(param_name)
                     if col not in schema_cols:
                         print(f"Skipping '{param_name}': column '{col}' not present in grain "
-                            f"'{self.grain}'. Check which section of the YAML this belongs to.")
+                              f"'{self.grain}'. Check which section of the YAML this belongs to.")
                         continue
                     expr = self._translate_to_expression(param_name, value)
 
@@ -1324,7 +1326,7 @@ class ParquetQueryInterpreter:
 
     @staticmethod
     def _strip_suffix(param_name: str) -> str:
-        for suffix in ("_min", "_max", "_abs_gt", "_abs_lt", "_in"):
+        for suffix in ParquetQueryInterpreter._SUFFIX_ORDER:
             if param_name.endswith(suffix):
                 return param_name[: -len(suffix)]
         return param_name
@@ -1339,16 +1341,22 @@ class ParquetQueryInterpreter:
         return table.to_pandas()
 
     @classmethod
-    def execute_from_params_file(cls, project_root: Path, params_path: Path) -> pd.DataFrame:
+    def execute_from_params_file(
+        cls,
+        parquet_output_path: Path,
+        params_path: Path,
+        query_name: str | None = None,
+    ) -> pd.DataFrame:
         with open(params_path, "r") as f:
-            params = yaml.safe_load(f) or {}
+            config = yaml.safe_load(f) or {}
+
+        query_name = query_name
+        if not query_name:
+            raise ValueError("YAML defines multiple 'queries' but no query_name was passed")
+        if query_name not in config["queries"]:
+            raise KeyError(f"Query '{query_name}' not found. Available: {list(config['queries'])}")
+        params = config["queries"][query_name]
+
         grain = params.get("grain", "compound_lfc")
-        engine = cls(Path(project_root), grain)
+        engine = cls(Path(parquet_output_path), grain)
         return engine.execute(params)
-
-
-def run_parquet_query(project_root: str, params_path: str) -> pd.DataFrame:
-    from metatlas2.workflow_objects import ParquetQueryInterpreter
-    return ParquetQueryInterpreter.execute_from_params_file(
-        Path(project_root), Path(params_path)
-    )
