@@ -19,12 +19,6 @@
 #                 Downloads dev data if needed to ~/.metatlas2-dev/.
 #   --update-data Force re-download of dev data (use with --standalone).
 #                 Useful when new Zenodo versions are published.
-#
-# Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch)
-# inside the container, so no explicit volume flags are needed for data access.
-#
-# The wrapper handles the submit/sbatch split:
-#   submit -> container generates the SLURM script -> host calls sbatch.
 
 set -euo pipefail
 
@@ -34,10 +28,6 @@ DEV_MODE=false
 STANDALONE_MODE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-
-# Parse wrapper-specific flags; pass everything else through to Python
-
 PASSTHROUGH_ARGS=()
 UPDATE_DATA=false
 while [[ $# -gt 0 ]]; do
@@ -53,7 +43,6 @@ done
 
 IMAGE="docker:${IMAGE_REPO}:${IMAGE_TAG}"
 
-
 # Validate required environment variables (skip for standalone mode)
 if [[ "${STANDALONE_MODE}" == "false" ]]; then
     if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
@@ -62,7 +51,6 @@ if [[ "${STANDALONE_MODE}" == "false" ]]; then
         exit 1
     fi
 fi
-
 
 # Standalone mode setup
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
@@ -88,7 +76,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
         exit 1
     fi
 
-    # ── Data download (unchanged from your original) ───────────────────────────
+    # Data download
     NEEDS_DOWNLOAD=false
     if [[ ! -d "${STANDALONE_DIR}" ]]; then
         NEEDS_DOWNLOAD=true
@@ -122,7 +110,7 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
             echo ""
         fi
 
-    # ── Clean previous outputs ─────────────────────────────────────────────────
+    # Clean previous outputs
     PROJECTS_DIR="${STANDALONE_DIR}/projects/targeted_outputs"
     if [[ -d "${PROJECTS_DIR}" ]]; then
         echo "Cleaning up previous workflow outputs..."
@@ -136,14 +124,12 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     cp "${REPO_DIR}/local/parquet_query.ipynb" "${STANDALONE_DIR}/notebooks/parquet_query.ipynb"
     echo ""
 
-    # ── Pull latest image ──────────────────────────────────────────────────────
+    # Pull latest image
     echo "Pulling latest container image..."
     docker pull "${IMAGE_REPO}:${IMAGE_TAG}"
     echo ""
 
-    # ── Write a fresh Jupyter config inside a temp dir ────────────────────────
-    # This is baked into the container at runtime via JUPYTER_CONFIG_DIR,
-    # guaranteeing nothing inside the image can override the bind address.
+    # Write a fresh Jupyter config inside a temp dir
     JUPYTER_CONFIG_TMPDIR=$(mktemp -d)
     trap "rm -rf '${JUPYTER_CONFIG_TMPDIR}'" EXIT
     cat > "${JUPYTER_CONFIG_TMPDIR}/jupyter_server_config.py" <<'EOF'
@@ -155,7 +141,7 @@ c.ServerApp.open_browser = False
 c.ServerApp.allow_root = True
 EOF
 
-    # ── Launch via Docker Compose ──────────────────────────────────────────────
+    # Launch via Docker Compose
     echo "=========================================="
     echo "Launching JupyterLab..."
     echo ""
@@ -182,34 +168,22 @@ EOF
 fi
 
 # Common shifter flags.
-# GPFS paths (home, CFS, scratch) are auto-mounted by shifter -- no -v needed.
 SHIFTER_ARGS=(
     "--image=${IMAGE}"
     "--env=METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
     "--env=METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
     "--env=HOME=${HOME}"
     "--env=JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
-    # metatlas2 has no [build-system] in pyproject.toml so it is not installed
-    # as a wheel in the venv.  Set PYTHONPATH=/app so Python always finds
-    # /app/metatlas2/ regardless of the working directory.
     "--env=PYTHONPATH=/app"
 )
 
 # Dev mode: put the local metatlas2/ package first on PYTHONPATH so edits
-# take effect immediately.  GPFS is auto-mounted by shifter, so the repo is
-# already visible inside the container at the same absolute path.
-# Also keep /app as fallback so other metatlas2 subpackages still resolve.
+# take effect immediately.
 if [[ "${DEV_MODE}" == "true" ]]; then
     SHIFTER_ARGS+=("--env=PYTHONPATH=${REPO_DIR}:/app")
     echo "Dev mode enabled: using local repo scripts at ${REPO_DIR}/scripts"
 fi
 
-
-# Auto-install a Jupyter kernel spec for pinned image tags.
-# The two default kernels (metatlas2, metatlas2-dev) reference :latest and
-# stay valid across image updates -- they only need to be installed once.
-# Pinned tags are registered on first use so the analyst never has to
-# run install_kernels.sh --tag manually.
 if [[ "${IMAGE_TAG}" != "latest" ]]; then
     KERNEL_DIR="${HOME}/.local/share/jupyter/kernels/metatlas2-${IMAGE_TAG}"
     if [[ ! -d "${KERNEL_DIR}" ]]; then
@@ -219,13 +193,9 @@ if [[ "${IMAGE_TAG}" != "latest" ]]; then
 fi
 
 
-# Subcommand dispatch
-
 SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
 
 if [[ "${SUBCOMMAND}" == "submit" ]]; then
-    # Generate the SLURM script inside the container (sbatch is not available
-    # there), write it to a temp file on the shared /tmp, then submit from host.
     TMPSCRIPT="$(mktemp /tmp/metatlas2_XXXXXX.sh)"
     # shellcheck disable=SC2064
     trap "rm -f '${TMPSCRIPT}'" EXIT
