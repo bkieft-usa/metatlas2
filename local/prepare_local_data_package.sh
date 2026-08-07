@@ -1,8 +1,4 @@
 #!/bin/bash
-# Prepare standalone development environment data package
-#
-# This script must be run at NERSC with access to production data.
-# It extracts a minimal set of files and creates the dev package structure.
 #
 # Usage:
 #   cd /global/homes/b/bkieft/metatlas2
@@ -12,20 +8,22 @@
 #   --keep-existing-archive  Skip package creation and only upload existing tarball to Zenodo
 #   --no-h5-subset  Skip filtering copied h5 files (filtering is on by default)
 #   --skip-zenodo-upload  Skip upload to Zenodo (useful for testing)
+#
 # Output:
 #   Creates metatlas2-dev-data.tar.gz ready for Zenodo upload
 
-# If .venv is not available, run uv sync to build it
+set -euo pipefail
+
+# If .venv is not available, run uv sync to build it, then re-source
 if [[ ! -d "/global/cfs/cdirs/metatlas/tools/metatlas2/.venv" ]]; then
     echo "Virtual environment not found. Running uv sync to create it..."
     uv sync
-    exit 1
+    echo "Virtual environment created. Please re-run this script."
+    exit 0
 fi
 
-# activate env with 'source /global/cfs/cdirs/metatlas/tools/metatlas2/.venv/bin/activate'
+# activate env
 source /global/cfs/cdirs/metatlas/tools/metatlas2/.venv/bin/activate
-
-set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -52,7 +50,7 @@ done
 OUTPUT_DIR="${OUTPUT_DIR:-${METATLAS_DATA_DIR}/databases/standalone_dev_data}"
 PACKAGE_NAME="metatlas2-dev-data"
 
-# Source project with representative ISTD data
+# Source project with representative data
 SOURCE_PROJECT="20260311_JGI_AE_511825_SorghAnth_final_EXP120B_HILICZ_USHXG03401"
 SOURCE_OWNER="jgi"
 SOURCE_BASE="${METATLAS_DATA_DIR}/raw_data/${SOURCE_OWNER}/${SOURCE_PROJECT}"
@@ -93,20 +91,13 @@ else
         exit 1
     fi
 
-# Remove existing output if it exists
-if [[ -d "${OUTPUT_DIR}/${PACKAGE_NAME}" ]]; then
-    echo "Warning: Output directory already exists. Removing: ${OUTPUT_DIR}/${PACKAGE_NAME}"
-    rm -rf "${OUTPUT_DIR:?}/${PACKAGE_NAME}"
-fi
+    # Remove existing output if it exists
+    if [[ -d "${OUTPUT_DIR}/${PACKAGE_NAME}" ]]; then
+        echo "Warning: Output directory already exists. Removing: ${OUTPUT_DIR}/${PACKAGE_NAME}"
+        rm -rf "${OUTPUT_DIR:?}/${PACKAGE_NAME}"
+    fi
 
-# Create output structure matching expected paths:
-# - raw_data/dev/{project_name}/   (h5 files live directly here)
-# - databases/main_db/
-# - databases/msms_refs/
-# - databases/modelseed_db/
-# - configs/
-# - atlases/
-# - projects/targeted_outputs/ (will be created by workflow)
+# Create output structure matching expected paths
 STANDALONE_PROJECT="20260101_JGI_XX_000000_STANDALONE-DEV_test_EXP000_HILICZ_TESTXXXX"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/raw_data/dev/${STANDALONE_PROJECT}"
 mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/databases/main_db"
@@ -118,7 +109,6 @@ mkdir -p "${OUTPUT_DIR}/${PACKAGE_NAME}/projects/targeted_outputs"
 cd "${OUTPUT_DIR}/${PACKAGE_NAME}"
 
 echo "Collecting h5 files..."
-echo "------------------------------------"
 
 # Copy all h5 files for specific run types
 QC_RUNS=(
@@ -150,7 +140,6 @@ echo "Copying h5 files for ${#ALL_RUNS[@]} runs (each run may have multiple h5 f
 echo ""
 
 for run in "${ALL_RUNS[@]}"; do
-    # Find all h5 files for this run
     shopt -s nullglob
     run_files=("${SOURCE_BASE}/"*"_${run}".h5)
     shopt -u nullglob
@@ -180,16 +169,12 @@ if [[ ${MISSING} -gt 0 ]]; then
     echo "You may need to adjust the run list in this script."
 fi
 
-# Count total h5 files copied
 TOTAL_H5=$(find "raw_data/dev/${STANDALONE_PROJECT}/" -name "*.h5" 2>/dev/null | wc -l)
 echo ""
 echo "Total h5 files copied: ${TOTAL_H5}"
 
 echo ""
-echo "Creating compound definitions..."
-echo "-----------------------------------------"
-
-# Create positive mode compounds
+echo "Creating atlases..."
 
 cat > atlases/qc_compounds_pos.tsv << 'EOF'
 compound_name	adduct	mz	rt_peak	rt_min	rt_max	inchi_key	mz_tolerance	polarity
@@ -234,9 +219,7 @@ echo "   Created atlases/ema_compounds_neg.tsv"
 
 echo ""
 echo "Creating MS2 references..."
-echo "----------------------------------"
 
-# Create MS2 references file
 cat > databases/msms_refs/ms2_references.json << 'EOF'
 {"ix": 40, "database": "metatlas", "id": "36aacde4bdf647aabd2f6012491e1b37", "name": "riboflavin", "decimal": 4.0, "inchi_key": "AUNGANRZJHBGPY-SCRDCRAPSA-N", "precursor_mz": 377.146, "polarity": "positive", "adduct": null, "fragmentation_method": "cid", "collision_energy": null, "instrument": null, "instrument_type": null, "formula": "C17H20N4O6", "mono_isotopic_molecular_weight": 376.1382844, "inchi": "InChI=1S/C17H20N4O6/c1-7-3-9-10(4-8(7)2)21(5-11(23)14(25)12(24)6-22)15-13(18-9)16(26)20-17(27)19-15/h3-4,11-12,14,22-25H,5-6H2,1-2H3,(H,20,26,27)/t11-,12+,14-/m0/s1", "smiles": null, "mz": [51.5585, 57.0344, 57.2594, 59.0501, 61.0291, 68.1039, 69.0343, 70.3038, 71.0134, 71.0498, 71.3187, 73.029, 74.7888, 74.7934, 75.0447, 79.9236, 81.034, 94.4088, 94.4139, 99.0447, 117.055, 120.772, 130.617, 140.291, 167.512, 169.607, 172.087, 178.786, 200.081, 216.077, 243.088, 244.091, 334.14, 359.135, 360.139, 377.146, 378.149], "intensities": [41067.0, 416448.0, 51929.0, 45272.0, 61642.0, 46252.0, 687842.0, 52021.0, 186327.0, 213927.0, 60040.0, 105045.0, 248913.0, 105136.0, 224415.0, 40740.0, 269204.0, 80258.0, 65152.0, 685077.0, 209501.0, 45974.0, 47854.0, 51782.0, 48939.0, 52416.0, 101369.0, 54696.0, 57464.0, 59277.0, 10433600.0, 780488.0, 53680.0, 727446.0, 65661.0, 32985600.0, 3942320.0]}
 {"ix": 61, "database": "metatlas", "id": "4d60ac06c206441e88226f9d8f1f124e", "name": "isoleucine", "decimal": 4.0, "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N", "precursor_mz": 132.102, "polarity": "positive", "adduct": null, "fragmentation_method": "cid", "collision_energy": null, "instrument": null, "instrument_type": null, "formula": "C6H13NO2", "mono_isotopic_molecular_weight": 131.0946287, "inchi": "InChI=1S/C6H13NO2/c1-3-4(2)5(7)6(8)9/h4-5H,3,7H2,1-2H3,(H,8,9)/t4-,5-/m0/s1", "smiles": null, "mz": [51.0053, 51.6623, 54.0121, 54.328, 55.2777, 58.0977, 58.9816, 69.071, 86.0974, 87.1008, 121.602, 132.103], "intensities": [2034.0, 2228.0, 2164.0, 2066.0, 2245.0, 2105.0, 2254.0, 41822.0, 433756.0, 22292.0, 2518.0, 5459.0]}
@@ -352,7 +335,9 @@ EOF
 
 echo "   Created ms2_references.json"
 
-# Create modelseed cache
+echo ""
+echo "Creating modelseed lookup..."
+
 cat > databases/modelseed_db/modelseed.tsv << 'EOF'
 id	abbreviation	name	formula	mass	source	inchikey	charge	is_core	is_obsolete	linked_compound	is_cofactor	deltag	deltagerr	pka	pkb	abstract_compound	comprised_of	aliases	smiles	notes
 cpd00128	ade	Adenine	C5H5N5	135.0	Primary Database	GFFGJBXGBJISGV-UHFFFAOYSA-N	0	1	0	null	0	122.4	0.39	1:9:9.90;1:10:19.90	1:3:-7.90;1:5:4.25;1:7:-0.52;1:10:-6.30	null	null	Name: 6-Aminopurine; 6-aminopurine; Adenine; adenine|AraCyc: ADENINE|BiGG: ade|BrachyCyc: ADENINE|KEGG: C00147|MetaCyc: ADENINE	Nc1ncnc2[nH]cnc12	GC|EQ|EQU
@@ -369,7 +354,6 @@ echo "   Created modelseed.tsv"
 if [[ "$SUBSET_H5" == true ]]; then
     echo ""
     echo "Subsetting copied h5 files..."
-    echo "----------------------------------"
 
     # Use conservative defaults so rows needed by both RT alignment and targeted analysis are retained.
     SUBSET_PPM_MS1=5.0
@@ -569,7 +553,6 @@ fi
 
 echo ""
 echo "Creating configuration files..."
-echo "----------------------------------------"
 
 # Create compounds configuration
 cat > configs/compounds_config.yaml << 'EOF'
@@ -736,6 +719,9 @@ echo "   Created configs/compounds_config.yaml"
 echo "   Created configs/atlases_config.yaml"
 echo "   Created configs/analysis_config.yaml"
 
+echo ""
+echo "Creating parquet query configuration..."
+
 cat > configs/parquet_query.yaml << 'EOF'
 # ==============================================================================
 # QUERY PARAMETERS
@@ -805,7 +791,6 @@ echo "    Created configs/parquet_query.yaml"
 
 echo ""
 echo "Creating tarball..."
-echo "---------------------------"
 
 cd "${OUTPUT_DIR}"
 tar -czf "${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}/"
@@ -837,7 +822,6 @@ if [[ "$KEEP_EXISTING" == true ]]; then
 else
     echo "Uploading to Zenodo..."
 fi
-echo "-------------------------------"
 
 # Check for Zenodo access token
 if [[ -z "${ZENODO_ACCESS_TOKEN:-}" ]]; then
