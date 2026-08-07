@@ -1,0 +1,24 @@
+PARAMS:
+  use_pubchem_cache: true
+  update_pubchem_cache: false
+COMPOUNDS:
+    HILICZ:
+      POS:
+        PATHS:
+          - /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_QCv7_positive.tsv
+          - /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_ISTDsEtcV7_positive.tsv
+          - /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_EMA-standards_positive.tsv
+      NEG:
+        PATHS:
+         - /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_ISTDsEtcV7_negative.tsv
+         - /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_EMA-standards_negative.tsv
+    # C18:
+    #   POS:
+    #     PATHS:
+    #       - /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_QCv7_positive.tsv
+    #       - /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_positive.tsv
+    #       - /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_EMA-standards_positive.tsv
+    #   NEG:
+    #     PATHS:
+    #       - /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_negative.tsv
+    #       - /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_EMA-standards_negative.tsv
