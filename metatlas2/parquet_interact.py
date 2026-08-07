@@ -200,7 +200,7 @@ def make_analysis_parquet(
         file_leaf = _partition_leaf_dir(parquet_output_path / "compound_file", summary_obj)
         lfc_leaf = _partition_leaf_dir(parquet_output_path / "compound_lfc", summary_obj)
         if any(file_leaf.glob("*.parquet")) and any(lfc_leaf.glob("*.parquet")):
-            logger.info("Overwriting disabled: existing partition data found for %s.", summary_obj.project_name)
+            logger.info(f"Overwriting disabled: existing partition data found for {summary_obj.project_name}.")
             return
 
     schema_dir = parquet_output_path / "schema_maps"
@@ -215,10 +215,10 @@ def make_analysis_parquet(
     )
 
     def _write_grain(build_fn, grain_name: str) -> None:
-        logger.info("Building %s table...", grain_name)
+        logger.info(f"Building {grain_name} table...")
         table = build_fn(summary_obj)
         if table.num_rows == 0:
-            logger.warning("%s table is empty — file not written.", grain_name)
+            logger.warning(f"{grain_name} table is empty — file not written.")
             return
 
         table = _with_partition_columns(table, summary_obj)
@@ -237,7 +237,7 @@ def make_analysis_parquet(
             max_rows_per_group=100_000,
             existing_data_behavior="delete_matching",
         )
-        logger.info("Wrote %s (%d rows) for project=%s", grain_name, table.num_rows, summary_obj.project_name)
+        logger.info(f"Wrote {grain_name} ({table.num_rows} rows) for project={summary_obj.project_name}")
 
     _write_grain(_build_compound_per_file_table, "compound_file")
     _write_grain(_build_compound_lfc_table, "compound_lfc")
@@ -327,9 +327,9 @@ def _build_compound_per_file_table(
     unexpected = [p for p in row_polarities if p != summary_obj.polarity]
     if unexpected:
         raise ValueError(
-            "curation_df contains polarity values %s that differ from summary_obj.polarity=%s; "
-            "these rows may belong to the wrong partition.",
-            unexpected, summary_obj.polarity,
+            f"curation_df contains polarity values {unexpected!r} that differ from "
+            f"summary_obj.polarity={summary_obj.polarity!r}; "
+            f"these rows may belong to the wrong partition."
         )
 
     chromatography = summary_obj.chromatography
@@ -414,7 +414,7 @@ def _build_compound_per_file_table(
             if "inchi_key" in fdf.columns and "control_filter" in fdf.columns:
                 ctrl_filter_map = dict(zip(fdf["inchi_key"], fdf["control_filter"]))
         except Exception as exc:
-            logger.warning("Could not read control_filter from %s: %s", filtered_csv, exc)
+            logger.warning(f"Could not read control_filter from {filtered_csv}: {exc}")
 
     quality_df["control_filter"] = quality_df["inchi_key"].map(ctrl_filter_map).fillna("")
 
@@ -572,7 +572,7 @@ def _build_compound_lfc_table(
     lfc_cols = [c for c in lfc_df.columns if c not in _ID_COLS]
 
     if not lfc_cols:
-        logger.warning("No LFC columns found in %s — compound_lfc table will be empty.", lfc_csv)
+        logger.warning(f"No LFC columns found in {lfc_csv} — compound_lfc table will be empty.")
         return pa.table({})
 
     # Melt wide to long: each LFC column becomes one row

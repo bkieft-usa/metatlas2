@@ -73,7 +73,6 @@ def generate_gui_notebooks(
 
     return out_path
 
-
 def _make_parameters_cell(auto_id_obj: "AutoIdentification", run_params: dict) -> nbformat.NotebookNode:
     params = auto_id_obj.ta.params
     param_keys = [
@@ -109,7 +108,6 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification", run_params: dict) -
     src += "}"
     return nbformat.v4.new_code_cell(src)
 
-
 def _make_header_cell(run_params: dict) -> nbformat.NotebookNode:
     text = (
         f"# **`{run_params['project_name']}`**  \n"
@@ -123,7 +121,6 @@ def _make_header_cell(run_params: dict) -> nbformat.NotebookNode:
     )
     return nbformat.v4.new_markdown_cell(text)
 
-
 def _make_imports_cell() -> nbformat.NotebookNode:
     src = (
         "import logging\n"
@@ -136,7 +133,6 @@ def _make_imports_cell() -> nbformat.NotebookNode:
     )
     return nbformat.v4.new_code_cell(src)
 
-
 def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
         "# Manual Curation\n"
@@ -146,7 +142,6 @@ def _make_gui_cell() -> nbformat.NotebookNode:
         ")"
     )
     return nbformat.v4.new_code_cell(src)
-
 
 def _make_summary_cell() -> nbformat.NotebookNode:
     src = (

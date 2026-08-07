@@ -204,14 +204,14 @@ def make_identification_figure(
 ) -> None:
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "identification_figures"
     if overwrite and output_dir.exists():
-        logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
+        logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
     elif not overwrite and output_dir.exists():
-        logger.info("Overwriting disabled: existing directory %s will be used.", output_dir)
+        logger.info(f"Overwriting disabled: existing directory {output_dir} will be used.")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Exporting identification figures to %s", output_dir)
+    logger.info(f"Exporting identification figures to {output_dir}")
 
     color_map = None
     if hasattr(summary_obj, "override_parameters") and summary_obj.override_parameters.get("gui_lcmsruns_colors"):
@@ -224,7 +224,7 @@ def make_identification_figure(
     ms2_all_df = summary_obj.experimental_data.ms2_df
 
     total_files = ms1_all_df["filename"].nunique() if (ms1_all_df is not None and not ms1_all_df.empty) else 0
-    logger.info("Plotting %d compounds across %d files.", len(manual_curation_df), total_files)
+    logger.info(f"Plotting {len(manual_curation_df)} compounds across {total_files} files.")
 
     def _pregroup(df: pd.DataFrame | None) -> dict:
         if df is None or df.empty:
@@ -269,7 +269,7 @@ def make_identification_figure(
         return
 
     n_workers = max_workers or min(os.cpu_count() or 4, len(tasks))
-    logger.info("Generating %d figures using %d workers...", len(tasks), n_workers)
+    logger.info(f"Generating {len(tasks)} figures using {n_workers} workers...")
 
     pbar = tqdm(
         total=len(tasks), desc="Generating ID figures",
@@ -284,9 +284,9 @@ def make_identification_figure(
             name = future_to_name[future]
             try:
                 future.result()
-                logger.debug("Exported identification figure for %s", name)
+                logger.debug(f"Exported identification figure for {name}")
             except Exception as exc:
-                logger.error("Failed to generate figure for %s: %s", name, exc)
+                logger.error(f"Failed to generate figure for {name}: {exc}")
             finally:
                 pbar.set_postfix(compound=name, refresh=False)
                 pbar.update(1)
@@ -876,7 +876,7 @@ def _plot_structure(
             return
 
     except Exception as exc:
-        logger.warning("Could not draw structure for %s: %s", inchi_key, exc)
+        logger.warning(f"Could not draw structure for {inchi_key}: {exc}")
 
     ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
             ha="center", va="center", fontsize=12, weight="bold", color="gray")
@@ -906,7 +906,7 @@ def make_final_id_sheet(
         output_filename += ".xlsx"
     excel_path = output_loc / output_filename
     if not overwrite and excel_path.exists():
-        logger.info("Overwriting disabled: existing file %s will be used.", excel_path)
+        logger.info(f"Overwriting disabled: existing file {excel_path} will be used.")
         return
 
     manual_curation_df = summary_obj.experimental_data.curation_df
@@ -949,7 +949,7 @@ def make_final_id_sheet(
 
     is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
 
-    logger.info("Processing %d compounds...", len(manual_curation_df))
+    logger.info(f"Processing {len(manual_curation_df)} compounds...")
 
     overlapping_map = _compute_all_overlapping_compounds(manual_curation_df, mass_map)
 
@@ -1101,7 +1101,7 @@ def make_final_id_sheet(
         })
 
     final_df = pd.DataFrame(rows)
-    logger.info("Assembled final ID table with %d rows.", len(final_df))
+    logger.info(f"Assembled final ID table with {len(final_df)} rows.")
 
     COL_NAMES = [
         # COMPOUND ANNOTATION
@@ -1313,7 +1313,7 @@ def make_final_id_sheet(
                 {"type": "no_errors", "format": fmt},
             )
 
-    logger.info("Exported final ID table to %s", excel_path)
+    logger.info(f"Exported final ID table to {excel_path}")
 
 def mz_quality(ppm_error: float, mz_delta: float) -> float:
     """Return 0/0.5/1 mz quality score from ppm and absolute mass error."""
@@ -1353,7 +1353,10 @@ def total_score_and_msi(
 
     if msms_q == -1:
         msi = "REMOVE, INVALIDATED BY BAD MSMS MATCH"
-    elif len(scores) > 0 and statistics.median(scores) < 1:
+    elif len(scores) == 0:
+        # All three quality scores are NaN — cannot determine MSI level
+        msi = "putative"
+    elif statistics.median(scores) < 1:
         msi = "putative"
     elif total == 3:
         msi = "Exceeds Level 1"
@@ -1440,7 +1443,7 @@ def make_eic_thumbnails(
     dir_indep = shared_base_dir / "eic_thumbnails_independent_y"
     for d in (dir_shared, dir_indep):
         if overwrite and d.exists():
-            logger.info("Overwriting enabled: clearing existing contents of %s", d)
+            logger.info(f"Overwriting enabled: clearing existing contents of {d}")
             shutil.rmtree(d)
         elif not overwrite and d.exists():
             logger.info(
@@ -1449,7 +1452,7 @@ def make_eic_thumbnails(
                 d,
             )
             return
-        logger.info("Creating directory %s", d)
+        logger.info(f"Creating directory {d}")
         d.mkdir(parents=True, exist_ok=True)
 
     if summary_obj.experimental_data.curation_df is None:
@@ -1472,7 +1475,7 @@ def make_eic_thumbnails(
         ms1_groups = {}
 
     n_compounds = len(manual_curation_df)
-    logger.info("Building task list for %d compounds...", n_compounds)
+    logger.info(f"Building task list for {n_compounds} compounds...")
 
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
@@ -1562,9 +1565,9 @@ def make_eic_thumbnails(
             name = future_to_name[future]
             try:
                 future.result()
-                logger.debug("Wrote EIC PDFs for %s", name)
+                logger.debug(f"Wrote EIC PDFs for {name}")
             except Exception as exc:
-                logger.error("Failed to write PDFs for %s: %s", name, exc)
+                logger.error(f"Failed to write PDFs for {name}: {exc}")
             finally:
                 pbar.update(1)
 
@@ -1690,8 +1693,8 @@ def _short_fname(filename: str) -> str:
 
 def _render_eic_thumbnail(
     ax,
-    spec_rts: List,
-    spec_ints: List,
+    spec_rts: list,
+    spec_ints: list,
     rt_min: float,
     rt_peak: float,
     rt_max: float,
@@ -1892,14 +1895,14 @@ def make_boxplots(
 
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "boxplots"
     if overwrite and output_dir.exists():
-        logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
+        logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
     elif not overwrite and output_dir.exists():
-        logger.info("Overwriting disabled: existing directory %s will be used (existing PDFs will be preserved).", output_dir)
+        logger.info(f"Overwriting disabled: existing directory {output_dir} will be used (existing PDFs will be preserved).")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Exporting boxplot figures to %s", output_dir)
+    logger.info(f"Exporting boxplot figures to {output_dir}")
 
     manual_curation_df = summary_obj.experimental_data.curation_df
 
@@ -1945,9 +1948,8 @@ def make_boxplots(
 
     if mc_uids and not matched:
         logger.warning(
-            "No mz_rt_uid overlap between curation_df and per_file_metrics_df! "
-            "Sample curation UIDs: %s | Sample per_file UIDs: %s",
-            list(mc_uids)[:3], list(pf_uids)[:3],
+            f"No mz_rt_uid overlap between curation_df and per_file_metrics_df! "
+            f"Sample curation UIDs: {list(mc_uids)[:3]} | Sample per_file UIDs: {list(pf_uids)[:3]}"
         )
 
     # One task per compound
@@ -1974,10 +1976,7 @@ def make_boxplots(
         return
 
     n_workers = max_workers or min(os.cpu_count() or 4, len(tasks))
-    logger.info(
-        "Generating boxplot PDFs for %d compounds (%d metric types) using %d workers...",
-        len(tasks), len(_METRIC_CONFIGS), n_workers,
-    )
+    logger.info(f"Generating boxplot PDFs for {len(tasks)} compounds ({len(_METRIC_CONFIGS)} metric types) using {n_workers} workers...")
 
     pbar = tqdm(total=len(tasks), desc="Generating boxplots", unit="compound", disable=should_disable_tqdm())
 
@@ -1990,9 +1989,9 @@ def make_boxplots(
             name = future_to_name[future]
             try:
                 future.result()
-                logger.debug("Wrote boxplot PDFs for %s", name)
+                logger.debug(f"Wrote boxplot PDFs for {name}")
             except Exception as exc:
-                logger.error("Failed to generate boxplots for %s: %s", name, exc)
+                logger.error(f"Failed to generate boxplots for {name}: {exc}")
             finally:
                 pbar.set_postfix(compound=name, refresh=False)
                 pbar.update(1)
@@ -2031,11 +2030,11 @@ def make_manual_curation_csv(
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
-        logger.info("Overwriting disabled: existing file %s will be used.", output_file)
+        logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Exporting manual curation CSV to %s", output_file)
+    logger.info(f"Exporting manual curation CSV to {output_file}")
 
     manual_curation_df = summary_obj.experimental_data.curation_df
 
@@ -2059,11 +2058,11 @@ def make_best_ms2_hit_fragment_ions_csv(
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
-        logger.info("Overwriting disabled: existing file %s will be used.", output_file)
+        logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Exporting best MS2 hit fragment ions CSV to %s", output_file)
+    logger.info(f"Exporting best MS2 hit fragment ions CSV to {output_file}")
 
     if summary_obj.experimental_data.curation_df is None:
         summary_obj.load_data()
@@ -2153,7 +2152,7 @@ def make_data_sheets(
 
     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
     if overwrite and output_dir.exists():
-        logger.info("Overwriting enabled: clearing existing contents of %s", output_dir)
+        logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
     elif not overwrite and output_dir.exists():
         logger.info(
@@ -2164,7 +2163,7 @@ def make_data_sheets(
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Exporting data sheets to %s", output_dir)
+    logger.info(f"Exporting data sheets to {output_dir}")
 
     manual_curation_df = summary_obj.experimental_data.curation_df
     if manual_curation_df is None or manual_curation_df.empty:
@@ -2228,7 +2227,7 @@ def make_data_sheets(
         wide.to_csv(csv_path, index=False)
         logger.info(f"Exported {metric} data sheet ({len(wide)} compounds x {len(wide.columns) - len(present_idx)} files)")
 
-    logger.info("Data sheets written to %s", output_dir)
+    logger.info(f"Data sheets written to {output_dir}")
 
 def make_peak_height_filtered_csv(
     obj: "AnalysisSummary",
@@ -2258,10 +2257,10 @@ def make_peak_height_filtered_csv(
         )
         return
     if not overwrite and output_csv.exists():
-        logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
+        logger.info(f"Overwriting disabled: existing file {output_csv} will be used.")
         return
 
-    logger.info("Creating filtered peak height CSV at %s", output_csv)
+    logger.info(f"Creating filtered peak height CSV at {output_csv}")
 
     df = pd.read_csv(source_csv)
 
@@ -2365,7 +2364,7 @@ def make_peak_height_filtered_csv(
     if not np.isnan(global_min):
         n_nan = int(df_agg[data_cols_final].isna().sum().sum())
         df_agg[data_cols_final] = df_agg[data_cols_final].fillna(global_min)
-        logger.info("Imputed %d NaN cells with global minimum: %g", n_nan, global_min)
+        logger.info(f"Imputed {n_nan} NaN cells with global minimum: {global_min:g}")
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
@@ -2418,10 +2417,10 @@ def make_log_fold_changes_csv(
         )
         return
     if not overwrite and output_csv.exists():
-        logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
+        logger.info(f"Overwriting disabled: existing file {output_csv} will be used.")
         return
 
-    logger.info("Creating group-level log fold changes CSV at %s", output_csv)
+    logger.info(f"Creating group-level log fold changes CSV at {output_csv}")
     df = pd.read_csv(source_csv)
     if use_filter and "control_filter" in df.columns:
         df = df[df["control_filter"] == "keep"].reset_index(drop=True)
@@ -2434,7 +2433,7 @@ def make_log_fold_changes_csv(
     data_cols = [c for c in df.columns if c not in _ID_COL_NAMES and c != "control_filter"]
 
     if not data_cols:
-        logger.warning("No numeric sample columns found in %s; writing identifiers only.", source_csv)
+        logger.warning(f"No numeric sample columns found in {source_csv}; writing identifiers only.")
         df[id_cols].to_csv(output_csv, sep=",", index=False)
         return
 
@@ -2474,7 +2473,7 @@ def make_log_fold_changes_csv(
         list(group_to_cols.keys()),
     )
     for grp, cols in group_to_cols.items():
-        logger.info("  Group '%s': %d replicate(s) — %s", grp, len(cols), cols)
+        logger.info(f"  Group '{grp}': {len(cols)} replicate(s) — {cols}")
 
     # ── Compute per-group mean across replicates ──────────────────────────────
     group_means: dict[str, np.ndarray] = {}

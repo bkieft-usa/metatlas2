@@ -948,7 +948,9 @@ def build_dash_app(
             rt_list = r.get("spec_rts", [])
             int_list = r.get("spec_ints", [])
             
-            if len(rt_list) == 0: raise ValueError(f"MS1 data for {fn} has no RT points")
+            if len(rt_list) == 0:
+                logger.warning(f"MS1 data for {fn} has no RT points; skipping trace")
+                continue
             
             rt_arr = np.asarray(rt_list)
             int_arr = np.asarray(int_list)
@@ -1711,16 +1713,7 @@ def build_dash_app(
             new_state["isomer_snap_idx"] = (isomer_idx + 1) % len(bounds)
             return new_state, dash.no_update
 
-        # --- Compound navigation ---
-        if key in ("j", "k", "ArrowLeft", "ArrowRight"):
-            delta = 1 if key in ("k", "ArrowRight") else -1
-            new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
-            if new_idx == int(state["compound_idx"]):
-                raise dash.exceptions.PreventUpdate
-            new_state = _flush_and_load_compound(state, new_idx, delta=delta)
-            return new_state, new_idx
-
-    # --- Note hotkeys ---
+        # --- Note hotkeys --- (must come before compound navigation so they are reachable)
         if key in analysis_gui_obj.notes["ms2_key_to_label"]:
             return _patch_with_seq(state, ms2_note=analysis_gui_obj.notes["ms2_key_to_label"][key]), dash.no_update
 
@@ -1737,6 +1730,15 @@ def build_dash_app(
             else:
                 current = current + [label]
             return _patch_with_seq(state, other_note=current), dash.no_update
+
+        # --- Compound navigation ---
+        if key in ("j", "k", "ArrowLeft", "ArrowRight"):
+            delta = 1 if key in ("k", "ArrowRight") else -1
+            new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
+            if new_idx == int(state["compound_idx"]):
+                raise dash.exceptions.PreventUpdate
+            new_state = _flush_and_load_compound(state, new_idx, delta=delta)
+            return new_state, new_idx
 
         raise dash.exceptions.PreventUpdate
 

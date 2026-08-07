@@ -274,7 +274,7 @@ def enrich_atlas_df_with_compound_metadata(atlas_df: pd.DataFrame, main_db_path:
                 compound_uids,
             ).df()
     except Exception as exc:
-        logger.warning("Failed to enrich atlas metadata from main DB: %s", exc)
+        logger.warning(f"Failed to enrich atlas metadata from main DB: {exc}")
         return atlas_df
 
     if cmp_df.empty:
@@ -1013,7 +1013,7 @@ def batch_save_compounds(
     logger.info(f"  Compounds created: {compounds_created}")
     logger.info(f"  Compounds skipped (already exist): {compounds_skipped_existing}")
 
-    return
+    return compounds_created
 
 
 def _create_database_tables(conn, db_type: str = "main"):
@@ -2050,7 +2050,7 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
 
     if summary_rows:
         header = f"{'compound_name':<40} {'MS1':>6} {'MS2':>6} {'hits':>6}"
-        logger.info("Auto-ID summary:\n%s", header)
+        logger.info(f"Auto-ID summary:\n{header}")
         for r in summary_rows:
             logger.info(
                 "  %-40s %6d %6d %6d",
@@ -2087,7 +2087,11 @@ def save_auto_identification_results_to_db(auto_id_obj):
         'created_date': get_provenance()["timestamp"]
     }
 
-    # Add constants to all DataFrames
+    # Add constants to all DataFrames — work on copies to avoid mutating the
+    # caller's live objects on auto_id_obj.experimental_data.
+    ms1_df = ms1_df.copy() if not ms1_df.empty else ms1_df
+    ms2_df = ms2_df.copy() if not ms2_df.empty else ms2_df
+    curation_df = curation_df.copy() if not curation_df.empty else curation_df
     for df in [ms1_df, ms2_df, curation_df]:
         if not df.empty:
             for k, v in constants.items():
@@ -2348,12 +2352,15 @@ def _transfer_istd_curation(
         istd_col = f"{col}_istd"
         if istd_col in merged.columns:
             # Update EMA value only if original is empty/default (don't overwrite a manually entered value)
-            merged[col] = np.where(
-                (merged[col] == '') | (merged[col] == 0.0), 
-                merged[istd_col], 
-                merged[col]
-            )
-            merged['analyst_notes'] = merged['analyst_notes'] + " (curation transferred from ISTD compound)"
+            was_empty = (merged[col] == '') | (merged[col] == 0.0)
+            merged[col] = np.where(was_empty, merged[istd_col], merged[col])
+
+    # Append the transfer note only to rows that actually received ISTD data
+    if 'analyst_notes_istd' in merged.columns:
+        had_istd_match = merged['analyst_notes_istd'].notna() & (merged['analyst_notes_istd'] != '')
+        merged.loc[had_istd_match, 'analyst_notes'] = (
+            merged.loc[had_istd_match, 'analyst_notes'] + " (curation transferred from ISTD compound)"
+        )
     
     obj.experimental_data.curation_df = merged[[c for c in merged.columns if not c.endswith('_istd')]]
 
@@ -2639,19 +2646,35 @@ def _update_infeature_tag(
         for _, row in obj.experimental_data.curation_df.iterrows()
     }
 
-    # Update in_feature for MS1 data
-    logger.info(f"Updating in_feature for MS1 data based on manual curation RT bounds...")
-    def update_ms1_in_feature(row):
-        bounds = rt_bounds.get(row['mz_rt_uid'])
-        if bounds is None:
-            raise ValueError(f"No RT bounds found for mz_rt_uid {row['mz_rt_uid']} in curation_df.")
-        rt_min, rt_max = bounds
-        return [bool(rt_min <= rt <= rt_max) for rt in row['spec_rts']]
-
-    obj.experimental_data.ms1_df['in_feature'] = [
-        update_ms1_in_feature(row)
-        for _, row in obj.experimental_data.ms1_df.iterrows()
-    ]
+    # Update in_feature for MS1 data — vectorized via explode to avoid slow iterrows.
+    logger.info("Updating in_feature for MS1 data based on manual curation RT bounds...")
+    ms1_df = obj.experimental_data.ms1_df
+    if not ms1_df.empty:
+        # Map RT bounds onto each row using the uid lookup
+        rt_min_map = ms1_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[0])
+        rt_max_map = ms1_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[1])
+        missing = rt_min_map.isna()
+        if missing.any():
+            missing_uids = ms1_df.loc[missing, 'mz_rt_uid'].unique().tolist()
+            raise ValueError(
+                f"No RT bounds found in curation_df for {len(missing_uids)} mz_rt_uid(s): {missing_uids[:5]}"
+            )
+        # Explode spec_rts to a long frame, apply the RT window mask, then re-aggregate
+        exploded = ms1_df[['mz_rt_uid', 'spec_rts']].copy()
+        exploded['_rt_min'] = rt_min_map.values
+        exploded['_rt_max'] = rt_max_map.values
+        exploded = exploded.explode('spec_rts').reset_index(names='_orig_idx')
+        exploded['spec_rts'] = pd.to_numeric(exploded['spec_rts'], errors='coerce')
+        exploded['_in_feature'] = (
+            (exploded['spec_rts'] >= exploded['_rt_min']) &
+            (exploded['spec_rts'] <= exploded['_rt_max'])
+        )
+        new_in_feature = (
+            exploded.groupby('_orig_idx')['_in_feature']
+            .apply(list)
+        )
+        obj.experimental_data.ms1_df = ms1_df.copy()
+        obj.experimental_data.ms1_df['in_feature'] = new_in_feature.values
 
     # Update in_feature for MS2 data
     logger.info(f"Updating in_feature for MS2 data based on manual curation RT bounds...")

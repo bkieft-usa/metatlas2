@@ -1,5 +1,3 @@
-"""Transfer files to Google Drive using rclone."""
-
 from __future__ import annotations
 
 import configparser
@@ -35,11 +33,6 @@ RCLONE_UPLOAD_EXCLUDES = [
     "**/.*/**",
 ]
 
-# ------------------------------------------------------------------ #
-#  Low-level rclone helpers                                           #
-# ------------------------------------------------------------------ #
-
-
 def _rclone_config_file() -> str | None:
     """Return the path to the rclone config file, or None if not found."""
     try:
@@ -48,7 +41,6 @@ def _rclone_config_file() -> str | None:
         return None
     lines = [l for l in result.splitlines() if l.strip()]
     return lines[-1] if lines else None
-
 
 def _get_drive_name_for_id(folder_id: str) -> str | None:
     """
@@ -65,7 +57,6 @@ def _get_drive_name_for_id(folder_id: str) -> str | None:
         if props.get("type") == "drive" and props.get("root_folder_id") == folder_id:
             return name
     return None
-
 
 def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = False) -> None:
     """
@@ -85,7 +76,7 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
         cmd.append("--ignore-times")
     
     try:
-        logger.info("Starting rclone upload: %s -> %s", source, dest)
+        logger.info(f"Starting rclone upload: {source} -> {dest}")
         with tqdm(total=100, desc="Uploading to Google Drive", unit="%", disable=should_disable_tqdm()) as pbar:
             with Popen(cmd, stdout=PIPE, bufsize=1, universal_newlines=True) as proc:
                 for line in proc.stdout or []:
@@ -106,8 +97,7 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
         logger.exception("rclone copy failed: %s", err)
         raise
     except FileNotFoundError:
-        logger.warning("rclone binary not found at %s — skipping upload.", RCLONE_PATH)
-
+        logger.warning(f"rclone binary not found at {RCLONE_PATH} — skipping upload.")
 
 def _has_drive_access(drive: str) -> tuple[bool, str | None]:
     """Return whether the configured remote is accessible and an optional error message."""
@@ -122,7 +112,6 @@ def _has_drive_access(drive: str) -> tuple[bool, str | None]:
         if not message:
             message = str(err)
         return False, message
-
 
 def _get_drive_id_for_path(drive: str, dest_path: Path) -> str | None:
     """
@@ -144,14 +133,12 @@ def _get_drive_id_for_path(drive: str, dest_path: Path) -> str | None:
             return entry.get("ID")
     return None
 
-
 def _drive_path_to_url(drive: str, dest_path: Path) -> str | None:
     """Return a browser URL for *drive*:*dest_path*, or None on failure."""
     folder_id = _get_drive_id_for_path(drive, dest_path)
     if folder_id is None:
         return None
     return f"https://drive.google.com/drive/folders/{folder_id}"
-
 
 def copy_outputs_to_google_drive(
     obj: "RTAlign" | "AnalysisSummary",
@@ -168,13 +155,6 @@ def copy_outputs_to_google_drive(
             └── <env_user>_<owner>_<chrom>_RTA<n>_<date>/   # run subfolder
                 ├── rt_alignment_<n>/            # RT alignment results
                 └── targeted_analysis_<n>/       # targeted analysis output
-
-    Parameters
-    ----------
-    obj:
-        The AnalysisSummary object whose analysis_output_dir will be uploaded.
-    overwrite:
-        If True, overwrite existing files on Google Drive.
     """
     if stage == "ANALYSIS_SUMMARY":
         if obj.override_parameters.get("upload_to_gdrive", True) is False:
@@ -185,7 +165,7 @@ def copy_outputs_to_google_drive(
 
     config_file = _rclone_config_file()
     if config_file is None:
-        logger.warning("rclone config file not found — %s.", fail_suffix)
+        logger.warning(f"rclone config file not found — {fail_suffix}.")
         return
 
     drive = _get_drive_name_for_id(obj.config.gdrive_subfolder)
@@ -202,7 +182,7 @@ def copy_outputs_to_google_drive(
         msg = f"No access to Google Drive remote '{drive}' via rclone"
         if access_err:
             msg = f"{msg}: {access_err}"
-        logger.warning("%s — %s.", msg, fail_suffix)
+        logger.warning(f"{msg} — {fail_suffix}.")
         display(HTML(f"Upload skipped: {msg}"))
         return
 
@@ -221,19 +201,19 @@ def copy_outputs_to_google_drive(
         if rt_results_dir.is_dir():
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             rt_dest = base_dest / f"rt_alignment_results_{timestamp}"
-            logger.info("Uploading RT alignment results: %s -> %s:%s", rt_results_dir, drive, rt_dest)
+            logger.info(f"Uploading RT alignment results: {rt_results_dir} -> {drive}:{rt_dest}")
             _rclone_copy(rt_results_dir, drive, rt_dest, overwrite=overwrite)
         else:
-            logger.warning("rt_alignment_results_dir '%s' does not exist — skipping RT alignment upload.", rt_results_dir)
+            logger.warning(f"rt_alignment_results_dir '{rt_results_dir}' does not exist — skipping RT alignment upload.")
     elif stage == "ANALYSIS_SUMMARY":
         tga_results_dir = Path(obj.paths.get("analysis_output_dir"))
         if tga_results_dir.is_dir():
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             tga_dest = base_dest / f"targeted_analysis_results_{timestamp}"
-            logger.info("Uploading targeted analysis results: %s -> %s:%s", tga_results_dir, drive, tga_dest)
+            logger.info(f"Uploading targeted analysis results: {tga_results_dir} -> {drive}:{tga_dest}")
             _rclone_copy(tga_results_dir, drive, tga_dest, overwrite=overwrite)
             url = _drive_path_to_url(drive, tga_dest)
             if url:
                 display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
         else:
-            logger.warning("analysis_output_dir '%s' does not exist — skipping targeted analysis upload.", tga_results_dir)
+            logger.warning(f"analysis_output_dir '{tga_results_dir}' does not exist — skipping targeted analysis upload.")

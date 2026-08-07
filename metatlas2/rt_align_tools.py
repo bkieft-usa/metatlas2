@@ -17,24 +17,18 @@ import metatlas2.logging_config as lcf
 from metatlas2.utils import should_disable_tqdm
 logger = lcf.get_logger('rt_align_tools')
 
-def calculate_model_values_from_existing(model_dict: Dict) -> Dict:
-    """
-    Reconstruct sklearn model objects from database values and calculate predictions and metrics.
-    """
+def calculate_model_values_from_existing(model_dict: dict) -> dict:
     metadata = model_dict.get('metadata', {})
     
-    # Reconstruct PolynomialFeatures
     poly_features = PolynomialFeatures(
         degree=metadata.get('poly_degree', model_dict.get('degree', 1)),
         include_bias=metadata.get('poly_include_bias', True),
         interaction_only=metadata.get('poly_interaction_only', False)
     )
     
-    # Fit the PolynomialFeatures with dummy data matching expected input shape
     dummy_X = np.array([[0]]).reshape(-1, 1)
     poly_features.fit(dummy_X)
     
-    # Reconstruct LinearRegression model
     model = LinearRegression()
     model.coef_ = np.array(metadata.get('model_coefficients', model_dict.get('coefficients', [])))
     model.intercept_ = metadata.get('model_intercept', model_dict.get('intercept', 0.0))
@@ -96,14 +90,13 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     rt_alignment_model = rt_align_obj.rt_alignment_model
     output_dir = rt_align_obj.paths['rt_alignment_results_dir']
 
-    # Sort by Atlas RT before numbering and plotting
     modeling_results_df = modeling_results_df.sort_values('atlas_rt_peak').reset_index(drop=True)
     modeling_results_df['compound_num'] = modeling_results_df.index + 1
 
     fig = plt.figure(constrained_layout=True, figsize=(14, 10))
     gs = fig.add_gridspec(2, 2, height_ratios=[3, 1])
 
-    # Plot 1: Atlas RT vs Observed RT (with model fit)
+    # Atlas RT vs Observed RT (with model fit)
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.scatter(modeling_results_df['atlas_rt_peak'], modeling_results_df['exp_rt_median'], 
                 alpha=0.7, s=50, c='blue', label='Observed Data')
@@ -118,13 +111,12 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # Add numbers to points
     for _, row in modeling_results_df.iterrows():
         ax1.annotate(str(int(row['compound_num'])), 
                     (row['atlas_rt_peak'], row['exp_rt_median']),
                     textcoords="offset points", xytext=(5, -10), ha='left', fontsize=9, color='black')
 
-    # Plot 2: Residuals vs Atlas RT
+    # Residuals vs Atlas RT
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.scatter(modeling_results_df['atlas_rt_peak'], modeling_results_df['residual'], 
                 alpha=0.7, s=50, c='green')
@@ -137,13 +129,12 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
-    # Add numbers to points
     for _, row in modeling_results_df.iterrows():
         ax2.annotate(str(int(row['compound_num'])), 
                     (row['atlas_rt_peak'], row['residual']),
                     textcoords="offset points", xytext=(5, -10), ha='left', fontsize=9, color='black')
 
-    # Table: Compound number to name mapping (ordered by RT), now with residuals
+    # Compound number to name mapping (ordered by RT)
     ax_table = fig.add_subplot(gs[1, :])
     ax_table.axis('off')
     table_data = modeling_results_df[['compound_num', 'compound_name', 'inchi_key', 'adduct', 'atlas_rt_peak', 'residual']].copy()
@@ -159,7 +150,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     col_widths = [0.2, 0.5, 0.5, 0.3, 0.3]
     for i, width in enumerate(col_widths):
         table.auto_set_column_width(i)
-        for j in range(len(table_data) + 1):  # +1 for header
+        for j in range(len(table_data) + 1):
             cell = table[(j, i)]
             cell.set_width(width)
 
@@ -170,6 +161,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     plt.suptitle('RT Alignment Model Validation', fontsize=16, fontweight='bold', y=1.02)
 
     if save_plot:
+        pdf_path = None
         try:
             plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
@@ -180,17 +172,18 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
         except Exception as e:
             logger.error(f"Error saving plot: {e}")
         finally:
-            logger.info(f"RT alignment model plot saved to {pdf_path}")
+            if pdf_path is not None:
+                logger.info(f"RT alignment model plot saved to {pdf_path}")
 
     return
 
 def build_rt_alignment_model(
     rt_align_obj: "RTAlign"
-) -> tuple[Dict, pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     """
     Build RT alignment model directly from ExperimentalData and Atlas.
     Args:
-        rt_align: RTAlign object with alignment settings
+        rt_align_obj: RTAlign object with alignment settings
     Returns:
         Tuple of (rt_alignment_model, modeling_results_df, compound_rt_stats)
     """
@@ -219,13 +212,11 @@ def build_rt_alignment_model(
         rt_diffs = []
         mz_errors = []
 
-        # Wide format: one row per compound per file, with lists in columns
         for _, row in ms1_df_comp.iterrows():
             rt_list = row.get('spec_rts', [])
             intensity_list = row.get('spec_ints', [])
             mz_list = row.get('spec_mzs', [])
             in_feature_mask = row.get('in_feature', [True]*len(rt_list))
-            # Only use values where in_feature_mask is True
             for i, use in enumerate(in_feature_mask):
                 if not use:
                     continue
@@ -325,7 +316,7 @@ def build_rt_alignment_model(
     return
 
 def calculate_rt_shifts(rt_align_obj: "RTAlign") -> pd.DataFrame:
-    # Apply RT shifts to the template atlas compound mzrt uids and save the new bounds to a dataframe
+    """Apply RT shifts to the template atlas compound mzrt uids and save the new bounds to a dataframe."""
     all_rt_shifts = []
     per_compound_rt_shifts = []
     new_compound_mzrts = {}
@@ -352,7 +343,6 @@ def calculate_rt_shifts(rt_align_obj: "RTAlign") -> pd.DataFrame:
         })
         new_compound_mzrts[mz_rt_uid] = {"rt_peak": aligned_rt_peak, "rt_min": aligned_rt_min, "rt_max": aligned_rt_max}
 
-    # Save and print RT shift stats per-compound for this atlas
     output_fname = f"rt_shifts_for_{rt_align_obj.aligned_atlas_obj.atlas_uid}.json" 
     _save_rt_aligned_stats_to_json(
         all_rt_shifts=all_rt_shifts,

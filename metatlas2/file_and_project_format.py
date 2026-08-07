@@ -1,6 +1,5 @@
 import re
 
-# Define the expected file and project patterns
 FILE_PATTERN = re.compile(
     r"^(?P<date>[^_]+)_"
     r"(?P<owner>[^_]+)_"

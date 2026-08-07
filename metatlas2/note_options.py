@@ -64,7 +64,6 @@ def get_notes_opts(owner: str = "jgi") -> tuple[dict[str, str], dict[str, str], 
         return EGSB_DEFAULT_MS2_HOTKEYS, EGSB_DEFAULT_MS1_HOTKEYS, EGSB_DEFAULT_OTHER_HOTKEYS
     return JGI_DEFAULT_MS2_HOTKEYS, JGI_DEFAULT_MS1_HOTKEYS, JGI_DEFAULT_OTHER_HOTKEYS
 
-
 def get_note_options_and_hotkeys(override_dict, default_hotkeys):
     if isinstance(override_dict, dict) and len(override_dict) > 0:
         hotkeys = dict(override_dict)
@@ -72,7 +71,6 @@ def get_note_options_and_hotkeys(override_dict, default_hotkeys):
         hotkeys = dict(default_hotkeys)
     options = list(hotkeys.keys())
     return options, hotkeys
-
 
 def _is_missing_note_value(value) -> bool:
     if value is None:
@@ -83,7 +81,6 @@ def _is_missing_note_value(value) -> bool:
         return True
     return False
 
-
 def normalize_note_value(value, options: list[str]) -> str:
     """Normalize DB-loaded note value to a valid option, defaulting to options[0]."""
     if not options:
@@ -92,7 +89,6 @@ def normalize_note_value(value, options: list[str]) -> str:
         return options[0]
     value_str = str(value)
     return value_str if value_str in options else options[0]
-
 
 def should_require_note_selection(note_value: str, options: list[str]) -> bool:
     """True when note remains at default first option that requires explicit change.

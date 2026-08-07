@@ -28,7 +28,6 @@ logger = lcf.get_logger('workflow_objects')
 class AtlasStage(str, Enum):
     """Defined stages of an atlas in the workflow, used to
     keep track of the progress of an atlas through the workflow."""
-
     RT_ALIGNED = "RT_ALIGNED"
     AUTO_IDED = "AUTO_IDED"
     MANUALLY_CURATED = "MANUALLY_CURATED"
@@ -38,7 +37,6 @@ class AlignedSpectrumPair:
     """A query/reference spectrum pair produced by MS2 library matching.
     Stores the aligned fragment arrays and per-fragment color assignments
     """
-
     query_mzs: list[float]
     query_ints: list[float]
     ref_mzs: list[float]
@@ -46,13 +44,11 @@ class AlignedSpectrumPair:
     fragment_colors: list[str]
 
     def __post_init__(self) -> None:
-        # Ensure all arrays are plain Python lists (not numpy arrays)
         self.query_mzs = as_list(self.query_mzs)
         self.query_ints = as_list(self.query_ints)
         self.ref_mzs = as_list(self.ref_mzs)
         self.ref_ints = as_list(self.ref_ints)
         self.fragment_colors = as_list(self.fragment_colors)
-        # Default colors if missing
         if not self.fragment_colors and self.query_mzs:
             self.fragment_colors = ["tomato"] * len(self.query_mzs)
 
@@ -75,12 +71,9 @@ class AlignedSpectrumPair:
             "fragment_colors": self.fragment_colors,
         }
 
-
 @dataclass
 class MS2Hit:
-    """One MS2 library match result for a single scan against a reference spectrum.
-    """
-
+    """One MS2 library match result for a single scan against a reference spectrum."""
     score: float
     num_matches: int
     ref_frags: int
@@ -119,7 +112,6 @@ class MS2Hit:
         raw = scan_row.get("hits")
         if raw is None:
             return []
-        # Handle JSON string (as stored in DuckDB VARCHAR column)
         if isinstance(raw, str):
             try:
                 raw = json.loads(raw)
@@ -331,7 +323,7 @@ class NewAtlasesConfig:
                         entries.append(AtlasEntry(path=e['path'], name=e['name'], desc=e['desc']))
                     atlases[chrom][pol][analysis_type] = entries
 
-        logger.info("Loaded atlas configuration from %s", path)
+        logger.info(f"Loaded atlas configuration from {path}")
         return cls(atlases=atlases)
 
     def iter_entries(self):
@@ -392,12 +384,10 @@ class NewAtlasesConfig:
         for info in summary:
             logger.info(f"Created new atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
 
-
 @dataclass
 class CompoundParams:
     use_pubchem_cache: bool = True
     update_pubchem_cache: bool = False
-
 
 @dataclass
 class NewCompoundsConfig:
@@ -449,7 +439,7 @@ class NewCompoundsConfig:
                     validated.append(p_str)
                 compounds[chrom][pol] = validated
 
-        logger.info("Loaded compound configuration from %s", path)
+        logger.info(f"Loaded compound configuration from {path}")
         return cls(params=params, compounds=compounds)
 
     def iter_paths(self):
@@ -489,7 +479,6 @@ class NewCompoundsConfig:
                     logger.warning(f"Failed to create Compound for row {row.get('compound_name', 'Unknown')}: {e}")
 
         dbi.batch_save_compounds(main_db_path, compounds)
-
 
 @dataclass
 class Compound:
@@ -553,7 +542,6 @@ class Compound:
             'created_by': self.created_by,
             'created_date': self.created_date
         }
-
 
 @dataclass
 class CompoundMZRT:
@@ -651,7 +639,6 @@ class Atlas:
 
         logger.debug(f"Validating atlas {self.atlas_name} (UID: {self.atlas_uid}) with {len(self.compound_mzrts)} compounds...")
 
-        # Helper for required fields
         def check_required(field, text):
             if not field:
                 raise ValueError(f"Atlas {text} is missing")
@@ -661,7 +648,6 @@ class Atlas:
         check_required(self.chromatography, "chromatography")
         check_required(self.polarity, "polarity")
 
-        # Check compound MZRT data
         if not self.compound_mzrts or len(self.compound_mzrts) == 0:
             raise ValueError("No compound MZRTs in atlas")
 
@@ -688,7 +674,6 @@ class Atlas:
         rows = []
         for compound_mzrt in self.compound_mzrts.values():
             compound_dict = asdict(compound_mzrt)
-            # Add Atlas-level metadata
             compound_dict.update({
                 'atlas_uid': self.atlas_uid,
                 'atlas_name': self.atlas_name,
@@ -729,11 +714,9 @@ class Atlas:
         created_date      = meta.get('created_date', '')
         source            = meta.get('source', '')
         source_atlas_uid  = meta.get('source_atlas_uid', None)
-        # Preserve workflow tracking numbers when loading from a project DB atlas
         rt_alignment_number = meta.get('rt_alignment_number', None)
         analysis_number     = meta.get('analysis_number', None)
 
-        # Use mz_rt_uid as the unique key for each CompoundMZRT
         compound_mzrts = {}
         for _, row in atlas_df.iterrows():
             compound_mzrt = CompoundMZRT.from_atlas_row(row)
@@ -888,7 +871,6 @@ class LCMSRun:
 
 @dataclass
 class RTAlign:
-
     rt_alignment_number: int | None = field(default=None)
     analysis_number: int | None = field(default=None)
     project_name: str | None = field(default=None)
@@ -988,7 +970,6 @@ class ExperimentalData:
 
 @dataclass
 class AutoIdentification:
-
     project_name: str | None = field(default=None)
     project_db_path: str | None = field(default=None)
     rt_alignment_number: int | None = field(default=None)
@@ -1044,15 +1025,14 @@ class AutoIdentification:
             stage=AtlasStage.AUTO_IDED,
         )
         if autoided_count > 0:
-            raise ValueError(
-                f"AutoID-aligned atlases already exist for RTA{self.rt_alignment_number} and TGA{self.analysis_number} "
-                f"To run a new AutoID analysis, increment analysis_number in the command line call. "
+            logger.info(
+                f"{autoided_count} AUTO_IDED run(s) already exist for "
+                f"RTA{self.rt_alignment_number} and TGA{self.analysis_number}. "
+                f"Per-analysis checks will skip already-completed analyses."
             )
 
 class CurationStageBase(ABC):
-    """Shared logic for AnalysisGUI and AnalysisSummary.
-    """
-
+    """Shared logic for AnalysisGUI and AnalysisSummary."""
     project_name: str | None
     project_db_path: str | None
     rt_alignment_number: int | None
@@ -1135,7 +1115,6 @@ class CurationStageBase(ABC):
             "other_key_to_label": {v: k for k, v in other_hotkeys.items()},
         }
 
-
 @dataclass
 class AnalysisGUI(CurationStageBase):
     """Workflow object for the interactive manual-curation GUI stage."""
@@ -1170,11 +1149,9 @@ class AnalysisGUI(CurationStageBase):
         )
         super().setup(run_parameters, override_parameters)
 
-
 @dataclass
 class AnalysisSummary(CurationStageBase):
     """Workflow object for the post-curation analysis summary stage."""
-
     project_name: str | None = field(default=None)
     project_db_path: str | None = field(default=None)
     rt_alignment_number: int | None = field(default=None)
@@ -1226,7 +1203,6 @@ class ParquetQueryInterpreter:
         self.grain = grain
         self.dataset = ds.dataset(dataset_dir, format="parquet", partitioning=pqi._PARTITIONING)
 
-    # Longest / most specific suffixes must be checked first.
     _SUFFIX_ORDER = ("_abs_min", "_abs_max", "_abs_gt", "_abs_lt", "_min", "_max", "_in")
 
     def _translate_to_expression(self, param_name: str, value: Any):
@@ -1253,10 +1229,8 @@ class ParquetQueryInterpreter:
         elif op == "abs_lt":
             return (field < value) & (field > -value)
         elif op == "abs_min":
-            # inclusive: abs(field) >= value
             return (field >= value) | (field <= -value)
         elif op == "abs_max":
-            # inclusive: abs(field) <= value
             return (field <= value) & (field >= -value)
 
         return None

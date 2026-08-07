@@ -1,32 +1,9 @@
-"""
-get_atlases_from_db.py - standalone script called via metatlas2.sh get-atlases
-
-Two sub-commands are available:
-
-  fetch   - fetch one or more atlases by UID and write each to a CSV file
-             (original behaviour, now explicit sub-command)
-
-  query  - filter the atlases table by metadata attributes and print a
-             summary table so the user can identify the UID(s) they need
-
-Examples
---------
-# Save a single atlas to $HOME/<uid>.csv
-metatlas2.sh get-atlases fetch --atlas_uids <uid>
-
-# Save two atlases to an explicit directory
-metatlas2.sh get-atlases fetch --atlas_uids uid1,uid2 --output_path /path/to/dir
-
-# List all C18 positive-mode atlases created by jsmith
-metatlas2.sh get-atlases query --chromatography C18 --polarity positive --created_by jsmith
-
-# List every atlas in the database (no filters)
-metatlas2.sh get-atlases query
-"""
+from __future__ import annotations
 
 import argparse
 import sys
-from __future__ import annotations
+import pandas as pd
+import logging
 
 from pathlib import Path
 
@@ -36,7 +13,6 @@ import metatlas2.run_targeted_analysis as rtg
 
 logger = lcf.get_logger("workflow_objects")
 
-# Columns printed by the query sub-command (in display order)
 _QUERY_DISPLAY_COLUMNS = [
     "atlas_uid",
     "atlas_name",
@@ -49,16 +25,10 @@ _QUERY_DISPLAY_COLUMNS = [
     "created_date",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _parse_csv_values(raw_value: str) -> list[str]:
     """Parse a comma-separated CLI argument into non-empty values."""
     values = [value.strip() for value in raw_value.split(",")]
     return [value for value in values if value]
-
 
 def _resolve_output_paths(atlas_uids: list[str], output_path: str | None) -> list[Path]:
     """Resolve output CSV paths for each atlas UID."""
@@ -82,18 +52,12 @@ def _resolve_output_paths(atlas_uids: list[str], output_path: str | None) -> lis
     # Treat a single path as an output directory for one or more atlas UIDs.
     return [output / f"{uid}.csv" for uid in atlas_uids]
 
-
 def _resolve_database_path(database_path: str | None) -> str:
     """Return *database_path* unchanged, or look it up from the environment."""
     if database_path is not None:
         return database_path
     paths = rtg.set_up_paths(config={})
     return paths["main_db_path"]
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def get_atlases(
     atlas_uids: list[str],
@@ -118,8 +82,7 @@ def get_atlases(
             atlas_df = dbi.get_atlas_compounds_table(db, atlas_uid)
             csv_path.parent.mkdir(parents=True, exist_ok=True)
             atlas_df.to_csv(csv_path, index=False)
-            logger.info("Saved atlas %s to %s", atlas_uid, csv_path)
-
+            logger.info(f"Saved atlas {atlas_uid} to {csv_path}")
 
 def query_atlases(
     database_path: str | None = None,
@@ -133,7 +96,7 @@ def query_atlases(
     with lcf.temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, reconfigure_existing=True):
         db = _resolve_database_path(database_path)
 
-        logger.info("Querying atlas metadata in %s", db)
+        logger.info(f"Querying atlas metadata in {db}")
 
         df = dbi.query_atlases_metadata(
             database_path=db,
@@ -153,7 +116,6 @@ def query_atlases(
         display_df = df[display_cols]
 
         # Pretty-print with pandas; widen the display so UIDs aren't truncated
-        import pandas as pd
         with pd.option_context(
             "display.max_rows", None,
             "display.max_columns", None,
@@ -163,11 +125,6 @@ def query_atlases(
             print(display_df.to_string(index=False))
 
         print(f"\n{len(df)} atlas(es) found.")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -192,7 +149,6 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
     subparsers.required = True
 
-    # -- fetch sub-command ---------------------------------------------------
     fetch_parser = subparsers.add_parser(
         "fetch",
         parents=[common],
@@ -216,7 +172,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # -- query sub-command --------------------------------------------------
     query_parser = subparsers.add_parser(
         "query",
         parents=[common],
@@ -261,7 +216,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
-
 
 if __name__ == "__main__":
     parser = _build_parser()

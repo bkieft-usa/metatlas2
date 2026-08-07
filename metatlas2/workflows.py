@@ -170,6 +170,20 @@ def run_auto_identification(
         auto_id_obj.paths['analysis_results_output_dir'] = Path(auto_id_obj.paths["analysis_output_dir"]) / f"{auto_id_obj.ta.chromatography}-{auto_id_obj.ta.polarity}-{auto_id_obj.ta.analysis_type}-{auto_id_obj.ta.analysis_name}"
         os.makedirs(auto_id_obj.paths['analysis_results_output_dir'], exist_ok=True)
 
+        # chromatography/polarity/type/name combination has already been auto-IDed.
+        existing_autoid = dbi.get_atlas_uid_from_stage(
+            obj=auto_id_obj,
+            stage=AtlasStage.AUTO_IDED,
+        )
+        if existing_autoid:
+            logger.info(
+                f"AutoID results already exist for "
+                f"{ta.chromatography}-{ta.polarity}-{ta.analysis_type}-{ta.analysis_name} "
+                f"(RTA{auto_id_obj.rt_alignment_number}, TGA{auto_id_obj.analysis_number}). "
+                f"Skipping. To re-run, increment analysis_number."
+            )
+            continue
+
         autoid_atlas_info = dbi.get_atlas_uid_from_stage(
             obj=auto_id_obj,
             stage=AtlasStage.RT_ALIGNED
@@ -254,8 +268,11 @@ def run_analysis_gui(
         stage=AtlasStage.AUTO_IDED, # updated data during GUI only lives in curation_df for now
     )
     if curation_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
-        logger.warning(f"Atlas UID for manual curation stage from database {curation_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
-        logger.warning("Please verify that you intended to input a different Atlas UID in the notebook before proceeding.")
+        raise ValueError(
+            f"Atlas UID mismatch: the database returned '{curation_atlas_info['atlas_uid']}' for the "
+            f"AUTO_IDED stage but the notebook specifies '{run_parameters['input_atlas_uid']}'. "
+            f"Update 'input_atlas_uid' in RUN_PARAMS to match the database value, or re-run auto-identification."
+        )
     
     logger.info(f"Retrieving Atlas UID {curation_atlas_info['atlas_uid']} for manual curation stage.")
     analysis_gui_obj.auto_ided_atlas_obj = Atlas.from_database(
@@ -330,8 +347,11 @@ def run_analysis_summary(
         stage=AtlasStage.AUTO_IDED, # start with auto ided atlas again (like GUI), but this time clone and update based on mc GUI (curation_df)
     )
     if summary_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
-        logger.warning(f"Atlas UID for summary stage from database {summary_atlas_info['atlas_uid']} does not match input Atlas UID {run_parameters['input_atlas_uid']}.")
-        logger.warning("Please verify that you intended to input a different Atlas UID in the notebook before proceeding.")
+        raise ValueError(
+            f"Atlas UID mismatch: the database returned '{summary_atlas_info['atlas_uid']}' for the "
+            f"AUTO_IDED stage but the notebook specifies '{run_parameters['input_atlas_uid']}'. "
+            f"Update 'input_atlas_uid' in RUN_PARAMS to match the database value, or re-run auto-identification."
+        )
     
     logger.info(f"Retrieving Atlas UID {summary_atlas_info['atlas_uid']} for analysis summary stage.")
     summary_obj.auto_ided_atlas_obj = Atlas.from_database(

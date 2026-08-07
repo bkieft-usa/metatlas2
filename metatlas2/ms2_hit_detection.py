@@ -32,7 +32,7 @@ def _suppress_tqdm():
     finally:
         tqdm_module.tqdm.__init__ = original_init
 
-def _no_match_alignment(query_mz, query_int, ref_mz, ref_int) -> Dict:
+def _no_match_alignment(query_mz, query_int, ref_mz, ref_int) -> dict:
     """Fallback alignment when no peaks match (or on error)."""
     return {
         'matched_fragments': [],
@@ -48,7 +48,7 @@ def _align_spectra_for_plotting(
     ref_mz: np.ndarray,
     ref_int: np.ndarray,
     frag_mz_tolerance: float,
-) -> Dict:
+) -> dict:
     """
     Align query and reference spectra for mirror plotting.
     """
@@ -102,14 +102,41 @@ def _align_spectra_for_plotting(
         return _no_match_alignment(query_mz, query_int, ref_mz, ref_int)
 
 def _process_compound_batch(job):
-    (uid, filename, scans_data, ref_spectra, 
-     frag_mz_tolerance, min_score, min_frags, 
+    """Score all MS2 scans for one (compound, file) group against reference spectra.
+
+    Designed to run in a worker process via :class:`concurrent.futures.ProcessPoolExecutor`.
+    Builds :class:`matchms.Spectrum` objects from raw scan data, applies a vectorised
+    precursor m/z PPM filter, computes CosineHungarian scores against every candidate
+    reference, and calls :func:`_align_spectra_for_plotting` for each passing hit.
+
+    Args:
+        job: A tuple of
+            ``(uid, filename, scans_data, ref_spectra, frag_mz_tolerance,
+            min_score, min_frags, ms2_mz_tolerance_ppm, limit_to_n_hits)`` where
+
+            * ``uid`` - compound ``mz_rt_uid`` string.
+            * ``filename`` - sample file identifier.
+            * ``scans_data`` - list of dicts with keys ``frag_mzs``, ``frag_ints``,
+              ``precursor_MZ``, and ``precursor_intensity``.
+            * ``ref_spectra`` - list of :class:`matchms.Spectrum` reference objects.
+            * ``frag_mz_tolerance`` - fragment m/z tolerance in Da for scoring/alignment.
+            * ``min_score`` - minimum cosine score threshold.
+            * ``min_frags`` - minimum number of matched fragments threshold.
+            * ``ms2_mz_tolerance_ppm`` - precursor PPM filter (``None`` disables it).
+            * ``limit_to_n_hits`` - maximum hits to return per scan (``None`` = unlimited).
+
+    Returns:
+        A 3-tuple ``(uid, filename, all_scan_results)`` where ``all_scan_results``
+        is a list (one entry per input scan) of hit-record lists.  Each hit record
+        is a ``dict`` containing score, alignment, and metadata fields.
+    """
+    (uid, filename, scans_data, ref_spectra,
+     frag_mz_tolerance, min_score, min_frags,
      ms2_mz_tolerance_ppm, limit_to_n_hits) = job
     
     if not ref_spectra:
         return uid, filename, [[] for _ in range(len(scans_data))]
 
-    # 1. Prepare matchms Spectra
     queries = []
     q_mzs = []
     valid_scans = []
@@ -130,7 +157,6 @@ def _process_compound_batch(job):
     if not queries:
         return uid, filename, [[] for _ in range(len(scans_data))]
 
-    # 2. Vectorized PPM Masking
     ref_precursor_mzs = np.array([float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra])
     q_mzs_np = np.array(q_mzs)[:, None] 
     
@@ -140,24 +166,14 @@ def _process_compound_batch(job):
         tol_matrix = ref_precursor_mzs * (ms2_mz_tolerance_ppm * 1e-6)
         candidate_mask = np.abs(q_mzs_np - ref_precursor_mzs) <= tol_matrix
 
-    # 3. Scoring
+    # always use the vectorised matrix method
     cosine_hungarian = CosineHungarian(tolerance=frag_mz_tolerance)
-    hit_method = "matrix"
-    if hit_method == "matrix":
-        with _suppress_tqdm():
-            # Use matrix method
-            score_matrix = cosine_hungarian.matrix(references=ref_spectra, queries=queries)
-            scores = score_matrix['score'].T
-            matches = score_matrix['matches'].T
-    elif hit_method == "pair":
-        pair_results = np.array([
-            cosine_hungarian.pair(r, q) for q in queries for r in ref_spectra
-        ])
-        scores = pair_results['score'].reshape(len(queries), len(ref_spectra))
-        matches = pair_results['matches'].reshape(len(queries), len(ref_spectra))
+    with _suppress_tqdm():
+        score_matrix = cosine_hungarian.matrix(references=ref_spectra, queries=queries)
+        scores = score_matrix['score'].T
+        matches = score_matrix['matches'].T
     passing = candidate_mask & (scores >= min_score) & (matches >= min_frags)
 
-    # 4. Build Rich Metadata Hits
     all_scan_results = [[] for _ in range(len(scans_data))]
     
     for q_idx in range(len(queries)):
@@ -181,8 +197,10 @@ def _process_compound_batch(job):
             
             # Perform alignment ONLY for the top N hits
             align_res = _align_spectra_for_plotting(
-                q_mz_np, q_int_np, 
-                ref.mz, ref.intensities, 
+                q_mz_np, 
+                q_int_np, 
+                ref.mz, 
+                ref.intensities, 
                 frag_mz_tolerance
             )
 
@@ -210,6 +228,23 @@ def _process_compound_batch(job):
     return uid, filename, all_scan_results
 
 def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
+    """Remove compounds that have no passing MS2 hits and synchronise the MS1 DataFrame.
+
+    When both ``min_score`` and ``min_frags`` are 0 the filter is skipped and all
+    scans are retained.  Otherwise only compounds that have at least one
+    ``in_feature`` scan with a non-empty ``hits`` list are kept.  The MS1 DataFrame
+    is then trimmed to the same set of compound UIDs.
+
+    Args:
+        ms2_df: :class:`pandas.DataFrame` of MS2 scans with a ``hits`` column
+            populated by :func:`_assign_hits`.
+        ms1_df: :class:`pandas.DataFrame` of MS1 data to synchronise.
+        min_score: Minimum cosine score used during hit detection (for log messages).
+        min_frags: Minimum matched-fragment count used during hit detection (for log messages).
+
+    Returns:
+        A 2-tuple ``(filtered_ms2_df, filtered_ms1_df)`` with standardised columns.
+    """
     starting_scans = len(ms2_df)
     starting_uids = ms2_df['mz_rt_uid'].nunique()
     final_columns = ['mz_rt_uid', 'filename', 'inchi_key', 'adduct', 'scan_rt', 'frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity', 'collision_energy', 'in_feature', 'hits']
@@ -223,10 +258,8 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
         )
         return ms2_df.reindex(columns=final_columns), ms1_df
 
-    # Collect per-step stats for the summary table: (step_label, scans_after, compounds_after)
     ms2_steps = [("all ms2 scans", starting_scans, starting_uids)]
 
-    # Only in_feature=True scans count toward compound retention.
     in_feature_df = ms2_df[ms2_df['in_feature'] == True]
     if in_feature_df.empty:
         keep_uids = set()
@@ -242,7 +275,7 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
 
     ms2_df = ms2_df.reindex(columns=final_columns)
 
-    # Synchronize MS1: drop compounds with no passing MS2 hits (if we made it this far, there are MS2 filters)
+    # drop compounds with no passing MS2 hits (if we made it this far, there were MS2 filters)
     if not ms1_df.empty and not ms2_df.empty:
         ms1_starting_entries = len(ms1_df)
         ms1_starting_uids = ms1_df['mz_rt_uid'].nunique()
@@ -280,6 +313,24 @@ def _assign_hits(ms2_df, results_map):
     return ms2_df
 
 def find_ms2_hits(auto_id_obj):
+    """Run the full MS2 hit-detection pipeline and attach results to ``auto_id_obj``.
+
+    Loads reference MSMS spectra for every InChIKey present in the MS2 data,
+    dispatches per-(compound, file) scoring jobs to a :class:`~concurrent.futures.ProcessPoolExecutor`,
+    assigns the scored hits back to the MS2 DataFrame via :func:`_assign_hits`,
+    and filters both the MS2 and MS1 DataFrames via :func:`_filter_out_ms2_data`.
+    Results are written back to ``auto_id_obj.experimental_data``.
+
+    Args:
+        auto_id_obj: An auto-identification result object exposing
+            ``experimental_data`` (with ``ms2_df`` and ``ms1_df``),
+            ``ta.params``, ``ta.polarity``, ``paths``, and
+            ``msms_refs_db_filter``.
+
+    Returns:
+        None.  Results are attached to ``auto_id_obj.experimental_data.ms2_df``
+        and ``auto_id_obj.experimental_data.ms1_df``.
+    """
     dataset = auto_id_obj.experimental_data
     wp = auto_id_obj.ta.params
     polarity = auto_id_obj.ta.polarity

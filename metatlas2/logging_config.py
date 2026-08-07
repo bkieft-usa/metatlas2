@@ -3,12 +3,10 @@ import sys
 from pathlib import Path
 from contextlib import contextmanager
 
-# Global flag to track if logging has been initialized
 _logging_initialized = False
 _global_log_level = logging.INFO
-_log_to_stdout = True  # updated by setup_logging
-_log_file = None       # updated by setup_logging
-
+_log_to_stdout = True
+_log_file = None
 
 def _create_formatter():
     return logging.Formatter(
@@ -16,13 +14,11 @@ def _create_formatter():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-
 def _has_stdout_handler(logger):
     for handler in logger.handlers:
         if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
             return True
     return False
-
 
 def _has_file_handler(logger, log_file):
     if not log_file:
@@ -36,7 +32,6 @@ def _has_file_handler(logger, log_file):
             except (OSError, RuntimeError):
                 continue
     return False
-
 
 def _add_handlers(logger, formatter, log_level, log_to_stdout=True, log_file=None):
     if log_to_stdout and not _has_stdout_handler(logger):
@@ -58,11 +53,9 @@ def _add_handlers(logger, formatter, log_level, log_to_stdout=True, log_file=Non
         handler.setLevel(log_level)
         handler.setFormatter(formatter)
 
-
 def _iter_metatlas_logger_names():
     names = [name for name in logging.Logger.manager.loggerDict if name == "metatlas2" or name.startswith("metatlas2.")]
     return sorted(names)
-
 
 def _snapshot_logging_state():
     logger_state = {}
@@ -81,7 +74,6 @@ def _snapshot_logging_state():
         "log_file": _log_file,
         "logger_state": logger_state,
     }
-
 
 def _restore_logging_state(snapshot):
     global _logging_initialized, _global_log_level, _log_to_stdout, _log_file
@@ -118,7 +110,6 @@ def _restore_logging_state(snapshot):
     _global_log_level = snapshot["global_log_level"]
     _log_to_stdout = snapshot["log_to_stdout"]
     _log_file = snapshot["log_file"]
-
 
 @contextmanager
 def temporary_logging(log_level=logging.INFO, log_file=None, log_to_stdout=True, module_name=None, reconfigure_existing=True):
@@ -224,9 +215,6 @@ def get_logger(module_name, log_level=None):
     logger = logging.getLogger(f"metatlas2.{module_name}")
     logger.setLevel(log_level)
 
-    # Keep logger handlers synchronized with current global logging targets.
-    # This is idempotent and ensures a file handler is added when _log_file
-    # is set after a logger already existed.
     formatter = _create_formatter()
     _add_handlers(logger, formatter, log_level, _log_to_stdout, _log_file)
     logger.propagate = False

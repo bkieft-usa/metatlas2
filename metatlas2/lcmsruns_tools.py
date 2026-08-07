@@ -17,7 +17,7 @@ ANALYSIS_TYPE_MAP = {
     'refstd': ['refstd', 'standard'],
 }
 
-def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[Dict]:
+def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
     project_path = Path(project_raw_files_path)
     if not project_path.exists():
         raise FileNotFoundError(f"Project path does not exist: {project_path}")
@@ -27,7 +27,6 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[Dict]:
         raise ValueError(f"Please address {len(failed)} .failed files in {project_path}.")
 
     lcmsruns = []
-    # Process all target extensions in one loop
     for ext in ['raw', 'mzML', 'h5']:
         files = list(project_path.glob(f"*.{ext}"))
         logger.info(f"Found {len(files)} .{ext} files")
@@ -77,14 +76,14 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[Dict]:
     return lcmsruns
 
 def filter_lcmsruns_list(
-    lcmsruns: list[Any], 
+    lcmsruns: list[dict], 
     include_file_type: list[str] = None,
     exclude_file_type: list[str] = None,
     file_format: str = "h5",
     chromatography: str = None,
     polarity: str = None,
     ms_level: str = None
-) -> list[Any]:
+) -> list[dict]:
 
     # Normalize and lowercase all filter inputs
     if chromatography:

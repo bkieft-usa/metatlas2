@@ -15,34 +15,66 @@ from metatlas2.utils import should_disable_tqdm
 logger = lcf.get_logger('extract_data_from_h5')
 
 def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
+    """Load a PyTables/HDF5 table from *file_path* into a DataFrame.
+
+    When *mz_bounds* is provided the ``<key>_mz`` sorted variant is read and
+    a binary-search pre-filter is applied so only rows within the m/z range
+    are returned.
+
+    Args:
+        file_path: Path to the HDF5 file.
+        key:       HDF5 table key (e.g. ``"ms1_pos"``).
+        columns:   Optional list of column names to load; ``None`` loads all.
+        mz_bounds: Optional ``(mz_min, mz_max)`` tuple.  When given, the
+                   ``<key>_mz`` sorted variant is read and rows outside the
+                   range are dropped via ``searchsorted``.
+
+    Returns:
+        DataFrame with the requested rows, or an empty DataFrame on error.
+    """
     read_key = key + "_mz" if mz_bounds is not None else key
     try:
         df = pd.read_hdf(file_path, key=read_key, columns=columns)
     except (KeyError, ValueError, OSError) as exc:
-        logger.warning("Could not read key %s from %s: %s", read_key, file_path, exc)
+        logger.warning(f"Could not read key {read_key} from {file_path}: {exc}")
         return pd.DataFrame()
     if df.empty:
         return df
-    logger.debug("Loaded %d rows from %s key %s", len(df), file_path, read_key)
+    logger.debug(f"Loaded {len(df)} rows from {file_path} key {read_key}")
     if mz_bounds is not None:
         mz_min, mz_max = mz_bounds
         mz = df["mz"].to_numpy()
         lo = np.searchsorted(mz, mz_min, side="left")
         hi = np.searchsorted(mz, mz_max, side="right")
         df = df.iloc[lo:hi]
-        logger.debug("Filtered to %d rows within atlas mz bounds (to remove out-of-scope data points) [%f, %f]", len(df), mz_min, mz_max)
+        logger.debug(f"Filtered to {len(df)} rows within atlas mz bounds (to remove out-of-scope data points) [{mz_min:f}, {mz_max:f}]")
     float_cols = df.select_dtypes(include=['float64']).columns
     if not float_cols.empty:
         df[float_cols] = df[float_cols].astype(np.float32, copy=False)
     return df
 
 def _expand_atlas_windows(atlas: pd.DataFrame, extra_time: float, ms1_mz_tolerance_ppm: float, polarity: str) -> pd.DataFrame:
+    """Add padded m/z and RT bound columns to the atlas DataFrame.
 
+    Computes ``mz_min``/``mz_max`` from the ppm tolerance and
+    ``rt_min_pad``/``rt_max_pad`` by subtracting/adding *extra_time* to the
+    atlas RT bounds.  These columns are consumed by the interval-join helpers.
+
+    Args:
+        atlas:                 Atlas compound DataFrame (must have ``mz``,
+                               ``rt_min``, ``rt_max`` columns).
+        extra_time:            Extra time (minutes) added to each RT window.
+        ms1_mz_tolerance_ppm:  m/z tolerance in ppm used to compute the
+                               ``mz_min``/``mz_max`` search window.
+        polarity:              Polarity string (``"positive"`` or
+                               ``"negative"``) written into the output.
+
+    Returns:
+        Copy of *atlas* with ``polarity``, ``mz_min``, ``mz_max``,
+        ``rt_min_pad``, and ``rt_max_pad`` columns added.
+    """
     logger.info(
-        "Expanding atlas windows for %d compounds with extra_time=%s and mz_tolerance_ppm=%s",
-        len(atlas),
-        extra_time,
-        ms1_mz_tolerance_ppm,
+        f"Expanding atlas windows for {len(atlas)} compounds with extra_time={extra_time} and mz_tolerance_ppm={ms1_mz_tolerance_ppm}"
     )
 
     out = atlas.copy()
@@ -56,6 +88,23 @@ def _expand_atlas_windows(atlas: pd.DataFrame, extra_time: float, ms1_mz_toleran
     return out
 
 def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
+    """Return index pairs (query_idx, atlas_idx) for all overlapping m/z intervals.
+
+    Implements a vectorised sweep-line interval join: for each query m/z value
+    find every atlas feature whose ``[mz_min, mz_max]`` window contains it.
+    Processing is done in chunks to bound peak memory usage.
+
+    Args:
+        query_mz:     1-D numpy array of query m/z values (may contain NaN).
+        atlas_mz_min: 1-D numpy array of atlas lower m/z bounds.
+        atlas_mz_max: 1-D numpy array of atlas upper m/z bounds.
+        chunk_size:   Number of sorted query points processed per iteration.
+
+    Returns:
+        Tuple ``(query_indices, atlas_indices)`` — parallel integer arrays
+        giving the row index in the original query and atlas arrays for each
+        matching pair.  Both arrays are empty when there are no matches.
+    """
     n, m = len(atlas_mz_min), len(query_mz)
     if n == 0 or m == 0:
         return np.empty(0, np.int64), np.empty(0, np.int64)
@@ -74,25 +123,46 @@ def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
         hi = np.searchsorted(sorted_min, q.max(), side="right")
         live_mask = sorted_max[:hi] >= q.min()
         live_pos = np.nonzero(live_mask)[0]
-        if live_pos.size == 0: continue
+        if live_pos.size == 0: 
+            continue
         live_min, live_max = sorted_min[live_pos], sorted_max[live_pos]
         n_open_local = np.searchsorted(live_min, q, side="right")
         total = int(n_open_local.sum())
-        if total == 0: continue
+        if total == 0: 
+            continue
         q_local = np.repeat(np.arange(q.size, dtype=np.int64), n_open_local)
         starts = np.zeros(q.size, dtype=np.int64)
         np.cumsum(n_open_local[:-1], out=starts[1:])
         cand_pos = np.arange(total, dtype=np.int64) - np.repeat(starts, n_open_local)
         keep = live_max[cand_pos] >= q[q_local]
-        if not keep.any(): continue
+        if not keep.any(): 
+            continue
         q_chunks_q.append(mz_order[start + q_local[keep]])
         q_chunks_a.append(order_min[live_pos[cand_pos[keep]]])
     return np.concatenate(q_chunks_q), np.concatenate(q_chunks_a)
 
 def _join_ms1_to_atlas(ms1_df: pd.DataFrame, atlas: pd.DataFrame, only_in_feature: bool) -> pd.DataFrame:
+    """Join raw MS1 scan points to atlas features via m/z interval + RT window.
+
+    Each scan point is matched to every atlas feature whose m/z window
+    contains the scan m/z.  An ``in_feature`` boolean column is added
+    indicating whether the scan RT also falls within the padded RT window.
+
+    Args:
+        ms1_df:          Long-format MS1 DataFrame with ``mz``, ``rt``, ``i``
+                         columns (one row per scan point).
+        atlas:           Expanded atlas DataFrame (output of
+                         :func:`_expand_atlas_windows`).
+        only_in_feature: When ``True``, rows where ``in_feature`` is ``False``
+                         are dropped before returning.
+
+    Returns:
+        DataFrame with columns ``mz``, ``rt``, ``i``, ``mz_rt_uid``,
+        ``in_feature``, or an empty DataFrame when there are no matches.
+    """
     if ms1_df.empty or atlas.empty:
         return pd.DataFrame(columns=["mz", "rt", "i", "mz_rt_uid", "in_feature"])
-    logger.debug("Joining %d MS1 points to %d atlas features", len(ms1_df), len(atlas))
+    logger.debug(f"Joining {len(ms1_df)} MS1 points to {len(atlas)} atlas features")
     scans = ms1_df[["mz", "rt", "i"]].reset_index(drop=True)
     atlas_r = atlas.reset_index(drop=True)
     q_idx, a_idx = _interval_join_mz(scans["mz"].to_numpy(), atlas_r["mz_min"].to_numpy(), atlas_r["mz_max"].to_numpy())
@@ -109,7 +179,7 @@ def _join_ms1_to_atlas(ms1_df: pd.DataFrame, atlas: pd.DataFrame, only_in_featur
         q_idx = q_idx[keep_mask]
         a_idx = a_idx[keep_mask]
         in_feature = in_feature[keep_mask]
-        logger.debug("Filtered to %d MS1 points that are in features (only_in_feature=True)", len(q_idx))
+        logger.debug(f"Filtered to {len(q_idx)} MS1 points that are in features (only_in_feature=True)")
 
     return pd.DataFrame({
         "mz": scans["mz"].to_numpy()[q_idx],
@@ -120,9 +190,28 @@ def _join_ms1_to_atlas(ms1_df: pd.DataFrame, atlas: pd.DataFrame, only_in_featur
     })
 
 def _join_ms2_to_atlas(ms2_df: pd.DataFrame, atlas: pd.DataFrame, only_in_feature: bool) -> pd.DataFrame:
+    """Join raw MS2 scan points to atlas features via precursor m/z + RT window.
+
+    Matches each MS2 scan to atlas features using the precursor m/z interval
+    join.  Scans with missing or zero precursor m/z are discarded before
+    joining.
+
+    Args:
+        ms2_df:          Long-format MS2 DataFrame with ``mz``, ``i``, ``rt``,
+                         ``precursor_MZ``, ``precursor_intensity``,
+                         ``collision_energy`` columns.
+        atlas:           Expanded atlas DataFrame (output of
+                         :func:`_expand_atlas_windows`).
+        only_in_feature: When ``True``, rows where ``in_feature`` is ``False``
+                         are dropped before returning.
+
+    Returns:
+        DataFrame with the original MS2 columns plus ``mz_rt_uid`` and
+        ``in_feature``, or an empty DataFrame when there are no matches.
+    """
     if ms2_df.empty or atlas.empty:
         return pd.DataFrame(columns=["mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy", "mz_rt_uid", "in_feature"])
-    logger.debug("Joining %d MS2 points to %d atlas features", len(ms2_df), len(atlas))
+    logger.debug(f"Joining {len(ms2_df)} MS2 points to {len(atlas)} atlas features")
     needed = ("mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy")
     scans = ms2_df[[c for c in needed if c in ms2_df.columns]].reset_index(drop=True)
     precursor_raw = scans["precursor_MZ"].to_numpy()
@@ -146,11 +235,30 @@ def _join_ms2_to_atlas(ms2_df: pd.DataFrame, atlas: pd.DataFrame, only_in_featur
     # remove any rows that are not in a feature if only_in_feature is True
     if only_in_feature:
         pts = pts[pts["in_feature"]].reset_index(drop=True)
-        logger.debug("Filtered to %d MS2 points that are in features (only_in_feature=True)", len(pts))
+        logger.debug(f"Filtered to {len(pts)} MS2 points that are in features (only_in_feature=True)")
 
     return pts
 
 def _process_one_file(run, atlas, only_in_feature):
+    """Extract and atlas-join MS1 and MS2 data for a single HDF5 file.
+
+    Designed to be called from a :class:`ProcessPoolExecutor` worker.  Reads
+    the appropriate polarity table from *run.file_path*, applies the m/z
+    pre-filter, and joins the result to *atlas* via
+    :func:`_join_ms1_to_atlas` / :func:`_join_ms2_to_atlas`.
+
+    Args:
+        run:             :class:`LCMSRun` object with ``file_path`` and
+                         ``filename`` attributes.
+        atlas:           Expanded atlas DataFrame (output of
+                         :func:`_expand_atlas_windows`).
+        only_in_feature: Passed through to the join helpers; when ``True``
+                         only in-feature scan points are retained.
+
+    Returns:
+        Tuple ``(ms1_extracted, ms2_extracted)`` — long-format DataFrames
+        with a ``filename`` column added.  Either may be empty.
+    """
     polarity = atlas['polarity'].iloc[0] if 'polarity' in atlas.columns else 'unknown'
     ms1_key = {"positive": "ms1_pos", "negative": "ms1_neg"}.get(polarity)
     ms2_key = {"positive": "ms2_pos", "negative": "ms2_neg"}.get(polarity)
@@ -163,7 +271,7 @@ def _process_one_file(run, atlas, only_in_feature):
     ms1_extracted = _join_ms1_to_atlas(ms1_df, atlas, only_in_feature)
     ms2_extracted = _join_ms2_to_atlas(ms2_df, atlas, only_in_feature)
 
-    logger.debug("Extracted %d MS1 points and %d MS2 points for run %s", len(ms1_extracted), len(ms2_extracted), run.filename)
+    logger.debug(f"Extracted {len(ms1_extracted)} MS1 points and {len(ms2_extracted)} MS2 points for run {run.filename}")
     if not ms1_extracted.empty:
         ms1_extracted["filename"] = run.filename
     if not ms2_extracted.empty:
@@ -172,6 +280,19 @@ def _process_one_file(run, atlas, only_in_feature):
     return ms1_extracted, ms2_extracted
 
 def _sort_frags(wide):
+    """Sort MS2 fragment m/z and intensity lists in ascending m/z order.
+
+    Operates in-place on the ``frag_mzs`` and ``frag_ints`` list columns of
+    a wide-format MS2 DataFrame.  Rows that are already sorted are left
+    unchanged.
+
+    Args:
+        wide: Wide-format MS2 DataFrame with ``frag_mzs`` and ``frag_ints``
+              list columns.
+
+    Returns:
+        The same DataFrame with sorted fragment lists (modified in-place).
+    """
     if not 'frag_mzs' in wide.columns or not 'frag_ints' in wide.columns:
         return wide
     else:
@@ -191,6 +312,19 @@ def _sort_frags(wide):
         return wide
 
 def _sort_ms1_lists_by_rts(wide):
+    """Sort MS1 list columns (spec_rts, spec_ints, spec_mzs, in_feature) by RT.
+
+    Ensures that the per-file EIC lists are in ascending retention-time order,
+    which is required for correct ``np.interp`` calls in downstream analysis.
+
+    Args:
+        wide: Wide-format MS1 DataFrame with ``spec_rts``, ``spec_ints``,
+              ``spec_mzs``, and ``in_feature`` list columns.
+
+    Returns:
+        The same DataFrame with all list columns sorted by RT (modified
+        in-place).
+    """
     if not all(col in wide.columns for col in ['spec_rts', 'spec_ints', 'spec_mzs', 'in_feature']):
         return wide
     def sort_row(rts, ints, mzs, feats):
@@ -213,13 +347,32 @@ def _sort_ms1_lists_by_rts(wide):
     return wide
 
 def _widen_ms_data(df, type_name, group_cols, list_cols):
-    if df.empty: 
+    """Aggregate long-format MS data into wide format (one row per group).
+
+    Groups *df* by *group_cols* and collects *list_cols* values into Python
+    lists.  Non-list metadata columns are taken from the first row of each
+    group.  Column renaming and fragment sorting are applied after aggregation.
+
+    Args:
+        df:         Long-format MS DataFrame (output of the join helpers).
+        type_name:  ``"ms1"`` or ``"ms2"`` — controls column renaming and
+                    logging labels.
+        group_cols: Columns to group by (e.g. ``["mz_rt_uid", "filename"]``).
+        list_cols:  Columns whose values should be collected into lists.
+
+    Returns:
+        Wide-format DataFrame, or the original empty DataFrame unchanged.
+    """
+    if df.empty:
         return df
 
-    logger.info("Total %s data points: %d", type_name, len(df) if not df.empty else 0)
-    logger.info("Total %s data points in atlas feature windows: %d (%.2f%%)", type_name, len(df[df['in_feature']]) if not df.empty else 0, (len(df[df['in_feature']]) if not df.empty else 0) / (len(df) if not df.empty else 1) * 100)
+    _total = len(df) if not df.empty else 0
+    _in_feat = len(df[df['in_feature']]) if not df.empty else 0
+    _pct = _in_feat / max(_total, 1) * 100
+    logger.info(f"Total {type_name} data points: {_total}")
+    logger.info(f"Total {type_name} data points in atlas feature windows: {_in_feat} ({_pct:.2f}%)")
 
-    logger.info("Aggregating %s data to wide format by %s...", type_name, group_cols)
+    logger.info(f"Aggregating {type_name} data to wide format by {group_cols}...")
     agg_dict = {col: list for col in list_cols}
     if type_name == "ms2" and "in_feature" in list_cols:
         agg_dict["in_feature"] = lambda x: bool(x.iloc[0]) if len(x) > 0 else False
@@ -230,7 +383,9 @@ def _widen_ms_data(df, type_name, group_cols, list_cols):
         meta = df.groupby(group_cols)[meta_cols].first().reset_index()
         wide = wide.merge(meta, on=group_cols, how='left')
 
-    logger.info("Aggregated %s spectral data to %d unique %s compound+file%s entries.", type_name, len(wide), "feature" if type_name=="ms1" else "scan", "+scan" if type_name=="ms2" else "")
+    _grain = "feature" if type_name == "ms1" else "scan"
+    _suffix = "+scan" if type_name == "ms2" else ""
+    logger.info(f"Aggregated {type_name} spectral data to {len(wide)} unique {_grain} compound+file{_suffix} entries.")
     logger.info(f"  Unique files: {wide['filename'].nunique()}")
     logger.info(f"  Unique compounds (mz_rt_uid): {wide['mz_rt_uid'].nunique()}")
 
@@ -243,28 +398,41 @@ def _widen_ms_data(df, type_name, group_cols, list_cols):
     return wide
 
 def _filter_ms2_points(ms2_df, ms1_df, min_scans=None, min_int=None):
-    """Filter MS2 wide-format DataFrame.
+    """Filter wide-format MS2 DataFrame by minimum scan count and precursor intensity.
 
-    ms2_df structure (post _widen_ms_data):
-      - One row per (mz_rt_uid, filename, rt) — i.e. one row per MS2 scan.
-      - 'in_feature' is a scalar bool per row (not a list).
-      - 'precursor_intensity' is a scalar float per row.
+    *ms2_df* is expected to be in the post-:func:`_widen_ms_data` format:
+    one row per ``(mz_rt_uid, filename, scan_rt)`` with a scalar ``in_feature``
+    bool and a scalar ``precursor_intensity`` float per row.
 
-    Filters are applied at the (mz_rt_uid, filename) group level:
-      - min_scans : keep groups where the number of in-feature scans >= min_scans.
-      - min_int   : keep groups where the max precursor_intensity among in-feature
-                    scans >= min_int.
-    Finally, any remaining rows whose own in_feature==False are dropped so that
-    only in-feature scans survive.
+    Filters are applied at the ``(mz_rt_uid, filename)`` group level:
+
+    * ``min_scans`` — keep groups that have at least this many in-feature scans.
+    * ``min_int``   — keep groups whose maximum in-feature precursor intensity
+      meets the threshold.
+
+    After group-level filtering, any remaining rows with ``in_feature=False``
+    are dropped so only in-feature scans survive.  Orphan MS2 entries (no
+    corresponding MS1 compound) are also removed when *ms1_df* is non-empty.
+
+    Args:
+        ms2_df:     Wide-format MS2 DataFrame (one row per scan).
+        ms1_df:     Wide-format MS1 DataFrame used to remove orphan MS2 entries.
+        min_scans:  Minimum number of in-feature scans required per
+                    ``(mz_rt_uid, filename)`` group.  ``None`` skips this filter.
+        min_int:    Minimum precursor intensity required among in-feature scans.
+                    ``None`` skips this filter.
+
+    Returns:
+        Filtered MS2 DataFrame.
     """
     if ms2_df.empty:
         logger.warning("No MS2 data found. Skipping point filtering.")
         return ms2_df
     if min_scans is None and min_int is None:
-        logger.info("No MS2 point filters specified. Retaining all %d entries across %d compounds.", len(ms2_df), ms2_df['mz_rt_uid'].nunique())
+        logger.info(f"No MS2 point filters specified. Retaining all {len(ms2_df)} entries across {ms2_df['mz_rt_uid'].nunique()} compounds.")
         return ms2_df
     if min_scans == 0 and min_int == 0:
-        logger.info("ms2_min_scans=0 and ms2_min_intensity=0: skipping MS2 point filter. Retaining all %d entries across %d compounds.", len(ms2_df), ms2_df['mz_rt_uid'].nunique())
+        logger.info(f"ms2_min_scans=0 and ms2_min_intensity=0: skipping MS2 point filter. Retaining all {len(ms2_df)} entries across {ms2_df['mz_rt_uid'].nunique()} compounds.")
         return ms2_df
 
     starting_scans = len(ms2_df)
@@ -326,14 +494,31 @@ def _filter_ms2_points(ms2_df, ms1_df, min_scans=None, min_int=None):
     return ms2_df
 
 def _filter_ms1_points(ms1_df, min_pts, min_int):
+    """Filter wide-format MS1 DataFrame by minimum in-feature point count and intensity.
+
+    Each row of *ms1_df* represents one compound x one file with list columns
+    ``spec_rts``, ``spec_ints``, and ``in_feature``.  Rows are kept only when
+    the in-feature subset meets both thresholds.  Uses vectorised numpy helpers
+    to avoid slow Python-level ``apply(lambda row: ...)`` loops.
+
+    Args:
+        ms1_df:   Wide-format MS1 DataFrame (one row per compound x file).
+        min_pts:  Minimum number of in-feature scan points required per row.
+                  ``None`` or ``0`` skips this filter.
+        min_int:  Minimum peak intensity (max of in-feature intensities) required
+                  per row.  ``None`` or ``0`` skips this filter.
+
+    Returns:
+        Filtered MS1 DataFrame.
+    """
     if ms1_df.empty:
         logger.warning("No MS1 data found. Skipping point filtering.")
         return ms1_df
     if min_pts is None and min_int is None:
-        logger.info("No MS1 point filters specified. Retaining all %d entries across %d compounds.", len(ms1_df), ms1_df['mz_rt_uid'].nunique())
+        logger.info(f"No MS1 point filters specified. Retaining all {len(ms1_df)} entries across {ms1_df['mz_rt_uid'].nunique()} compounds.")
         return ms1_df
     if min_pts == 0 and min_int == 0:
-        logger.info("ms1_min_pts=0 and ms1_min_intensity=0: skipping MS1 point filter. Retaining all %d entries across %d compounds.", len(ms1_df), ms1_df['mz_rt_uid'].nunique())
+        logger.info(f"ms1_min_pts=0 and ms1_min_intensity=0: skipping MS1 point filter. Retaining all {len(ms1_df)} entries across {ms1_df['mz_rt_uid'].nunique()} compounds.")
         return ms1_df
 
     starting_compounds = ms1_df['mz_rt_uid'].nunique()
@@ -342,15 +527,39 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
     # Collect per-step stats for the summary table: (step_label, entries_after, compounds_after)
     steps = [("extracted", starting_entries, starting_compounds)]
 
+    # compute per-row in-feature point count and max intensity
+    def _in_feature_count(in_feature_col):
+        """Count True values in each row's in_feature list."""
+        return in_feature_col.apply(
+            lambda x: int(np.sum(x)) if isinstance(x, (list, np.ndarray)) and len(x) > 0 else 0
+        )
+
+    def _in_feature_max_int(in_feature_col, spec_ints_col):
+        """Max intensity among in-feature points per row."""
+        def _row_max(pair):
+            mask, ints = pair
+            if not isinstance(mask, (list, np.ndarray)) or not isinstance(ints, (list, np.ndarray)):
+                return -float('inf')
+            arr_mask = np.asarray(mask, dtype=bool)
+            arr_ints = np.asarray(ints, dtype=float)
+            in_f = arr_ints[arr_mask]
+            return float(in_f.max()) if in_f.size > 0 else -float('inf')
+        return pd.Series(
+            [_row_max(pair) for pair in zip(in_feature_col, spec_ints_col)],
+            index=in_feature_col.index,
+        )
+
     if min_pts is not None and min_pts > 0:
-        ms1_df = ms1_df[ms1_df.apply(lambda row: sum(1 for in_f, rt in zip(row['in_feature'], row['spec_rts']) if in_f) >= min_pts, axis=1)]
+        counts = _in_feature_count(ms1_df['in_feature'])
+        ms1_df = ms1_df[counts >= min_pts]
         steps.append((f"min_pts >= {min_pts}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
         if ms1_df.empty:
             ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
 
     if min_int is not None and min_int > 0:
-        ms1_df = ms1_df[ms1_df.apply(lambda row: max((i for in_f, i in zip(row['in_feature'], row['spec_ints']) if in_f), default=-float('inf')) >= min_int, axis=1)]
+        max_ints = _in_feature_max_int(ms1_df['in_feature'], ms1_df['spec_ints'])
+        ms1_df = ms1_df[max_ints >= min_int]
         steps.append((f"min_intensity >= {min_int}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
         if ms1_df.empty:
             ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
@@ -364,6 +573,19 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
     return ms1_df
 
 def _ensure_in_feature_list_of_bools(df, col="in_feature"):
+    """Coerce the *col* column to a list of Python bools in every row.
+
+    DuckDB REAL[] columns are read back as numpy arrays; this helper
+    normalises them to plain ``list[bool]`` so downstream code can use
+    standard Python list operations.
+
+    Args:
+        df:  DataFrame to modify in-place.
+        col: Name of the list column to coerce (default ``"in_feature"``).
+
+    Returns:
+        The same DataFrame with *col* coerced (modified in-place).
+    """
     if col in df.columns:
         df[col] = df[col].apply(
             lambda x: [bool(i) for i in x] if isinstance(x, (list, np.ndarray)) else []
@@ -371,6 +593,20 @@ def _ensure_in_feature_list_of_bools(df, col="in_feature"):
     return df
 
 def _join_metadata(ms1_df, ms2_df, atlas):
+    """Merge compound metadata (inchi_key, adduct) onto MS1 and MS2 DataFrames.
+
+    Performs a left join on ``mz_rt_uid`` and reorders MS1 columns to the
+    canonical wide-format column order.
+
+    Args:
+        ms1_df: Wide-format MS1 DataFrame.
+        ms2_df: Wide-format MS2 DataFrame.
+        atlas:  Expanded atlas DataFrame containing ``mz_rt_uid``,
+                ``inchi_key``, and ``adduct`` columns.
+
+    Returns:
+        Tuple ``(ms1_df, ms2_df)`` with metadata columns added.
+    """
     meta_df = atlas[["mz_rt_uid", "inchi_key", "adduct"]]
     if not ms1_df.empty:
         ms1_df = ms1_df.merge(meta_df, on="mz_rt_uid", how="left")
@@ -451,10 +687,12 @@ def extract_data_from_raw(
                                    atlas_expanded, 
                                    wp.get("only_keep_data_in_feature", False)
                                 ): run for run in runs}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Extracting MS data"):
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Extracting MS data", disable=should_disable_tqdm()):
             m1, m2 = fut.result()
-            if not m1.empty: ms1_all.append(m1)
-            if not m2.empty: ms2_all.append(m2)
+            if not m1.empty: 
+                ms1_all.append(m1)
+            if not m2.empty: 
+                ms2_all.append(m2)
 
     final_ms1_df = pd.concat(ms1_all, ignore_index=True) if ms1_all else pd.DataFrame()
     final_ms2_df = pd.concat(ms2_all, ignore_index=True) if ms2_all else pd.DataFrame()
@@ -495,4 +733,3 @@ def extract_data_from_raw(
     obj.experimental_data.ms2_df = final_ms2_df
 
     return
-

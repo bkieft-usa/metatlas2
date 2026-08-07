@@ -17,10 +17,20 @@ import metatlas2.logging_config as lcf
 from metatlas2.utils import should_disable_tqdm
 logger = lcf.get_logger('curation_creator')
 
-def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
-    """
-    Builds the manual curation metadata table using the Tidy DataFrame architecture.
-    Returns a DataFrame where each row is a compound's curation metadata.
+def create_manual_curation_obj(auto_id_obj) -> None:
+    """Build and attach a curation DataFrame to ``auto_id_obj.experimental_data.curation_df``.
+
+    Iterates over every compound in the auto-identified atlas, computes per-compound
+    MS1 summary statistics via :func:`analyze_ms1`, and assembles a
+    :class:`pandas.DataFrame` of curation records.  Compounds that failed auto-ID
+    are included unless ``remove_unided_compounds`` is set in the task-atlas params.
+
+    Args:
+        auto_id_obj: An auto-identification result object that exposes
+            ``auto_ided_atlas_obj``, ``experimental_data``, ``paths``, and ``ta``.
+
+    Returns:
+        None.  The result is written to ``auto_id_obj.experimental_data.curation_df``.
     """
     logger.info("Loading experimental data and atlas for curation metadata creation...")
     atlas_df = auto_id_obj.auto_ided_atlas_obj.to_dataframe()
@@ -106,10 +116,30 @@ def create_manual_curation_obj(auto_id_obj) -> pd.DataFrame:
 
     return
 
-def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",apply_bounds_cutoff=None) -> dict:
-    """
-    Analyzes MS1 data using wide format (one row per file, lists of rts, intensities, mzs, in_feature).
-    Aggregates across all files for the compound.
+def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", apply_bounds_cutoff=None) -> dict:
+    """Compute MS1 summary statistics for a single compound across all sample files.
+
+    Aggregates per-file extracted-ion chromatogram (EIC) data to derive observed
+    retention-time and m/z values, errors relative to the atlas, and (in the
+    ``"manual_curation_creator"`` stage) an RT-bounds suggestion.
+
+    Args:
+        atlas_row: A mapping (e.g. a :class:`pandas.Series` row) containing atlas
+            fields such as ``mz``, ``rt_peak``, ``rt_min``, and ``rt_max``.
+        compound_ms1_df: A :class:`pandas.DataFrame` where each row represents one
+            sample file and contains list-valued columns ``spec_rts``, ``spec_ints``,
+            ``spec_mzs``, and ``in_feature``.
+        stage: Processing stage selector.  ``"manual_curation_creator"`` (default)
+            computes EIC traces and RT suggestions; ``"post_curation_summary"``
+            returns only error metrics.
+        apply_bounds_cutoff: Optional confidence threshold (0-1).  When the
+            RT-suggestion confidence exceeds this value the suggested bounds are
+            written into the result as the active ``rt_min``/``rt_max``.
+
+    Returns:
+        A ``dict`` of computed fields (e.g. ``mz``, ``rt_peak``, ``rt_error``,
+        ``mz_error``, ``max_eic_rt``, ``max_eic_intensity``, ``suggested_rt_min``,
+        etc.), or an empty ``dict`` if no usable data were found.
     """
     if compound_ms1_df.empty:
         return {}
@@ -120,21 +150,17 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
     atlas_rt_min = atlas_row.get('rt_min', 0.0)
     atlas_rt_max = atlas_row.get('rt_max', 0.0)
 
-    # 1. Per-file analysis for Best File and EIC (wide format)
-    rt_arrays, int_arrays = [], []  # For all data (for EIC)
-    in_feature_mz, in_feature_int, in_feature_rt = [], [], []  # For in_feature only
-    per_file_peak_rts = []  # RT of the highest-intensity in_feature point per file
+    rt_arrays, int_arrays = [], []
+    in_feature_mz, in_feature_int, in_feature_rt = [], [], []
+    per_file_peak_rts = []
 
     # Each row is one file for this compound, with lists in columns
     for _, row in compound_ms1_df.iterrows():
         filename = row.get('filename', None)
-        # Wide format columns: spec_rts, spec_ints, spec_mzs, in_feature
         rt_list = row.get('spec_rts', [])
         intensity_list = row.get('spec_ints', [])
         mz_list = row.get('spec_mzs', [])
         in_feature_mask = row.get('in_feature', [True]*len(rt_list))
-
-        # Convert to numpy arrays for easier indexing
         rt_arr = np.asarray(rt_list)
         int_arr = np.asarray(intensity_list)
         mz_arr = np.asarray(mz_list)
@@ -167,26 +193,20 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
         return {}
 
     if stage == "manual_curation_creator":
-        # 2. EIC Calculation (Vectorized, all data)
         all_rts = np.unique(np.concatenate(rt_arrays))
         max_eic_intensity = np.max([
             np.interp(all_rts, r, i, left=0, right=0)
             for r, i in zip(rt_arrays, int_arrays)
         ], axis=0)
 
-    # 3. Window Metrics (in_feature only)
-    # rt_peak = mean of each file's highest-intensity in_feature RT point
-    # mz      = mean of all in_feature mzs across all files
     win_rt_peak = float(np.mean(per_file_peak_rts)) if per_file_peak_rts else float(in_feature_rt[np.argmax(in_feature_int)])
     win_mz_mean = float(np.mean(in_feature_mz))
     rt_err = win_rt_peak - atlas_rt_peak
     mz_err = (win_mz_mean - atlas_mz) / atlas_mz * 1e6 if atlas_mz else 0.0
 
     if stage == "manual_curation_creator":
-        # 4. RT Suggestion (using average EIC across all files)
         avg_trace_data = None
         if rt_arrays:
-            all_rts = np.unique(np.concatenate(rt_arrays))  # already computed above
             avg_eic_intensity = np.mean([
                 np.interp(all_rts, r, i, left=0, right=0)
                 for r, i in zip(rt_arrays, int_arrays)
@@ -261,6 +281,23 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator",appl
     return res
 
 def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
+    """Build a mapping from each atlas entry's UID to its list of isomers.
+
+    Two entries are considered isomers if they share a similar m/z (within 5 mDa),
+    a similar monoisotopic mass (within 5 mDa), or the same first InChIKey block
+    (identical molecular skeleton).
+
+    Args:
+        atlas_obj: An ``Atlas`` instance that exposes a ``to_dataframe()`` method
+            returning a :class:`pandas.DataFrame` with columns ``mz_rt_uid``,
+            ``mz``, ``mono_isotopic_molecular_weight``, ``inchi_key``,
+            ``adduct``, ``compound_name``, and ``rt_peak``.
+
+    Returns:
+        A ``dict`` mapping each ``mz_rt_uid`` to a (possibly empty) list of
+        isomer records, each containing keys ``mz_rt_uid``, ``inchi_key``,
+        ``adduct``, ``compound_name``, ``rt``, and ``mz``.
+    """
     atlas_df = atlas_obj.to_dataframe().reset_index(drop=True)
     n = len(atlas_df)
     mzs = atlas_df["mz"].to_numpy(dtype=float)
@@ -268,7 +305,6 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
     inchi_prefixes = np.array([str(ik).split("-")[0] for ik in atlas_df["inchi_key"]], dtype=object)
     uids = atlas_df["mz_rt_uid"].to_numpy()
 
-    # Vectorized distance matrices
     mz_sim = np.abs(mzs[:, None] - mzs[None, :]) <= 0.005
     mass_sim = np.abs(masses[:, None] - masses[None, :]) <= 0.005
     prefix_match = inchi_prefixes[:, None] == inchi_prefixes[None, :]
@@ -277,7 +313,6 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
     np.fill_diagonal(isomer_mask, False) # Remove self
 
     isomer_dict = {}
-    # Optimization: instead of iterrows, use boolean indices to slice the dataframe once per compound
     for i in range(n):
         match_indices = np.where(isomer_mask[i])[0]
         if match_indices.size > 0:
@@ -295,13 +330,31 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
     return isomer_dict
 
 def _suggest_rt_bounds_from_ms1(best_trace_data, atlas_rt_peak, atlas_rt_min, atlas_rt_max):
+    """Suggest chromatographic RT bounds from an averaged EIC trace.
+
+    Applies Gaussian smoothing, detects peaks, selects the peak closest to the
+    expected atlas RT, and estimates half-maximum widths to propose ``rt_min`` and
+    ``rt_max``.  A composite confidence score (0-1) is computed from peak intensity,
+    prominence, width, RT deviation, and peak symmetry.
+
+    Args:
+        best_trace_data: A ``dict`` with keys ``"rt"`` and ``"i"`` holding
+            array-like retention-time and intensity values for the averaged EIC.
+        atlas_rt_peak: Expected peak retention time from the atlas (minutes).
+        atlas_rt_min: Atlas lower RT bound (minutes), used for deviation scoring.
+        atlas_rt_max: Atlas upper RT bound (minutes), used for deviation scoring.
+
+    Returns:
+        A ``dict`` with keys ``"rt_min"``, ``"rt_max"``, ``"rt_peak"``, and
+        ``"confidence"``, or ``None`` if the trace contains insufficient data or
+        the confidence falls below 0.1.
+    """
     if not best_trace_data:
         return None
     
     rt = np.asarray(best_trace_data.get("rt"), dtype=np.float64)
     intensity = np.asarray(best_trace_data.get("i"), dtype=np.float64)
 
-    # Match legacy filtering: keep positive intensities and finite values.
     valid_mask = (intensity > 0) & (~np.isnan(rt)) & (~np.isnan(intensity))
     if not np.any(valid_mask):
         return None
@@ -334,7 +387,7 @@ def _suggest_rt_bounds_from_ms1(best_trace_data, atlas_rt_peak, atlas_rt_min, at
             "right_bases": np.array([min(len(rt) - 1, peaks[0] + 5)]),
         }
 
-    # Match legacy selection: choose detected peak closest to expected RT.
+    # choose detected peak closest to expected RT.
     peak_rts = rt[peaks]
     closest_peak_idx = int(np.argmin(np.abs(peak_rts - theoretical_rt)))
     main_peak_idx = int(peaks[closest_peak_idx])
@@ -363,7 +416,6 @@ def _suggest_rt_bounds_from_ms1(best_trace_data, atlas_rt_peak, atlas_rt_min, at
     rt_min_suggested = rt_left - pad
     rt_max_suggested = rt_right + pad
 
-    # Match legacy bound constraints.
     rt_min_suggested = max(rt_min_suggested, float(rt[0]))
     rt_max_suggested = min(rt_max_suggested, float(rt[-1]))
 

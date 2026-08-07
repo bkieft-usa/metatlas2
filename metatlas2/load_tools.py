@@ -134,7 +134,7 @@ def load_msms_refs_file(
                 continue
 
             inchi_key = rec_inchi_key
-            # matchms requires m/z ascending; defensively sort
+            # matchms requires m/z ascending
             if len(mz) > 1 and not np.all(mz[:-1] <= mz[1:]):
                 order = np.argsort(mz, kind='stable')
                 mz = mz[order]
@@ -176,8 +176,6 @@ def load_msms_refs_file(
     return refs_by_inchi_key
 
 def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict[str, Any]:
-    """Validate and coerce a single PARAMS block from RT_ALIGNMENT.
-    """
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', False))
     params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT
     params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
@@ -195,7 +193,6 @@ def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict
     params['r2_threshold'] = float(params.get('r2_threshold', 0.5))
     params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
     return params
-
 
 def _validate_targeted_analysis_params(params: dict[str, Any], location: str) -> dict[str, Any]:
     """Validate and coerce a single PARAMS block from TARGETED_ANALYSES.
@@ -249,19 +246,15 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['skip_outputs'] = params.get('skip_outputs', None)
     return params
 
-
 def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2Config":
-    """Build a Metatlas2Config from parsed YAML content."""
     from metatlas2.workflow_objects import Metatlas2Config, TargetedAnalysis
 
-    # ── top-level structure ────────────────────────────────────────────────
     if 'WORKFLOWS' not in raw:
         raise ValueError("Missing required configuration section: WORKFLOWS")
     for subsection in ("RT_ALIGNMENT", "TARGETED_ANALYSES"):
         if subsection not in raw['WORKFLOWS']:
             raise ValueError(f"Missing required WORKFLOWS subsection: {subsection}")
 
-    # ── RT_ALIGNMENT ───────────────────────────────────────────────────────
     rt_alignment_config: dict[str, Any] = {}
     for chromatography, chrom_cfg in raw['WORKFLOWS']['RT_ALIGNMENT'].items():
         location = f"RT_ALIGNMENT {chromatography}"
@@ -276,7 +269,6 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
         )
         rt_alignment_config[chromatography] = chrom_cfg
 
-    # ── TARGETED_ANALYSES → flat list of TargetedAnalysis objects ──────────
     targeted_analyses: list = []
     for chromatography, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
         for polarity, pol_cfg in chrom_cfg.items():
@@ -322,53 +314,17 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
         targeted_analyses=targeted_analyses,
     )
 
-
 def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
-    """Load and validate a metatlas2 YAML config file.
-
-    The config uses ``yaml.safe_load`` with a structure where analysis name
-    is a mapping key, so each unique analysis is unambiguous:
-
-    .. code-block:: yaml
-
-        TARGETED_ANALYSES:
-          HILICZ:
-            POS:
-              EMA:
-                ANALYSIS-NAME-1:
-                  ATLAS:
-                    uid: atl-ref-ema-hilicz-pos-...
-                  PARAMS:
-                    ...
-                ANALYSIS-NAME-2:
-                  ATLAS:
-                    uid: atl-ref-ema-hilicz-pos-...
-                  PARAMS:
-                    ...
-
-    Returns a :class:`~metatlas2.workflow_objects.Metatlas2Config` instance
-    whose ``targeted_analyses`` attribute is a flat list of
-    :class:`~metatlas2.workflow_objects.TargetedAnalysis` objects — one per
-    unique ``chrom/pol/analysis_type/name`` combination.
-    """
     with open(config_path, 'r') as f:
         raw = yaml.safe_load(f)
     return _build_metatlas2_config(raw, config_path)
 
 def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
-    """Parse and validate a metatlas2 config from a raw YAML string.
-
-    This is the companion to :func:`load_metatlas2_config` used when YAML text
+    """
+    This is the companion to load_metatlas2_config used when YAML text
     has been retrieved from the ``project_config`` database table rather than
     read directly from a file on disk.
-
-    Args:
-        config_yaml: Raw YAML text (as stored in ``project_config.config_yaml``).
-
-    Returns:
-        A fully validated :class:`~metatlas2.workflow_objects.Metatlas2Config`.
     """    
-
     raw = yaml.safe_load(config_yaml)
     return _build_metatlas2_config(raw, "project_config.config_yaml")
 
@@ -380,13 +336,11 @@ def load_compound_input(file_path: str) -> pd.DataFrame:
     if not file_path.exists():
         raise FileNotFoundError(f"Compound input file not found: {file_path}")
     
-    # Try to read as TSV first, then CSV
     if file_path.suffix.lower() != '.csv':
         df = pd.read_csv(file_path, sep='\t')
     else:
         df = pd.read_csv(file_path)
 
-    # Check for required columns (need to use label if it's present)
     if 'compound_name' in df.columns and 'label' in df.columns:
         df.rename(columns={'compound_name': 'compound_name_input', 'label': 'compound_name'}, inplace=True)
     elif 'compound_name' not in df.columns and 'label' in df.columns:
@@ -402,7 +356,6 @@ def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
     if 'chromatography' in df.columns:
         chrom_values = df['chromatography'].dropna().unique()
         return str(chrom_values[0])
-    
     return 'Unknown'
 
 def detect_atlas_input_polarity(df: pd.DataFrame) -> str:
@@ -415,12 +368,16 @@ def detect_atlas_input_polarity(df: pd.DataFrame) -> str:
     # Try to infer from adduct information
     if 'adduct' in df.columns:
         adducts = ' '.join(df['adduct'].dropna().astype(str))
-        if '+' in adducts and '[M+H]+' in adducts:
+        if '[M+H]+' in adducts or '[M+Na]+' in adducts or '[M+NH4]+' in adducts:
             return 'positive'
-        elif '-' in adducts and '[M-H]-' in adducts:
+        elif '[M-H]-' in adducts or '[M+Cl]-' in adducts or '[M-2H]-' in adducts or '[M+formate]-' in adducts:
             return 'negative'
     
-    return 'positive'  # Default
+    raise ValueError(
+        "Could not determine polarity from atlas input data. "
+        "Add a 'polarity' column (values: 'positive' or 'negative') or ensure adduct strings "
+        "contain recognisable patterns (e.g. '[M+H]+' or '[M-H]-')."
+    )
 
 def check_missing_columns(df: pd.DataFrame, required_columns: list) -> None:
     """Check for missing required columns and raise error if any are missing."""
@@ -435,7 +392,6 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
     if not file_path.exists():
         raise FileNotFoundError(f"Atlas input file not found: {file_path}")
     
-    # Try to read as TSV first, then CSV
     if file_path.suffix.lower() != '.csv':
         df = pd.read_csv(file_path, sep='\t')
     else:
@@ -486,31 +442,24 @@ def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
 
 def change_ownership_to_metatlas_group(project_dir_path: str) -> None:
     """Change ownership of project directory to metatlas group for HPC environments."""
-
-    group_name = 'metatlas'
-
     try:
-        grp.getgrnam(group_name)
+        grp.getgrnam('metatlas')
     except KeyError:
-        logger.warning(f"Group '{group_name}' not found. Skipping ownership change.")
+        logger.warning(f"Group '{'metatlas'}' not found. Skipping ownership change.")
         return
-
     try:
-        subprocess.run(['chgrp', '-R', group_name, project_dir_path], check=True)
-        logger.info(f"Changed group of {project_dir_path} to {group_name}")
+        subprocess.run(['chgrp', '-R', 'metatlas', project_dir_path], check=True)
+        logger.info(f"Changed group of {project_dir_path} to {'metatlas'}")
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to change group: {e}")
 
-
 def log_filter_table(steps, starting_entries, starting_compounds, entries_label="Entries", title=None):
-    """Log a fixed-width summary table of sequential filtering steps.
-
-    Args:
-        steps: list of (label, count, compounds) tuples; first entry should be the 'start' row.
-        starting_entries: row count before any filtering (denominator for % columns).
-        starting_compounds: unique compound count before any filtering (denominator for % columns).
-        entries_label: column header for the row-count column (e.g. 'Entries' or 'Scans').
-        title: optional log message title; defaults to '<entries_label> filtering summary'.
+    """
+    steps: list of (label, count, compounds) tuples; first entry should be the 'start' row.
+    starting_entries: row count before any filtering (denominator for % columns).
+    starting_compounds: unique compound count before any filtering (denominator for % columns).
+    entries_label: column header for the row-count column (e.g. 'Entries' or 'Scans').
+    title: optional log message title; defaults to '<entries_label> filtering summary'.
     """
     if title is None:
         title = f"{entries_label} filtering summary"
@@ -520,7 +469,7 @@ def log_filter_table(steps, starting_entries, starting_compounds, entries_label=
         f"{'Step':<{col_w[0]}} {entries_label:>{col_w[1]}} {pct_label:>{col_w[2]}} "
         f"{'Compounds':>{col_w[3]}} {'Compounds %':>{col_w[4]}}"
     )
-    sep = "-" * sum(col_w + [4])  # 4 spaces between 5 columns
+    sep = "-" * sum(col_w + [4])
     rows = [header, sep]
     for label, entries, compounds in steps:
         pct_e = entries / starting_entries * 100 if starting_entries > 0 else 0.0
@@ -530,7 +479,7 @@ def log_filter_table(steps, starting_entries, starting_compounds, entries_label=
             f"{compounds:>{col_w[3]}} {pct_c:>{col_w[4] - 1}.1f}%"
         )
     rows.append(sep)
-    logger.info("%s:\n%s", title, "\n".join(rows))
+    logger.info(f"{title}:\n{chr(10).join(rows)}")
 
 def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, analysis_type: str, analysis_name: str) -> dict:
 
@@ -539,10 +488,8 @@ def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, a
     type_lc = analysis_type.lower()
     name_lc = analysis_name.lower()
 
-    # The decorator prefix embedded in the UID: atl-ref-{chrom}-{pol}-{type}-{name}-
     uid_prefix = f"atl-ref-{chrom_lc}-{pol_lc}-{type_lc}-{name_lc}-"
 
-    # Regex to extract any UID from a "Created new atlas" log line
     uid_pattern = re.compile(r'\(UID:\s*(atl-[^\)]+)\)')
 
     matched_uid = None
@@ -554,7 +501,7 @@ def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, a
             if m:
                 uid = m.group(1).strip()
                 if uid.startswith(uid_prefix):
-                    matched_uid = uid  # keep the last match
+                    matched_uid = uid 
 
     return matched_uid
     

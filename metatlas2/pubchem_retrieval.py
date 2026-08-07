@@ -15,7 +15,22 @@ from metatlas2.utils import get_provenance
 logger = lcf.get_logger('pubchem_retrieval')
 
 def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> dict[str, Any]:
-    """Get comprehensive compound data from PubChem using InChI key."""
+    """Retrieve comprehensive compound data from PubChem for a single InChIKey.
+
+    Looks up the PubChem CID via the InChIKey namespace, fetches the full
+    :class:`pubchempy.Compound` record, filters synonyms with
+    :func:`_filter_synonym_list`, and extracts a CAS number when available.
+
+    Args:
+        inchi_key: Standard InChIKey string used to query PubChem.
+        timestamp: ISO-format timestamp string to record as ``pubchem_retrieval_date``.
+
+    Returns:
+        A ``dict`` with keys ``pubchem_cid``, ``iupac_name``, ``synonyms``,
+        ``inchi``, ``smiles``, ``formula``, ``mono_isotopic_molecular_weight``,
+        ``cas_number``, ``pubchem_retrieval_date``, and ``pubchem_compound_url``,
+        or ``None`` if the compound is not found or an error occurs.
+    """
     try:
         # Get CID from InChI key
         cid_result = pcp.get_compounds(inchi_key, namespace='inchikey',
@@ -31,13 +46,10 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> dict[str, Any]:
         if "\n" in cid:
             cid = (cid.rstrip().split('\n'))[-1]
 
-        # Get detailed compound information
         compound = pcp.Compound.from_cid(cid)
 
-        # Filter synonyms to remove some common problematic entries
         filtered_synonyms = _filter_synonym_list(compound.synonyms) if compound.synonyms else []
 
-        # Extract all available properties
         compound_data = {
             "pubchem_cid": str(compound.cid) if compound.cid else "",
             "iupac_name": str(compound.iupac_name) if compound.iupac_name else "",
@@ -51,7 +63,6 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> dict[str, Any]:
             "pubchem_compound_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{compound.cid}" if compound.cid else ""
         }
 
-        # Extract CAS number from synonyms
         if compound.synonyms:
             for synonym in compound.synonyms:
                 if not compound_data["cas_number"] and '-' in synonym and len(synonym.split('-')) == 3:
@@ -61,11 +72,23 @@ def fetch_pubchem_entry(inchi_key: str, timestamp: str) -> dict[str, Any]:
         return compound_data
 
     except Exception as e:
-        #logger.warning(f"Error retrieving PubChem data for {inchi_key}: {e}")
         return None
 
 def _filter_synonym_list(synonyms: list[str]) -> str:
-    """Filter synonym list to find the best name."""
+    """Select the best human-readable synonym from a PubChem synonym list.
+
+    Removes entries that start with known database-code prefixes (e.g. ``CHEMBL``,
+    ``ZINC``, ``DTXSID``), strips entries that are purely numeric codes, and
+    returns the shortest remaining synonym as a proxy for the most concise name.
+
+    Args:
+        synonyms: List of synonym strings as returned by PubChem, or a single
+            string.  ``None`` or ``["Undefined"]`` are handled gracefully.
+
+    Returns:
+        The shortest non-problematic synonym string, or ``"Undefined"`` if no
+        suitable synonym remains after filtering.
+    """
     if not synonyms or synonyms == ["Undefined"]:
         return "Undefined"
     
@@ -83,18 +106,14 @@ def _filter_synonym_list(synonyms: list[str]) -> str:
         "AM-", "IFLab", "Cream"
     )
 
-    # Remove problematic prefixes
     filtered_synonyms = [x for x in synonyms if not x.startswith(problematic_prefixes)]
     filtered_synonyms = [x for x in filtered_synonyms if not "cream" in x.lower()]
-    
-    # Remove entries that are mostly digits or codes
-    filtered_synonyms = [x for x in filtered_synonyms 
-                        if not x.replace("-", "").replace(re.compile('^A-Z').pattern, "").isdigit()]
+    filtered_synonyms = [x for x in filtered_synonyms
+                        if not re.sub(r'[A-Z\-]', '', x).isdigit()]
     
     if not filtered_synonyms:
         return "Undefined"
     
-    # Return the shortest remaining synonym
     return min(filtered_synonyms, key=len)
 
 def load_or_create_pubchem_cache(pubchem_cache_path: str, use_cache: bool = True) -> dict[str, dict[str, Any]]:
@@ -127,8 +146,20 @@ def load_or_create_pubchem_cache(pubchem_cache_path: str, use_cache: bool = True
         logger.info("Starting with empty cache")
         return {}
 
-def save_pubchem_cache(cache: dict[str, Dict], cache_filename: str) -> None:
-    """Save global PubChem cache to JSON file."""
+def save_pubchem_cache(cache: dict[str, dict], cache_filename: str) -> None:
+    """Persist the in-memory PubChem cache to a JSON file on disk.
+
+    Creates any missing parent directories before writing.  Logs a warning if
+    the write fails but does not raise.
+
+    Args:
+        cache: Mapping of InChIKey strings to PubChem data dicts, as maintained
+            by :func:`retrieve_pubchem_info`.
+        cache_filename: Destination file path (string or path-like).
+
+    Returns:
+        None.
+    """
     cache_file = Path(cache_filename)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     
@@ -151,13 +182,10 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
         update_pubchem_cache: If True, force API lookup and update cache for all compounds
     """
 
-    # Load existing global cache
     pubchem_cache = load_or_create_pubchem_cache(pubchem_cache_path, use_cache=use_pubchem_cache)
-
     prov = get_provenance()
     unique_inchi_keys = compounds['inchi_key'].dropna().unique()
 
-    # Determine which compounds need API lookup
     if update_pubchem_cache:
         # Force update mode: lookup all compounds via API
         compounds_to_fetch = list(unique_inchi_keys)
@@ -175,7 +203,6 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
         compounds_in_cache = []
         logger.info(f"Cache disabled - will query all {len(compounds_to_fetch)} compounds via PubChem API")
 
-    # Fetch data from PubChem API if needed
     if compounds_to_fetch:
         logger.info(f"Fetching PubChem data for {len(compounds_to_fetch)} compounds...")
         logger.info("This may take several minutes depending on the number of compounds.")
@@ -186,7 +213,6 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
         for inchi_key in tqdm(compounds_to_fetch, desc="Fetching PubChem data"):
             was_in_cache = inchi_key in pubchem_cache
             
-            # Get PubChem data via API
             pubchem_data = fetch_pubchem_entry(inchi_key, prov['timestamp'])
 
             if pubchem_data:
@@ -197,10 +223,8 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
                 else:
                     new_entries += 1
 
-            # Be respectful to PubChem API
             time.sleep(0.5)
         
-        # Save cache IMMEDIATELY after fetching to persist for next file
         if use_pubchem_cache or update_pubchem_cache:
             save_pubchem_cache(pubchem_cache, pubchem_cache_path)
             logger.info(f"Cache update completed: {new_entries} new entries added, {updated_entries} entries updated")
@@ -210,15 +234,12 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
     else:
         logger.info("All compounds already in cache!")
 
-    # Merge PubChem data back into compounds DataFrame
     pubchem_df = pd.DataFrame.from_dict(pubchem_cache, orient='index')
     pubchem_df.index.name = 'inchi_key'
     pubchem_df = pubchem_df.reset_index()
     
-    # Merge PubChem data with compounds
     compounds = compounds.merge(pubchem_df, on='inchi_key', how='left', suffixes=('', '_pubchem'))
     
-    # Update columns with PubChem data if not already present
     for col in pubchem_df.columns:
         if col != 'inchi_key' and col in compounds.columns:
             # Fill missing values with PubChem data
@@ -227,7 +248,6 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str,
                 compounds[col] = compounds[col].fillna(compounds[pubchem_col])
                 compounds = compounds.drop(columns=[pubchem_col])
 
-    # Report statistics
     successful_retrievals = [k for k, v in pubchem_cache.items() 
                             if v.get('pubchem_cid') and v.get('pubchem_cid') != '']
     failed_retrievals = [k for k, v in pubchem_cache.items() 
