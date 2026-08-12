@@ -330,7 +330,26 @@ def run_analysis_summary(
     run_parameters: dict[str, Any],
     override_parameters: dict[str, Any] = None,
     overwrite: bool = False,
+    auto_curate: bool = False,
 ) -> None:
+    """Run the post-curation analysis summary for one targeted analysis.
+
+    Parameters
+    ----------
+    run_parameters:
+        Dict with keys: ``project_name``, ``rt_alignment_number``,
+        ``analysis_number``, ``chromatography``, ``polarity``,
+        ``analysis_type``, ``analysis_name``, ``input_atlas_uid``.
+    override_parameters:
+        Optional dict of parameter overrides (same as the notebook GUI cell).
+    overwrite:
+        When ``True``, existing output files are overwritten.
+    auto_curate:
+        When ``True``, apply automatic curation defaults to the
+        ``curation_df`` before generating summary outputs.  This is used
+        by the ``--skip-curation`` command-line flag to bypass the manual
+        GUI step.  Defaults to ``False`` (normal notebook behaviour).
+    """
 
     from metatlas2.workflow_objects import Atlas, AnalysisSummary, AtlasStage
 
@@ -373,7 +392,10 @@ def run_analysis_summary(
         update_raw_in_feature=False
     )
 
-    if summary_obj.ta.params.get("gui_require_all_evaluated", True):
+    if auto_curate:
+        logger.info("auto_curate=True: applying automatic curation defaults to curation_df (skipping manual GUI)...")
+        asm.apply_auto_curation_defaults(summary_obj.experimental_data.curation_df)
+    elif summary_obj.ta.params.get("gui_require_all_evaluated", True):
         logger.info("Checking that all compounds have been evaluated in the GUI before allowing summary generation...")
         dbi.check_require_evaluated(summary_obj)
 

@@ -183,7 +183,6 @@ def copy_outputs_to_google_drive(
         if access_err:
             msg = f"{msg}: {access_err}"
         logger.warning(f"{msg} — {fail_suffix}.")
-        display(HTML(f"Upload skipped: {msg}"))
         return
 
     env_user = os.environ.get("USER", "unknown")
@@ -194,7 +193,7 @@ def copy_outputs_to_google_drive(
 
     base_dest = Path("Analysis_uploads") / obj.project_name / run_folder
     path_string = f"{drive}:{base_dest}"
-    display(HTML(f"Uploading analysis results to Google Drive at {path_string}"))
+    logger.info(f"Uploading analysis results to Google Drive at {path_string}")
 
     if stage == "RT_ALIGNMENT":
         rt_results_dir = Path(obj.paths.get("rt_alignment_results_dir"))
@@ -214,6 +213,7 @@ def copy_outputs_to_google_drive(
             _rclone_copy(tga_results_dir, drive, tga_dest, overwrite=overwrite)
             url = _drive_path_to_url(drive, tga_dest)
             if url:
+                logger.info(f"Upload complete: {path_string} ({url})")
                 display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
         else:
             logger.warning(f"analysis_output_dir '{tga_results_dir}' does not exist — skipping targeted analysis upload.")

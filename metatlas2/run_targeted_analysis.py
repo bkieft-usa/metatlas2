@@ -7,10 +7,6 @@ import sys
 import os
 import re
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from metatlas2.workflow_objects import PathsConfig
 
 SLURM_TEMPLATE = """\
 #!/bin/bash
@@ -337,19 +333,57 @@ def main():
                 image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
             )
 
-        ### NOT WORKING YET
         if args.skip_curation:
-            logger.info("------------ Skipping curation step is not implemented yet.")
-        #     if not args.log_to_stdout and args.command == "run": print("========- Skipping curation step and running summary...")
-        #     logger.info("Skipping curation GUI and running summary.")
+            if not args.log_to_stdout and args.command == "run": print("========- Skipping curation GUI and running analysis summary...")
+            logger.info("------------ Skipping curation GUI: applying auto-curation defaults and running analysis summary")
 
-        #     wfs.run_analysis_summary(
-        #         config_path=os.path.abspath(args.config),
-        #         project_name=args.project,
-        #         rt_alignment_number=args.rt_align_num,
-        #         analysis_number=args.analysis_num,
-        #         post_autoid_atlas=paths["auto_ided_atlases_store_file"],
-        #     )
+            import metatlas2.database_interact as dbi
+
+            auto_ided_df = dbi.get_auto_ided_atlases_for_summary(
+                project_db_path=paths["project_db_path"],
+                rt_alignment_number=args.rt_align_num,
+                analysis_number=args.analysis_num,
+                analysis_subset=args.analysis_subset,
+            )
+
+            for _, row in auto_ided_df.iterrows():
+                chrom = row["chromatography"]
+                pol = row["polarity"]
+                atype = row["analysis_type"]
+                aname = row["analysis_name"]
+                atlas_uid = row["atlas_uid"]
+
+                logger.info(
+                    f"Running auto-curated analysis summary for "
+                    f"{chrom}-{pol}-{atype}-{aname} (atlas_uid={atlas_uid})..."
+                )
+
+                run_params = {
+                    "project_name": args.project,
+                    "rt_alignment_number": args.rt_align_num,
+                    "analysis_number": args.analysis_num,
+                    "chromatography": chrom,
+                    "polarity": pol,
+                    "analysis_type": atype,
+                    "analysis_name": aname,
+                    "input_atlas_uid": atlas_uid,
+                }
+
+                try:
+                    wfs.run_analysis_summary(
+                        run_parameters=run_params,
+                        override_parameters=None,
+                        overwrite=args.overwrite,
+                        auto_curate=True,
+                    )
+                    logger.info(
+                        f"Analysis summary complete for {chrom}-{pol}-{atype}-{aname}."
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Analysis summary failed for {chrom}-{pol}-{atype}-{aname}: {e}",
+                        exc_info=True,
+                    )
 
         if not args.log_to_stdout and args.command == "run": print("========= Pre-curation workflow complete!")
         logger.info("Pre-curation workflow complete. Open the generated notebooks to curate.")

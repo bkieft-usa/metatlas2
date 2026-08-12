@@ -39,7 +39,6 @@ from metatlas2.utils import (
     safe_float,
     safe_isnan,
     as_list,
-    jsonable_list,
 )
 
 logger = lcf.get_logger('analysis_summary')
@@ -67,15 +66,15 @@ def run_all_summaries(
 
     if "id_figures" not in (skip_outputs or []):
         logger.info("Making Identification figures...")
-        make_identification_figure(summary_obj, overwrite=overwrite, max_workers=8)
+        make_identification_figure(summary_obj, overwrite=overwrite, max_workers=4)
 
     if "eic_thumbnails" not in (skip_outputs or []):
         logger.info("Making EIC thumbnails...")
-        make_eic_thumbnails(summary_obj, overwrite=overwrite, max_workers=8)
+        make_eic_thumbnails(summary_obj, overwrite=overwrite, max_workers=4)
 
     if "boxplots" not in (skip_outputs or []):
         logger.info("Making Boxplots...")
-        make_boxplots(summary_obj, overwrite=overwrite, max_workers=8)
+        make_boxplots(summary_obj, overwrite=overwrite, max_workers=4)
 
     if "data_sheets" not in (skip_outputs or []):
         logger.info("Making quantitative data sheets...")
@@ -114,19 +113,68 @@ def run_all_summaries(
         logger.info("Uploading outputs to Google Drive...")
         gdu.copy_outputs_to_google_drive(summary_obj, "ANALYSIS_SUMMARY", overwrite=overwrite)
 
-###############################################
-#### Global helpers
-###############################################
+def apply_auto_curation_defaults(curation_df: "pd.DataFrame") -> "pd.DataFrame":
+    """Apply default curation values to a curation DataFrame when skipping the manual GUI.
+
+    Sets the following fields for every row:
+    - ``analyst_notes``: appends ``" (manual curation skipped)"`` to any existing notes.
+    - ``ms1_notes``: set to ``"keep"`` if currently empty/blank.
+    - ``ms2_notes``: set to ``"0.5, curation skipped, putative match"`` if currently empty/blank.
+
+    RT bounds come directly from the auto id routine
+
+    Parameters
+    ----------
+    curation_df:
+        The ``manual_curation`` DataFrame loaded from the project database
+        (``summary_obj.experimental_data.curation_df``).
+
+    Returns
+    -------
+    pd.DataFrame
+        The same DataFrame with the three note columns updated in-place.
+    """
+    if curation_df is None or curation_df.empty:
+        return curation_df
+
+    _MS1_DEFAULT = "keep"
+    _MS2_DEFAULT = "0.5, curation skipped, putative match"
+    _ANALYST_SUFFIX = " (manual curation skipped)"
+
+    for idx in curation_df.index:
+        # analyst_notes
+        existing_analyst = str(curation_df.at[idx, "analyst_notes"] or "").strip()
+        if existing_analyst:
+            curation_df.at[idx, "analyst_notes"] = existing_analyst + _ANALYST_SUFFIX
+        else:
+            curation_df.at[idx, "analyst_notes"] = _ANALYST_SUFFIX.strip()
+
+        # ms1_notes
+        existing_ms1 = str(curation_df.at[idx, "ms1_notes"] or "").strip()
+        if not existing_ms1:
+            curation_df.at[idx, "ms1_notes"] = _MS1_DEFAULT
+
+        # ms2_notes
+        existing_ms2 = str(curation_df.at[idx, "ms2_notes"] or "").strip()
+        if not existing_ms2:
+            curation_df.at[idx, "ms2_notes"] = _MS2_DEFAULT
+
+    logger.info(
+        f"Applied auto-curation defaults to {len(curation_df)} compounds "
+        f"(ms1_notes='{_MS1_DEFAULT}', ms2_notes='{_MS2_DEFAULT}', "
+        f"analyst_notes suffix='{_ANALYST_SUFFIX.strip()}')."
+    )
+    return curation_df
+
+# helpers
 
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
     return "".join(c for c in text if ord(c) not in range(0xFDD0, 0xFDF0) and ord(c) & 0xFFFF not in (0xFFFE, 0xFFFF))
 
-
 def _display_compound_idx(compound_idx: int) -> int:
     """Convert internal zero-based index to user-facing one-based index."""
     return int(compound_idx) + 1
-
 
 def _resolve_summary_note_options(summary_obj: "AnalysisSummary") -> tuple[list[str], list[str]]:
     """Resolve MS1/MS2 option lists with the same owner/override logic as the GUI."""
@@ -139,7 +187,6 @@ def _resolve_summary_note_options(summary_obj: "AnalysisSummary") -> tuple[list[
     ms1_options, _ = get_note_options_and_hotkeys(note_overrides.get("ms1_notes", {}), ms1_defaults)
     ms2_options, _ = get_note_options_and_hotkeys(note_overrides.get("ms2_notes", {}), ms2_defaults)
     return ms1_options, ms2_options
-
 
 def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
     """Raise if required GUI notes remain at unresolved defaults."""
@@ -193,9 +240,7 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         + " | ".join(details)
     )
 
-###############################################
-#### Identification Figure
-###############################################
+#Identification Figure
 
 def make_identification_figure(
     summary_obj: "AnalysisSummary",
@@ -292,7 +337,6 @@ def make_identification_figure(
                 pbar.update(1)
     pbar.close()
     logger.info("Identification figure export complete")
-
 
 def _identification_figure_worker(kwargs: dict) -> str:
     """Worker: generate and save one identification figure PDF."""

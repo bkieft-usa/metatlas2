@@ -291,10 +291,13 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
 
 def _assign_hits(ms2_df, results_map):
     """Assign scored hits back to every row of ms2_df in a single O(n) pass.
-    
+
     results_map[(uid, filename)] is a list of hit lists, one per scan in the
     order they appear in ms2_df for that group (all scans, in_feature or not).
-    Compound retention is decided separately by _filter_out_ms2_data.
+    Compound retention is decided separately by :func:`_filter_out_ms2_data`.
+
+    The ``hits`` column is assigned directly without copying the full DataFrame
+    first, avoiding a redundant deep copy of all list-valued columns.
     """
     logger.info("Assigning hits back to MS2 dataframe...")
     hits_col = [[] for _ in range(len(ms2_df))]
@@ -308,8 +311,8 @@ def _assign_hits(ms2_df, results_map):
         if scan_idx < len(hits_list):
             hits_col[row_idx] = hits_list[scan_idx]
         group_counter[key] = scan_idx + 1
-    ms2_df = ms2_df.copy()
-    ms2_df['hits'] = hits_col
+    # Assign the new column directly — no full-frame copy needed.
+    ms2_df = ms2_df.assign(hits=hits_col)
     return ms2_df
 
 def find_ms2_hits(auto_id_obj):
@@ -369,7 +372,9 @@ def find_ms2_hits(auto_id_obj):
 
     logger.info(f"Finding reference hits for {len(jobs)} compound-file groups...")
     results_map = {}
-    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 10)) as executor:
+    # Cap workers at 5 to limit concurrent memory from score matrices and
+    # alignment data held in worker processes simultaneously.
+    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 5)) as executor:
         futures = [executor.submit(_process_compound_batch, job) for job in jobs]
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Detecting MS2 Hits", disable=should_disable_tqdm()):
             uid, filename, hits_list = fut.result()

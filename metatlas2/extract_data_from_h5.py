@@ -346,56 +346,173 @@ def _sort_ms1_lists_by_rts(wide):
     wide['in_feature'] = [x[3] for x in sorted_cols]
     return wide
 
-def _widen_ms_data(df, type_name, group_cols, list_cols):
-    """Aggregate long-format MS data into wide format (one row per group).
+def _widen_one_file_ms1(ms1_long: pd.DataFrame) -> pd.DataFrame:
+    """Widen a single file's long-format MS1 data into one row per compound.
 
-    Groups *df* by *group_cols* and collects *list_cols* values into Python
-    lists.  Non-list metadata columns are taken from the first row of each
-    group.  Column renaming and fragment sorting are applied after aggregation.
+    Because *ms1_long* contains data for exactly one ``filename``, the group
+    key is just ``mz_rt_uid``.  Each compound's scan points are collected into
+    ``spec_rts``, ``spec_ints``, and ``spec_mzs`` lists and the ``in_feature``
+    flag list is preserved.  The ``filename`` column is carried through as a
+    scalar (same value for every row).
 
     Args:
-        df:         Long-format MS DataFrame (output of the join helpers).
-        type_name:  ``"ms1"`` or ``"ms2"`` — controls column renaming and
-                    logging labels.
-        group_cols: Columns to group by (e.g. ``["mz_rt_uid", "filename"]``).
-        list_cols:  Columns whose values should be collected into lists.
+        ms1_long: Long-format MS1 DataFrame for a single file with columns
+                  ``mz``, ``rt``, ``i``, ``in_feature``, ``filename``,
+                  ``mz_rt_uid``.
 
     Returns:
-        Wide-format DataFrame, or the original empty DataFrame unchanged.
+        Wide-format MS1 DataFrame with one row per ``mz_rt_uid`` and list
+        columns ``spec_rts``, ``spec_ints``, ``spec_mzs``, ``in_feature``.
+        Returns an empty DataFrame when *ms1_long* is empty.
     """
-    if df.empty:
-        return df
+    if ms1_long.empty:
+        return pd.DataFrame()
 
-    _total = len(df) if not df.empty else 0
-    _in_feat = len(df[df['in_feature']]) if not df.empty else 0
-    _pct = _in_feat / max(_total, 1) * 100
-    logger.info(f"Total {type_name} data points: {_total}")
-    logger.info(f"Total {type_name} data points in atlas feature windows: {_in_feat} ({_pct:.2f}%)")
+    agg = (
+        ms1_long
+        .groupby("mz_rt_uid", sort=False)
+        .agg(
+            spec_rts=("rt", list),
+            spec_ints=("i", list),
+            spec_mzs=("mz", list),
+            in_feature=("in_feature", list),
+            filename=("filename", "first"),
+        )
+        .reset_index()
+    )
+    return agg
 
-    logger.info(f"Aggregating {type_name} data to wide format by {group_cols}...")
-    agg_dict = {col: list for col in list_cols}
-    if type_name == "ms2" and "in_feature" in list_cols:
-        agg_dict["in_feature"] = lambda x: bool(x.iloc[0]) if len(x) > 0 else False
 
-    wide = df.groupby(group_cols).agg(agg_dict).reset_index()
-    meta_cols = [c for c in df.columns if c not in group_cols + list_cols]
-    if meta_cols:
-        meta = df.groupby(group_cols)[meta_cols].first().reset_index()
-        wide = wide.merge(meta, on=group_cols, how='left')
+def _widen_one_file_ms2(ms2_long: pd.DataFrame) -> pd.DataFrame:
+    """Widen a single file's long-format MS2 data into one row per scan.
 
-    _grain = "feature" if type_name == "ms1" else "scan"
-    _suffix = "+scan" if type_name == "ms2" else ""
-    logger.info(f"Aggregated {type_name} spectral data to {len(wide)} unique {_grain} compound+file{_suffix} entries.")
-    logger.info(f"  Unique files: {wide['filename'].nunique()}")
-    logger.info(f"  Unique compounds (mz_rt_uid): {wide['mz_rt_uid'].nunique()}")
+    Because *ms2_long* contains data for exactly one ``filename``, the group
+    key is ``(mz_rt_uid, rt)``.  Fragment m/z and intensity values are
+    collected into ``frag_mzs`` and ``frag_ints`` lists.  The ``in_feature``
+    flag is taken from the first row of each scan group (all rows in a scan
+    share the same value).  Extra scalar columns (``precursor_MZ``,
+    ``precursor_intensity``, ``collision_energy``) are carried through via
+    ``first``.
 
-    if type_name == "ms1":
-        wide = wide.rename(columns={'mz': 'spec_mzs', 'i': 'spec_ints', 'rt': 'spec_rts'})
-    elif type_name == "ms2":
-        wide = wide.rename(columns={'rt': 'scan_rt','mz': 'frag_mzs', 'i': 'frag_ints'})
-        wide = _sort_frags(wide)
-        
+    Args:
+        ms2_long: Long-format MS2 DataFrame for a single file with columns
+                  ``mz``, ``i``, ``rt``, ``precursor_MZ``,
+                  ``precursor_intensity``, ``collision_energy``,
+                  ``in_feature``, ``filename``, ``mz_rt_uid``.
+
+    Returns:
+        Wide-format MS2 DataFrame with one row per ``(mz_rt_uid, scan_rt)``
+        and list columns ``frag_mzs``, ``frag_ints``.  Returns an empty
+        DataFrame when *ms2_long* is empty.
+    """
+    if ms2_long.empty:
+        return pd.DataFrame()
+
+    scalar_cols = [c for c in ("precursor_MZ", "precursor_intensity", "collision_energy") if c in ms2_long.columns]
+    agg_spec: dict = {
+        "frag_mzs": ("mz", list),
+        "frag_ints": ("i", list),
+        "in_feature": ("in_feature", lambda x: bool(x.iloc[0]) if len(x) > 0 else False),
+        "filename": ("filename", "first"),
+    }
+    for col in scalar_cols:
+        agg_spec[col] = (col, "first")
+
+    wide = (
+        ms2_long
+        .groupby(["mz_rt_uid", "rt"], sort=False)
+        .agg(**agg_spec)
+        .reset_index()
+        .rename(columns={"rt": "scan_rt"})
+    )
+    wide = _sort_frags(wide)
     return wide
+
+
+def _merge_wide_ms1(
+    accumulator: pd.DataFrame,
+    new_chunk: pd.DataFrame,
+) -> pd.DataFrame:
+    """Incrementally merge a per-file wide MS1 chunk into the running accumulator.
+
+    Because each chunk already has exactly one row per ``mz_rt_uid`` (for a
+    single file), and the accumulator contains rows for previously processed
+    files, a simple :func:`pd.concat` is sufficient — no second ``groupby``
+    is needed.
+
+    Args:
+        accumulator: Current wide-format MS1 accumulator (may be empty on the
+                     first call).
+        new_chunk:   Wide-format MS1 DataFrame for one file (output of
+                     :func:`_widen_one_file_ms1`).
+
+    Returns:
+        Updated accumulator with *new_chunk* appended.
+    """
+    if new_chunk.empty:
+        return accumulator
+    if accumulator.empty:
+        return new_chunk
+    return pd.concat([accumulator, new_chunk], ignore_index=True)
+
+
+def _merge_wide_ms2(
+    accumulator: pd.DataFrame,
+    new_chunk: pd.DataFrame,
+) -> pd.DataFrame:
+    """Incrementally merge a per-file wide MS2 chunk into the running accumulator.
+
+    Because each chunk already has exactly one row per ``(mz_rt_uid, scan_rt)``
+    (for a single file), a simple :func:`pd.concat` is sufficient.
+
+    Args:
+        accumulator: Current wide-format MS2 accumulator (may be empty on the
+                     first call).
+        new_chunk:   Wide-format MS2 DataFrame for one file (output of
+                     :func:`_widen_one_file_ms2`).
+
+    Returns:
+        Updated accumulator with *new_chunk* appended.
+    """
+    if new_chunk.empty:
+        return accumulator
+    if accumulator.empty:
+        return new_chunk
+    return pd.concat([accumulator, new_chunk], ignore_index=True)
+
+
+def _log_ms_totals(ms1_df: pd.DataFrame, ms2_df: pd.DataFrame) -> None:
+    """Log aggregate counts for the fully assembled wide MS1 and MS2 DataFrames.
+
+    Counts total list elements across all rows to report the equivalent of the
+    pre-widening long-format row counts that were previously logged inside
+    :func:`_widen_ms_data`.
+
+    Args:
+        ms1_df: Wide-format MS1 DataFrame (post stream-widen).
+        ms2_df: Wide-format MS2 DataFrame (post stream-widen).
+    """
+    if not ms1_df.empty:
+        total_ms1 = int(ms1_df["spec_rts"].apply(len).sum()) if "spec_rts" in ms1_df.columns else 0
+        in_feat_ms1 = int(
+            ms1_df["in_feature"].apply(lambda x: sum(1 for v in x if v)).sum()
+        ) if "in_feature" in ms1_df.columns else 0
+        pct = in_feat_ms1 / max(total_ms1, 1) * 100
+        logger.info(f"Total ms1 data points: {total_ms1}")
+        logger.info(f"Total ms1 data points in atlas feature windows: {in_feat_ms1} ({pct:.2f}%)")
+        logger.info(
+            f"Aggregated ms1 spectral data to {len(ms1_df)} unique feature compound+file entries."
+        )
+        logger.info(f"  Unique files: {ms1_df['filename'].nunique()}")
+        logger.info(f"  Unique compounds (mz_rt_uid): {ms1_df['mz_rt_uid'].nunique()}")
+    if not ms2_df.empty:
+        total_ms2 = int(ms2_df["frag_mzs"].apply(len).sum()) if "frag_mzs" in ms2_df.columns else 0
+        logger.info(f"Total ms2 data points: {total_ms2}")
+        logger.info(
+            f"Aggregated ms2 spectral data to {len(ms2_df)} unique scan compound+file+scan entries."
+        )
+        logger.info(f"  Unique files: {ms2_df['filename'].nunique()}")
+        logger.info(f"  Unique compounds (mz_rt_uid): {ms2_df['mz_rt_uid'].nunique()}")
 
 def _filter_ms2_points(ms2_df, ms1_df, min_scans=None, min_int=None):
     """Filter wide-format MS2 DataFrame by minimum scan count and precursor intensity.
@@ -654,7 +771,7 @@ def extract_data_from_raw(
         wp = obj.ta.params
 
     polarity = "positive" if atlas.polarity.lower() == "pos" else "negative" if atlas.polarity.lower() == "neg" else atlas.polarity.lower()
-    
+
     used_params = [
         "atlas_extra_time", "ms1_mz_tolerance_ppm", "only_keep_data_in_feature",
         "ms1_min_num_points", "ms1_min_peak_intensity",
@@ -666,7 +783,12 @@ def extract_data_from_raw(
             logger.info(f"  {k}: {wp[k]}")
 
     atlas_df = atlas.to_dataframe()
-    atlas_expanded = _expand_atlas_windows(atlas_df, wp.get("atlas_extra_time", 0.0), wp.get("ms1_mz_tolerance_ppm", 5.0), polarity)
+    atlas_expanded = _expand_atlas_windows(
+        atlas_df,
+        wp.get("atlas_extra_time", 0.0),
+        wp.get("ms1_mz_tolerance_ppm", 5.0),
+        polarity,
+    )
     runs = [r for r in lcmsruns if getattr(r, "file_format", "h5") == "h5"]
 
     # check that all files exist on disk before starting extraction
@@ -676,37 +798,38 @@ def extract_data_from_raw(
         for f in missing_files:
             logger.error(f"  {f}")
         raise FileNotFoundError(f"{len(missing_files)} files are missing. Is the conversion finished?.")
-    
+
     logger.info(f"Extracting data for {len(runs)} files in stage '{stage}' with polarity '{polarity}'...")
 
-    # 1. Parallel Extraction (Purely loading and tagging)
-    ms1_all, ms2_all = [], []
-    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 10)) as executor:
-        futures = {executor.submit(_process_one_file, 
-                                   run, 
-                                   atlas_expanded, 
-                                   wp.get("only_keep_data_in_feature", False)
-                                ): run for run in runs}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Extracting MS data", disable=should_disable_tqdm()):
-            m1, m2 = fut.result()
-            if not m1.empty: 
-                ms1_all.append(m1)
-            if not m2.empty: 
-                ms2_all.append(m2)
+    final_ms1_df = pd.DataFrame()
+    final_ms2_df = pd.DataFrame()
 
-    final_ms1_df = pd.concat(ms1_all, ignore_index=True) if ms1_all else pd.DataFrame()
-    final_ms2_df = pd.concat(ms2_all, ignore_index=True) if ms2_all else pd.DataFrame()
+    only_in_feature = wp.get("only_keep_data_in_feature", False)
+    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 5)) as executor:
+        futures = {
+            executor.submit(_process_one_file, run, atlas_expanded, only_in_feature): run
+            for run in runs
+        }
+        for fut in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="Extracting MS data",
+            disable=should_disable_tqdm(),
+        ):
+            m1_long, m2_long = fut.result()
+            final_ms1_df = _merge_wide_ms1(final_ms1_df, _widen_one_file_ms1(m1_long))
+            final_ms2_df = _merge_wide_ms2(final_ms2_df, _widen_one_file_ms2(m2_long))
+            del m1_long, m2_long
 
-    # widen the dataframes from long
-    final_ms1_df = _widen_ms_data(final_ms1_df, "ms1", ['mz_rt_uid', 'filename'], ['rt', 'i', 'mz', 'in_feature'])
+    # Sort MS1 list columns by RT (required for correct np.interp downstream)
     final_ms1_df = _sort_ms1_lists_by_rts(final_ms1_df)
-    final_ms2_df = _widen_ms_data(final_ms2_df, "ms2", ['mz_rt_uid', 'filename', 'rt'], ['mz', 'i', 'in_feature'])
+    _log_ms_totals(final_ms1_df, final_ms2_df)
 
-    # filter by minimum number of points in MS1 and remove compounds with no MS1 points "in_feature"
+    # Filter by minimum number of points in MS1 and remove compounds with no MS1 points "in_feature"
     final_ms1_df = _filter_ms1_points(
-        final_ms1_df, 
-        wp.get("ms1_min_num_points", None), 
-        wp.get("ms1_min_peak_intensity", None)
+        final_ms1_df,
+        wp.get("ms1_min_num_points", None),
+        wp.get("ms1_min_peak_intensity", None),
     )
     final_ms2_df = _filter_ms2_points(
         final_ms2_df,
@@ -715,7 +838,6 @@ def extract_data_from_raw(
         min_int=wp.get("ms2_min_precursor_intensity", None),
     )
 
-    # Final Metadata Join
     final_ms1_df, final_ms2_df = _join_metadata(final_ms1_df, final_ms2_df, atlas_expanded)
 
     logger.info(f"Data extraction complete for stage '{stage}'.")

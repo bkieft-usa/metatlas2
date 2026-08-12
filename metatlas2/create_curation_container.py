@@ -150,13 +150,13 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
     atlas_rt_min = atlas_row.get('rt_min', 0.0)
     atlas_rt_max = atlas_row.get('rt_max', 0.0)
 
-    rt_arrays, int_arrays = [], []
     in_feature_mz, in_feature_int, in_feature_rt = [], [], []
     per_file_peak_rts = []
+    raw_rt_arrays: list[np.ndarray] = []
+    raw_int_arrays: list[np.ndarray] = []
 
     # Each row is one file for this compound, with lists in columns
     for _, row in compound_ms1_df.iterrows():
-        filename = row.get('filename', None)
         rt_list = row.get('spec_rts', [])
         intensity_list = row.get('spec_ints', [])
         mz_list = row.get('spec_mzs', [])
@@ -166,11 +166,11 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
         mz_arr = np.asarray(mz_list)
         mask = np.asarray(in_feature_mask, dtype=bool)
 
-        # Store for EIC calculation (all data)
+        # Collect raw arrays for EIC calculation (stage-gated)
         if stage == "manual_curation_creator":
             if len(rt_arr) > 0 and len(int_arr) == len(rt_arr):
-                rt_arrays.append(rt_arr)
-                int_arrays.append(int_arr)
+                raw_rt_arrays.append(rt_arr)
+                raw_int_arrays.append(int_arr)
 
         # Store for in_feature calculations
         if np.any(mask):
@@ -180,24 +180,33 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
             in_feature_mz.extend(in_feature_mzs.tolist())
             in_feature_int.extend(in_feature_ints.tolist())
             in_feature_rt.extend(in_feature_rts.tolist())
-            sum_int = in_feature_ints.sum()
-            if sum_int > 0:
+            if in_feature_ints.sum() > 0:
                 idx = np.argmax(in_feature_ints)
-                h = in_feature_ints[idx]
                 per_file_peak_rts.append(float(in_feature_rts[idx]))
+
     if stage == "manual_curation_creator":
-        if not rt_arrays or not in_feature_rt:
+        if not raw_rt_arrays or not in_feature_rt:
             return {}
 
     if not in_feature_rt or not in_feature_int:
         return {}
 
     if stage == "manual_curation_creator":
-        all_rts = np.unique(np.concatenate(rt_arrays))
-        max_eic_intensity = np.max([
-            np.interp(all_rts, r, i, left=0, right=0)
-            for r, i in zip(rt_arrays, int_arrays)
-        ], axis=0)
+        # Build the union RT grid once (cheap: concatenate raw RT arrays and unique-sort).
+        all_rts = np.unique(np.concatenate(raw_rt_arrays))
+
+        # Compute max and mean EIC traces with online accumulators so we never
+        # hold more than one interpolated array in memory at a time.
+        max_eic_intensity = np.zeros(len(all_rts), dtype=np.float64)
+        eic_sum = np.zeros(len(all_rts), dtype=np.float64)
+        n_files_eic = len(raw_rt_arrays)
+        for r, i in zip(raw_rt_arrays, raw_int_arrays):
+            interp = np.interp(all_rts, r, i, left=0.0, right=0.0)
+            np.maximum(max_eic_intensity, interp, out=max_eic_intensity)
+            eic_sum += interp
+            # `interp` goes out of scope here and is eligible for GC immediately
+        avg_eic_intensity = eic_sum / max(n_files_eic, 1)
+        del raw_rt_arrays, raw_int_arrays, eic_sum  # release before continuing
 
     win_rt_peak = float(np.mean(per_file_peak_rts)) if per_file_peak_rts else float(in_feature_rt[np.argmax(in_feature_int)])
     win_mz_mean = float(np.mean(in_feature_mz))
@@ -206,14 +215,10 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
 
     if stage == "manual_curation_creator":
         avg_trace_data = None
-        if rt_arrays:
-            avg_eic_intensity = np.mean([
-                np.interp(all_rts, r, i, left=0, right=0)
-                for r, i in zip(rt_arrays, int_arrays)
-            ], axis=0)
+        if all_rts.size > 0:
             avg_trace_data = {
                 'rt': all_rts,
-                'i': avg_eic_intensity
+                'i': avg_eic_intensity,
             }
 
         suggestion = _suggest_rt_bounds_from_ms1(

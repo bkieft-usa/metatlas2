@@ -13,7 +13,6 @@ import copy
 import getpass
 import shutil
 import time
-from IPython.display import display
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1558,6 +1557,89 @@ def _atlas_matches_subset(atlas_to_autoid: dict, analysis_subset: list) -> bool:
     )
     return False
 
+def get_auto_ided_atlases_for_summary(
+    project_db_path: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    analysis_subset: list[str] | None = None,
+) -> pd.DataFrame:
+    """Return a DataFrame of AUTO_IDED atlases available for summary generation.
+
+    Queries ``workflow_runs`` for all ``AUTO_IDED`` entries matching the given
+    ``rt_alignment_number`` / ``analysis_number`` combination, then optionally
+    filters to the ``analysis_subset`` list using the same logic as the
+    auto-identification step.
+
+    Parameters
+    ----------
+    project_db_path:
+        Path to the project DuckDB database.
+    rt_alignment_number:
+        RT alignment number (RTA index).
+    analysis_number:
+        Targeted-analysis number (TGA index).
+    analysis_subset:
+        Optional list of ``"CHROM-POL-TYPE-NAME"`` strings.  When provided,
+        only atlases whose ``(chromatography, polarity, analysis_type,
+        analysis_name)`` tuple matches one of the entries are returned.
+        When ``None`` (default), all AUTO_IDED atlases are returned.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``atlas_uid``, ``chromatography``, ``polarity``,
+        ``analysis_type``, ``analysis_name``.  Empty when no matching atlases
+        are found.
+
+    Raises
+    ------
+    RuntimeError
+        If the database query itself fails.
+    """
+    try:
+        with get_db_connection(project_db_path, read_only=True) as conn:
+            df = conn.execute("""
+                SELECT atlas_uid, chromatography, polarity, analysis_type, analysis_name
+                FROM workflow_runs
+                WHERE rt_alignment_number = ?
+                  AND analysis_number IS NOT DISTINCT FROM ?
+                  AND stage = 'AUTO_IDED'
+                ORDER BY created_date
+            """, [rt_alignment_number, analysis_number]).df()
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to query AUTO_IDED atlases from {project_db_path}: {e}"
+        )
+
+    if df.empty:
+        logger.warning(
+            f"No AUTO_IDED atlases found for RTA{rt_alignment_number} / TGA{analysis_number} "
+            f"in {project_db_path}."
+        )
+        return df
+
+    if analysis_subset:
+        rows = [
+            row for _, row in df.iterrows()
+            if _atlas_matches_subset(row.to_dict(), analysis_subset)
+        ]
+        df = pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame(columns=df.columns)
+        logger.info(
+            f"After analysis_subset filter: {len(df)} AUTO_IDED atlas(es) to summarise."
+        )
+    else:
+        logger.info(f"Found {len(df)} AUTO_IDED atlas(es) to summarise.")
+
+    if df.empty:
+        logger.warning(
+            f"No AUTO_IDED atlases found for RTA{rt_alignment_number} / TGA{analysis_number} "
+            f"in {project_db_path}."
+        )
+        return df
+
+    return df
+
+
 def get_atlas_uid_from_stage(
     obj: "AnalysisSummary" | "AutoIdentification" | "AnalysisGUI",
     stage: str,
@@ -2066,8 +2148,17 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
 ########################################################
 
 def save_auto_identification_results_to_db(auto_id_obj):
-    """
-    Saves Tidy DataFrames directly to pre-defined DuckDB tables.
+    """Save auto-identification DataFrames to the project DuckDB database.
+
+    Adds provenance constants (run numbers, analyst, timestamp) to each
+    DataFrame and inserts them into the ``manual_curation``, ``ms1_data``,
+    and ``ms2_data`` tables.
+
+    Memory strategy: constants are added via ``assign`` (returns a new
+    DataFrame only for the columns being added, not a full deep copy of
+    list-valued columns).  The MS2 ``hits`` column is serialised to JSON
+    strings in-place on a **single** copy of the MS2 DataFrame, avoiding
+    the previous pattern of making three simultaneous copies.
     """
     logger.info("Saving results to database...")
 
@@ -2077,32 +2168,22 @@ def save_auto_identification_results_to_db(auto_id_obj):
     curation_df = dataset.curation_df
     ms1_df = dataset.ms1_df
     ms2_df = dataset.ms2_df
-    
+
     constants = {
         'rt_alignment_number': auto_id_obj.rt_alignment_number,
         'analysis_number': auto_id_obj.analysis_number,
         'analysis_type': auto_id_obj.auto_ided_atlas_obj.analysis_type,
         'analysis_name': auto_id_obj.auto_ided_atlas_obj.analysis_name,
         'created_by': get_provenance()["analyst"],
-        'created_date': get_provenance()["timestamp"]
+        'created_date': get_provenance()["timestamp"],
     }
 
-    # Add constants to all DataFrames — work on copies to avoid mutating the
-    # caller's live objects on auto_id_obj.experimental_data.
-    ms1_df = ms1_df.copy() if not ms1_df.empty else ms1_df
-    ms2_df = ms2_df.copy() if not ms2_df.empty else ms2_df
-    curation_df = curation_df.copy() if not curation_df.empty else curation_df
-    for df in [ms1_df, ms2_df, curation_df]:
-        if not df.empty:
-            for k, v in constants.items():
-                df[k] = v
-
-    # Ensure hits are persisted as JSON strings for the VARCHAR ms2_data.hits column.
-    logger.info("Serializing MS2 hits for database storage...")
-    ms2_df_to_save = ms2_df
-    if not ms2_df.empty and "hits" in ms2_df.columns:
-        ms2_df_to_save = ms2_df.copy()
-        ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
+    # Add scalar provenance columns without deep-copying list-valued columns.
+    # DataFrame.assign() only allocates the new scalar columns, not the whole frame.
+    if not curation_df.empty:
+        curation_df = curation_df.assign(**constants)
+    if not ms1_df.empty:
+        ms1_df = ms1_df.assign(**constants)
 
     manual_curation_columns = [
         "mz_rt_uid", "compound_uid", "inchi_key", "adduct", "compound_name",
@@ -2140,16 +2221,26 @@ def save_auto_identification_results_to_db(auto_id_obj):
             conn.execute(
                 f"INSERT INTO manual_curation ({col_select}) SELECT {col_select} FROM curation_df"
             )
+        # Release curation_df before touching the larger MS DataFrames
+        del curation_df
 
         if not ms1_df.empty:
             logger.info("Saving MS1 data entries to database...")
             col_select = ", ".join(ms1_data_columns)
             conn.execute(f"INSERT INTO ms1_data SELECT {col_select} FROM ms1_df")
+        del ms1_df
 
         if not ms2_df.empty:
             logger.info("Saving MS2 data entries to database...")
+            # Serialise hits to JSON strings in-place on a single copy.
+            # This is the only copy of ms2_df made in this function.
+            ms2_df = ms2_df.assign(**constants)
+            if "hits" in ms2_df.columns:
+                logger.info("Serializing MS2 hits for database storage...")
+                ms2_df["hits"] = ms2_df["hits"].apply(_serialize_hits_value)
             col_select = ", ".join(ms2_data_columns)
-            conn.execute(f"INSERT INTO ms2_data SELECT {col_select} FROM ms2_df_to_save")
+            conn.execute(f"INSERT INTO ms2_data SELECT {col_select} FROM ms2_df")
+        del ms2_df
 
     logger.info("Database save complete.")
 
@@ -2640,47 +2731,41 @@ def _get_max_frags(hits_data):
 def _update_infeature_tag(
     obj: "AnalysisSummary"
 ):
-    # Create RT bounds lookup for efficient access
-    rt_bounds = {
-        row['mz_rt_uid']: (row['rt_min'], row['rt_max'])
-        for _, row in obj.experimental_data.curation_df.iterrows()
-    }
+    # Create RT bounds lookup for efficient access — use vectorised Series.map
+    # rather than iterrows so we don't iterate the curation DataFrame in Python.
+    curation_df = obj.experimental_data.curation_df
+    uid_to_rt_min = curation_df.set_index('mz_rt_uid')['rt_min']
+    uid_to_rt_max = curation_df.set_index('mz_rt_uid')['rt_max']
 
-    # Update in_feature for MS1 data — vectorized via explode to avoid slow iterrows.
+    # Update in_feature for MS1 data.
+    # Previous approach: explode → long frame → groupby(list) — O(N_rows × N_rts) RAM.
+    # New approach: iterate rows with numpy arrays — O(max_rts_per_row) extra RAM.
     logger.info("Updating in_feature for MS1 data based on manual curation RT bounds...")
     ms1_df = obj.experimental_data.ms1_df
     if not ms1_df.empty:
-        # Map RT bounds onto each row using the uid lookup
-        rt_min_map = ms1_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[0])
-        rt_max_map = ms1_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[1])
+        rt_min_map = ms1_df['mz_rt_uid'].map(uid_to_rt_min)
+        rt_max_map = ms1_df['mz_rt_uid'].map(uid_to_rt_max)
         missing = rt_min_map.isna()
         if missing.any():
             missing_uids = ms1_df.loc[missing, 'mz_rt_uid'].unique().tolist()
             raise ValueError(
                 f"No RT bounds found in curation_df for {len(missing_uids)} mz_rt_uid(s): {missing_uids[:5]}"
             )
-        # Explode spec_rts to a long frame, apply the RT window mask, then re-aggregate
-        exploded = ms1_df[['mz_rt_uid', 'spec_rts']].copy()
-        exploded['_rt_min'] = rt_min_map.values
-        exploded['_rt_max'] = rt_max_map.values
-        exploded = exploded.explode('spec_rts').reset_index(names='_orig_idx')
-        exploded['spec_rts'] = pd.to_numeric(exploded['spec_rts'], errors='coerce')
-        exploded['_in_feature'] = (
-            (exploded['spec_rts'] >= exploded['_rt_min']) &
-            (exploded['spec_rts'] <= exploded['_rt_max'])
-        )
-        new_in_feature = (
-            exploded.groupby('_orig_idx')['_in_feature']
-            .apply(list)
-        )
-        obj.experimental_data.ms1_df = ms1_df.copy()
-        obj.experimental_data.ms1_df['in_feature'] = new_in_feature.values
+        rt_mins = rt_min_map.to_numpy(dtype=np.float64)
+        rt_maxs = rt_max_map.to_numpy(dtype=np.float64)
+        # Compute new in_feature lists row-by-row using numpy — no explode needed.
+        new_in_feature = [
+            (np.asarray(rts, dtype=np.float64) >= lo) & (np.asarray(rts, dtype=np.float64) <= hi)
+            for rts, lo, hi in zip(ms1_df['spec_rts'], rt_mins, rt_maxs)
+        ]
+        # Assign directly — no full-frame copy required.
+        obj.experimental_data.ms1_df = ms1_df.assign(in_feature=new_in_feature)
 
     # Update in_feature for MS2 data
     logger.info(f"Updating in_feature for MS2 data based on manual curation RT bounds...")
     if not obj.experimental_data.ms2_df.empty:
-        rt_min_series = obj.experimental_data.ms2_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[0])
-        rt_max_series = obj.experimental_data.ms2_df['mz_rt_uid'].map(lambda uid: rt_bounds.get(uid, (None, None))[1])
+        rt_min_series = obj.experimental_data.ms2_df['mz_rt_uid'].map(uid_to_rt_min)
+        rt_max_series = obj.experimental_data.ms2_df['mz_rt_uid'].map(uid_to_rt_max)
         has_bounds = rt_min_series.notna()
         obj.experimental_data.ms2_df['in_feature'] = np.where(
             has_bounds,
@@ -2716,9 +2801,11 @@ def _save_updated_infeature_tag_to_db(
             # Delete old entries and insert updated ones for MS2
             if not obj.experimental_data.ms2_df.empty:
                 logger.info("  Saving MS2 data entries to database...")
-                # Re-serialize hits for database storage
-                ms2_df_to_save = obj.experimental_data.ms2_df.copy()
-                ms2_df_to_save["hits"] = ms2_df_to_save["hits"].apply(_serialize_hits_value)
+                # Re-serialize hits for database storage — use assign to avoid a
+                # full deep copy of all list-valued columns.
+                ms2_df_to_save = obj.experimental_data.ms2_df.assign(
+                    hits=obj.experimental_data.ms2_df["hits"].apply(_serialize_hits_value)
+                )
                 conn.execute(
                     f"DELETE FROM ms2_data "
                     f"WHERE rt_alignment_number = ? AND analysis_number = ? "
@@ -2733,21 +2820,32 @@ def _save_updated_infeature_tag_to_db(
 def _filter_to_infeature_data(
     obj: "AnalysisSummary",
 ):
+    """Filter MS1 and MS2 DataFrames to only in-feature scan points.
 
+    MS1: for each row, mask the ``spec_rts``, ``spec_mzs``, and ``spec_ints``
+    list columns to keep only entries where ``in_feature`` is True.  Uses
+    vectorised column-level list comprehensions rather than ``apply(row_fn)``
+    to avoid constructing a full dict per row and calling ``pd.DataFrame``
+    on a list of dicts (which triggers an extra copy).
+
+    MS2: simple boolean row filter (already one scalar per row).
+    """
     logger.info(f"Creating filtered copies with only in_feature=True data...")
     starting_ms1_count = len(obj.experimental_data.ms1_df)
     starting_ms2_count = len(obj.experimental_data.ms2_df)
     if not obj.experimental_data.ms1_df.empty:
-        def filter_ms1_row(row):
-            mask = row['in_feature']
-            filtered = {k: row[k] for k in obj.experimental_data.ms1_df.columns}
-            filtered['spec_rts'] = [v for v, m in zip(row['spec_rts'], mask) if m]
-            filtered['spec_mzs'] = [v for v, m in zip(row['spec_mzs'], mask) if m]
-            filtered['spec_ints'] = [v for v, m in zip(row['spec_ints'], mask) if m]
-            filtered['in_feature'] = [True] * len(filtered['spec_rts'])
-            return filtered
-
-        obj.experimental_data.ms1_df = pd.DataFrame(obj.experimental_data.ms1_df.apply(filter_ms1_row, axis=1).tolist())
+        ms1 = obj.experimental_data.ms1_df
+        masks = ms1['in_feature'].tolist()
+        rts   = ms1['spec_rts'].tolist()
+        mzs   = ms1['spec_mzs'].tolist()
+        ints  = ms1['spec_ints'].tolist()
+        # Filter each list column in one pass — no per-row dict allocation.
+        obj.experimental_data.ms1_df = ms1.assign(
+            spec_rts  = [[v for v, m in zip(r, mk) if m] for r, mk in zip(rts,  masks)],
+            spec_mzs  = [[v for v, m in zip(z, mk) if m] for z, mk in zip(mzs,  masks)],
+            spec_ints = [[v for v, m in zip(i, mk) if m] for i, mk in zip(ints, masks)],
+            in_feature= [[True] * sum(bool(m) for m in mk) for mk in masks],
+        )
 
     if not obj.experimental_data.ms2_df.empty:
         obj.experimental_data.ms2_df = obj.experimental_data.ms2_df[obj.experimental_data.ms2_df['in_feature'] == True]
@@ -3093,23 +3191,20 @@ def _load_data_from_db(
             base_params,
         ).df()
 
+    # Coerce DuckDB REAL[] array columns to plain Python lists on read-back.
+    # Mutate the columns directly — no full-frame copy needed because DuckDB
+    # already returned fresh DataFrames from .df().
     if not ms2_df.empty and "hits" in ms2_df.columns:
-        ms2_df = ms2_df.copy()
         ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
 
-    # Coerce DuckDB REAL[] array columns to plain Python lists on read-back.
-    # ms1_data list columns
     _MS1_LIST_COLS = ("spec_rts", "spec_ints", "spec_mzs", "in_feature")
     if not ms1_df.empty:
-        ms1_df = ms1_df.copy()
         for _col in _MS1_LIST_COLS:
             if _col in ms1_df.columns:
                 ms1_df[_col] = ms1_df[_col].apply(as_list)
 
-    # manual_curation REAL[] columns
     _MC_LIST_COLS = ("max_eic_rt", "max_eic_intensity")
     if not curation_df.empty:
-        curation_df = curation_df.copy()
         for _col in _MC_LIST_COLS:
             if _col in curation_df.columns:
                 curation_df[_col] = curation_df[_col].apply(as_list)

@@ -658,8 +658,8 @@ class Atlas:
                 raise ValueError(f"CompoundMZRT {inchi_key} missing compound_uid")
             if compound.mz is None or compound.mz <= 0:
                 raise ValueError(f"CompoundMZRT {inchi_key} has invalid m/z: {compound.mz}")
-            if compound.rt_peak is None or compound.rt_peak <= 0:
-                raise ValueError(f"CompoundMZRT {inchi_key} has invalid RT peak: {compound.rt_peak}")
+            #if compound.rt_peak is None or compound.rt_peak <= 0:
+                #raise ValueError(f"CompoundMZRT {inchi_key} has invalid RT peak: {compound.rt_peak}")
             if compound.rt_min is None or compound.rt_max is None:
                 raise ValueError(f"CompoundMZRT {inchi_key} missing RT min/max")
             elif compound.rt_min >= compound.rt_max:
