@@ -66,7 +66,7 @@ def parse_args():
     submit_parser.add_argument("--qos", default="regular")
     submit_parser.add_argument("--constraint", default="cpu", help="Node constraint (default: cpu for Perlmutter)")
     submit_parser.add_argument("--cpus", type=int, default=8)
-    submit_parser.add_argument("--mem", default="64G")
+    submit_parser.add_argument("--mem", default="128G")
     submit_parser.add_argument("--time", default="00:30:00")
     submit_parser.add_argument("--output", default=None, help="Override output path for the .sh script")
     submit_parser.add_argument(

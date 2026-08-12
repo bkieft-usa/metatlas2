@@ -66,9 +66,11 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
     cmd = [
         RCLONE_PATH, "copy", str(source), dest,
         "--progress",
-        "--transfers", "4",
-        "--checkers", "8",
-        "--drive-chunk-size", "16M",
+        "--transfers", "32",
+        "--checkers", "64",
+        "--drive-chunk-size", "8M",
+        "--drive-batch-mode", "files",
+        "--drive-batch-size", "100",
     ]
     for pattern in RCLONE_UPLOAD_EXCLUDES:
         cmd.extend(["--exclude", pattern])
