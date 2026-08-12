@@ -1,0 +1,59 @@
+# ==============================================================================
+# QUERY PARAMETERS
+# ==============================================================================
+# Instructions:
+# 1. Set `active_query` below to the name of the query you want to run,
+#    or pass query_name=... explicitly to run_parquet_query().
+# 2. grain: "compound_file" (per-file MS1/MS2 hits) or "compound_lfc" (LFC table)
+# 3. Partition columns: project_name, chromatography, polarity,
+#    analysis_type, analysis_name — omit to search across all values.
+#    Add "_in" for a list (e.g., chromatography_in: ["HILIC", "C18"]).
+# 4. Float columns: _min (>=), _max (<=), _abs_gt/_abs_lt (exclusive abs).
+# 5. String columns: plain name = equality, _in = membership in a list.
+# ==============================================================================
+
+queries:
+
+  # Any compound ([M+H]+ adduct) with |log2FC| > 1.5 in POS mode across any
+  # sample comparison and across all conditions/chromatographies/analysis types/names.
+  significant_compound_screen:
+    grain: "compound_lfc"
+    polarity: "POS"
+    log2_fold_change_abs_gt: 5.5
+    adduct: "[M+H]+"
+
+  # Biological question: "Which internal standards (ISTD) have strong, reliable
+  # MS2 spectral matches?" Useful as a QC gate before trusting an ISTD-based
+  # normalization or retention-time calibration — high best_ms2_score plus tight
+  # mass accuracy indicates the fragmentation spectrum genuinely matches the
+  # expected standard rather than a coincidental isobaric hit.
+  istd_ms2_confidence_check:
+    grain: "compound_file"
+    analysis_type: "EMA"
+    best_ms2_score_min: 0.7
+    best_ms2_mz_ppm_error_max: 5.0
+
+  # Biological question: "Did central redox and energy-carrier metabolites
+  # (NAD+/NADH, ATP/ADP, glutathione couple) shift significantly under any
+  # treatment comparison?" These cofactor pairs are classic indicators of
+  # cellular redox/energy state — large shifts often flag oxidative stress,
+  # altered respiration, or metabolic rewiring. No condition_pair is specified,
+  # so this scans every stored condition_1/condition_2 comparison at once.
+  redox_energy_screen:
+    grain: "compound_lfc"
+    compound_name_in: ["NAD+", "NADH", "ATP", "ADP", "glutathione", "glutathione disulfide"]
+    log2_fold_change_abs_gt: 1.0
+
+  # Biological question: "What is my curated, publication-grade compound list
+  # for HILIC — i.e. compounds identified with strong composite quality score
+  # and intensity to be quantitatively meaningful?" This is the typical filter
+  # used before feeding a compound list into pathway enrichment or a
+  # supplementary-table export, since it excludes low-abundance or
+  # borderline-quality identifications.
+  high_confidence_core_hits:
+    grain: "compound_file"
+    chromatography: "HILICZ"
+    polarity: "POS"
+    total_score_min: 3
+    best_ms1_intensity_min: 10000
+    best_ms1_ppm_error_min: 1.0 
