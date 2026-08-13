@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from dataclasses import dataclass, field, asdict
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 from enum import Enum
 from pathlib import Path
 import json
@@ -1191,6 +1191,20 @@ class AnalysisSummary(CurationStageBase):
         )
         os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
 
+class ParquetQueryResult(NamedTuple):
+    """Return type for :meth:`ParquetQueryInterpreter.execute`.
+
+    Attributes
+    ----------
+    df:
+        :class:`pandas.DataFrame` of rows matching the query filters.
+    sql:
+        Human-readable SQL SELECT statement equivalent to the query,
+        suitable for display, logging, or passing to DuckDB directly.
+    """
+    df: pd.DataFrame
+    sql: str
+
 class ParquetQueryInterpreter:
     def __init__(self, parquet_output_path: Path, grain: str = "compound_lfc"):
         if grain not in pqi._GRAIN_SUBDIR:
@@ -1305,14 +1319,117 @@ class ParquetQueryInterpreter:
                 return param_name[: -len(suffix)]
         return param_name
 
-    def execute(self, params: dict) -> pd.DataFrame:
+    def _build_sql_string(self, params: dict) -> str:
+        """Return a human-readable SQL SELECT statement equivalent to the query.
+
+        The statement targets the virtual table name matching the grain
+        (``compound_file`` or ``compound_lfc``) and renders each active
+        filter parameter as a WHERE clause predicate.  Special handlers
+        (``condition_pair``, ``lfc_directional_min``) are rendered as
+        descriptive SQL comments so the intent is still visible.
+
+        Parameters
+        ----------
+        params:
+            The raw query parameter dict (same dict passed to ``execute``).
+
+        Returns
+        -------
+        str
+            A formatted SQL string suitable for display or logging.
+        """
+        schema_cols = set(self.dataset.schema.names)
+        predicates: list[str] = []
+
+        for param_name, value in params.items():
+            if param_name == "grain" or value is None:
+                continue
+
+            try:
+                if param_name in pqi._SPECIAL_HANDLERS:
+                    required = {"condition_1", "condition_2"} if param_name in (
+                        "condition_pair", "lfc_directional_min"
+                    ) else set()
+                    missing = required - schema_cols
+                    if missing:
+                        continue
+
+                    if param_name == "condition_pair":
+                        c1, c2 = value
+                        predicates.append(
+                            f"((condition_1 = '{c1}' AND condition_2 = '{c2}')"
+                            f" OR (condition_1 = '{c2}' AND condition_2 = '{c1}'))"
+                        )
+                    elif param_name == "lfc_directional_min":
+                        treatment = value["treatment"]
+                        control = value["control"]
+                        threshold = value["threshold"]
+                        predicates.append(
+                            f"((condition_1 = '{treatment}' AND condition_2 = '{control}'"
+                            f" AND log2_fold_change >= {threshold})"
+                            f" OR (condition_1 = '{control}' AND condition_2 = '{treatment}'"
+                            f" AND log2_fold_change <= {-threshold}))"
+                        )
+                    else:
+                        predicates.append(f"-- special handler: {param_name} = {value!r}")
+                else:
+                    col = self._strip_suffix(param_name)
+                    if col not in schema_cols:
+                        continue
+
+                    op = "=="
+                    for suffix in self._SUFFIX_ORDER:
+                        if param_name.endswith(suffix):
+                            op = suffix.lstrip("_")
+                            break
+
+                    if op == "==":
+                        sql_val = f"'{value}'" if isinstance(value, str) else value
+                        predicates.append(f"{col} = {sql_val}")
+                    elif op == "min":
+                        predicates.append(f"{col} >= {value}")
+                    elif op == "max":
+                        predicates.append(f"{col} <= {value}")
+                    elif op == "in":
+                        val_list = value if isinstance(value, list) else [value]
+                        quoted = ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in val_list)
+                        predicates.append(f"{col} IN ({quoted})")
+                    elif op == "abs_gt":
+                        predicates.append(f"(ABS({col}) > {value})")
+                    elif op == "abs_lt":
+                        predicates.append(f"(ABS({col}) < {value})")
+                    elif op == "abs_min":
+                        predicates.append(f"(ABS({col}) >= {value})")
+                    elif op == "abs_max":
+                        predicates.append(f"(ABS({col}) <= {value})")
+            except Exception:
+                pass
+
+        table_name = pqi._GRAIN_SUBDIR.get(self.grain, self.grain)
+        if predicates:
+            where_clause = "\n  AND ".join(predicates)
+            return f"SELECT *\nFROM {table_name}\nWHERE {where_clause}"
+        return f"SELECT *\nFROM {table_name}"
+
+    def execute(self, params: dict) -> "ParquetQueryResult":
+        """Execute the query and return a named tuple with ``df`` and ``sql``.
+
+        Returns
+        -------
+        ParquetQueryResult
+            A named tuple with two fields:
+
+            * ``df``  – :class:`pandas.DataFrame` of matching rows.
+            * ``sql`` – ``str`` SQL SELECT statement equivalent to the query.
+        """
         final_filter = self._build_filter(params)
         table = (
             self.dataset.to_table(filter=final_filter)
             if final_filter is not None
             else self.dataset.to_table()
         )
-        return table.to_pandas()
+        sql = self._build_sql_string(params)
+        return ParquetQueryResult(df=table.to_pandas(), sql=sql)
 
     @classmethod
     def execute_from_params_file(
@@ -1320,7 +1437,7 @@ class ParquetQueryInterpreter:
         parquet_output_path: Path,
         params_path: Path,
         query_name: str | None = None,
-    ) -> pd.DataFrame:
+    ) -> "ParquetQueryResult":
         with open(params_path, "r") as f:
             config = yaml.safe_load(f) or {}
 

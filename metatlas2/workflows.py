@@ -430,7 +430,7 @@ def run_parquet_query(
     project_root: str,
     params_path: str,
     query_name: str
-) -> pd.DataFrame:
+) -> "ParquetQueryResult":
     """Run a YAML-configured query against a project's Parquet results.
 
     Parameters
@@ -444,6 +444,29 @@ def run_parquet_query(
         ``compound_file`` or ``compound_lfc``, plus any filter params.
     query_name:
         The name of the query to execute from the YAML file.
+
+    Returns
+    -------
+    ParquetQueryResult
+        A named tuple with two fields:
+
+        * ``df``  – :class:`pandas.DataFrame` of matching rows.
+        * ``sql`` – ``str`` SQL SELECT statement equivalent to the query.
+
+    Examples
+    --------
+    >>> result = wfs.run_parquet_query(
+    ...     project_root=str(DATA_DIR / "projects" / "parquet_outputs"),
+    ...     params_path=str(DATA_DIR / "tools/metatlas2/configs/example_configs/parquet" / "parquet_query.yaml"),
+    ...     query_name="redox_energy_screen",
+    ... )
+    >>> result.df       # pandas DataFrame of matching rows
+    >>> result.sql      # SQL string equivalent of the query
+    >>> print(result.sql)
+    SELECT *
+    FROM compound_lfc
+    WHERE compound_name IN ('NAD+', 'NADH', 'ATP', 'ADP', 'glutathione', 'glutathione disulfide')
+      AND (ABS(log2_fold_change) > 1.0)
     """
     from metatlas2.workflow_objects import ParquetQueryInterpreter
 

@@ -17,9 +17,10 @@ queries:
   # Any compound ([M+H]+ adduct) with |log2FC| > 1.5 in POS mode across any
   # sample comparison and across all conditions/chromatographies/analysis types/names.
   significant_compound_screen:
+    project_name: "20220614_JGI_AO_505162_StrepP5F9_final_IDX_HILICZ_USHXG01885"
     grain: "compound_lfc"
     polarity: "POS"
-    log2_fold_change_abs_gt: 5.5
+    log2_fold_change_abs_gt: 10
     adduct: "[M+H]+"
 
   # Biological question: "Which internal standards (ISTD) have strong, reliable
@@ -53,7 +54,9 @@ queries:
   high_confidence_core_hits:
     grain: "compound_file"
     chromatography: "HILICZ"
-    polarity: "POS"
-    total_score_min: 3
+    analysis_type: "EMA"
+    polarity: "NEG"
+    #adduct: "[M+Cl]-"
+    total_score_min: 1.5
     best_ms1_intensity_min: 10000
-    best_ms1_ppm_error_min: 1.0 
+    best_ms1_ppm_error_min: 1.0
