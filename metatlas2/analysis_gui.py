@@ -218,14 +218,20 @@ def build_dash_app(
 
     # format of the app itself
     all_notes_len = len(analysis_gui_obj.notes["ms1_notes"]) + len(analysis_gui_obj.notes["ms2_notes"]) + len(analysis_gui_obj.notes["other_notes"])
-    total_plot_height = all_notes_len*75
-    ms1_height = total_plot_height*0.6
-    ms2_height = total_plot_height*0.4
+    total_plot_height = all_notes_len * 80
+    ms1_height = total_plot_height * 0.6
+    ms2_height = total_plot_height * 0.4
+    # ms1_frac and ms2_frac are the proportions of total_plot_height for each graph.
+    # The clientside callback uses these to set graph heights as a fraction of the
+    # available window height (after subtracting the fixed chrome height).
+    ms1_frac = 0.6
+    ms2_frac = 0.4
     app.layout = dbc.Container(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
             dcc.Store(id="controls-compound-idx", storage_type="memory", data=starting_compound_idx),
             dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
+            dcc.Store(id="design-height-store", data={"ms1_frac": ms1_frac, "ms2_frac": ms2_frac}),
             keyboard_listener,
             dbc.Row(
                 [
@@ -243,12 +249,12 @@ def build_dash_app(
                                     ),
                                 ],
                             ),
-                            dbc.Textarea(id="analyst-notes", placeholder="Analyst notes …", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
+                            dbc.Textarea(id="analyst-notes", placeholder="Analyst notes...", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
                             dbc.FormText(
                                 id="id-notes",
                                 style={
                                     "width": "100%",
-                                    "height": "40px",
+                                    "height": "100px",
                                     "whiteSpace": "pre-line",
                                     "display": "block",
                                     "backgroundColor": "#f8f9fa",
@@ -423,6 +429,73 @@ def build_dash_app(
         ],
         fluid=True,
         style={"paddingTop": "0.5rem"},
+    )
+
+    # Clientside callback: resize the two graph divs to fill the available window height.
+    # Rather than scaling the whole page (which has Plotly async-render timing issues),
+    # we directly set the height of ms1-graph and ms2-graph in pixels based on
+    # window.innerHeight minus the measured height of all fixed chrome elements.
+    # This fires once on load (triggered by design-height-store) and is immune to
+    # Plotly's async render because it sets heights BEFORE Plotly sizes the SVG.
+    app.clientside_callback(
+        """
+        function(fracs) {
+            if (!fracs) { return fracs; }
+            var ms1_frac = fracs.ms1_frac || 0.6;
+            var ms2_frac = fracs.ms2_frac || 0.4;
+
+            function resize() {
+                var win_h = window.innerHeight;
+
+                // Measure the fixed chrome: everything in the layout except the two graphs.
+                // We do this by summing the heights of all siblings of the graph divs.
+                var ms1El = document.getElementById('ms1-graph');
+                var ms2El = document.getElementById('ms2-graph');
+                if (!ms1El || !ms2El) { return; }
+
+                // Walk up to find the column container that holds both graphs + button rows
+                var col = ms1El.parentElement;
+                if (!col) { return; }
+
+                // Sum heights of all children of the graph column EXCEPT the two graphs
+                var fixed_in_col = 0;
+                var children = col.children;
+                for (var i = 0; i < children.length; i++) {
+                    var child = children[i];
+                    if (child.id !== 'ms1-graph' && child.id !== 'ms2-graph') {
+                        fixed_in_col += child.getBoundingClientRect().height;
+                    }
+                }
+
+                // Also measure the top chrome above the column row (title bar, padding)
+                var row = col.parentElement;
+                var top_chrome = row ? row.getBoundingClientRect().top : 8;
+
+                var available_h = win_h - top_chrome - fixed_in_col - 8; // 8px bottom margin
+                var ms1_h = Math.max(Math.round(available_h * ms1_frac), 200);
+                var ms2_h = Math.max(Math.round(available_h * ms2_frac), 150);
+
+                ms1El.style.height = ms1_h + 'px';
+                ms2El.style.height = ms2_h + 'px';
+
+                // Trigger Plotly to resize its SVG to the new container height
+                if (window.Plotly) {
+                    window.Plotly.Plots.resize(ms1El);
+                    window.Plotly.Plots.resize(ms2El);
+                }
+            }
+
+            // Wait for the full render cycle: rAF ensures DOM is painted,
+            // setTimeout(0) lets Plotly finish its own initialization tick.
+            requestAnimationFrame(function() {
+                setTimeout(resize, 100);
+            });
+
+            return fracs;
+        }
+        """,
+        Output("design-height-store", "data"),
+        Input("design-height-store", "data"),
     )
 
     logger.debug("Layout constructed successfully")
