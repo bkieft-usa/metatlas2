@@ -52,7 +52,7 @@ WORKFLOWS:
               data_sheets:
                 - INJBL
                 - BLANK
-            do_alignment: true
+            apply_alignment: true
             create_curation_notebooks: false
             remove_unided_compounds: true
             remove_flagged_compounds: true
@@ -98,7 +98,7 @@ WORKFLOWS:
               data_sheets:
                 - INJBL
                 - BLANK
-            do_alignment: true
+            apply_alignment: true
             create_curation_notebooks: false  # Skip notebook generation for CI
             remove_unided_compounds: true
             remove_flagged_compounds: true

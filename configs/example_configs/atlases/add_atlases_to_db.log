@@ -1,0 +1,62 @@
+2026-08-13 15:41:24 | metatlas2 | INFO | Logging to file: /global/cfs/cdirs/metatlas/tools/metatlas2/configs/example_configs/atlases/add_atlases_to_db.log
+2026-08-13 15:41:24 | metatlas2.workflow_objects | INFO | Adding atlases from config file to database...
+2026-08-13 15:41:24 | metatlas2.workflow_objects | INFO | Loaded atlas configuration from /global/cfs/cdirs/metatlas/tools/metatlas2/configs/example_configs/atlases/jgi_production_atlases.yaml
+2026-08-13 15:41:24 | metatlas2.load_tools | INFO | Loaded 9 atlas entries from /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_QCv7_positive.tsv
+2026-08-13 15:41:24 | metatlas2.database_interact | WARNING | Compound with inchi_key RYYVLZVUVIJVGH-UHFFFAOYSA-N missing from metatlas database, skipping. (Note: mz_rt_uid is the unique identifier for all compounds.)
+2026-08-13 15:41:24 | metatlas2.database_interact | WARNING | Compound with inchi_key SHGAZHPCJJPHSC-YCNIQYBTSA-N missing from metatlas database, skipping. (Note: mz_rt_uid is the unique identifier for all compounds.)
+2026-08-13 15:41:24 | metatlas2.database_interact | WARNING | Compound with inchi_key GMBQZIIUCVWOCD-WWASVFFGSA-N missing from metatlas database, skipping. (Note: mz_rt_uid is the unique identifier for all compounds.)
+2026-08-13 15:41:24 | metatlas2.database_interact | WARNING | Compound with inchi_key MOYOTUKECQMGHE-PDEFJWSRSA-M missing from metatlas database, skipping. (Note: mz_rt_uid is the unique identifier for all compounds.)
+2026-08-13 15:41:24 | metatlas2.database_interact | INFO | Saving atlas Current C18 QC Atlas Positive to database at /global/cfs/cdirs/metatlas/databases/main_db/metatlas.duckdb...
+2026-08-13 15:41:24 | metatlas2.database_interact | INFO | All compounds verified to exist in the database.
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | Saved atlas Current C18 QC Atlas Positive (UID atl-ref-c18-pos-qc-main-e8dfd471ddfd436987d25ab0574bb09a) — C18/POS/QC
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO |   compound_mzrt rows created: 5, reused: 0
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO |   atlas_compound_associations created: 5
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Successfully created atlas: Current C18 QC Atlas Positive
+2026-08-13 15:41:25 | metatlas2.load_tools | INFO | Loaded 7 atlas entries from /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_positive.tsv
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | Saving atlas Current C18 ISTD Atlas Positive to database at /global/cfs/cdirs/metatlas/databases/main_db/metatlas.duckdb...
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | All compounds verified to exist in the database.
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | Saved atlas Current C18 ISTD Atlas Positive (UID atl-ref-c18-pos-istd-main-01bc688a19034df29cc15e0c00106f74) — C18/POS/ISTD
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO |   compound_mzrt rows created: 7, reused: 0
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO |   atlas_compound_associations created: 7
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Successfully created atlas: Current C18 ISTD Atlas Positive
+2026-08-13 15:41:25 | metatlas2.load_tools | INFO | Loaded 7 atlas entries from /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_negative.tsv
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | Saving atlas Current C18 ISTD Atlas Negative to database at /global/cfs/cdirs/metatlas/databases/main_db/metatlas.duckdb...
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | All compounds verified to exist in the database.
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO | Saved atlas Current C18 ISTD Atlas Negative (UID atl-ref-c18-neg-istd-main-58a34a5a4dc1439aa458bbf1161ee95b) — C18/NEG/ISTD
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO |   compound_mzrt rows created: 7, reused: 0
+2026-08-13 15:41:25 | metatlas2.database_interact | INFO |   atlas_compound_associations created: 7
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Successfully created atlas: Current C18 ISTD Atlas Negative
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Summary of new atlases.
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | **Make sure to add these to your analysis config to use as project reference atlases:**
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Created new atlas: Current C18 QC Atlas Positive (UID: atl-ref-c18-pos-qc-main-e8dfd471ddfd436987d25ab0574bb09a) - 5 compounds
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Created new atlas: Current C18 ISTD Atlas Positive (UID: atl-ref-c18-pos-istd-main-01bc688a19034df29cc15e0c00106f74) - 7 compounds
+2026-08-13 15:41:25 | metatlas2.workflow_objects | INFO | Created new atlas: Current C18 ISTD Atlas Negative (UID: atl-ref-c18-neg-istd-main-58a34a5a4dc1439aa458bbf1161ee95b) - 7 compounds
+2026-08-13 15:47:04 | metatlas2 | INFO | Logging to file: /global/cfs/cdirs/metatlas/tools/metatlas2/configs/example_configs/atlases/add_atlases_to_db.log
+2026-08-13 15:47:04 | metatlas2.workflow_objects | INFO | Adding atlases from config file to database...
+2026-08-13 15:47:04 | metatlas2.workflow_objects | INFO | Loaded atlas configuration from /global/cfs/cdirs/metatlas/tools/metatlas2/configs/example_configs/atlases/jgi_production_atlases.yaml
+2026-08-13 15:47:04 | metatlas2.load_tools | INFO | Loaded 9 atlas entries from /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_QCv7_positive.tsv
+2026-08-13 15:47:04 | metatlas2.database_interact | INFO | Saving atlas Current C18 QC Atlas Positive to database at /global/cfs/cdirs/metatlas/databases/main_db/metatlas.duckdb...
+2026-08-13 15:47:04 | metatlas2.database_interact | INFO | All compounds verified to exist in the database.
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | Saved atlas Current C18 QC Atlas Positive (UID atl-ref-c18-pos-qc-main-5accc10d6ba44b829b848aaff8b68358) — C18/POS/QC
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO |   compound_mzrt rows created: 9, reused: 0
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO |   atlas_compound_associations created: 9
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Successfully created atlas: Current C18 QC Atlas Positive
+2026-08-13 15:47:05 | metatlas2.load_tools | INFO | Loaded 7 atlas entries from /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_positive.tsv
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | Saving atlas Current C18 ISTD Atlas Positive to database at /global/cfs/cdirs/metatlas/databases/main_db/metatlas.duckdb...
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | All compounds verified to exist in the database.
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | Saved atlas Current C18 ISTD Atlas Positive (UID atl-ref-c18-pos-istd-main-6953aa82c3ce4fc58727462e28a8697b) — C18/POS/ISTD
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO |   compound_mzrt rows created: 7, reused: 0
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO |   atlas_compound_associations created: 7
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Successfully created atlas: Current C18 ISTD Atlas Positive
+2026-08-13 15:47:05 | metatlas2.load_tools | INFO | Loaded 7 atlas entries from /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_negative.tsv
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | Saving atlas Current C18 ISTD Atlas Negative to database at /global/cfs/cdirs/metatlas/databases/main_db/metatlas.duckdb...
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | All compounds verified to exist in the database.
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO | Saved atlas Current C18 ISTD Atlas Negative (UID atl-ref-c18-neg-istd-main-d89e2d2524054ffb8ee01f0a0ec8afd6) — C18/NEG/ISTD
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO |   compound_mzrt rows created: 7, reused: 0
+2026-08-13 15:47:05 | metatlas2.database_interact | INFO |   atlas_compound_associations created: 7
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Successfully created atlas: Current C18 ISTD Atlas Negative
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Summary of new atlases.
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | **Make sure to add these to your analysis config to use as project reference atlases:**
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Created new atlas: Current C18 QC Atlas Positive (UID: atl-ref-c18-pos-qc-main-5accc10d6ba44b829b848aaff8b68358) - 9 compounds
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Created new atlas: Current C18 ISTD Atlas Positive (UID: atl-ref-c18-pos-istd-main-6953aa82c3ce4fc58727462e28a8697b) - 7 compounds
+2026-08-13 15:47:05 | metatlas2.workflow_objects | INFO | Created new atlas: Current C18 ISTD Atlas Negative (UID: atl-ref-c18-neg-istd-main-d89e2d2524054ffb8ee01f0a0ec8afd6) - 7 compounds
