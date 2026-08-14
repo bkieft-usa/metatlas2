@@ -2,6 +2,7 @@ import os
 import nbformat
 
 import metatlas2.logging_config as lcf
+import metatlas2.file_and_project_format as fpf
 logger = lcf.get_logger('notebook_generator')
 
 def generate_gui_notebooks(
@@ -27,7 +28,7 @@ def generate_gui_notebooks(
         "project_name": auto_id_obj.project_name,
         "rt_alignment_number": auto_id_obj.rt_alignment_number,
         "analysis_number": auto_id_obj.analysis_number,
-        "chromatography": auto_id_obj.auto_ided_atlas_obj.chromatography,
+        "chromatography": fpf.normalize_chromatography(auto_id_obj.auto_ided_atlas_obj.chromatography),
         "polarity": auto_id_obj.auto_ided_atlas_obj.polarity,
         "analysis_type": auto_id_obj.auto_ided_atlas_obj.analysis_type,
         "analysis_name": auto_id_obj.auto_ided_atlas_obj.analysis_name,

@@ -1754,87 +1754,103 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
             )
 
     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
-        conn.execute("""
-            INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            atlas_obj.atlas_uid,
-            atlas_obj.atlas_name,
-            atlas_obj.atlas_description,
-            atlas_obj.chromatography,
-            atlas_obj.polarity,
-            atlas_obj.analysis_type,
-            atlas_obj.analysis_name,
-            atlas_obj.atlas_type,
-            getattr(atlas_obj, 'source_atlas_uid', None),
-            getattr(atlas_obj, 'rt_alignment_number', None),
-            getattr(atlas_obj, 'analysis_number', None),
-            prov["analyst"],
-            prov["timestamp"],
-            atlas_obj.source,
-        ))
+        # Check if this atlas already exists in the project DB (e.g. the same reference
+        # atlas UID being re-used across multiple RTA runs with --skip-rt-align).
+        atlas_already_exists = conn.execute(
+            "SELECT atlas_uid FROM atlases WHERE atlas_uid = ?",
+            [atlas_obj.atlas_uid]
+        ).fetchone() is not None
 
-        association_order = 0
-        mzrts_created = 0
-        mzrts_reused = 0
+        if atlas_already_exists:
+            logger.info(
+                f"Atlas {atlas_obj.atlas_uid} already exists in project DB — "
+                "skipping atlas/compound_mzrt/association inserts."
+            )
+            mzrts_created = 0
+            mzrts_reused = len(atlas_obj.compound_mzrts)
+        else:
+            conn.execute("""
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                atlas_obj.atlas_uid,
+                atlas_obj.atlas_name,
+                atlas_obj.atlas_description,
+                atlas_obj.chromatography,
+                atlas_obj.polarity,
+                atlas_obj.analysis_type,
+                atlas_obj.analysis_name,
+                atlas_obj.atlas_type,
+                getattr(atlas_obj, 'source_atlas_uid', None),
+                getattr(atlas_obj, 'rt_alignment_number', None),
+                getattr(atlas_obj, 'analysis_number', None),
+                prov["analyst"],
+                prov["timestamp"],
+                atlas_obj.source,
+            ))
 
-        for compound_mzrt in atlas_obj.compound_mzrts.values():
-            mz_rt_uid = compound_mzrt.mz_rt_uid
+            association_order = 0
+            mzrts_created = 0
+            mzrts_reused = 0
 
-            existing = conn.execute(
-                "SELECT mz_rt_uid FROM compound_mzrt WHERE mz_rt_uid = ?",
-                [mz_rt_uid]
-            ).fetchone()
+            for compound_mzrt in atlas_obj.compound_mzrts.values():
+                mz_rt_uid = compound_mzrt.mz_rt_uid
 
-            if not existing:
+                existing = conn.execute(
+                    "SELECT mz_rt_uid FROM compound_mzrt WHERE mz_rt_uid = ?",
+                    [mz_rt_uid]
+                ).fetchone()
+
+                if not existing:
+                    conn.execute("""
+                        INSERT INTO compound_mzrt VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                    """, (
+                        mz_rt_uid,
+                        compound_mzrt.compound_uid,
+                        getattr(compound_mzrt, 'prev_mz_rt_uid', None),
+                        compound_mzrt.compound_name,
+                        compound_mzrt.inchi_key,
+                        compound_mzrt.adduct,
+                        compound_mzrt.rt_space,
+                        compound_mzrt.rt_peak,
+                        compound_mzrt.rt_min,
+                        compound_mzrt.rt_max,
+                        compound_mzrt.mz,
+                        compound_mzrt.mz_tolerance,
+                        compound_mzrt.chromatography,
+                        compound_mzrt.polarity,
+                        compound_mzrt.confidence,
+                        compound_mzrt.source,
+                        compound_mzrt.identification_notes,
+                        prov["analyst"],
+                        prov["timestamp"],
+                    ))
+                    mzrts_created += 1
+                else:
+                    mzrts_reused += 1
+
+                assoc_uid = _generate_uid("association")
                 conn.execute("""
-                    INSERT INTO compound_mzrt VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    )
+                    INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    mz_rt_uid,
+                    assoc_uid,
+                    atlas_obj.atlas_uid,
                     compound_mzrt.compound_uid,
-                    getattr(compound_mzrt, 'prev_mz_rt_uid', None),
-                    compound_mzrt.compound_name,
-                    compound_mzrt.inchi_key,
-                    compound_mzrt.adduct,
-                    compound_mzrt.rt_space,
-                    compound_mzrt.rt_peak,
-                    compound_mzrt.rt_min,
-                    compound_mzrt.rt_max,
-                    compound_mzrt.mz,
-                    compound_mzrt.mz_tolerance,
-                    compound_mzrt.chromatography,
-                    compound_mzrt.polarity,
-                    compound_mzrt.confidence,
-                    compound_mzrt.source,
-                    compound_mzrt.identification_notes,
+                    mz_rt_uid,
+                    association_order,
                     prov["analyst"],
                     prov["timestamp"],
                 ))
-                mzrts_created += 1
-            else:
-                mzrts_reused += 1
-
-            assoc_uid = _generate_uid("association")
-            conn.execute("""
-                INSERT INTO atlas_compound_associations VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                assoc_uid,
-                atlas_obj.atlas_uid,
-                compound_mzrt.compound_uid,
-                mz_rt_uid,
-                association_order,
-                prov["analyst"],
-                prov["timestamp"],
-            ))
-            association_order += 1
+                association_order += 1
 
     logger.info(
         f"Saved atlas {atlas_obj.atlas_name} (UID {atlas_obj.atlas_uid}) — "
         f"{atlas_obj.chromatography}/{atlas_obj.polarity}/{atlas_obj.analysis_type}"
     )
     logger.info(f"  compound_mzrt rows created: {mzrts_created}, reused: {mzrts_reused}")
-    logger.info(f"  atlas_compound_associations created: {association_order}")
+    if not atlas_already_exists:
+        logger.info(f"  atlas_compound_associations created: {association_order}")
 
 def _verify_compounds_exist_in_db(compound_uids: list, conn: duckdb.DuckDBPyConnection) -> bool:
     """

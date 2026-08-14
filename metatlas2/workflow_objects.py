@@ -192,7 +192,7 @@ class Metatlas2Config:
         analysis_type: str,
         analysis_name: str,
     ) -> "TargetedAnalysis":
-
+        chromatography = fpf.normalize_chromatography(chromatography)
         for ta in self.targeted_analyses:
             if (
                 ta.chromatography == chromatography
@@ -1057,7 +1057,7 @@ class CurationStageBase(ABC):
         """
         self.rt_alignment_number = run_parameters['rt_alignment_number']
         self.analysis_number = run_parameters['analysis_number']
-        self.chromatography = run_parameters['chromatography']
+        self.chromatography = fpf.normalize_chromatography(run_parameters['chromatography'])
         self.polarity = run_parameters['polarity']
         self.analysis_type = run_parameters['analysis_type']
         self.analysis_name = run_parameters['analysis_name']
