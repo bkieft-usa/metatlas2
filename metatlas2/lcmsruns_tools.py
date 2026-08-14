@@ -8,14 +8,40 @@ import metatlas2.logging_config as lcf
 
 logger = lcf.get_logger('lcmsruns_tools')
 
-# Mapping for analysis type categorization
-ANALYSIS_TYPE_MAP = {
-    'qc': ['qc'],
-    'istd': ['istd'],
-    'exctrl': ['exctrl', 'txctrl'],
-    'injbl': ['injbl', 'blank'],
-    'refstd': ['refstd', 'standard'],
+SAMPLE_NAME_TO_FILE_TYPE: dict[str, str] = {
+    'qc':       'qc',
+    'istd':     'istd',
+    'exctrl':   'exctrl',
+    'txctrl':   'exctrl',
+    'injbl':    'injbl',
+    'blank':    'injbl',
+    'refstd':   'refstd',
+    'standard': 'refstd',
 }
+
+
+def _classify_file_type(fields: dict) -> str:
+    """Return the file_type category for a parsed filename field dict.
+
+    Classification is driven exclusively by the ``sample_name`` field from
+    ``fpf.parse_file_name()``, with ``run_metadata`` used as a fallback.
+    Both fields are exact-matched (case-insensitive) against
+    ``SAMPLE_NAME_TO_FILE_TYPE``; if neither matches, ``'experimental'`` is
+    returned.
+    """
+    sample_name = fields.get("sample_name", "").lower().strip()
+    run_metadata = fields.get("run_metadata", "").lower().strip()
+
+    # Primary: exact match on sample_name
+    if sample_name in SAMPLE_NAME_TO_FILE_TYPE:
+        return SAMPLE_NAME_TO_FILE_TYPE[sample_name]
+
+    # Fallback: exact match on run_metadata
+    if run_metadata in SAMPLE_NAME_TO_FILE_TYPE:
+        return SAMPLE_NAME_TO_FILE_TYPE[run_metadata]
+
+    return 'experimental'
+
 
 def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
     project_path = Path(project_raw_files_path)
@@ -34,25 +60,15 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
         for file_path in files:
             try:
                 fields = fpf.parse_file_name(file_path.name)
-                s_name = fields.get("sample_name", "").lower()
-                r_meta = fields.get("run_metadata", "").lower()
-                combined = f"{s_name} {r_meta}"
-
-                # Determine analysis type using the mapping
-                analysis_type = 'experimental'
-                for category, keywords in ANALYSIS_TYPE_MAP.items():
-                    if any(k in combined for k in keywords):
-                        analysis_type = category
-                        break
 
                 lcmsruns.append({
                     "file_path": str(file_path),
                     "filename": file_path.name,
                     "file_format": ext,
-                    "file_type": analysis_type.lower(),
-                    "chromatography": fields.get("chromatography", "Unknown").lower(),
-                    "ms_level": fields.get("ms_level", "Unknown").lower(),
-                    "polarity": fields.get("polarity", "Unknown").lower(),
+                    "file_type": _classify_file_type(fields),
+                    "chromatography": fields.get("chromatography", "unknown"),
+                    "ms_level": fields.get("ms_level", "unknown").lower(),
+                    "polarity": fields.get("polarity", "unknown").lower(),
                     "created_by": None if fields.get("created_by") is None else str(fields.get("created_by")).lower(),
                     "created_date": None if fields.get("created_date") is None else str(fields.get("created_date")).lower(),
                 })
@@ -76,7 +92,7 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
     return lcmsruns
 
 def filter_lcmsruns_list(
-    lcmsruns: list[dict], 
+    lcmsruns: list[dict],
     include_file_type: list[str] = None,
     exclude_file_type: list[str] = None,
     file_format: str = "h5",
@@ -85,19 +101,10 @@ def filter_lcmsruns_list(
     ms_level: str = None
 ) -> list[dict]:
 
-    # Normalize and lowercase all filter inputs
     if chromatography:
-        chromatography = chromatography.lower()
-        # Accept both 'hilic' and 'hilicz'
-        if chromatography in ["hilic", "hilicz"]:
-            chromatography_set = {"hilic", "hilicz"}
-        else:
-            chromatography_set = {chromatography}
+        chromatography_set = {fpf.normalize_chromatography(chromatography)}
     else:
         chromatography_set = None
-
-    # Do not lower file_format, keep as is for case-sensitive matching
-    # file_format = file_format.lower() if file_format else None
 
     pol_set = set()
     if polarity:

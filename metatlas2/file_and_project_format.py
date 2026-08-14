@@ -33,11 +33,29 @@ PROJECT_PATTERN = re.compile(
     r"(?:_(?P<suffix>[^_]+))?$"
 )
 
+def normalize_chromatography(chrom: str) -> str:
+    """Return the canonical lowercase chromatography label.
+
+    All other values are simply lowercased.
+    """
+
+    _CHROM_NORMALIZATION_MAP = {
+        "hilicz": "hilic",
+        "c18-ep": "c18",
+        "c18ep":  "c18",
+    }
+
+    if not chrom:
+        return chrom
+    return _CHROM_NORMALIZATION_MAP.get(chrom.lower(), chrom.lower())
+
 def parse_file_name(filename: str):
     match = FILE_PATTERN.match(filename)
     if not match:
         raise Exception(f"Filename '{filename}' does not match the expected format.")
-    return match.groupdict()
+    fields = match.groupdict()
+    fields["chromatography"] = normalize_chromatography(fields.get("chromatography", ""))
+    return fields
 
 def parse_project_name(project_name: str):
     match = PROJECT_PATTERN.match(project_name)
@@ -50,6 +68,13 @@ def parse_project_name(project_name: str):
             print(f"Warning: Project name '{project_name}' has a suffix '{suffix}'.")
     return project_name
 
+def get_project_chromatography(project_name: str) -> str:
+    """Return the normalized chromatography field from a project name."""
+    match = PROJECT_PATTERN.match(project_name)
+    if not match:
+        raise ValueError(f"Project name '{project_name}' does not match the expected format.")
+    return normalize_chromatography(match.group("chromatography"))
+
 def get_file_parts(name: str, part: str):
     """Return the named capture group *part* from a file stem or project name.
     """
@@ -60,7 +85,10 @@ def get_file_parts(name: str, part: str):
         match = FILE_PATTERN.match(name)
         if match:
             try:
-                return match.group(part)
+                value = match.group(part)
+                if part == "chromatography":
+                    return normalize_chromatography(value)
+                return value
             except IndexError:
                 raise ValueError(f"File name '{name}' does not match the expected format.")
     except Exception:

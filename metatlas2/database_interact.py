@@ -22,7 +22,6 @@ from tqdm.auto import tqdm
 import metatlas2.file_and_project_format as fpf
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
-from metatlas2.workflow_objects import AtlasStage
 from metatlas2.utils import should_disable_tqdm, as_list, get_provenance
 logger = lcf.get_logger('database_interact')
 
@@ -897,8 +896,8 @@ def get_lcmsruns_from_db(
 ) -> list["LCMSRun"]:
     from metatlas2.workflow_objects import LCMSRun
 
-    # Normalization
-    if chromatography == "HILICZ": chromatography = "HILIC"
+    if chromatography:
+        chromatography = fpf.normalize_chromatography(chromatography)
     if polarity:
         polarity = "positive" if polarity.lower() in ["pos", "positive"] else \
                    "negative" if polarity.lower() in ["neg", "negative"] else polarity
@@ -919,7 +918,6 @@ def get_lcmsruns_from_db(
     where_clause = " AND ".join(where_conditions)
     
     with get_db_connection(project_db_path, read_only=True) as conn:
-        # EFFICIENT: Use cursor directly instead of Pandas .df()
         cursor = conn.execute(f"""
             SELECT file_path, filename, file_format, file_type, chromatography, ms_level, polarity, created_by, created_date
             FROM lcmsruns
@@ -927,8 +925,6 @@ def get_lcmsruns_from_db(
             ORDER BY chromatography, ms_level, polarity, file_path
         """, params)
         
-        # Use a list comprehension directly on the cursor
-        # This avoids the overhead of creating a DataFrame and iterating via Series
         lcmsruns_list = [LCMSRun(*row) for row in cursor.fetchall()]
 
     logger.info(f"Retrieved {len(lcmsruns_list)} {file_format}-formatted runs from DB.")
@@ -1447,7 +1443,7 @@ def load_paths_from_db(
 
 def update_config_overrides(
     obj: "AnalysisSummary",
-    stage: AtlasStage | str = AtlasStage.AUTO_IDED,
+    stage: "AtlasStage"
 ) -> None:
     """
     Persist analyst override parameters onto the matching ``workflow_runs`` row.
@@ -1480,8 +1476,13 @@ def register_workflow_run(
     """
     This saves atlas UIDs that were created during a stage so they can be called back later
     """
+    from metatlas2.workflow_objects import AtlasStage
     prov = get_provenance()
     run_uid = _generate_uid("workflow_stage_run")
+    chromatography = atlas_obj.chromatography.lower() if atlas_obj.chromatography else atlas_obj.chromatography
+    polarity = atlas_obj.polarity.lower() if atlas_obj.polarity else atlas_obj.polarity
+    analysis_type = atlas_obj.analysis_type.lower() if atlas_obj.analysis_type else atlas_obj.analysis_type
+    analysis_name = atlas_obj.analysis_name.lower() if atlas_obj.analysis_name else atlas_obj.analysis_name
     with get_db_connection(obj.paths["project_db_path"], max_retries=10, initial_retry_delay=0.5) as conn:
         conn.execute("""
             INSERT INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1489,10 +1490,10 @@ def register_workflow_run(
             run_uid,
             obj.rt_alignment_number,
             obj.analysis_number if stage != AtlasStage.RT_ALIGNED else None,
-            atlas_obj.chromatography,
-            atlas_obj.polarity,
-            atlas_obj.analysis_type,
-            atlas_obj.analysis_name,
+            chromatography,
+            polarity,
+            analysis_type,
+            analysis_name,
             stage,
             atlas_obj.atlas_uid,
             atlas_obj.source_atlas_uid,
@@ -1536,9 +1537,13 @@ def _atlas_matches_subset(atlas_to_autoid: dict, analysis_subset: list) -> bool:
         if len(parts) != 4:
             raise ValueError(
                 f"Invalid analysis_subset entry '{subset}'. "
-                "Must be in 'CHROM-POL-TYPE-NAME' format (e.g. 'HILICZ-POS-EMA-DEFAULT')."
+                "Must be in 'CHROM-POL-TYPE-NAME' format (e.g. 'HILIC-POS-EMA-DEFAULT')."
             )
         s_chrom, s_pol, s_type, s_name = parts
+        s_chrom = fpf.normalize_chromatography(s_chrom)
+        s_pol = s_pol.lower()
+        s_type = s_type.lower()
+        s_name = s_name.lower()
         if (atlas_to_autoid['chromatography'] == s_chrom
                 and atlas_to_autoid['polarity'] == s_pol
                 and atlas_to_autoid['analysis_type'] == s_type
@@ -1653,9 +1658,14 @@ def get_atlas_uid_from_stage(
     Raises RuntimeError if the query returns more than one row (the combination
     of filter columns must be unique) or if no rows are found.
     """
+    from metatlas2.workflow_objects import AtlasStage
     logger.info(f"Querying workflow_runs to get Atlas UID...")
     try:
         analysis_number = obj.analysis_number if stage != AtlasStage.RT_ALIGNED else None
+        chrom_lc = obj.ta.chromatography.lower() if obj.ta.chromatography else obj.ta.chromatography
+        polarity_lc = obj.ta.polarity.lower() if obj.ta.polarity else obj.ta.polarity
+        analysis_type_lc = obj.ta.analysis_type.lower() if obj.ta.analysis_type else obj.ta.analysis_type
+        analysis_name_lc = obj.ta.analysis_name.lower() if obj.ta.analysis_name else obj.ta.analysis_name
         with get_db_connection(obj.paths['project_db_path'], read_only=True) as conn:
             df = conn.execute("""
                 SELECT atlas_uid, chromatography, polarity,
@@ -1665,12 +1675,12 @@ def get_atlas_uid_from_stage(
                 WHERE rt_alignment_number = ?
                   AND analysis_number IS NOT DISTINCT FROM ?
                   AND stage = ?
-                  AND chromatography = ?
-                  AND polarity = ?
-                  AND analysis_type = ?
-                  AND analysis_name = ?
+                  AND LOWER(chromatography) = ?
+                  AND LOWER(polarity) = ?
+                  AND LOWER(analysis_type) = ?
+                  AND LOWER(analysis_name) = ?
                 ORDER BY created_date
-            """, [obj.rt_alignment_number, analysis_number, stage, obj.ta.chromatography, obj.ta.polarity, obj.ta.analysis_type, obj.ta.analysis_name]).df()
+            """, [obj.rt_alignment_number, analysis_number, stage, chrom_lc, polarity_lc, analysis_type_lc, analysis_name_lc]).df()
     except Exception as e:
         raise RuntimeError(
             f"Error loading atlases from stage {stage} from database: {e}. "
@@ -1735,8 +1745,6 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
     prov = get_provenance()
     compound_uids = [c.compound_uid for c in atlas_obj.compound_mzrts.values()]
 
-    # Verify compounds exist using a dedicated read-only connection so we
-    # never need ATTACH inside a write transaction.
     verify_db = main_db_path if main_db_path else db_path
     with get_db_connection(verify_db, read_only=True) as verify_conn:
         if not _verify_compounds_exist_in_db(compound_uids, verify_conn):
@@ -1745,9 +1753,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 f"{'main' if main_db_path else 'target'} database"
             )
 
-    # Write atlas, compound_mzrt rows, and associations in a single transaction
     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
-        # Insert atlas row — unified 14-column schema for both DB types
         conn.execute("""
             INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -1767,7 +1773,6 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
             atlas_obj.source,
         ))
 
-        # Insert compound_mzrt rows and associations
         association_order = 0
         mzrts_created = 0
         mzrts_reused = 0
@@ -1781,7 +1786,6 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
             ).fetchone()
 
             if not existing:
-                # Unified 19-column INSERT — prev_mz_rt_uid is NULL for reference entries
                 conn.execute("""
                     INSERT INTO compound_mzrt VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -1882,6 +1886,7 @@ def clone_atlas(
     Create a copy of the source atlas with a new UID and updated metadata.
     This is used as a starting point for creating new atlases after workflow stages, where we want to keep the same compound_mzrts but update the values based on curation results.
     """
+    from metatlas2.workflow_objects import AtlasStage
     source_atlas = None
     if stage == AtlasStage.RT_ALIGNED:
         mzrt_decorator = "rta"
@@ -1959,6 +1964,7 @@ def update_compound_mzrt_for_atlas(
     the results of data extraction and automated curation (in ccc). This will produce the auto-ided atlas that is then passed to the GUI for manual curation. 
 
     """
+    from metatlas2.workflow_objects import AtlasStage
     atlas_to_update = None
     if stage == AtlasStage.RT_ALIGNED:
         atlas_to_update = obj.aligned_atlas_obj
@@ -1966,6 +1972,8 @@ def update_compound_mzrt_for_atlas(
         atlas_to_update = obj.auto_ided_atlas_obj
     elif stage == AtlasStage.MANUALLY_CURATED:
         atlas_to_update = obj.manually_curated_atlas_obj
+    else:
+        raise ValueError(f"Unsupported stage: {stage}")
     
     logger.info(f"Updating compound_mzrts from {atlas_to_update.atlas_uid} for stage {stage}")
     mz_rt_update_lookup = {row['mz_rt_uid']: row for row in mz_rt_update_df.to_dict('records')}
@@ -2000,6 +2008,7 @@ def save_atlas_to_db_and_disk(
     :func:`update_compound_mzrt_for_atlas` and the ``_skip_rt_align_routine``
     path in :class:`RTAlign`.
     """
+    from metatlas2.workflow_objects import AtlasStage
     logger.info("Saving curated Atlas to database...")
     save_atlas_to_database(
         atlas_to_update,

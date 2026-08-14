@@ -2346,8 +2346,7 @@ def make_peak_height_filtered_csv(
         logger.warning("No compounds found — no output written.")
         return
 
-    # ── 2. Collapse duplicate (inchi_key, compound_name) rows ────────────────
-    # When multiple adducts exist for the same compound, keep the adduct that
+    # Collapse duplicate (inchi_key, compound_name) rows and keep the adduct that
     # produced the highest peak across non-control sample columns.
     selector_cols = non_ctrl_cols if non_ctrl_cols else data_cols
     group_keys    = ["inchi_key", "compound_name", "control_filter"]
@@ -2401,7 +2400,7 @@ def make_peak_height_filtered_csv(
     df_agg["compound_index"] = df_agg.apply(lambda r: _lookup(r, chosen_index_map, np.nan), axis=1)
     df_agg["mz_rt_uid"]      = df_agg.apply(lambda r: _lookup(r, chosen_uid_map), axis=1)
 
-    # ── 3. Impute NaN sample cells with the global matrix minimum ────────────
+    # Impute NaN sample cells with the global matrix minimum
     _META_FIXED = {"control_filter", "compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
     data_cols_final = [c for c in df_agg.columns if c not in _META_FIXED]
     global_min = float(df_agg[data_cols_final].min().min()) if data_cols_final else np.nan
@@ -2412,8 +2411,7 @@ def make_peak_height_filtered_csv(
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
-    # ── 4. Reorder columns: control_filter, compound_index, mz_rt_uid,
-    #       compound_name, inchi_key, adduct, ...sample data... ───────────────
+    # Reorder columns
     ordered_meta = ["control_filter", "compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"]
     ordered_meta = [c for c in ordered_meta if c in df_agg.columns]
     other_cols   = [c for c in df_agg.columns if c not in set(ordered_meta)]

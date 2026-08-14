@@ -51,9 +51,7 @@ def parse_args():
         p.add_argument("--analysis-num", type=int, default=0)
         p.add_argument("--analysis-subset",  type=lambda s: s.split(","), default=None, help="Comma-separated POL-TYPE-NAME list to filter which named analyses to run (e.g. 'POS-ISTD-default,POS-EMA-default,NEG-EMA-no-standards')")
         p.add_argument("--overwrite", action="store_true", default=False)
-        p.add_argument("--skip-setup", action="store_true", default=False)
         p.add_argument("--skip-rt-align", action="store_true", default=False)
-        p.add_argument("--skip-auto-id", action="store_true", default=False)
         p.add_argument("--skip-curation", action="store_true", default=False)
         p.add_argument("--log-to-stdout", action="store_true", default=False, help="Write log output to stdout in addition to the project log file.")
 
@@ -92,9 +90,7 @@ def generate_slurm_script(args, paths) -> str:
 
     extra_flags = []
     if args.overwrite: extra_flags.append("--overwrite")
-    if args.skip_setup: extra_flags.append("--skip-setup")
     if args.skip_rt_align: extra_flags.append("--skip-rt-align")
-    if args.skip_auto_id: extra_flags.append("--skip-auto-id")
     if args.skip_curation: extra_flags.append("--skip-curation")
     if args.analysis_subset: extra_flags.append("--analysis-subset " + ",".join(args.analysis_subset))
     extra_flags_str = " \\\n ".join(extra_flags)
@@ -253,6 +249,7 @@ def set_up_paths(
     project_output_dir.mkdir(parents=True, exist_ok=True)
     rta_dir.mkdir(parents=True, exist_ok=True)
     analysis_dir.mkdir(parents=True, exist_ok=True)
+    Path(paths['rt_alignment_results_dir']).mkdir(parents=True, exist_ok=True)
 
     return paths
 
@@ -301,37 +298,35 @@ def main():
                 logger.info(f"Expected SLURM stderr: {slurm_stderr}")
             return
 
-        if not args.skip_setup:
-            if not args.log_to_stdout and args.command == "run": print("======--- Setting up project specs...")
-            logger.info("------------ Running Project Setup")
-            wfs.run_project_setup(
-                project_name=args.project,
-                config=config,
-                paths=paths,
-                overwrite_existing=args.overwrite,
-                rt_alignment_number=args.rt_align_num,
-                analysis_number=args.analysis_num,
-            )
+        if not args.log_to_stdout and args.command == "run": print("======--- Setting up project specs...")
+        logger.info("------------ Running Project Setup")
+        wfs.run_project_setup(
+            project_name=args.project,
+            config=config,
+            paths=paths,
+            overwrite_existing=args.overwrite,
+            rt_alignment_number=args.rt_align_num,
+            analysis_number=args.analysis_num,
+        )
 
-        if not args.skip_rt_align:
-            if not args.log_to_stdout and args.command == "run": print("=======-- Running RT alignment...")
-            logger.info("------------ Running RT Alignment ...")
-            wfs.run_rt_alignment(
-                project_name=args.project,
-                rt_alignment_number=args.rt_align_num,
-                analysis_number=args.analysis_num,
-            )
+        if not args.log_to_stdout and args.command == "run": print("=======-- Running RT alignment...")
+        logger.info("------------ Running RT Alignment ...")
+        wfs.run_rt_alignment(
+            project_name=args.project,
+            rt_alignment_number=args.rt_align_num,
+            analysis_number=args.analysis_num,
+            skip_alignment=args.skip_rt_align,
+        )
 
-        if not args.skip_auto_id:
-            if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
-            logger.info("------------ Running Auto Identification")
-            wfs.run_auto_identification(
-                project_name=args.project,
-                rt_alignment_number=args.rt_align_num,
-                analysis_number=args.analysis_num,
-                analysis_subset=args.analysis_subset,
-                image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
-            )
+        if not args.log_to_stdout and args.command == "run": print("========- Running Auto Identification...")
+        logger.info("------------ Running Auto Identification")
+        wfs.run_auto_identification(
+            project_name=args.project,
+            rt_alignment_number=args.rt_align_num,
+            analysis_number=args.analysis_num,
+            analysis_subset=args.analysis_subset,
+            image_tag=os.environ.get("METATLAS2_IMAGE_TAG", "latest"),
+        )
 
         if args.skip_curation:
             if not args.log_to_stdout and args.command == "run": print("========- Skipping curation GUI and running analysis summary...")

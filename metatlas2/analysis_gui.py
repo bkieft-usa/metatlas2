@@ -221,9 +221,6 @@ def build_dash_app(
     total_plot_height = all_notes_len * 80
     ms1_height = total_plot_height * 0.6
     ms2_height = total_plot_height * 0.4
-    # ms1_frac and ms2_frac are the proportions of total_plot_height for each graph.
-    # The clientside callback uses these to set graph heights as a fraction of the
-    # available window height (after subtracting the fixed chrome height).
     ms1_frac = 0.6
     ms2_frac = 0.4
     app.layout = dbc.Container(
@@ -920,7 +917,6 @@ def build_dash_app(
             # Store in cache (metadata only, not rectangles)
             isomer_string_cache[compound_idx] = resolved_isomers
         
-        # PHASE 4 FIX: Draw isomer rectangles outside cache block (always draw)
         isomer_lines = []
         if resolved_isomers:
             def _window_overlaps(a_min, a_max, b_min, b_max):

@@ -889,7 +889,7 @@ class RTAlign:
     paths: PathsConfig = field(default_factory=dict)
     config: Metatlas2Config | None = field(default=None)
 
-    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int):
+    def setup(self, project_name: str, rt_alignment_number: int, analysis_number: int, skip_alignment: bool = False):
         """Load config and paths from the project database and configure this object."""
         logger.info(f"Setting up RTAlign object with RT alignment number {rt_alignment_number}...")
         self.rt_alignment_number = rt_alignment_number
@@ -913,7 +913,7 @@ class RTAlign:
         self.align_atlas_uid = self.config.rt_alignment_config[self.chromatography].get('ATLAS', {}).get('uid', None)
         self.rt_alignment_params = self.config.rt_alignment_config[self.chromatography].get('PARAMS', {})
 
-        if self.rt_alignment_params.get('do_alignment', True) is False:
+        if skip_alignment:
             self.run_alignment = False
             self._skip_rt_align_routine()
             return
@@ -922,8 +922,8 @@ class RTAlign:
 
     def _skip_rt_align_routine(self):
         logger.info(
-            "RT alignment is disabled in config. "
-            "Copying reference atlases into project DB and registering in workflow_runs..."
+            "RT alignment skipped via --skip-rt-align flag. "
+            "Copying reference atlases into project DB and registering in workflow_runs as RT_ALIGNED..."
         )
         for ta in self.config.targeted_analyses:
             self.aligned_atlas_obj = Atlas.from_database(

@@ -13,6 +13,7 @@ import subprocess
 from matchms import Spectrum
 from typing import Any
 
+import metatlas2.file_and_project_format as fpf
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
 
@@ -207,7 +208,7 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
         params['exclude_lcmsruns'] = {'data_extraction': list(excl)}
     else:
         raise ValueError(f"{location}: exclude_lcmsruns must be a dict or list")
-    params['do_alignment'] = bool(params.get('do_alignment', True))
+    params['apply_alignment'] = bool(params.get('apply_alignment', True))
     params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
     params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
     params['only_keep_data_in_feature'] = bool(params.get('only_keep_data_in_feature', False))
@@ -256,7 +257,8 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
             raise ValueError(f"Missing required WORKFLOWS subsection: {subsection}")
 
     rt_alignment_config: dict[str, Any] = {}
-    for chromatography, chrom_cfg in raw['WORKFLOWS']['RT_ALIGNMENT'].items():
+    for chrom_key, chrom_cfg in raw['WORKFLOWS']['RT_ALIGNMENT'].items():
+        chromatography = fpf.normalize_chromatography(chrom_key)
         location = f"RT_ALIGNMENT {chromatography}"
         if 'ATLAS' not in chrom_cfg:
             raise ValueError(f"{location} missing ATLAS section")
@@ -270,7 +272,8 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
         rt_alignment_config[chromatography] = chrom_cfg
 
     targeted_analyses: list = []
-    for chromatography, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
+    for chrom_key, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
+        chromatography = fpf.normalize_chromatography(chrom_key)
         for polarity, pol_cfg in chrom_cfg.items():
             for analysis_type, named_entries in pol_cfg.items():
                 if not isinstance(named_entries, dict):

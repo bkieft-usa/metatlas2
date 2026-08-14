@@ -51,6 +51,7 @@ def run_rt_alignment(
     project_name: str,
     rt_alignment_number: int,
     analysis_number: int,
+    skip_alignment: bool = False,
 ) -> None:
 
     from metatlas2.workflow_objects import RTAlign, Atlas, AtlasStage
@@ -61,6 +62,7 @@ def run_rt_alignment(
         project_name=project_name,
         rt_alignment_number=rt_alignment_number,
         analysis_number=analysis_number,
+        skip_alignment=skip_alignment,
     )
 
     if rt_align_obj.run_alignment is False:
@@ -112,9 +114,25 @@ def run_rt_alignment(
     for ta in rt_align_obj.config.targeted_analyses:
 
         rt_align_obj.unaligned_atlas_obj = Atlas.from_database(
-            rt_align_obj.paths['main_db_path'] , 
-            ta.atlas_uid # the atlas from the config
+            rt_align_obj.paths['main_db_path'],
+            ta.atlas_uid  # the atlas from the config
         )
+
+        if not ta.params.get('apply_alignment', True):
+            logger.info(
+                f"apply_alignment=false for {ta.chromatography}-{ta.polarity}-{ta.analysis_type}-{ta.analysis_name}. "
+                f"Registering reference atlas {ta.atlas_uid} as RT_ALIGNED without applying model..."
+            )
+            rt_align_obj.aligned_atlas_obj = rt_align_obj.unaligned_atlas_obj
+            rt_align_obj.aligned_atlas_obj.analysis_name = ta.analysis_name
+            rt_align_obj.aligned_atlas_obj.rt_alignment_number = rt_align_obj.rt_alignment_number
+            rt_align_obj.aligned_atlas_obj.analysis_number = None
+            dbi.save_atlas_to_db_and_disk(
+                obj=rt_align_obj,
+                atlas_to_update=rt_align_obj.aligned_atlas_obj,
+                stage=AtlasStage.RT_ALIGNED,
+            )
+            continue
 
         logger.info(f"Cloning config Atlas {rt_align_obj.unaligned_atlas_obj.atlas_uid} for RT alignment stage...")
         rt_align_obj.aligned_atlas_obj = dbi.clone_atlas(
