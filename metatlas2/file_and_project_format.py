@@ -77,19 +77,25 @@ def get_project_chromatography(project_name: str) -> str:
 
 def get_file_parts(name: str, part: str):
     """Return the named capture group *part* from a file stem or project name.
+
+    Raises:
+        ValueError: If *name* does not match the expected filename format or
+            *part* is not a recognised capture-group name.
     """
     try:
-        #name = os.path.basename(name).strip()
         if ".h5" not in name:
             name += ".h5"
         match = FILE_PATTERN.match(name)
-        if match:
-            try:
-                value = match.group(part)
-                if part == "chromatography":
-                    return normalize_chromatography(value)
-                return value
-            except IndexError:
-                raise ValueError(f"File name '{name}' does not match the expected format.")
+        if not match:
+            raise ValueError(f"File name '{name}' does not match the expected format.")
+        try:
+            value = match.group(part)
+        except IndexError:
+            raise ValueError(f"File name '{name}' does not match the expected format.")
+        if part == "chromatography":
+            return normalize_chromatography(value)
+        return value
+    except ValueError:
+        raise
     except Exception:
         raise ValueError(f"File name '{name}' does not match the expected format.")

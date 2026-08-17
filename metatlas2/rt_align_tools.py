@@ -383,5 +383,6 @@ def _save_rt_aligned_stats_to_json(
         'compounds': per_compound_rt_shifts,
     }
     rt_shift_stats_path = Path(output_dir) / f"{output_file}"
+    rt_shift_stats_path.parent.mkdir(parents=True, exist_ok=True)
     with open(rt_shift_stats_path, "w") as f:
         json.dump(rt_shift_output, f, indent=4)

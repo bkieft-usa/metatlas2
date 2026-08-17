@@ -139,6 +139,8 @@ def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
             continue
         q_chunks_q.append(mz_order[start + q_local[keep]])
         q_chunks_a.append(order_min[live_pos[cand_pos[keep]]])
+    if not q_chunks_q:
+        return np.empty(0, np.int64), np.empty(0, np.int64)
     return np.concatenate(q_chunks_q), np.concatenate(q_chunks_a)
 
 def _join_ms1_to_atlas(ms1_df: pd.DataFrame, atlas: pd.DataFrame, only_in_feature: bool) -> pd.DataFrame:

@@ -109,8 +109,10 @@ def create_manual_curation_obj(auto_id_obj) -> None:
         curation_records.append(curation_entry)
 
     manual_curation_df = pd.DataFrame(curation_records)
-    manual_curation_df['isomers'] = manual_curation_df['isomers'].apply(json.dumps)
-    logger.info(f"Summary: manual_curation_df contains {manual_curation_df['mz_rt_uid'].nunique()} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
+    if not manual_curation_df.empty:
+        manual_curation_df['isomers'] = manual_curation_df['isomers'].apply(json.dumps)
+    n_uids = manual_curation_df['mz_rt_uid'].nunique() if not manual_curation_df.empty else 0
+    logger.info(f"Summary: manual_curation_df contains {n_uids} unique mz_rt_uids built from {atlas_df.shape[0]} atlas entries.")
     
     auto_id_obj.experimental_data.curation_df = manual_curation_df
 
