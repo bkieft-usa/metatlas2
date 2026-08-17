@@ -216,7 +216,7 @@ TARGETED_ANALYSES:
             data_sheets:
               - INJBL
               - BLANK
-          do_alignment: true
+          apply_alignment: true
           create_curation_notebooks: true
           remove_unided_compounds: true
           remove_flagged_compounds: true
@@ -243,7 +243,7 @@ TARGETED_ANALYSES:
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `do_alignment` | bool | `true` | Apply the RT alignment correction to the atlas before data extraction. |
+| `apply_alignment` | bool | `true` | Apply the RT alignment correction to the atlas before data extraction. When `false`, the reference atlas is registered as RT-aligned without applying the model. |
 | `create_curation_notebooks` | bool | `true` | Generate Jupyter notebooks for manual compound curation. |
 | `remove_unided_compounds` | bool | `true` | Remove compounds with no MS1 or MS2 data during the auto identification. |
 | `remove_flagged_compounds` | bool | `true` | Remove compounds that were flagged as "remove" during manual GUI analysis. |

@@ -635,7 +635,7 @@ WORKFLOWS:
                 chromatograms: # INJBL, BLANK
                 id_plots: # INJBL, BLANK, REFSTD
                 data_sheets: # INJBL, BLANK
-              do_alignment: true
+              apply_alignment: true
               remove_unided_compounds: true
               remove_flagged_compounds: true
               only_keep_data_in_feature: false
@@ -682,7 +682,7 @@ WORKFLOWS:
                 chromatograms: # INJBL, BLANK
                 id_plots: # INJBL, BLANK, REFSTD
                 data_sheets: # INJBL, BLANK
-              do_alignment: true
+              apply_alignment: true
               remove_unided_compounds: true
               remove_flagged_compounds: true
               only_keep_data_in_feature: false

@@ -87,3 +87,18 @@ all = [
 
 [tool.uv.extra-build-dependencies]
 jnius = ["Cython"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Markers used to split the test suite:
+#   unit   — fast, no network, no Docker (default for branch pushes)
+#   system — heavier end-to-end tests (required for PRs → main)
+markers = [
+    "system: end-to-end system tests (run on PRs targeting main)",
+    "unit:   fast unit tests with no external dependencies",
+]
+# Default: run everything; CI overrides with -m "not system" or -m "system"
+addopts = "--tb=short -q"
