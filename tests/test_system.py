@@ -331,11 +331,6 @@ def analysis_yaml(tmp_path: Path) -> tuple[Path, str, str]:
     """))
     return p, qc_uid, ema_uid
 
-
-# ---------------------------------------------------------------------------
-# Canned PubChem response
-# ---------------------------------------------------------------------------
-
 def _fake_pubchem_info(compounds: pd.DataFrame, **kwargs) -> pd.DataFrame:
     """Return the input DataFrame unchanged (simulates a cache-hit with no enrichment)."""
     return compounds
