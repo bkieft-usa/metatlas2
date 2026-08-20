@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import io
 import itertools
 import shutil
 from pathlib import Path
@@ -2541,25 +2542,65 @@ def make_log_fold_changes_csv(
 def _get_modelseed_compounds(cache_path: Path) -> pd.DataFrame:
     """Load the ModelSEED compounds table, fetching and caching it if needed.
 
+    Compounds are sourced from the ModelSEED ``dev`` branch, which contains
+    the most up-to-date data.  On that branch the table is split into an
+    arbitrary number of shards named ``compounds_NN.tsv``.  The GitHub
+    Contents API is used to discover all matching shard filenames so that
+    the function remains correct even if the number of shards changes in the
+    future.  All shards are downloaded, concatenated, and written to
+    ``cache_path`` as a single TSV on the first call; subsequent calls load
+    directly from the local cache.
+
     Parameters
     ----------
     cache_path:
-        Permanent local path to store/load the TSV.
+        Permanent local path to store/load the merged TSV.
     """
 
-    _MODELSEED_COMPOUNDS_URL = (
-        "https://raw.githubusercontent.com/ModelSEED/ModelSEEDDatabase/"
-        "master/Biochemistry/compounds.tsv"
+    _MODELSEED_API_URL = (
+        "https://api.github.com/repos/ModelSEED/ModelSEEDDatabase/"
+        "contents/Biochemistry?ref=dev"
     )
+    _MODELSEED_RAW_BASE = (
+        "https://raw.githubusercontent.com/ModelSEED/ModelSEEDDatabase/"
+        "dev/Biochemistry/"
+    )
+    _SHARD_PATTERN = re.compile(r"^compounds_\d+\.tsv$")
+
     if cache_path.exists():
         logger.info(f"Loading ModelSEED compounds from local cache: {cache_path}")
     else:
-        logger.info(f"Fetching ModelSEED compounds table from {_MODELSEED_COMPOUNDS_URL}")
-        resp = requests.get(_MODELSEED_COMPOUNDS_URL, timeout=30)
-        resp.raise_for_status()
+        logger.info(f"Querying GitHub Contents API for ModelSEED compound shards: {_MODELSEED_API_URL}")
+        api_resp = requests.get(
+            _MODELSEED_API_URL,
+            timeout=30,
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        api_resp.raise_for_status()
+        shard_names = sorted(
+            entry["name"]
+            for entry in api_resp.json()
+            if _SHARD_PATTERN.match(entry.get("name", ""))
+        )
+        if not shard_names:
+            raise ValueError(
+                f"No compound shard files matching 'compounds_NN.tsv' found via "
+                f"GitHub Contents API at {_MODELSEED_API_URL}"
+            )
+        logger.info(f"Found {len(shard_names)} ModelSEED compound shards: {shard_names[0]} … {shard_names[-1]}")
+
+        frames: list[pd.DataFrame] = []
+        for name in shard_names:
+            url = _MODELSEED_RAW_BASE + name
+            logger.info(f"Fetching ModelSEED shard: {url}")
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            frames.append(pd.read_csv(io.StringIO(resp.text), sep="\t", low_memory=False))
+
+        merged = pd.concat(frames, ignore_index=True)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(resp.text, encoding="utf-8")
-        logger.info(f"Saved ModelSEED compounds cache to {cache_path}")
+        merged.to_csv(cache_path, sep="\t", index=False)
+        logger.info(f"Saved merged ModelSEED compounds cache ({len(merged)} rows) to {cache_path}")
 
     return pd.read_csv(cache_path, sep="\t", low_memory=False)
 

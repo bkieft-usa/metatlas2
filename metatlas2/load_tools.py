@@ -274,15 +274,17 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
     targeted_analyses: list = []
     for chrom_key, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
         chromatography = fpf.normalize_chromatography(chrom_key)
-        for polarity, pol_cfg in chrom_cfg.items():
-            for analysis_type, named_entries in pol_cfg.items():
+        for polarity_key, pol_cfg in chrom_cfg.items():
+            polarity = polarity_key.lower()
+            for analysis_type_key, named_entries in pol_cfg.items():
+                analysis_type = analysis_type_key.lower()
                 if not isinstance(named_entries, dict):
                     raise ValueError(
                         f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_type} "
                         f"must be a dict mapping analysis name -> {{ATLAS, PARAMS}}"
                     )
-                for name, entry in named_entries.items():
-                    name = str(name)
+                for name_key, entry in named_entries.items():
+                    name = str(name_key).lower()
                     location = f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_type}/{name}"
                     if not isinstance(entry, dict):
                         raise ValueError(f"{location} must be a dict with ATLAS and PARAMS keys")
@@ -302,6 +304,10 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
                         analysis_name=name,
                         atlas_uid=atlas_uid,
                         params=params,
+                        chromatography_label=chrom_key,
+                        polarity_label=polarity_key,
+                        analysis_type_label=analysis_type_key,
+                        analysis_name_label=str(name_key),
                     ))
 
     paths_config: dict[str, Any] = dict(raw['WORKFLOWS'].get('PATHS') or {})
