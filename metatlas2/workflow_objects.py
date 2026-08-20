@@ -177,6 +177,19 @@ class TargetedAnalysis:
     analysis_name: str
     atlas_uid: str
     params: dict[str, Any] = field(default_factory=dict)
+    chromatography_label: str = field(default="")
+    polarity_label: str = field(default="")
+    analysis_type_label: str = field(default="")
+    analysis_name_label: str = field(default="")
+
+    @property
+    def label(self) -> str:
+        """Human-readable folder label built from raw YAML keys."""
+        chrom = self.chromatography_label or self.chromatography
+        pol   = self.polarity_label       or self.polarity
+        atype = self.analysis_type_label  or self.analysis_type
+        aname = self.analysis_name_label  or self.analysis_name
+        return f"{chrom}-{pol}-{atype}-{aname}"
 
 @dataclass
 class Metatlas2Config:
@@ -193,6 +206,9 @@ class Metatlas2Config:
         analysis_name: str,
     ) -> "TargetedAnalysis":
         chromatography = fpf.normalize_chromatography(chromatography)
+        polarity = polarity.lower()
+        analysis_type = analysis_type.lower()
+        analysis_name = analysis_name.lower()
         for ta in self.targeted_analyses:
             if (
                 ta.chromatography == chromatography
@@ -244,6 +260,10 @@ class Metatlas2Config:
                 analysis_name=ta["analysis_name"],
                 atlas_uid=ta["atlas_uid"],
                 params=dict(ta.get("params") or {}),
+                chromatography_label=ta.get("chromatography_label", ""),
+                polarity_label=ta.get("polarity_label", ""),
+                analysis_type_label=ta.get("analysis_type_label", ""),
+                analysis_name_label=ta.get("analysis_name_label", ""),
             ))
 
         return cls(
@@ -930,6 +950,9 @@ class RTAlign:
                 database_path=self.paths['main_db_path'],
                 atlas_uid=ta.atlas_uid
             )
+            self.aligned_atlas_obj.chromatography = ta.chromatography
+            self.aligned_atlas_obj.polarity = ta.polarity
+            self.aligned_atlas_obj.analysis_type = ta.analysis_type
             self.aligned_atlas_obj.analysis_name = ta.analysis_name
             self.aligned_atlas_obj.rt_alignment_number = self.rt_alignment_number
             self.aligned_atlas_obj.analysis_number = None
@@ -1187,7 +1210,7 @@ class AnalysisSummary(CurationStageBase):
 
         self.paths['analysis_results_output_dir'] = str(
             Path(self.paths["analysis_output_dir"])
-            / f"{self.ta.chromatography}-{self.ta.polarity}-{self.ta.analysis_type}-{self.ta.analysis_name}"
+            / self.ta.label
         )
         os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
 

@@ -1943,6 +1943,8 @@ def clone_atlas(
     new_atlas.atlas_type = stage
     new_atlas.created_by = get_provenance()["analyst"]
     new_atlas.created_date = get_provenance()["timestamp"]
+    new_atlas.chromatography = ta.chromatography
+    new_atlas.polarity = ta.polarity
     new_atlas.analysis_name = ta.analysis_name
     new_atlas.analysis_type = ta.analysis_type
     new_atlas.rt_alignment_number = obj.rt_alignment_number
@@ -2053,7 +2055,7 @@ def to_python_type(val):
     if isinstance(val, np.generic):
         return val.item()
     return val
- 
+
 def write_curation_updates_to_db(
     project_db_path: str,
     rt_alignment_number: int,

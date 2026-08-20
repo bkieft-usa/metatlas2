@@ -124,6 +124,9 @@ def run_rt_alignment(
                 f"Registering reference atlas {ta.atlas_uid} as RT_ALIGNED without applying model..."
             )
             rt_align_obj.aligned_atlas_obj = rt_align_obj.unaligned_atlas_obj
+            rt_align_obj.aligned_atlas_obj.chromatography = ta.chromatography
+            rt_align_obj.aligned_atlas_obj.polarity = ta.polarity
+            rt_align_obj.aligned_atlas_obj.analysis_type = ta.analysis_type
             rt_align_obj.aligned_atlas_obj.analysis_name = ta.analysis_name
             rt_align_obj.aligned_atlas_obj.rt_alignment_number = rt_align_obj.rt_alignment_number
             rt_align_obj.aligned_atlas_obj.analysis_number = None
@@ -185,7 +188,7 @@ def run_auto_identification(
     for ta in auto_id_obj.config.targeted_analyses:
         
         auto_id_obj.ta = ta
-        auto_id_obj.paths['analysis_results_output_dir'] = Path(auto_id_obj.paths["analysis_output_dir"]) / f"{auto_id_obj.ta.chromatography}-{auto_id_obj.ta.polarity}-{auto_id_obj.ta.analysis_type}-{auto_id_obj.ta.analysis_name}"
+        auto_id_obj.paths['analysis_results_output_dir'] = Path(auto_id_obj.paths["analysis_output_dir"]) / auto_id_obj.ta.label
         os.makedirs(auto_id_obj.paths['analysis_results_output_dir'], exist_ok=True)
 
         # chromatography/polarity/type/name combination has already been auto-IDed.

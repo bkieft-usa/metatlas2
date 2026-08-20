@@ -146,8 +146,8 @@ def filter_lcmsruns_list(
     logger.info(f"  include_file_type={inc_set}")
     logger.info(f"  exclude_file_type={exc_set}")
     logger.info(f"  file_format={file_format}")
-    logger.info(f"  chromatography={chromatography}")
-    logger.info(f"  polarity={pol_set}")
+    logger.info(f"  chromatography={chromatography_set if chromatography_set else None} (no filter)" if not chromatography_set else f"  chromatography={chromatography_set}")
+    logger.info(f"  polarity={pol_set if pol_set else None} (no filter)" if not pol_set else f"  polarity={pol_set}")
     logger.info(f"  ms_level={ms_level}")
     filtered = [run for run in lcmsruns if match(run)]
 
