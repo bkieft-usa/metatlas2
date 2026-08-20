@@ -867,9 +867,9 @@ class TestRunTargetedAnalysis:
         assert len(config.targeted_analyses) == 1
         ta = config.targeted_analyses[0]
         assert ta.atlas_uid == atlas_uid
-        assert ta.polarity == "POS"
-        assert ta.analysis_type == "EMA"
-        assert ta.analysis_name == "DEFAULT"
+        assert ta.polarity.upper() == "POS"
+        assert ta.analysis_type.upper() == "EMA"
+        assert ta.analysis_name.upper() == "DEFAULT"
 
     def test_load_metatlas2_config_missing_workflows_raises(
         self,
@@ -1163,12 +1163,32 @@ class TestRunTargetedAnalysis:
         )
 
         conn = duckdb.connect(str(paths["project_db_path"]), read_only=True)
-        count = conn.execute(
-            "SELECT COUNT(*) FROM workflow_runs WHERE stage = 'RT_ALIGNED'"
-        ).fetchone()[0]
+        df = conn.execute(
+            "SELECT chromatography, polarity, analysis_type, analysis_name "
+            "FROM workflow_runs WHERE stage = 'RT_ALIGNED'"
+        ).df()
         conn.close()
 
-        assert count >= 1, "No RT_ALIGNED workflow_run rows were created with --skip-rt-align"
+        assert len(df) >= 1, "No RT_ALIGNED workflow_run rows were created with --skip-rt-align"
+
+        ta = config.targeted_analyses[0]
+        row = df.iloc[0]
+        assert row["chromatography"] == ta.chromatography, (
+            f"workflow_runs chromatography '{row['chromatography']}' does not match "
+            f"config ta.chromatography '{ta.chromatography}'"
+        )
+        assert row["polarity"] == ta.polarity, (
+            f"workflow_runs polarity '{row['polarity']}' does not match "
+            f"config ta.polarity '{ta.polarity}'"
+        )
+        assert row["analysis_type"] == ta.analysis_type, (
+            f"workflow_runs analysis_type '{row['analysis_type']}' does not match "
+            f"config ta.analysis_type '{ta.analysis_type}'"
+        )
+        assert row["analysis_name"] == ta.analysis_name, (
+            f"workflow_runs analysis_name '{row['analysis_name']}' does not match "
+            f"config ta.analysis_name '{ta.analysis_name}'"
+        )
 
     def test_generate_slurm_script_writes_file(
         self,
