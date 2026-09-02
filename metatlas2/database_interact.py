@@ -638,19 +638,25 @@ def save_rt_alignment_model_to_db(
         else rt_align_obj.modeling_data
     )
 
+    model_type = rt_alignment_model.get('model_type', 'polynomial')
+    coefficients = rt_alignment_model.get('coefficients', np.array([]))
+    coefficients_list = coefficients.tolist() if hasattr(coefficients, 'tolist') else list(coefficients)
+    poly_features = rt_alignment_model.get('poly_features')
+
     model_metadata = {
         "qc_files": [os.path.basename(f) for f in qc_files],
         "compounds_used": [d.get('compound_uid', '') for d in modeling_data],
         "alignment_timestamp": prov["timestamp"],
-        "alignment_method": "polynomial_qc_based",
+        "alignment_method": f"{model_type}_qc_based",
         "analyst": prov["analyst"],
         "r_squared": float(rt_alignment_model.get('r2', 0.0)),
         "rmse": float(rt_alignment_model.get('rmse', 0.0)),
         "equation": rt_alignment_model.get('equation', ''),
-        "poly_degree": int(rt_alignment_model['degree']),
-        "poly_interaction_only": bool(rt_alignment_model.get('poly_features').interaction_only if rt_alignment_model.get('poly_features') else False),
+        "poly_degree": int(rt_alignment_model.get('degree', 0)),
+        "poly_interaction_only": bool(poly_features.interaction_only if poly_features is not None else False),
         "model_intercept": float(rt_alignment_model.get('intercept', 0.0)),
-        "model_coefficients": rt_alignment_model['coefficients'].tolist() if hasattr(rt_alignment_model['coefficients'], 'tolist') else list(rt_alignment_model['coefficients'])
+        "model_coefficients": coefficients_list,
+        "median_offset": float(rt_alignment_model['offset']) if model_type == 'median_offset' else None,
     }
 
     with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
@@ -661,12 +667,12 @@ def save_rt_alignment_model_to_db(
             project_name,
             rt_align_obj.rt_alignment_number,
             rt_align_obj.align_atlas_uid,
-            "polynomial",
-            rt_alignment_model['degree'],
+            model_type,
+            rt_alignment_model.get('degree', 0),
             rt_alignment_model['r2'],
             rt_alignment_model['rmse'],
-            json.dumps(rt_alignment_model['coefficients'].tolist()),
-            rt_alignment_model['equation'],
+            json.dumps(coefficients_list),
+            rt_alignment_model.get('equation', ''),
             len(qc_files),
             len(modeling_data),
             prov["analyst"],
@@ -690,12 +696,16 @@ def save_rt_alignment_model_to_db(
     logger.info(f"RT Alignment Model Metadata for UID {rt_alignment_uid}:")
     logger.info(f"  QC files used: {model_metadata['qc_files']}")
     logger.info(f"  Number of compounds used (by UID): {len(model_metadata['compounds_used'])}")
+    logger.info(f"  Model type: {model_type}")
     logger.info(f"  R²: {model_metadata['r_squared']:.4f}")
     logger.info(f"  RMSE: {model_metadata['rmse']:.4f}")
-    logger.info(f"  Polynomial degree: {model_metadata['poly_degree']}")
-    logger.info(f"  Polynomial interaction_only: {model_metadata['poly_interaction_only']}")
-    logger.info(f"  Model intercept: {model_metadata['model_intercept']}")
-    logger.info(f"  Model coefficients: {model_metadata['model_coefficients']}")
+    if model_type == 'median_offset':
+        logger.info(f"  Median offset: {model_metadata['median_offset']:.6f} min")
+    else:
+        logger.info(f"  Polynomial degree: {model_metadata['poly_degree']}")
+        logger.info(f"  Polynomial interaction_only: {model_metadata['poly_interaction_only']}")
+        logger.info(f"  Model intercept: {model_metadata['model_intercept']}")
+        logger.info(f"  Model coefficients: {model_metadata['model_coefficients']}")
 
     return rt_alignment_uid
 
@@ -734,13 +744,14 @@ def get_rt_alignment_model_from_db(
 
     # Unpack result tuple and metadata
     metadata = json.loads(result[14])
-    
+    stored_model_type = result[4]  # e.g. "polynomial", "linear", "median_offset"
+
     model_dict = {
         'rt_alignment_uid': result[0],
         'project_name': result[1],
         'rt_alignment_number': result[2],
         'qc_atlas_uid': result[3],
-        'model_type': result[4],
+        'model_type': stored_model_type,
         'degree': result[5],
         'r2': result[6],
         'rmse': result[7],
@@ -751,13 +762,19 @@ def get_rt_alignment_model_from_db(
         'analyst': result[12],
         'timestamp': result[13],
         'metadata': metadata,
+        'offset': metadata.get('median_offset', metadata.get('model_intercept', 0.0)),
+        'intercept': metadata.get('model_intercept', 0.0),
     }
-    
+
+    # Reconstruct sklearn objects for polynomial/linear models
+    from metatlas2.rt_align_tools import calculate_model_values_from_existing
+    model_dict = calculate_model_values_from_existing(model_dict)
+
     logger.info(f"Retrieved and reconstructed RT alignment model {model_dict['rt_alignment_uid']} (RT alignment number {rt_alignment_number})")
     logger.info(f"  Model: {model_dict['model_type']} (degree={model_dict['degree']})")
     logger.info(f"  Performance: R²={model_dict['r2']:.4f}, RMSE={model_dict['rmse']:.4f}")
     logger.info(f"  Training data: {model_dict['num_qc_files']} QC files, {model_dict['num_compounds']} compounds")
-    
+
     return model_dict
 
 def _prepare_compound_record_from_dict(compound_data: dict) -> tuple | None:
@@ -899,17 +916,16 @@ def get_lcmsruns_from_db(
     if chromatography:
         chromatography = fpf.normalize_chromatography(chromatography)
     if polarity:
-        polarity = "positive" if polarity.lower() in ["pos", "positive"] else \
-                   "negative" if polarity.lower() in ["neg", "negative"] else polarity
+        polarity = fpf.normalize_polarity(polarity)
 
     where_conditions = ["file_format = ?"]
     params = [file_format]
 
     if chromatography:
-        where_conditions.append("UPPER(chromatography) = UPPER(?)")
+        where_conditions.append("LOWER(chromatography) = ?")
         params.append(chromatography)
     if polarity:
-        where_conditions.append("UPPER(polarity) = UPPER(?)")
+        where_conditions.append("LOWER(polarity) = ?")
         params.append(polarity)
     if file_types:
         where_conditions.append(f"file_type IN ({','.join(['?']*len(file_types))})")
@@ -1956,7 +1972,9 @@ def clone_atlas(
 
 def check_require_evaluated(obj: "ManualCuration"):
 
-    for _, mc_row in obj.curation_df.iterrows():
+    for _, mc_row in obj.experimental_data.curation_df.iterrows():
+        if mc_row is None:
+            continue
         ms1_notes = str(mc_row.get('ms1_notes', '')).strip()
         ms2_notes = str(mc_row.get('ms2_notes', '')).strip()
         if not ms1_notes:
@@ -2040,16 +2058,17 @@ def save_atlas_to_db_and_disk(
         stage=stage,
     )
     logger.info("Saving curated Atlas data to TSV...")
-    if stage == AtlasStage.AUTO_IDED:
-        ldt.save_atlas_data_to_tsv(
-            atlas_obj=atlas_to_update,
-            output_path=obj.paths['analysis_results_output_dir']
-        )
-    elif stage == AtlasStage.RT_ALIGNED:
+    if stage == AtlasStage.RT_ALIGNED:
         ldt.save_atlas_data_to_tsv(
             atlas_obj=atlas_to_update,
             output_path=obj.paths['rt_alignment_results_dir']
         )
+    else:
+        ldt.save_atlas_data_to_tsv(
+            atlas_obj=atlas_to_update,
+            output_path=obj.paths['analysis_results_output_dir']
+        )
+    return
 
 def to_python_type(val):
     if isinstance(val, np.generic):
@@ -2327,7 +2346,8 @@ def _get_opposite_polarity_curation(
     ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes.  Returns an empty DataFrame
     (no error) when no matching entries are found.
     """
-    opposite_polarity = "NEG" if obj.polarity.lower() == "pos" else "POS"
+    # Use canonical lowercase form to match what is stored in the DB.
+    opposite_polarity = "neg" if fpf.normalize_polarity(obj.polarity) == "pos" else "pos"
     project_db_path = obj.paths['project_db_path']
     rt_alignment_number = obj.rt_alignment_number
     analysis_number = obj.analysis_number
@@ -2371,7 +2391,7 @@ def _get_opposite_polarity_curation(
 def _apply_cross_polarity_curation(
     obj: "AnalysisGUI",
     opposite_polarity_df: pd.DataFrame,
-) -> tuple:
+) -> int:
     """
     Apply RT bounds (and notes) from opposite-polarity curated entries to
     matching compounds in the current analysis.
@@ -2382,7 +2402,7 @@ def _apply_cross_polarity_curation(
     auto_ided_atlas_obj CompoundMZRT objects (keyed by mz_rt_uid) so that EIC
     plot windows reflect the transferred values when the GUI opens.
 
-    Returns (updated_manual_curation_df, n_transferred).
+    Returns n_transferred.
     """
     if opposite_polarity_df.empty:
         return 0
@@ -2441,14 +2461,16 @@ def _transfer_istd_curation(
 ):
 
     if obj.analysis_type != "EMA":
-        return
+        return        
 
     apply_istd_override = obj.ta.params.get("apply_istd_curation_to_ema", True)
     if obj.override_parameters.get("apply_istd_curation_to_ema", None) is not None:
-        apply_istd_override = obj.override_parameters.get("apply_istd_curation_to_ema", None)
+        apply_istd_override = obj.override_parameters.get("apply_istd_curation_to_ema", False)
+
     if apply_istd_override:
-        if obj.auto_ided_atlas_obj.analysis_type == "EMA":
-            logger.info("Applying ISTD transfer...")
+        logger.info("Applying ISTD transfer...")
+    else:
+        return
 
     logger.info("Finding ISTD curation entries to transfer to EMA...")
     with get_db_connection(obj.paths["project_db_path"], read_only=True) as conn:
@@ -3006,6 +3028,61 @@ def _build_best_ms1_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     logger.info(f"Best MS1 metrics dataframe built with {len(summary_obj.best_ms1_metrics_df)} rows.")
     return
 
+def _compute_row_metrics(
+    rts_raw, ints_raw, mzs_raw
+) -> tuple[float, float, float, float, float, float]:
+    """Compute EIC metrics for a single (compound, file) row.
+
+    Operates on raw list/array values from the wide-format ms1_df.  All
+    arithmetic is done with numpy on pre-allocated float64 arrays so there
+    is no Python-level element iteration.
+
+    Returns
+    -------
+    (peak_height, peak_area, rt_peak, rt_centroid, mz_peak, mz_centroid)
+    All values are Python floats; ``nan`` is returned for missing data.
+    """
+    _nan = float("nan")
+
+    try:
+        ints = np.asarray(ints_raw, dtype=np.float64)
+        ints = np.where(np.isnan(ints), 0.0, ints)
+    except (TypeError, ValueError):
+        return _nan, _nan, _nan, _nan, _nan, _nan
+
+    if ints.size == 0 or ints.max() == 0:
+        return _nan, _nan, _nan, _nan, _nan, _nan
+
+    try:
+        rts = np.asarray(rts_raw, dtype=np.float64)
+        mzs = np.asarray(mzs_raw, dtype=np.float64)
+    except (TypeError, ValueError):
+        return _nan, _nan, _nan, _nan, _nan, _nan
+
+    peak_idx = int(np.argmax(ints))
+    peak_height = float(ints[peak_idx])
+
+    # Trapezoid area — requires at least 2 points with valid RTs.
+    valid_rt = np.isfinite(rts)
+    if valid_rt.sum() >= 2:
+        peak_area = float(np.trapezoid(ints[valid_rt], rts[valid_rt]))
+    else:
+        peak_area = _nan
+
+    rt_peak = float(rts[peak_idx]) if peak_idx < rts.size and np.isfinite(rts[peak_idx]) else _nan
+    mz_peak = float(mzs[peak_idx]) if peak_idx < mzs.size and np.isfinite(mzs[peak_idx]) else _nan
+
+    # Intensity-weighted centroids — use nansum so isolated NaN rts/mzs are skipped.
+    int_sum = float(np.nansum(ints))
+    if int_sum > 0:
+        rt_centroid = float(np.nansum(rts * ints) / int_sum)
+        mz_centroid = float(np.nansum(mzs * ints) / int_sum) if mzs.size > 0 else _nan
+    else:
+        rt_centroid = mz_centroid = _nan
+
+    return peak_height, peak_area, rt_peak, rt_centroid, mz_peak, mz_centroid
+
+
 def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
 
@@ -3032,54 +3109,46 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     if ms1_df is None or ms1_df.empty:
         return pd.DataFrame()
 
-    records = []
-    for _, row in tqdm(ms1_df.iterrows(), total=len(ms1_df), desc="Computing per-file metrics"):
-        spec_rts  = as_list(row.get("spec_rts"))
-        spec_ints = as_list(row.get("spec_ints"))
-        spec_mzs  = as_list(row.get("spec_mzs"))
+    spec_rts_col  = ms1_df["spec_rts"].tolist()
+    spec_ints_col = ms1_df["spec_ints"].tolist()
+    spec_mzs_col  = ms1_df["spec_mzs"].tolist()
+    filenames     = ms1_df["filename"].tolist()
+    mz_rt_uids    = ms1_df["mz_rt_uid"].tolist()
+    inchi_keys    = ms1_df["inchi_key"].tolist()
+    adducts       = ms1_df["adduct"].tolist()
 
-        # Coerce to float arrays, replacing None/nan with 0 for intensities
-        rts  = [float(v) if v is not None else float("nan") for v in spec_rts]
-        ints = [float(v) if v is not None else 0.0 for v in spec_ints]
-        mzs  = [float(v) if v is not None else float("nan") for v in spec_mzs]
+    n = len(ms1_df)
+    peak_heights  = np.empty(n, dtype=np.float64)
+    peak_areas    = np.empty(n, dtype=np.float64)
+    rt_peaks      = np.empty(n, dtype=np.float64)
+    rt_centroids  = np.empty(n, dtype=np.float64)
+    mz_peaks      = np.empty(n, dtype=np.float64)
+    mz_centroids  = np.empty(n, dtype=np.float64)
+    file_groups   = [""] * n
 
-        if not ints or max(ints) == 0:
-            peak_height = peak_area = rt_peak = rt_centroid = mz_peak = mz_centroid = float("nan")
-        else:
-            peak_idx = int(np.argmax(ints))
-            peak_height = ints[peak_idx]
-            peak_area = float(np.trapezoid(ints, rts))
-            rt_peak = rts[peak_idx] if peak_idx < len(rts) else float("nan")
-            mz_peak = mzs[peak_idx] if peak_idx < len(mzs) else float("nan")
-            # Use sum of intensities as the weight denominator for centroids
-            # (intensity-weighted mean, independent of RT spacing)
-            int_sum = float(np.nansum(ints))
-            rt_centroid = (
-                float(np.nansum([r * i for r, i in zip(rts, ints)]) / int_sum)
-                if int_sum > 0 else float("nan")
-            )
-            mz_centroid = (
-                float(np.nansum([m * i for m, i in zip(mzs, ints)]) / int_sum)
-                if int_sum > 0 and mzs else float("nan")
-            )
+    for i in tqdm(range(n), desc="Computing per-file metrics", disable=should_disable_tqdm()):
+        (
+            peak_heights[i], peak_areas[i], rt_peaks[i],
+            rt_centroids[i], mz_peaks[i], mz_centroids[i],
+        ) = _compute_row_metrics(spec_rts_col[i], spec_ints_col[i], spec_mzs_col[i])
+        try:
+            file_groups[i] = fpf.get_file_parts(filenames[i], "sample_name")
+        except Exception:
+            file_groups[i] = ""
 
-        fname = row.get("filename", "")
-        fgroup = fpf.get_file_parts(fname, "sample_name")
-        records.append({
-            "mz_rt_uid":   row.get("mz_rt_uid", ""),
-            "inchi_key":   row.get("inchi_key", ""),
-            "adduct":      row.get("adduct", ""),
-            "filename":    fname,
-            "file_group":  fgroup,
-            "peak_height": peak_height,
-            "peak_area":   peak_area,
-            "rt_peak":     rt_peak,
-            "rt_centroid": rt_centroid,
-            "mz_peak":     mz_peak,
-            "mz_centroid": mz_centroid,
-        })
-
-    summary_obj.per_file_metrics_df = pd.DataFrame(records)
+    summary_obj.per_file_metrics_df = pd.DataFrame({
+        "mz_rt_uid":   mz_rt_uids,
+        "inchi_key":   inchi_keys,
+        "adduct":      adducts,
+        "filename":    filenames,
+        "file_group":  file_groups,
+        "peak_height": peak_heights,
+        "peak_area":   peak_areas,
+        "rt_peak":     rt_peaks,
+        "rt_centroid": rt_centroids,
+        "mz_peak":     mz_peaks,
+        "mz_centroid": mz_centroids,
+    })
     logger.info(f"Per-file metrics dataframe built with {len(summary_obj.per_file_metrics_df)} rows.")
     return
 

@@ -9,6 +9,7 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import metatlas2.file_and_project_format as fpf
 import metatlas2.logging_config as lcf
 import metatlas2.load_tools as ldt
 from metatlas2.utils import should_disable_tqdm
@@ -772,7 +773,14 @@ def extract_data_from_raw(
         lcmsruns = obj.autoid_lcmsruns
         wp = obj.ta.params
 
-    polarity = "positive" if atlas.polarity.lower() == "pos" else "negative" if atlas.polarity.lower() == "neg" else atlas.polarity.lower()
+    _POL_TO_H5 = {"pos": "positive", "neg": "negative"}
+    canonical_pol = fpf.normalize_polarity(atlas.polarity)
+    if canonical_pol not in _POL_TO_H5:
+        raise ValueError(
+            f"Atlas polarity '{atlas.polarity}' (canonical: '{canonical_pol}') is not supported "
+            f"for data extraction. Expected 'pos' or 'neg' — the atlas must have a single polarity."
+        )
+    polarity = _POL_TO_H5[canonical_pol]
 
     used_params = [
         "atlas_extra_time", "ms1_mz_tolerance_ppm", "only_keep_data_in_feature",

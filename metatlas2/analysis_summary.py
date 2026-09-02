@@ -142,23 +142,21 @@ def apply_auto_curation_defaults(curation_df: "pd.DataFrame") -> "pd.DataFrame":
     _MS2_DEFAULT = "0.5, curation skipped, putative match"
     _ANALYST_SUFFIX = " (manual curation skipped)"
 
-    for idx in curation_df.index:
-        # analyst_notes
-        existing_analyst = str(curation_df.at[idx, "analyst_notes"] or "").strip()
-        if existing_analyst:
-            curation_df.at[idx, "analyst_notes"] = existing_analyst + _ANALYST_SUFFIX
-        else:
-            curation_df.at[idx, "analyst_notes"] = _ANALYST_SUFFIX.strip()
+    # analyst_notes: append suffix when non-empty, otherwise use suffix alone.
+    analyst = curation_df["analyst_notes"].fillna("").astype(str).str.strip()
+    curation_df["analyst_notes"] = np.where(
+        analyst != "",
+        analyst + _ANALYST_SUFFIX,
+        _ANALYST_SUFFIX.strip(),
+    )
 
-        # ms1_notes
-        existing_ms1 = str(curation_df.at[idx, "ms1_notes"] or "").strip()
-        if not existing_ms1:
-            curation_df.at[idx, "ms1_notes"] = _MS1_DEFAULT
+    # ms1_notes: fill only when currently empty/blank.
+    ms1 = curation_df["ms1_notes"].fillna("").astype(str).str.strip()
+    curation_df["ms1_notes"] = np.where(ms1 == "", _MS1_DEFAULT, ms1)
 
-        # ms2_notes
-        existing_ms2 = str(curation_df.at[idx, "ms2_notes"] or "").strip()
-        if not existing_ms2:
-            curation_df.at[idx, "ms2_notes"] = _MS2_DEFAULT
+    # ms2_notes: fill only when currently empty/blank.
+    ms2 = curation_df["ms2_notes"].fillna("").astype(str).str.strip()
+    curation_df["ms2_notes"] = np.where(ms2 == "", _MS2_DEFAULT, ms2)
 
     logger.info(
         f"Applied auto-curation defaults to {len(curation_df)} compounds "
@@ -166,8 +164,6 @@ def apply_auto_curation_defaults(curation_df: "pd.DataFrame") -> "pd.DataFrame":
         f"analyst_notes suffix='{_ANALYST_SUFFIX.strip()}')."
     )
     return curation_df
-
-# helpers
 
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
@@ -2515,8 +2511,8 @@ def make_log_fold_changes_csv(
         len(group_to_cols),
         list(group_to_cols.keys()),
     )
-    for grp, cols in group_to_cols.items():
-        logger.info(f"  Group '{grp}': {len(cols)} replicate(s) — {cols}")
+    #for grp, cols in group_to_cols.items():
+    #    logger.info(f"  Group '{grp}': {len(cols)} replicate(s) — {cols}")
 
     # ── Compute per-group mean across replicates ──────────────────────────────
     group_means: dict[str, np.ndarray] = {}
@@ -2667,8 +2663,8 @@ def make_metabomap(
     """
     # ── 1. Setup paths ────────────────────────────────────────────────────────
     analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
-    curr_pol = summary_obj.polarity.upper()
-    sib_pol  = "NEG" if curr_pol == "POS" else "POS"
+    curr_pol = fpf.normalize_polarity(summary_obj.polarity)   # "pos" or "neg"
+    sib_pol  = "neg" if curr_pol == "pos" else "pos"
 
     current_csv = analysis_output_dir / "data_sheets" / "peak_height_filtered.csv"
     sibling_csv = (

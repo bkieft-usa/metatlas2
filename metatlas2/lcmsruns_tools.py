@@ -100,6 +100,8 @@ def filter_lcmsruns_list(
     polarity: str = None,
     ms_level: str = None
 ) -> list[dict]:
+    """Filter a list of LCMS run dicts/objects by the given criteria.
+    """
 
     if chromatography:
         chromatography_set = {fpf.normalize_chromatography(chromatography)}
@@ -109,45 +111,69 @@ def filter_lcmsruns_list(
     pol_set = set()
     if polarity:
         if isinstance(polarity, (list, set, tuple)):
-            pol_set = {str(p).lower() for p in polarity}
+            pol_set = {fpf.normalize_polarity(str(p)) for p in polarity}
         else:
-            pol = str(polarity).lower()
-            if pol in ["pos", "positive", "fps"]:
-                pol_set = {"pos", "fps"}
-            elif pol in ["neg", "negative"]:
-                pol_set = {"neg"}
-            else:
-                pol_set = {pol}
+            pol_set = {fpf.normalize_polarity(str(polarity))}
 
-    inc_set = {ft.lower() for ft in include_file_type} if include_file_type else None
-    exc_set = {ft.lower() for ft in exclude_file_type} if exclude_file_type else None
+    # Split each exclude/include list into file_type tokens and polarity tokens.
+    def _split_tokens(token_list: list[str] | None):
+        """Return (file_type_set, polarity_set) from a mixed token list."""
+        _POLARITY_TOKENS = frozenset({"pos", "neg", "fps", "positive", "negative"})
+        if not token_list:
+            return None, set()
+        ft_set, pol_exc = set(), set()
+        for tok in token_list:
+            tok_lc = tok.lower()
+            if tok_lc in _POLARITY_TOKENS:
+                pol_exc.add(fpf.normalize_polarity(tok_lc))
+            else:
+                ft_set.add(tok_lc)
+        return (ft_set if ft_set else None), pol_exc
+
+    inc_ft_set, inc_pol_set = _split_tokens(include_file_type)
+    exc_ft_set, exc_pol_set = _split_tokens(exclude_file_type)
+
+
+    if pol_set and "fps" not in pol_set and "fps" not in exc_pol_set:
+        if "pos" in pol_set or "neg" in pol_set:
+            pol_set.add("fps")
+    if inc_pol_set and "fps" not in inc_pol_set and "fps" not in exc_pol_set:
+        if "pos" in inc_pol_set or "neg" in inc_pol_set:
+            inc_pol_set.add("fps")
 
     def match(run):
-        # Support both dict and object (namedtuple/dataclass) access
+        # Support both dict and object (namedtuple/dataclass) access.
         def get_val(k):
             v = run[k] if isinstance(run, dict) else getattr(run, k, "")
             return v.lower() if isinstance(v, str) else str(v).lower()
 
-        if inc_set and get_val('file_type') not in inc_set:
+        run_ft  = get_val('file_type')
+        run_pol = get_val('polarity')
+
+        if inc_ft_set and run_ft not in inc_ft_set:
             return False
-        if exc_set and get_val('file_type') in exc_set:
+        if inc_pol_set and run_pol not in inc_pol_set:
+            return False
+        if exc_ft_set and run_ft in exc_ft_set:
+            return False
+        if exc_pol_set and run_pol in exc_pol_set:
             return False
         if file_format and get_val('file_format') != file_format:
             return False
         if chromatography_set and get_val('chromatography') not in chromatography_set:
             return False
-        if pol_set and get_val('polarity') not in pol_set:
+        if pol_set and run_pol not in pol_set:
             return False
         if ms_level is not None and get_val('ms_level') != str(ms_level).lower():
             return False
         return True
 
     logger.info(f"Filtering {len(lcmsruns)} LCMS runs with criteria: ")
-    logger.info(f"  include_file_type={inc_set}")
-    logger.info(f"  exclude_file_type={exc_set}")
+    logger.info(f"  include_file_type={inc_ft_set}, include_polarity={inc_pol_set or None}")
+    logger.info(f"  exclude_file_type={exc_ft_set}, exclude_polarity={exc_pol_set or None}")
     logger.info(f"  file_format={file_format}")
-    logger.info(f"  chromatography={chromatography_set if chromatography_set else None} (no filter)" if not chromatography_set else f"  chromatography={chromatography_set}")
-    logger.info(f"  polarity={pol_set if pol_set else None} (no filter)" if not pol_set else f"  polarity={pol_set}")
+    logger.info(f"  chromatography={chromatography_set or None}")
+    logger.info(f"  polarity={pol_set or None}")
     logger.info(f"  ms_level={ms_level}")
     filtered = [run for run in lcmsruns if match(run)]
 
