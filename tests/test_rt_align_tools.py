@@ -7,7 +7,7 @@ and no subprocess calls.
 Tested functions
 ----------------
 * :func:`build_polynomial_model`
-* :func:`format_polynomial_equation`
+* :func:`format_model_equation`
 * :func:`calculate_model_values_from_existing`
 * :func:`_apply_rt_model`
 * :func:`_save_rt_aligned_stats_to_json`
@@ -32,7 +32,7 @@ from metatlas2.rt_align_tools import (
     build_rt_alignment_model,
     calculate_model_values_from_existing,
     calculate_rt_shifts,
-    format_polynomial_equation,
+    format_model_equation,
 )
 
 from conftest import (
@@ -156,7 +156,7 @@ class TestBuildPolynomialModel:
 
 
 # ---------------------------------------------------------------------------
-# format_polynomial_equation
+# format_model_equation
 # ---------------------------------------------------------------------------
 
 class TestFormatPolynomialEquation:
@@ -166,29 +166,29 @@ class TestFormatPolynomialEquation:
 
     def test_degree_1_contains_rt_atlas(self):
         info = self._model_info(1, [0.0, 1.5], 0.1)
-        eq = format_polynomial_equation(info)
+        eq = format_model_equation(info)
         assert "RT_atlas" in eq
         assert "RT_aligned" in eq
 
     def test_degree_2_contains_squared_term(self):
         info = self._model_info(2, [0.0, 1.0, 0.01], 0.05)
-        eq = format_polynomial_equation(info)
+        eq = format_model_equation(info)
         assert "RT_atlas^2" in eq
 
     def test_degree_3_contains_cubed_term(self):
         info = self._model_info(3, [0.0, 1.0, 0.01, 0.001], 0.0)
-        eq = format_polynomial_equation(info)
+        eq = format_model_equation(info)
         assert "RT_atlas^2" in eq or "³" in eq
 
     def test_unknown_degree_returns_string(self):
         info = self._model_info(5, [0.0] * 6, 0.0)
-        eq = format_polynomial_equation(info)
+        eq = format_model_equation(info)
         assert isinstance(eq, str)
         assert len(eq) > 0
 
     def test_intercept_value_appears_in_equation(self):
         info = self._model_info(1, [0.0, 1.0], 3.14159)
-        eq = format_polynomial_equation(info)
+        eq = format_model_equation(info)
         assert "3.141590" in eq
 
 
