@@ -49,6 +49,22 @@ def normalize_chromatography(chrom: str) -> str:
         return chrom
     return _CHROM_NORMALIZATION_MAP.get(chrom.lower(), chrom.lower())
 
+
+def normalize_polarity(polarity: str) -> str:
+    """Return the canonical lowercase polarity label: ``"pos"``, ``"neg"``, or ``"fps"``.
+    """
+    if not polarity:
+        raise ValueError(f"Polarity value is empty or None: {polarity!r}")
+
+    _POLARITY_MAP = {
+        "pos":      "pos",
+        "positive": "pos",
+        "neg":      "neg",
+        "negative": "neg",
+        "fps":      "fps",
+    }
+    return _POLARITY_MAP.get(polarity.lower(), polarity.lower())
+
 def parse_file_name(filename: str):
     match = FILE_PATTERN.match(filename)
     if not match:

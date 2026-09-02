@@ -682,8 +682,8 @@ class Atlas:
                 #raise ValueError(f"CompoundMZRT {inchi_key} has invalid RT peak: {compound.rt_peak}")
             if compound.rt_min is None or compound.rt_max is None:
                 raise ValueError(f"CompoundMZRT {inchi_key} missing RT min/max")
-            elif compound.rt_min >= compound.rt_max:
-                raise ValueError(f"CompoundMZRT {inchi_key} has invalid RT bounds: {compound.rt_min} >= {compound.rt_max}")
+            # elif compound.rt_min >= compound.rt_max:
+            #     raise ValueError(f"CompoundMZRT {inchi_key} has invalid RT bounds: {compound.rt_min} >= {compound.rt_max}")
             if not compound.adduct:
                 raise ValueError(f"CompoundMZRT {inchi_key} missing adduct")
 
@@ -1077,11 +1077,17 @@ class CurationStageBase(ABC):
         override_parameters: dict[str, Any] | None = None,
     ) -> None:
         """Populate all common attributes from *run_parameters*.
+
+        Paths are loaded from the ``project_config`` table (written during
+        project setup) so that the same filesystem layout is used regardless
+        of which user or working directory calls the GUI or summary stage.
+        ``set_up_paths()`` is called as a fallback only when no stored paths
+        are found (e.g. projects created before path serialisation was added).
         """
         self.rt_alignment_number = run_parameters['rt_alignment_number']
         self.analysis_number = run_parameters['analysis_number']
         self.chromatography = fpf.normalize_chromatography(run_parameters['chromatography'])
-        self.polarity = run_parameters['polarity']
+        self.polarity = fpf.normalize_polarity(run_parameters['polarity'])
         self.analysis_type = run_parameters['analysis_type']
         self.analysis_name = run_parameters['analysis_name']
         self.project_name = run_parameters['project_name']
@@ -1094,12 +1100,27 @@ class CurationStageBase(ABC):
         )
 
         self.owner = self.config.owner
-        self.paths = rtg.set_up_paths(
-            config=self.config,
-            project_name=self.project_name,
+
+        stored_paths = dbi.load_paths_from_db(
+            project_db_path=self.project_db_path,
             rt_alignment_number=self.rt_alignment_number,
             analysis_number=self.analysis_number,
         )
+        if stored_paths:
+            self.paths = stored_paths
+        else:
+            logger.warning(
+                "No stored paths found in project_config table for "
+                f"RTA{self.rt_alignment_number}/TGA{self.analysis_number}. "
+                "Falling back to set_up_paths() — paths may differ from the "
+                "original pipeline run if the USER environment variable has changed."
+            )
+            self.paths = rtg.set_up_paths(
+                config=self.config,
+                project_name=self.project_name,
+                rt_alignment_number=self.rt_alignment_number,
+                analysis_number=self.analysis_number,
+            )
 
         if override_parameters is not None:
             self.override_parameters = override_parameters
@@ -1150,7 +1171,7 @@ class AnalysisGUI(CurationStageBase):
     polarity: str | None = field(default=None)
     analysis_type: str | None = field(default=None)
     analysis_name: str | None = field(default=None)
-    owner: str = field(default="jgi")
+    owner: str | None = field(default=None)
     ta: TargetedAnalysis | None = field(default=None)
     auto_ided_atlas_obj: Atlas | None = field(default=None)
     experimental_data: ExperimentalData | None = field(default=None)

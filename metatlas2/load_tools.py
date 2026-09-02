@@ -65,16 +65,16 @@ def load_msms_refs_file(
         + "..."
     )
 
-    _POLARITY_MAP = {
+    _POLARITY_TO_MATCHMS = {
         'pos': 'positive', 'positive': 'positive',
         'neg': 'negative', 'negative': 'negative',
     }
     if polarity is not None:
-        polarity_norm = _POLARITY_MAP.get(polarity.lower())
+        polarity_norm = _POLARITY_TO_MATCHMS.get(polarity.lower())
         if polarity_norm is None:
             raise ValueError(
                 f"Unrecognised polarity value {polarity!r}. "
-                f"Expected one of: {list(_POLARITY_MAP.keys())}"
+                f"Expected one of: {list(_POLARITY_TO_MATCHMS.keys())}. "
             )
     else:
         polarity_norm = None
@@ -177,6 +177,14 @@ def load_msms_refs_file(
     return refs_by_inchi_key
 
 def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict[str, Any]:
+    _VALID_MODEL_TYPES = {"polynomial", "linear", "median_offset"}
+    model_type = str(params.get('model_type', 'polynomial')).lower()
+    if model_type not in _VALID_MODEL_TYPES:
+        raise ValueError(
+            f"{location}: invalid model_type '{model_type}'. "
+            f"Valid options: {sorted(_VALID_MODEL_TYPES)}"
+        )
+    params['model_type'] = model_type
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', False))
     params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT
     params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
@@ -275,7 +283,7 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
     for chrom_key, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
         chromatography = fpf.normalize_chromatography(chrom_key)
         for polarity_key, pol_cfg in chrom_cfg.items():
-            polarity = polarity_key.lower()
+            polarity = fpf.normalize_polarity(polarity_key)
             for analysis_type_key, named_entries in pol_cfg.items():
                 analysis_type = analysis_type_key.lower()
                 if not isinstance(named_entries, dict):
@@ -368,23 +376,27 @@ def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
     return 'Unknown'
 
 def detect_atlas_input_polarity(df: pd.DataFrame) -> str:
-    """Detect polarity from atlas input data."""
+    """Detect polarity from atlas input data.
+
+    Returns the canonical polarity string (``"pos"`` or ``"neg"``) used
+    throughout the rest of the codebase.
+    """
     if 'polarity' in df.columns:
         pol_values = df['polarity'].dropna().unique()
         if len(pol_values) > 0:
-            return str(pol_values[0])
-    
+            return fpf.normalize_polarity(str(pol_values[0]))
+
     # Try to infer from adduct information
     if 'adduct' in df.columns:
         adducts = ' '.join(df['adduct'].dropna().astype(str))
         if '[M+H]+' in adducts or '[M+Na]+' in adducts or '[M+NH4]+' in adducts:
-            return 'positive'
+            return 'pos'
         elif '[M-H]-' in adducts or '[M+Cl]-' in adducts or '[M-2H]-' in adducts or '[M+formate]-' in adducts:
-            return 'negative'
-    
+            return 'neg'
+
     raise ValueError(
         "Could not determine polarity from atlas input data. "
-        "Add a 'polarity' column (values: 'positive' or 'negative') or ensure adduct strings "
+        "Add a 'polarity' column (values: 'pos' or 'neg') or ensure adduct strings "
         "contain recognisable patterns (e.g. '[M+H]+' or '[M-H]-')."
     )
 
