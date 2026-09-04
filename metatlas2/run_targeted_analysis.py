@@ -150,8 +150,8 @@ def get_project_db_path(project_name: str) -> str:
             "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc and re-source it."
         )
     base = Path(data_dir) / "projects" / "targeted_outputs"
-    target = f"{project_name}.duckdb"
-    matches = list(base.rglob(target))
+    target = f"*/*/{project_name}/{project_name}.duckdb"
+    matches = list(base.glob(target))
     if not matches:
         raise FileNotFoundError(
             f"No project database found for '{project_name}' under {base}. "

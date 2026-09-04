@@ -23,22 +23,52 @@ SAMPLE_NAME_TO_FILE_TYPE: dict[str, str] = {
 def _classify_file_type(fields: dict) -> str:
     """Return the file_type category for a parsed filename field dict.
 
-    Classification is driven exclusively by the ``sample_name`` field from
-    ``fpf.parse_file_name()``, with ``run_metadata`` used as a fallback.
-    Both fields are exact-matched (case-insensitive) against
-    ``SAMPLE_NAME_TO_FILE_TYPE``; if neither matches, ``'experimental'`` is
+    Classification iterates ``SAMPLE_NAME_TO_FILE_TYPE`` keys **in insertion
+    order** (``qc`` → ``istd`` → ``exctrl`` → …).  For each key, the
+    hyphen-delimited segments of ``sample_name`` are checked first, then those
+    of ``run_metadata``.  The first key whose segment is found in either field
+    wins, so a higher-priority key in ``run_metadata`` (e.g. ``qc``) beats a
+    lower-priority key in ``sample_name`` (e.g. ``exctrl``).
+
+    Special case: a ``qc`` segment is skipped when the immediately following
+    segment is ``c18qu`` (i.e. the token ``QC-C18QU`` is not a real QC run).
+
+    If no segment in either field matches any key, ``'experimental'`` is
     returned.
+
+    Examples
+    --------
+    * ``sample_name="QC-SOPv7"``                                  → ``'qc'``
+    * ``sample_name="ExCtrl-LCMS-PPL"``                           → ``'exctrl'``
+    * ``sample_name="ExCtrl-MeOH-PPL"``,
+      ``run_metadata="...filtrate-QC"``                           → ``'qc'``
+      (``qc`` key checked before ``exctrl`` key; found in run_metadata)
+    * ``sample_name="ExCtrl-MeOH-PPL"``,
+      ``run_metadata="...filtrate-QC-C18QU"``                     → ``'exctrl'``
+      (``qc`` skipped due to C18QU; ``exctrl`` found in sample_name)
+    * ``sample_name="AB-T1-ENDO"``,
+      ``run_metadata="...cells-QC-C18QU"``                        → ``'experimental'``
     """
-    sample_name = fields.get("sample_name", "").lower().strip()
+    sample_name  = fields.get("sample_name",  "").lower().strip()
     run_metadata = fields.get("run_metadata", "").lower().strip()
 
-    # Primary: exact match on sample_name
-    if sample_name in SAMPLE_NAME_TO_FILE_TYPE:
-        return SAMPLE_NAME_TO_FILE_TYPE[sample_name]
+    sn_segs = sample_name.split("-")
+    rm_segs = run_metadata.split("-")
 
-    # Fallback: exact match on run_metadata
-    if run_metadata in SAMPLE_NAME_TO_FILE_TYPE:
-        return SAMPLE_NAME_TO_FILE_TYPE[run_metadata]
+    def _key_found_in(key: str, segments: list[str]) -> bool:
+        """Return True if *key* appears as a non-skipped segment."""
+        for idx, seg in enumerate(segments):
+            if seg != key:
+                continue
+            # Special skip: QC-C18QU is not a real QC run.
+            if key == "qc" and idx + 1 < len(segments) and segments[idx + 1] == "c18qu":
+                continue
+            return True
+        return False
+
+    for key, file_type in SAMPLE_NAME_TO_FILE_TYPE.items():
+        if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
+            return file_type
 
     return 'experimental'
 
