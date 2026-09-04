@@ -2213,17 +2213,29 @@ def make_data_sheets(
 
     per_file_df = summary_obj.per_file_metrics_df
     if per_file_df is None or per_file_df.empty:
-        logger.warning("per_file_metrics_df is empty after build - data sheets not written.")
-        return
+        logger.warning(
+            "per_file_metrics_df is empty — no MS1 data was found for any compound in this "
+            "analysis. Data sheets will be written with all compounds present but all metric "
+            "values will be NaN (no detected signal)."
+        )
+        per_file_df = pd.DataFrame(columns=["mz_rt_uid", "filename", "inchi_key", "adduct",
+                                             "peak_height", "peak_area", "rt_peak",
+                                             "rt_centroid", "mz_peak", "mz_centroid"])
 
     mc_reset = manual_curation_df.reset_index(drop=True)
-    mc_slim = mc_reset[["mz_rt_uid", "compound_name"]].copy()
+    mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "adduct"]].copy()
     mc_slim["compound_index"] = mc_reset.index + 1
     mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
-    pfm = per_file_df.merge(mc_slim, on="mz_rt_uid", how="left")
+
+    per_file_merge = per_file_df.drop(
+        columns=[c for c in ["inchi_key", "adduct"] if c in per_file_df.columns]
+    )
+    pfm = mc_slim.merge(per_file_merge, on="mz_rt_uid", how="left") # Left join from mc_slim so every compound in curation_df gets a row
 
     pfm["_file_col"] = pfm["filename"].apply(
-        lambda p: os.path.splitext(os.path.basename(str(p)))[0] if p else "unknown"
+        lambda p: os.path.splitext(os.path.basename(str(p)))[0]
+        if (p and not (isinstance(p, float) and np.isnan(p)))
+        else None
     )
 
     _DATA_SHEET_METRICS = [
@@ -2252,10 +2264,10 @@ def make_data_sheets(
 
         csv_path = output_dir / f"{metric}.csv"
 
-        # Include only index cols that are actually present
         present_idx = [c for c in _INDEX_COLS if c in pfm.columns]
+        pfm_with_file = pfm[pfm["_file_col"].notna()]
         wide = (
-            pfm[present_idx + ["_file_col", metric]]
+            pfm_with_file[present_idx + ["_file_col", metric]]
             .pivot_table(
                 index=present_idx,
                 columns="_file_col",
@@ -2265,6 +2277,19 @@ def make_data_sheets(
             .reset_index()
         )
         wide.columns.name = None
+        no_data_compounds = mc_slim[~mc_slim["mz_rt_uid"].isin(pfm_with_file["mz_rt_uid"])].copy()
+        if not no_data_compounds.empty:
+            # Align columns: add all sample columns as NaN
+            for col in wide.columns:
+                if col not in no_data_compounds.columns:
+                    no_data_compounds[col] = np.nan
+            no_data_compounds = no_data_compounds[[c for c in wide.columns if c in no_data_compounds.columns]]
+            wide = pd.concat([wide, no_data_compounds], ignore_index=True)
+            # Re-sort to match original curation_df order
+            order = mc_slim[["mz_rt_uid"]].reset_index(drop=True)
+            order["_sort_order"] = order.index
+            wide = wide.merge(order[["mz_rt_uid", "_sort_order"]], on="mz_rt_uid", how="left")
+            wide = wide.sort_values("_sort_order").drop(columns=["_sort_order"]).reset_index(drop=True)
         wide.to_csv(csv_path, index=False)
         logger.info(f"Exported {metric} data sheet ({len(wide)} compounds x {len(wide.columns) - len(present_idx)} files)")
 
