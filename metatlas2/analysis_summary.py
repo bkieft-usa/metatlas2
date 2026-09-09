@@ -81,9 +81,9 @@ def run_all_summaries(
         logger.info("Making quantitative data sheets...")
         make_data_sheets(summary_obj, overwrite=overwrite)
 
-    if "manual_curation_csv" not in (skip_outputs or []):
-        logger.info("Making Manual curation CSV...")
-        make_manual_curation_csv(summary_obj, overwrite=overwrite)
+    # if "manual_curation_csv" not in (skip_outputs or []):
+    #     logger.info("Making Manual curation CSV...")
+    #     make_manual_curation_csv(summary_obj, overwrite=overwrite)
 
     if "best_ms2_hits_csv" not in (skip_outputs or []):
         logger.info("Making best MS2 hit fragment ions CSV...")
@@ -581,7 +581,7 @@ def _plot_eic(
     if not safe_isnan(rt_max):
         ax.axvline(safe_float(rt_max), color="red", linestyle="--", linewidth=1.5, alpha=0.7)
     if not safe_isnan(rt_peak):
-        ax.axvline(safe_float(rt_peak), color="black", linestyle=":", linewidth=1.5, alpha=0.7)
+        ax.axvline(safe_float(rt_peak), color="black", linestyle=":", linewidth=3, alpha=0.7)
 
     if ms1_compound_df.empty:
         ax.text(0.5, 0.5, "No MS1 data", transform=ax.transAxes,
@@ -1764,14 +1764,14 @@ def _render_eic_thumbnail(
                 ha="center", va="center", fontsize=10, color="gray")
 
     # RT vlines: rt_min = red dashed, rt_peak = black dotted, rt_max = black dashed
-    _vline = lambda val, color, ls: (
-        ax.axvline(val, color=color, linewidth=0.8, linestyle=ls)
+    _vline = lambda val, color, lw, ls: (
+        ax.axvline(val, color=color, linewidth=lw, linestyle=ls)
         if val is not None and not np.isnan(val)
         else None
     )
-    _vline(rt_min, "red", "--")
-    _vline(rt_peak, "black", ":" )
-    _vline(rt_max, "black", "--")
+    _vline(rt_min, "red", 0.8, "--")
+    _vline(rt_peak, "black", 1.5, ":" )
+    _vline(rt_max, "red", 0.8, "--")
 
     if y_max is not None and y_max > 0:
         ax.set_ylim(bottom=0, top=y_max * 1.05)
@@ -1817,8 +1817,8 @@ def _plot_compound_boxplot(
     log_scale:
         When *True* the y-values are log₁₀-transformed before plotting.
     atlas_ref:
-        Atlas reference value to draw as a red dashed horizontal line
-        (pass *None* to omit the line).
+        Atlas reference value used only for the ``mz_centroid`` subplot title
+        (no reference line is drawn on the plot).
     compound_name, adduct:
         Used as the subplot title.
     ylabel:
@@ -1827,14 +1827,16 @@ def _plot_compound_boxplot(
     rng = np.random.default_rng(seed=42)
     groups = sorted(compound_metrics["file_group"].dropna().unique()) if not compound_metrics.empty else []
     data_per_group: list[list[float]] = []
+    real_vals_all: list[float] = []   # only genuine data values, used for y-axis scaling
     valid_groups: list[str] = []
     for g in groups:
         group_rows = compound_metrics.loc[compound_metrics["file_group"] == g]
         vals = group_rows[metric].dropna().tolist()
         if log_scale:
             vals = [np.log10(v) for v in vals if v is not None and v > 0]
-        n_files = len(group_rows)
-        data_per_group.append(vals if vals else [0.0] * max(n_files, 1))
+        if vals:
+            real_vals_all.extend(vals)
+        data_per_group.append(vals)
         valid_groups.append(g)
 
     if not data_per_group:
@@ -1842,7 +1844,12 @@ def _plot_compound_boxplot(
                 ha="center", va="center", fontsize=8, color="gray")
         title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
         if metric == "mz_centroid":
-            title_bottom = f"m/z centroid: {atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'}"
+            mz_val = atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
+            title_bottom = f"Atlas m/z: {mz_val}"
+            ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
+        elif metric == "rt_peak":
+            rt_val = f"{atlas_ref:.3f} min" if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
+            title_bottom = f"Atlas RT: {rt_val}"
             ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
         else:
             ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
@@ -1850,8 +1857,9 @@ def _plot_compound_boxplot(
         return
 
     positions = list(range(len(valid_groups)))
+    boxplot_data = [vals if vals else [np.nan] for vals in data_per_group]
     ax.boxplot(
-        data_per_group,
+        boxplot_data,
         positions=positions,
         widths=0.5,
         patch_artist=True,
@@ -1863,6 +1871,8 @@ def _plot_compound_boxplot(
     )
 
     for pos, vals in zip(positions, data_per_group):
+        if not vals:
+            continue  # no real data for this group — leave the slot blank
         jitter = rng.uniform(-0.15, 0.15, size=len(vals))
         ax.scatter(
             np.array([pos] * len(vals), dtype=float) + jitter,
@@ -1870,11 +1880,12 @@ def _plot_compound_boxplot(
             s=8, color="steelblue", alpha=0.65, zorder=3,
         )
 
-    if atlas_ref is not None and not np.isnan(atlas_ref):
-        ref_val = np.log10(atlas_ref) if (log_scale and atlas_ref > 0) else atlas_ref
-        ax.axhline(ref_val, color="red", linestyle="--", linewidth=0.8, alpha=0.8,
-                   label=f"Atlas {atlas_ref:.5g}")
-        ax.legend(fontsize=10, loc="upper right", framealpha=0.5)
+    # Fit y-axis tightly to the actual data values only (excludes placeholder zeros)
+    if real_vals_all:
+        data_min = min(real_vals_all)
+        data_max = max(real_vals_all)
+        data_range = data_max - data_min if data_max != data_min else abs(data_max) * 0.1 or 1.0
+        ax.set_ylim(data_min - data_range * 0.1, data_max + data_range * 0.15)
 
     ax.set_xticks(positions)
     ax.set_xticklabels(valid_groups, rotation=45, ha="right", fontsize=10)
@@ -1885,7 +1896,11 @@ def _plot_compound_boxplot(
     title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
     if metric == "mz_centroid":
         mz_val = atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-        title_bottom = f"m/z centroid: {mz_val}"
+        title_bottom = f"Atlas m/z: {mz_val}"
+        ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
+    elif metric == "rt_peak":
+        rt_val = f"{atlas_ref:.3f} min" if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
+        title_bottom = f"Atlas RT: {rt_val}"
         ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
     else:
         ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
@@ -2045,47 +2060,47 @@ def make_boxplots(
 #### Table Exporters
 ###############################################
 
-def make_manual_curation_csv(
-    summary_obj: "AnalysisSummary",
-    output_filename: str = "manually_curated_compound_data.csv",
-    overwrite: bool = True,
-) -> None:
-    """Write the ``manual_curation`` table to a CSV file (one row per compound).
+# def make_manual_curation_csv(
+#     summary_obj: "AnalysisSummary",
+#     output_filename: str = "manually_curated_compound_data.csv",
+#     overwrite: bool = True,
+# ) -> None:
+#     """Write the ``manual_curation`` table to a CSV file (one row per compound).
 
-    Parameters
-    ----------
-    summary_obj:
-        Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
-        ``manual_curation_df`` is loaded automatically if not already cached.
-    output_filename:
-        CSV filename (the ``.csv`` extension is appended automatically if absent).
-    overwrite:
-        When *False*, skips writing if the output file already exists.
+#     Parameters
+#     ----------
+#     summary_obj:
+#         Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
+#         ``manual_curation_df`` is loaded automatically if not already cached.
+#     output_filename:
+#         CSV filename (the ``.csv`` extension is appended automatically if absent).
+#     overwrite:
+#         When *False*, skips writing if the output file already exists.
 
-    Returns
-    -------
-    pd.DataFrame
-        The exported DataFrame (empty on error).
-    """
+#     Returns
+#     -------
+#     pd.DataFrame
+#         The exported DataFrame (empty on error).
+#     """
 
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
-    output_file = output_dir / output_filename
-    if not overwrite and output_file.exists():
-        logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
-        return
-    output_dir.mkdir(parents=True, exist_ok=True)
+#     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
+#     output_file = output_dir / output_filename
+#     if not overwrite and output_file.exists():
+#         logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
+#         return
+#     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Exporting manual curation CSV to {output_file}")
+#     logger.info(f"Exporting manual curation CSV to {output_file}")
 
-    manual_curation_df = summary_obj.experimental_data.curation_df
+#     manual_curation_df = summary_obj.experimental_data.curation_df
 
-    if manual_curation_df is None or manual_curation_df.empty:
-        logger.error("No manual curation entries found - CSV not written.")
-        return
+#     if manual_curation_df is None or manual_curation_df.empty:
+#         logger.error("No manual curation entries found - CSV not written.")
+#         return
 
-    manual_curation_df.to_csv(output_file, index=False)
-    logger.info("Exported manual curation CSV")
-    return
+#     manual_curation_df.to_csv(output_file, index=False)
+#     logger.info("Exported manual curation CSV")
+#     return
 
 def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
