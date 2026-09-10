@@ -82,9 +82,11 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
         logger.error("\n".join([f"  - {f.name}" for f in failed]))
         raise ValueError(f"Please address {len(failed)} .failed files in {project_path}.")
 
+    counts: dict[str, int] = {}
     lcmsruns = []
     for ext in ['raw', 'mzML', 'h5']:
         files = list(project_path.glob(f"*.{ext}"))
+        counts[ext] = len(files)
         logger.info(f"Found {len(files)} .{ext} files")
         
         for file_path in files:
@@ -105,18 +107,36 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
             except Exception as e:
                 raise ValueError(f"Error parsing filename '{file_path.name}': {e}")
 
-        if files:
-            file_types = [r["file_type"] for r in lcmsruns if r["file_format"] == ext]
-            chroms = [r["chromatography"] for r in lcmsruns if r["file_format"] == ext]
-            ms_levels = [r["ms_level"] for r in lcmsruns if r["file_format"] == ext]
-            polarities = [r["polarity"] for r in lcmsruns if r["file_format"] == ext]
-            logger.info(f"  file_type counts: {dict(Counter(file_types))}")
-            logger.info(f"  chromatography counts: {dict(Counter(chroms))}")
-            logger.info(f"  ms_level counts: {dict(Counter(ms_levels))}")
-            logger.info(f"  polarity counts: {dict(Counter(polarities))}")
-
     if not lcmsruns:
         raise ValueError(f"No .raw, .mzML, or .h5 files found in {project_path}")
+
+    # Verify all formats have the same number of files.
+    unique_counts = set(counts.values())
+    if len(unique_counts) > 1:
+        counts_str = ", ".join(f".{ext}: {n}" for ext, n in counts.items())
+        raise ValueError(
+            f"File count mismatch across formats ({counts_str}). "
+            "Each .raw file should have a corresponding .mzML and .h5 file."
+        )
+
+    # Log combined category breakdown for .h5 files only.
+    h5_runs = [r for r in lcmsruns if r["file_format"] == "h5"]
+    if h5_runs:
+        rows = sorted(
+            Counter(
+                (r['chromatography'], r['file_type'], r['polarity'], r['ms_level'])
+                for r in h5_runs
+            ).items()
+        )
+        headers = ("chromatography", "file_type", "polarity", "ms_level", "count")
+        col_widths = [
+            max(len(headers[i]), max(len(str(row[0][i])) for row in rows))
+            for i in range(4)
+        ] + [max(len(headers[4]), max(len(str(row[1])) for row in rows))]
+        fmt = "  " + "  ".join(f"{{:<{w}}}" for w in col_widths)
+        lines = [fmt.format(*headers)]
+        lines += [fmt.format(*combo, count) for combo, count in rows]
+        logger.info(".h5 category breakdown:\n" + "\n".join(lines))
     
     logger.info(f"Returning {len(lcmsruns)} LCMS runs.")
     return lcmsruns
