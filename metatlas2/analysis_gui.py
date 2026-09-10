@@ -1,7 +1,6 @@
-import functools, json, os, re, time, uuid, threading
+import json, os, re, time, uuid, threading
 import numpy as np, pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import dash
 from dash import dcc, html, ctx, Input, Output, State
 import dash_bootstrap_components as dbc
@@ -139,7 +138,6 @@ def build_dash_app(
             "edit_seq": int(edit_seq),
             "compound_idx": compound_idx,
             "ms2_idx": ms2_idx,
-            "ms2_idx_by_ce": {},
             "rt_min": rt_min,
             "rt_max": rt_max,
             "ms1_note": ms1_note,
@@ -163,10 +161,6 @@ def build_dash_app(
 
     def _ensure_valid_state(state):
         if "compound_idx" in state:
-            if not isinstance(state.get("ms2_idx_by_ce"), dict):
-                patched = dict(state)
-                patched["ms2_idx_by_ce"] = {}
-                return patched
             return state
         logger.warning(
             "Malformed session-store state (%s). Resetting to starting compound.",
@@ -178,7 +172,7 @@ def build_dash_app(
         rt_min = max(0.0, min(new_min, new_max))
         rt_max = max(rt_min, new_max)
         logger.debug(f"[_patch_rt_change] Called with new_min={new_min}, new_max={new_max} -> rt_min={rt_min}, rt_max={rt_max}")
-        new_state = _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4), ms2_idx=0, ms2_idx_by_ce={})
+        new_state = _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4), ms2_idx=0)
         logger.debug(f"[_patch_rt_change] Returning new_state with edit_seq={new_state.get('edit_seq')}, rt_min={new_state.get('rt_min')}, rt_max={new_state.get('rt_max')}")
         if "cached_y_max" in state:
             new_state["cached_y_max"] = state["cached_y_max"]
@@ -216,10 +210,6 @@ def build_dash_app(
         events=[{"event": "keydown", "props": ["key", "timeStamp", "target.tagName"]}],
     )
 
-    # ---------------------------------------------------------------------------
-    # Static layout sizing — driven entirely by the number of radio/checklist rows.
-    # Users zoom their browser (Ctrl+/Ctrl-) to fit their monitor; no JS needed.
-    # ---------------------------------------------------------------------------
     PX_PER_ROW = 52    # pixels per radio/checklist label row (label + margin)
     FIXED_CHROME = 340   # dropdown + textarea + id-notes + status divs + buttons + padding
     BUTTON_ROW_H = 48    # height of each button row between/below the graphs
@@ -242,6 +232,7 @@ def build_dash_app(
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
             dcc.Store(id="controls-compound-idx", storage_type="memory", data=starting_compound_idx),
             dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
+            dcc.Store(id="ms2-scan-fp-store", storage_type="memory", data=None),
             keyboard_listener,
             dbc.Row(
                 [
@@ -419,12 +410,9 @@ def build_dash_app(
                             ),
                             dbc.Row(
                                 [
-                                    dbc.Col(dbc.Button("◀ Prev MS2-CE102040  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
                                     dbc.Col(html.Div(id="ms2-counter-1", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2-CE102040 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("◀ Prev MS2-CE205060  [>]", id="ms2-prev-2", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(html.Div(id="ms2-counter-2", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2-CE205060 ▶  [/]", id="ms2-next-2", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
                                 ],
                                 className="my-2 align-items-center",
                                 style={"width": "100%"},
@@ -476,10 +464,24 @@ def build_dash_app(
                 out.append(np.nan)
         return out
 
-    def _get_ms2_scans(row, rt_min=None, rt_max=None):
-        """Return dictionary of sorted, capped scans DataFrames grouped by collision energy.
+    def _get_all_ms2_scans_in_window(row, rt_min=None, rt_max=None):
+        """Return ALL MS2 scans within the RT window, with no score-sorting or
+        top-N truncation.  Used exclusively for the MS1 plot markers so that
+        every scan timepoint is shown regardless of hit score or count.
+        """
+        mz_rt_uid = row["mz_rt_uid"]
+        ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
+        if ms2_sub.empty:
+            return pd.DataFrame()
+        if rt_min is not None and rt_max is not None:
+            ms2_sub = ms2_sub[(ms2_sub["scan_rt"] >= rt_min) & (ms2_sub["scan_rt"] <= rt_max)]
+        return ms2_sub
 
-        Returns a dict: {collision_energy: DataFrame} with top N hits from each collision energy.
+    def _get_ms2_scans(row, rt_min=None, rt_max=None):
+        """Return a DataFrame of the top N MS2 scans across all collision energies,
+        sorted by best hit score descending then scan_rt ascending.
+
+        Returns a single DataFrame (not grouped by CE) with at most top_n_hits rows.
         """
         mz_rt_uid = row["mz_rt_uid"]
 
@@ -487,17 +489,8 @@ def build_dash_app(
         if not ms2_sub.empty and rt_min is not None and rt_max is not None:
             ms2_sub = ms2_sub[(ms2_sub["scan_rt"] >= rt_min) & (ms2_sub["scan_rt"] <= rt_max)]
 
-        # Group by collision energy and get top N from each
-        scans_by_energy = {}
         if ms2_sub.empty:
-            return scans_by_energy
-        if "collision_energy" not in ms2_sub.columns:
-            logger.warning(
-                "MS2 subset for %s is missing 'collision_energy'. Available columns: %s",
-                mz_rt_uid,
-                list(ms2_sub.columns),
-            )
-            return scans_by_energy
+            return pd.DataFrame()
 
         def _score_hit_entry(hit):
             if not isinstance(hit, dict):
@@ -513,25 +506,17 @@ def build_dash_app(
             sorted_hits = sorted(raw_hits, key=_score_hit_entry, reverse=True)
             return sorted_hits, _score_hit_entry(sorted_hits[0])
 
-        for ce, group in ms2_sub.groupby("collision_energy"):
-            group_sorted = group.copy()
-            if "hits" in group_sorted.columns:
-                normalized_hits_and_scores = group_sorted["hits"].apply(_normalize_and_best_score)
-                group_sorted["hits"] = normalized_hits_and_scores.apply(lambda x: x[0])
-                group_sorted["_best_hit_score"] = normalized_hits_and_scores.apply(lambda x: x[1])
-                group_sorted = group_sorted.sort_values(["_best_hit_score", "scan_rt"], ascending=[False, True])
-                group_sorted = group_sorted.drop(columns=["_best_hit_score"])
-            else:
-                group_sorted = group_sorted.sort_values("scan_rt")
+        result = ms2_sub.copy()
+        if "hits" in result.columns:
+            normalized = result["hits"].apply(_normalize_and_best_score)
+            result["hits"] = normalized.apply(lambda x: x[0])
+            result["_best_hit_score"] = normalized.apply(lambda x: x[1])
+            result = result.sort_values(["_best_hit_score", "scan_rt"], ascending=[False, True])
+            result = result.drop(columns=["_best_hit_score"])
+        else:
+            result = result.sort_values("scan_rt")
 
-            scans_by_energy[ce] = group_sorted.head(top_n_hits)
-        return scans_by_energy
-
-    def _ce_state_key(ce):
-        try:
-            return f"{float(ce):.6f}"
-        except Exception:
-            return str(ce)
+        return result.head(top_n_hits)
 
     def _format_collision_energy_label(ce_float):
         if abs(ce_float - 23.333) < 0.01:
@@ -540,37 +525,18 @@ def build_dash_app(
             return "CE205060"
         return f"CE{int(round(ce_float))}"
 
-    def _get_ms2_idx_for_ce(state, ce):
-        idx_by_ce = state.get("ms2_idx_by_ce") if isinstance(state, dict) else None
-        if not isinstance(idx_by_ce, dict):
-            raise ValueError(f"ms2_idx_by_ce missing or invalid in state: {state}")
-        raw_val = idx_by_ce.get(_ce_state_key(ce), 0)
-        try:
-            return max(0, int(raw_val))
-        except Exception:
-            return 0
-
-    def _move_ms2_idx_for_ce_position(state, ce_position, delta):
+    def _move_ms2_idx(state, delta):
+        """Move the flat MS2 scan index by delta, clamped to valid range."""
         row = _compound_row(state["compound_idx"])
-        scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
-        collision_energies = sorted(scans_by_energy.keys())
-        if ce_position < 0 or ce_position >= len(collision_energies):
-            raise dash.exceptions.PreventUpdate
-        ce = collision_energies[ce_position]
-        scans = scans_by_energy.get(ce)
-        n_scans = len(scans) if scans is not None else 0
+        scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
+        n_scans = len(scans)
         if n_scans <= 0:
             raise dash.exceptions.PreventUpdate
-        current_idx = _get_ms2_idx_for_ce(state, ce)
+        current_idx = max(0, int(state.get("ms2_idx", 0)))
         new_idx = max(0, min(current_idx + delta, n_scans - 1))
         if new_idx == current_idx:
             raise dash.exceptions.PreventUpdate
-        idx_by_ce = dict(state.get("ms2_idx_by_ce") or {})
-        idx_by_ce[_ce_state_key(ce)] = int(new_idx)
-        changes = {"ms2_idx_by_ce": idx_by_ce}
-        if ce_position == 0:
-            changes["ms2_idx"] = int(new_idx)
-        return _patch_with_seq(state, **changes)
+        return _patch_with_seq(state, ms2_idx=int(new_idx))
 
     def _compute_window_ms1_metrics(state):
         """Recompute MS1 metrics for the analyst-selected RT window.
@@ -604,10 +570,10 @@ def build_dash_app(
         # Replace each row's in_feature mask with the analyst's RT window so
         # analyze_ms1 treats exactly [rt_min, rt_max] as the feature window.
         rows_with_window_mask = []
-        for _, r in sub.iterrows():
-            rt_arr = np.asarray(r.get("spec_rts", []), dtype=np.float64)
+        for r in sub.itertuples(index=False):
+            rt_arr = np.asarray(getattr(r, "spec_rts", []), dtype=np.float64)
             window_mask = (rt_arr >= rt_min) & (rt_arr <= rt_max)
-            new_row = r.to_dict()
+            new_row = r._asdict()
             new_row["in_feature"] = window_mask.tolist()
             rows_with_window_mask.append(new_row)
 
@@ -789,25 +755,23 @@ def build_dash_app(
             )
             return fig
 
-        # Determine y_max as the highest intensity point of all files within the current window
+        # Determine y_max as the highest intensity point of all files within the current window.
         y_min_positive_data = None
         expanded_rt_min = state["rt_min"] - 1
         expanded_rt_max = state["rt_max"] + 1
-        windowed_intensities = []
-        for _, r in sub.iterrows():
-            rt_list = r.get("spec_rts", [])
-            int_list = r.get("spec_ints", [])
+        y_max_data = 1.0
+        for r in sub.itertuples(index=False):
+            rt_list = getattr(r, "spec_rts", [])
+            int_list = getattr(r, "spec_ints", [])
             if len(rt_list) == 0 or len(int_list) == 0:
                 continue
             rt_arr = np.asarray(rt_list)
             int_arr = np.asarray(int_list)
             mask = (rt_arr >= expanded_rt_min) & (rt_arr <= expanded_rt_max)
             if np.any(mask):
-                windowed_intensities.extend([float(v) for v in int_arr[mask] if np.isfinite(v)])
-        if windowed_intensities:
-            y_max_data = float(max(windowed_intensities))
-        else:
-            y_max_data = 1.0
+                local_max = float(np.nanmax(int_arr[mask]))
+                if local_max > y_max_data:
+                    y_max_data = local_max
         # Store in state for consistency across redraws when RT changes
         if "cached_y_max" not in state or state.get("force_y_recalc", False):
             state["cached_y_max"] = y_max_data
@@ -816,11 +780,12 @@ def build_dash_app(
         if yaxis_scale == "log":
             y_min_positive_data = y_max_data / 1e6  # Assume 6 orders of magnitude dynamic range
         y_upper_bound = max(y_max_data * 1.1, 1.0)
+        y_marker_band = y_upper_bound * 0.03
         if yaxis_scale == "log":
             log_min = max((y_min_positive_data or 1e-6), 1e-12)
             y_range = [np.log10(log_min), np.log10(y_upper_bound)]
         else:
-            y_range = [0.0, y_upper_bound]
+            y_range = [-y_marker_band, y_upper_bound]
 
         # Initialize figure before adding traces
         fig = go.Figure()
@@ -957,43 +922,92 @@ def build_dash_app(
         expanded_rt_min = state["rt_min"] - 1
         expanded_rt_max = state["rt_max"] + 1
 
-        ms1_trace_count = 0
-        for _, r in sub.iterrows():
-            fn = r.get("filename", "unknown")
+        # Keep an invisible file-specific trace for hover/click events, then group other traces (for speed)
+        color_groups: dict = {}
+        highlight_groups: dict = {}
+
+        ms1_file_count = 0
+        for r in sub.itertuples(index=False):
+            fn = getattr(r, "filename", "unknown")
             short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fn).split(".")[0].split("_")[11:]))
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
-            
             is_highlighted = fn in highlighted_files
-            line_width = 5.0 if is_highlighted else 1.5
-            
-            rt_list = r.get("spec_rts", [])
-            int_list = r.get("spec_ints", [])
-            
+
+            rt_list = getattr(r, "spec_rts", [])
+            int_list = getattr(r, "spec_ints", [])
+
             if len(rt_list) == 0:
                 logger.warning(f"MS1 data for {fn} has no RT points; skipping trace")
                 continue
-            
+
             rt_arr = np.asarray(rt_list)
             int_arr = np.asarray(int_list)
-            
+
             # Filter for RT window
             mask = (rt_arr >= expanded_rt_min) & (rt_arr <= expanded_rt_max)
             filt_rt = rt_arr[mask]
             filt_int = int_arr[mask]
 
-            if len(filt_rt) > 0:
-                fig.add_trace(go.Scattergl(
-                    x=filt_rt,
-                    y=filt_int,
-                    mode="lines",
-                    line=dict(color=color, width=line_width),
-                    customdata=[fn] * len(filt_rt),
-                    hovertemplate=f"%{{x:.3f}} min<br>%{{y:.2e}}<br>File: {short_name}",
-                    showlegend=False,
-                ))
-                ms1_trace_count += 1
+            if len(filt_rt) == 0:
+                continue
 
-        logger.debug(f"MS1 traces created: {ms1_trace_count} individual traces from {len(sub['filename'].unique())} files")
+            ms1_file_count += 1
+
+            fig.add_trace(go.Scattergl(
+                x=filt_rt,
+                y=filt_int,
+                mode="lines",
+                line=dict(color=color, width=3),
+                opacity=0.001,
+                customdata=[fn] * len(filt_rt),
+                hovertemplate=f"%{{x:.3f}} min<br>%{{y:.2e}}<br>File: {short_name}",
+                showlegend=False,
+            ))
+
+            filt_rt_list = filt_rt.tolist()
+            filt_int_list = filt_int.tolist()
+            filt_rt_list.append(None)
+            filt_int_list.append(None)
+
+            if is_highlighted:
+                if color not in highlight_groups:
+                    highlight_groups[color] = [[], []]
+                highlight_groups[color][0].extend(filt_rt_list)
+                highlight_groups[color][1].extend(filt_int_list)
+            else:
+                if color not in color_groups:
+                    color_groups[color] = [[], []]
+                color_groups[color][0].extend(filt_rt_list)
+                color_groups[color][1].extend(filt_int_list)
+
+        # --- Emit visible color-group traces (normal weight) ---
+        for color, (xs, ys) in color_groups.items():
+            fig.add_trace(go.Scattergl(
+                x=xs,
+                y=ys,
+                mode="lines",
+                line=dict(color=color, width=1.5),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+        # --- Emit visible highlight overlay traces (thick) ---
+        for color, (xs, ys) in highlight_groups.items():
+            fig.add_trace(go.Scattergl(
+                x=xs,
+                y=ys,
+                mode="lines",
+                line=dict(color=color, width=5.0),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+        logger.debug(
+            f"MS1 traces: {ms1_file_count} files → "
+            f"{len(color_groups)} color-group traces + "
+            f"{len(highlight_groups)} highlight traces + "
+            f"{ms1_file_count} invisible hover/click traces"
+        )
 
         # Atlas RT peak line (black, static)
         fig.add_trace(go.Scatter(
@@ -1064,11 +1078,12 @@ def build_dash_app(
             title=dict(text=ms1_title_text, x=0.5, xanchor="center", font=dict(size=18)),
             xaxis_title="RT",
             yaxis_title="Intensity",
-            hovermode="closest", 
+            hovermode="closest",
             showlegend=False,
-            margin=dict(l=50, r=20, t=125, b=40), 
+            margin=dict(l=50, r=20, t=125, b=40),
             dragmode="zoom",
             plot_bgcolor="white",
+            uirevision=str(state["compound_idx"]),
             xaxis=dict(
                 rangeslider=dict(
                     visible=True,
@@ -1094,34 +1109,42 @@ def build_dash_app(
             ),
         )
 
-        # MS2 scan RT markers: one black dot per scan at y=0, with CE/index/score/RT hover
-        ms2_scans_by_energy = _get_ms2_scans(row, expanded_rt_min, expanded_rt_max)
+        # MS2 scan RT markers: one upward triangle per scan.
+        ms2_scans_flat = _get_all_ms2_scans_in_window(row, expanded_rt_min, expanded_rt_max)
         ms2_marker_rts = []
         ms2_marker_hover = []
-        for _ce, _scans_df in ms2_scans_by_energy.items():
-            if _scans_df.empty or "scan_rt" not in _scans_df.columns:
-                continue
-            _ce_label = _format_collision_energy_label(_ce)
-            for _scan_idx, (_, _scan_row) in enumerate(_scans_df.iterrows()):
-                _rt = _scan_row.get("scan_rt")
+        if not ms2_scans_flat.empty and "scan_rt" in ms2_scans_flat.columns:
+            for _scan_row in ms2_scans_flat.itertuples(index=False):
+                _rt = getattr(_scan_row, "scan_rt", None)
                 if _rt is None or (isinstance(_rt, float) and np.isnan(_rt)):
                     continue
-                _hits = _scan_row.get("hits", [])
+                _ce_val = getattr(_scan_row, "collision_energy", None)
+                try:
+                    _ce_label = _format_collision_energy_label(float(_ce_val)) if _ce_val is not None else "MS2"
+                except (TypeError, ValueError):
+                    _ce_label = "MS2"
+                _hits = getattr(_scan_row, "hits", [])
                 if len(_hits) > 0:
                     _score = _hits[0].get("score", None)
-                    _score_str = f"{_score:.4f}" if isinstance(_score, (int, float)) and np.isfinite(_score) else "NA"
+                    if isinstance(_score, (int, float)) and np.isfinite(_score):
+                        _score_str = f"{_score:.4f}"
+                    else:
+                        _score_str = "NA"
                 else:
                     _score_str = "NA"
+                #if _score_str == "NA":
+                #    continue
                 ms2_marker_rts.append(_rt)
                 ms2_marker_hover.append(
                     f"CE: {_ce_label}<br>Score: {_score_str}<br>RT: {_rt:.4f} min"
                 )
         if ms2_marker_rts:
+            marker_y = -y_marker_band / 2
             fig.add_trace(go.Scatter(
                 x=ms2_marker_rts,
-                y=[0.0] * len(ms2_marker_rts),
+                y=[marker_y] * len(ms2_marker_rts),
                 mode="markers",
-                marker=dict(color="black", size=10, symbol="arrow"),
+                marker=dict(color="black", size=10, symbol="triangle-up"),
                 cliponaxis=False,
                 showlegend=False,
                 text=ms2_marker_hover,
@@ -1130,7 +1153,7 @@ def build_dash_app(
 
         return fig
 
-    def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, row_idx, col_idx, colors=None, default_color="red", line_width_px=3):
+    def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, colors=None, default_color="red", line_width_px=3):
         """Add MS2 peak sticks with fixed pixel width. Handles NaNs by ignoring them."""
         if mz_vals is None or intensities is None:
             return
@@ -1175,21 +1198,16 @@ def build_dash_app(
                     showlegend=False,
                     hovertemplate=f"m/z: %{{x:.4f}}<br>Int: %{{customdata:.2e}}<extra>{hover_label}</extra>",
                 ),
-                row=row_idx, col=col_idx,
             )
 
     def _make_ms2_figure(state):
         compound_idx = state["compound_idx"]
         row = _compound_row(compound_idx)
         rt_min, rt_max = state["rt_min"], state["rt_max"]
-        
-        # Debug logging to verify we're using the correct compound
-        #logger.info(f"_make_ms2_figure: compound_idx={compound_idx}, mz_rt_uid={row['mz_rt_uid']}, compound_name={row['compound_name']}")
 
-        scans_by_energy = _get_ms2_scans(row, rt_min, rt_max)
-        #logger.info(f"_make_ms2_figure: Got {len(scans_by_energy)} collision energies with scans")
+        scans = _get_ms2_scans(row, rt_min, rt_max)
 
-        if len(scans_by_energy) == 0:
+        if scans.empty:
             fig = go.Figure()
             fig.add_annotation(text=f"{row['compound_name']} - No MS2 data",
                                xref="paper", yref="paper", x=0.5, y=0.5,
@@ -1198,136 +1216,131 @@ def build_dash_app(
                                xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False))
             return fig
 
-        collision_energies = sorted(scans_by_energy.keys())
-        n_energies = len(collision_energies)
-        fig = make_subplots(rows=1, cols=n_energies, horizontal_spacing=0.08)
+        actual_idx = max(0, min(int(state.get("ms2_idx", 0)), len(scans) - 1))
+        scan = scans.iloc[actual_idx]
 
-        for col_idx, ce in enumerate(collision_energies, start=1):
-            scans = scans_by_energy[ce]
-            if len(scans) == 0:
-                xref = "x" if col_idx == 1 else f"x{col_idx}"
-                yref = "y" if col_idx == 1 else f"y{col_idx}"
-                fig.add_annotation(text="No scans", xref=xref, yref=yref, x=0.5, y=0.5, showarrow=False, row=1, col=col_idx)
-                continue
+        # Collision energy label for x-axis title
+        ce_val = scan.get("collision_energy", None)
+        try:
+            ce_label = _format_collision_energy_label(float(ce_val)) if ce_val is not None else "MS2"
+        except (TypeError, ValueError):
+            ce_label = "MS2"
 
-            ce_ms2_idx = _get_ms2_idx_for_ce(state, ce)
-            actual_idx = max(0, min(ce_ms2_idx, len(scans) - 1))
-            scan = scans.iloc[actual_idx]
-            
-            # --- DATA EXTRACTION FROM HITS LIST ---
-            hits = scan.get('hits', [])
-            hit = hits[0] if hits else None  # best hit of this scan (hits are pre-sorted by score)
-            
-            label_points = []
-            scale = 1.0
-            stick_width_px = 3
-            num_ref_fragments = 0
-            num_matching_fragments = 0
+        fig = go.Figure()
 
-            if hit:
-                # Extract pre-aligned arrays from the hit dictionary
-                q_mz_raw, q_int_raw = hit['query_aligned']
-                r_mz_raw, r_int_raw = hit['ref_aligned']
-                q_mz = _sanitize_numeric_list(q_mz_raw)
-                q_int = _sanitize_numeric_list(q_int_raw)
-                r_mz = _sanitize_numeric_list(r_mz_raw)
-                r_int = _sanitize_numeric_list(r_int_raw)
-                frag_colors = hit['fragment_colors']
-                
-                # Handle scaling for the mirror plot
-                q_max = np.nanmax(q_int) if q_int and np.any(np.isfinite(q_int)) else 0
-                r_max = np.nanmax(r_int) if r_int and np.any(np.isfinite(r_int)) else 0
-                scale = (q_max / r_max) if r_max > 0 else 1.0
-                
-                # Scale the reference intensities and invert for mirror
-                ref_y = [(-i * scale) if np.isfinite(i) else np.nan for i in r_int]
+        # DATA EXTRACTION FROM HITS LIST
+        hits = scan.get('hits', [])
+        hit = hits[0] if hits else None  # best hit of this scan (hits are pre-sorted by score)
 
-                # Plot Query (Top)
-                _add_ms2_stick_traces(fig, q_mz, q_int, "Query", 1, col_idx, 
-                                     colors=frag_colors, default_color="red", line_width_px=stick_width_px)
+        label_points = []
+        scale = 1.0
+        stick_width_px = 3
+        num_ref_fragments = 0
+        num_matching_fragments = 0
 
-                # Plot Reference (Bottom)
-                _add_ms2_stick_traces(fig, r_mz, ref_y, "Reference", 1, col_idx, 
-                                     colors=frag_colors, default_color="red", line_width_px=stick_width_px)
+        if hit:
+            # Extract pre-aligned arrays from the hit dictionary
+            q_mz_raw, q_int_raw = hit['query_aligned']
+            r_mz_raw, r_int_raw = hit['ref_aligned']
+            q_mz = _sanitize_numeric_list(q_mz_raw)
+            q_int = _sanitize_numeric_list(q_int_raw)
+            r_mz = _sanitize_numeric_list(r_mz_raw)
+            r_int = _sanitize_numeric_list(r_int_raw)
+            frag_colors = hit['fragment_colors']
 
-                num_ref_fragments = hit.get('ref_frags', 0)
-                num_matching_fragments = len(hit.get('matched_fragments', []))
-                label_points.extend(zip(q_mz, q_int))
-                label_points.extend(zip(r_mz, ref_y))
+            # Handle scaling for the mirror plot
+            q_max = np.nanmax(q_int) if q_int and np.any(np.isfinite(q_int)) else 0
+            r_max = np.nanmax(r_int) if r_int and np.any(np.isfinite(r_int)) else 0
+            scale = (q_max / r_max) if r_max > 0 else 1.0
+
+            # Scale the reference intensities and invert for mirror
+            ref_y = [(-i * scale) if np.isfinite(i) else np.nan for i in r_int]
+
+            # Plot Query (Top)
+            _add_ms2_stick_traces(fig, q_mz, q_int, "Query",
+                                  colors=frag_colors, default_color="red", line_width_px=stick_width_px)
+
+            # Plot Reference (Bottom)
+            _add_ms2_stick_traces(fig, r_mz, ref_y, "Reference",
+                                  colors=frag_colors, default_color="red", line_width_px=stick_width_px)
+
+            num_ref_fragments = hit.get('ref_frags', 0)
+            num_matching_fragments = len(hit.get('matched_fragments', []))
+            label_points.extend(zip(q_mz, q_int))
+            label_points.extend(zip(r_mz, ref_y))
+        else:
+            # Fallback to raw spectrum if no hit is selected/available
+            mz = _sanitize_numeric_list(scan.get('frag_mzs', []))
+            ints = _sanitize_numeric_list(scan.get('frag_ints', []))
+            _add_ms2_stick_traces(fig, mz, ints, "MS2", default_color="red", line_width_px=stick_width_px)
+            label_points.extend(zip(mz, ints))
+
+        # ANNOTATION & STYLING
+        fig.add_hline(y=0, line=dict(color="black", width=1.5))
+
+        y_vals = [y for _, y in label_points if not np.isnan(y)] or [0]
+        y_min, y_max = min(y_vals), max(y_vals)
+        y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
+        label_pad, y_pad, TEXT_HEIGHT_OFFSET = y_span * 0.01, y_span * 0.01, y_span * 0.01
+
+        top_label_idxs = {idx for idx, _ in sorted(enumerate(label_points), key=lambda item: abs(item[1][1] if not np.isnan(item[1][1]) else 0), reverse=True)[:7]}
+        top_labels_sorted = sorted([(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs and not np.isnan(mz_val)], key=lambda item: item[1])
+
+        prev_mz, stagger_level = None, 0
+        for idx, mz_val, y_val in top_labels_sorted:
+            y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
+            if prev_mz is not None and abs(mz_val - prev_mz) < 5.0:
+                stagger_level += 1
             else:
-                # Fallback to raw spectrum if no hit is selected/available
-                mz = _sanitize_numeric_list(scan.get('frag_mzs', []))
-                ints = _sanitize_numeric_list(scan.get('frag_ints', []))
-                _add_ms2_stick_traces(fig, mz, ints, "MS2", 1, col_idx, default_color="red", line_width_px=stick_width_px)
-                label_points.extend(zip(mz, ints))
+                stagger_level = 0
+            y_pos = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
+            fig.add_annotation(x=mz_val, y=y_pos, text=f"{mz_val:.4f}", showarrow=False,
+                               xanchor="center", yanchor="bottom" if y_val >= 0 else "top",
+                               font=dict(size=12))
+            prev_mz = mz_val
 
-            # --- ANNOTATION & STYLING (Same as your legacy code) ---
-            fig.add_hline(y=0, line=dict(color="black", width=1.5), row=1, col=col_idx)
-            
-            y_vals = [y for _, y in label_points if not np.isnan(y)] or [0]
-            y_min, y_max = min(y_vals), max(y_vals)
-            y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
-            label_pad, y_pad, TEXT_HEIGHT_OFFSET = y_span * 0.01, y_span * 0.01, y_span * 0.01
+        fig.update_xaxes(
+            title_text=f"m/z ({ce_label})",
+            showgrid=False,
+            zeroline=False,
+            title_font=dict(size=18),
+            tickfont=dict(size=15),
+        )
+        fig.update_yaxes(
+            title_text=f"Intensity (Ref scaled x{scale:.2f})",
+            showgrid=False,
+            zeroline=False,
+            range=[y_min - y_pad, y_max + y_pad],
+            title_font=dict(size=18),
+            tickfont=dict(size=15),
+            autorange=False,
+        )
 
-            top_label_idxs = {idx for idx, _ in sorted(enumerate(label_points), key=lambda item: abs(item[1][1] if not np.isnan(item[1][1]) else 0), reverse=True)[:7]}
-            top_labels_sorted = sorted([(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs and not np.isnan(mz_val)], key=lambda item: item[1])
-
-            prev_mz, stagger_level = None, 0
-            for idx, mz_val, y_val in top_labels_sorted:
-                y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
-                if prev_mz is not None and abs(mz_val - prev_mz) < 5.0: stagger_level += 1
-                else: stagger_level = 0
-                y_pos = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
-                xref_coord, yref_coord = ("x" if col_idx == 1 else f"x{col_idx}"), ("y" if col_idx == 1 else f"y{col_idx}")
-                fig.add_annotation(x=mz_val, y=y_pos, text=f"{mz_val:.4f}", showarrow=False, xanchor="center", 
-                                   yanchor="bottom" if y_val >= 0 else "top", font=dict(size=12), xref=xref_coord, yref=yref_coord)
-                prev_mz = mz_val
-
-            fig.update_xaxes(
-                title_text=f"m/z ({_format_collision_energy_label(ce)})",
-                showgrid=False,
-                zeroline=False,
-                title_font=dict(size=18),
-                tickfont=dict(size=15),
-                row=1,
-                col=col_idx,
+        fname = "_".join(os.path.basename(scan.get("filename", "")).split(".")[0].split("_")[11:])
+        if hit:
+            scan_info = (
+                f"<span style='font-size:1.2em'>"
+                f"<b>CoS.: {hit.get('score', 0):.4f}</b>  |  "
+                f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
+                f"RT: {scan.get('scan_rt', 0):.4f} min | "
+                f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
+                f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
+                f"ppm Δ: {hit.get('ppm_error', 0):.2f}"
+                f"</span><br>"
+                f"{hit.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
             )
-            fig.update_yaxes(
-                title_text=f"Intensity (Ref scaled x{scale:.2f})" if col_idx == 1 else "",
-                showgrid=False,
-                zeroline=False,
-                range=[y_min - y_pad, y_max + y_pad],
-                title_font=dict(size=18),
-                tickfont=dict(size=15),
-                autorange=False,
-                row=1,
-                col=col_idx,
+        else:
+            scan_info = (
+                f"<span style='font-size:1.2em'>"
+                f"<b>No Hit</b>"
+                f"</span><br>"
+                f"{fname}<br><br>"
             )
-            # Updated Scan Info using Hit metadata
-            fname = "_".join(os.path.basename(scan.get("filename", "")).split(".")[0].split("_")[11:])
-            if hit:
-                scan_info = (
-                    f"<span style='font-size:1.2em'>"
-                    f"<b>CoS.: {hit.get('score', 0):.4f}</b>  |  "
-                    f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
-                    f"RT: {scan.get('scan_rt', 0):.4f} min | "
-                    f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
-                    f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
-                    f"ppm Δ: {hit.get('ppm_error', 0):.2f}"
-                    f"</span><br>"
-                    f"{hit.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
-                )
-            else:
-                scan_info = (
-                    f"<span style='font-size:1.2em'>"
-                    f"<b>No Hit</b>"
-                    f"</span><br>"
-                    f"{fname}<br><br>"
-                )
 
-            xref_str, yref_str = ("x domain" if col_idx == 1 else f"x{col_idx} domain"), ("y domain" if col_idx == 1 else f"y{col_idx} domain")
-            fig.add_annotation(text=scan_info, xref=xref_str, yref=yref_str, x=0.5, y=1.02, showarrow=False, font=dict(size=14), xanchor="center", yanchor="bottom")
-        
+        fig.add_annotation(text=scan_info, xref="x domain", yref="y domain",
+                           x=0.5, y=1.02, showarrow=False, font=dict(size=14),
+                           xanchor="center", yanchor="bottom")
+
         fig.update_layout(
             barmode="overlay",
             hovermode="closest",
@@ -1335,8 +1348,6 @@ def build_dash_app(
             plot_bgcolor="white",
             showlegend=False,
         )
-        
-        #logger.info(f"_make_ms2_figure: Completed for compound {compound_idx} ({row['compound_name']})")
         return fig
 
     logger.debug("App helpers defined successfully")
@@ -1455,32 +1466,17 @@ def build_dash_app(
         Output("session-store", "data", allow_duplicate=True),
         Input("ms2-prev-1", "n_clicks"),
         Input("ms2-next-1", "n_clicks"),
-        Input("ms2-prev-2", "n_clicks"),
-        Input("ms2-next-2", "n_clicks"),
         State("session-store", "data"),
         prevent_initial_call=True,
     )
-    def navigate_ms2(prev1, nxt1, prev2, nxt2, state):
+    def navigate_ms2(prev1, nxt1, state):
         if state is None:
             raise dash.exceptions.PreventUpdate
         trigger = ctx.triggered_id
-        #logger.info(f"navigate_ms2 called: trigger={trigger}, current ms2_idx={state.get('ms2_idx', 0)}")
         if trigger == "ms2-prev-1":
-            new_state = _move_ms2_idx_for_ce_position(state, ce_position=0, delta=-1)
-            #logger.info(f"navigate_ms2: MS2-1 prev -> new ms2_idx={new_state.get('ms2_idx', 0)}")
-            return new_state
+            return _move_ms2_idx(state, delta=-1)
         if trigger == "ms2-next-1":
-            new_state = _move_ms2_idx_for_ce_position(state, ce_position=0, delta=1)
-            #logger.info(f"navigate_ms2: MS2-1 next -> new ms2_idx={new_state.get('ms2_idx', 0)}")
-            return new_state
-        if trigger == "ms2-prev-2":
-            new_state = _move_ms2_idx_for_ce_position(state, ce_position=1, delta=-1)
-            #logger.info(f"navigate_ms2: MS2-2 prev -> new ms2_idx={new_state.get('ms2_idx', 0)}")
-            return new_state
-        if trigger == "ms2-next-2":
-            new_state = _move_ms2_idx_for_ce_position(state, ce_position=1, delta=1)
-            #logger.info(f"navigate_ms2: MS2-2 next -> new ms2_idx={new_state.get('ms2_idx', 0)}")
-            return new_state
+            return _move_ms2_idx(state, delta=1)
         raise dash.exceptions.PreventUpdate
 
     @app.callback(
@@ -1703,13 +1699,9 @@ def build_dash_app(
 
         # --- MS2 navigation keys ---
         if key in ("l", "ArrowUp"):
-            return _move_ms2_idx_for_ce_position(state, ce_position=0, delta=-1), dash.no_update
+            return _move_ms2_idx(state, delta=-1), dash.no_update
         if key in (";", "ArrowDown"):
-            return _move_ms2_idx_for_ce_position(state, ce_position=0, delta=1), dash.no_update
-        if key == "o":
-            return _move_ms2_idx_for_ce_position(state, ce_position=1, delta=-1), dash.no_update
-        if key == "p":
-            return _move_ms2_idx_for_ce_position(state, ce_position=1, delta=1), dash.no_update
+            return _move_ms2_idx(state, delta=1), dash.no_update
 
         # --- Accept suggestions ---
         if key == "n":
@@ -1763,25 +1755,39 @@ def build_dash_app(
 
         raise dash.exceptions.PreventUpdate
 
+    def _ms2_scan_fingerprint(state):
+        """Return a frozenset representing the current MS2 render state.
+        Used to prevent re-rendering the MS2 figure if the set of scans in the RT window hasn't changed.
+        """
+        compound_idx = state["compound_idx"]
+        row = _compound_row(compound_idx)
+        scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
+        selected_idx = max(0, int(state.get("ms2_idx", 0)))
+        fp = set()
+        if not scans.empty and "scan_rt" in scans.columns:
+            for scan_rt in scans["scan_rt"]:
+                try:
+                    fp.add((int(compound_idx), round(float(scan_rt), 4), int(selected_idx)))
+                except (TypeError, ValueError):
+                    pass
+        return frozenset(fp)
+
     @app.callback(
         Output("ms1-graph", "figure"),
-        Output("ms2-graph", "figure"),
         Output("error-banner", "children"),
         Input("session-store", "data"),
         Input("yaxis-scale-radio", "value"),
         prevent_initial_call=False,
     )
-    def update_figures(state, yaxis_scale):
+    def update_ms1_figure(state, yaxis_scale):
         state = _ensure_valid_state(state)
-        
+
         flush_err = state.get("flush_error")
         ms2_warning = state.get("ms2_warning")
         ms1_warning = state.get("ms1_warning")
         try:
-            # Generate figures (no caching)
             ms1_fig = _make_ms1_figure(state, yaxis_scale)
-            ms2_fig = _make_ms2_figure(state)
-            
+
             banners = []
             if flush_err:
                 banners.append(html.Div(
@@ -1799,24 +1805,57 @@ def build_dash_app(
                     style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
                 ))
             banner = banners if banners else ""
-            return ms1_fig, ms2_fig, banner
+            return ms1_fig, banner
         except Exception as exc:
             traceback.print_exc()
-            logger.error(f"update_figures error: {exc}")
+            logger.error(f"update_ms1_figure error: {exc}")
             err_html = html.Span(
-                f"Figure error: {type(exc).__name__}: {exc}",
+                f"MS1 figure error: {type(exc).__name__}: {exc}",
                 style={"color": "red", "fontSize": "11px", "fontWeight": "bold"},
             )
             empty = go.Figure()
             empty.update_layout(margin=dict(l=50, r=20, t=40, b=40))
-            return empty, empty, err_html
+            return empty, err_html
+
+    @app.callback(
+        Output("ms2-graph", "figure"),
+        Output("ms2-scan-fp-store", "data"),
+        Input("session-store", "data"),
+        State("ms2-scan-fp-store", "data"),
+        prevent_initial_call=False,
+    )
+    def update_ms2_figure(state, old_fp_raw):
+        state = _ensure_valid_state(state)
+        # don't rebuild the ms2 plot of RT bound changes didn't impact the set of scans in the window
+        new_fp = _ms2_scan_fingerprint(state)
+        # Serialize as a sorted list of lists for JSON storage in dcc.Store
+        new_fp_serializable = sorted([list(item) for item in new_fp])
+
+        if old_fp_raw is not None:
+            try:
+                old_fp = frozenset(tuple(item) for item in old_fp_raw)
+                if old_fp == new_fp:
+                    logger.debug("update_ms2_figure: scan set unchanged, skipping re-render")
+                    raise dash.exceptions.PreventUpdate
+            except dash.exceptions.PreventUpdate:
+                raise
+            except Exception:
+                pass  # If comparison fails for any reason, fall through to full render
+
+        try:
+            return _make_ms2_figure(state), new_fp_serializable
+        except Exception as exc:
+            traceback.print_exc()
+            logger.error(f"update_ms2_figure error: {exc}")
+            empty = go.Figure()
+            empty.update_layout(margin=dict(l=50, r=20, t=40, b=40))
+            return empty, new_fp_serializable
 
     @app.callback(
         Output("status-current", "children"),
         Output("status-previous", "children"),
         Output("compound-counter", "children"),
         Output("ms2-counter-1", "children"),
-        Output("ms2-counter-2", "children"),
         Input("session-store", "data"),
         prevent_initial_call=False,
     )
@@ -1824,24 +1863,12 @@ def build_dash_app(
         state = _ensure_valid_state(state)
         row = _compound_row(state["compound_idx"])
         comp_txt = f"Compound {state['compound_idx']+1} of {len(compound_options)}"
-        
-        # Get scans by collision energy for detailed count
-        scans_by_energy = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
-        ms2_txt_1 = "No CE102040"
-        ms2_txt_2 = "No CE205060"
-        if scans_by_energy:
-            collision_energies = sorted(scans_by_energy.keys())
-            if len(collision_energies) > 0:
-                ce1 = collision_energies[0]
-                n1 = len(scans_by_energy.get(ce1, []))
-                idx1 = min(_get_ms2_idx_for_ce(state, ce1), max(n1 - 1, 0)) if n1 > 0 else 0
-                ms2_txt_1 = f"{_format_collision_energy_label(ce1)}: {idx1 + 1}/{n1}" if n1 > 0 else f"{_format_collision_energy_label(ce1)}: 0/0"
-            if len(collision_energies) > 1:
-                ce2 = collision_energies[1]
-                n2 = len(scans_by_energy.get(ce2, []))
-                idx2 = min(_get_ms2_idx_for_ce(state, ce2), max(n2 - 1, 0)) if n2 > 0 else 0
-                ms2_txt_2 = f"{_format_collision_energy_label(ce2)}: {idx2 + 1}/{n2}" if n2 > 0 else f"{_format_collision_energy_label(ce2)}: 0/0"
-        
+
+        scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
+        n_scans = len(scans)
+        ms2_idx = max(0, min(int(state.get("ms2_idx", 0)), max(n_scans - 1, 0)))
+        ms2_txt_1 = f"MS2: {ms2_idx + 1}/{n_scans}" if n_scans > 0 else "MS2: No scans"
+
         pending = html.Span(
             [
                 html.I("Current analysis: ", style={"color": "black"}),
@@ -1865,7 +1892,7 @@ def build_dash_app(
             )
         else:
             saved = html.Span("Previous: NA", style={"color": "#888", "fontSize": "16px"})
-        return pending, saved, comp_txt, ms2_txt_1, ms2_txt_2
+        return pending, saved, comp_txt, ms2_txt_1
 
     @app.callback(
         Output("analyst-notes", "value"),
