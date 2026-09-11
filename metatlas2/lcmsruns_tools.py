@@ -110,14 +110,14 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
     if not lcmsruns:
         raise ValueError(f"No .raw, .mzML, or .h5 files found in {project_path}")
 
-    # Verify all formats have the same number of files.
-    unique_counts = set(counts.values())
-    if len(unique_counts) > 1:
-        counts_str = ", ".join(f".{ext}: {n}" for ext, n in counts.items())
-        raise ValueError(
-            f"File count mismatch across formats ({counts_str}). "
-            "Each .raw file should have a corresponding .mzML and .h5 file."
-        )
+    # # Verify all formats have the same number of files.
+    # unique_counts = set(counts.values())
+    # if len(unique_counts) > 1:
+    #     counts_str = ", ".join(f".{ext}: {n}" for ext, n in counts.items())
+    #     raise ValueError(
+    #         f"File count mismatch across formats ({counts_str}). "
+    #         "Each .raw file should have a corresponding .mzML and .h5 file."
+    #     )
 
     # Log combined category breakdown for .h5 files only.
     h5_runs = [r for r in lcmsruns if r["file_format"] == "h5"]
