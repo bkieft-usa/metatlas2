@@ -1805,6 +1805,7 @@ def _plot_compound_boxplot(
     adduct: str,
     ylabel: str,
     compound_idx: int = 0,
+    all_groups: list[str] | None = None,
 ) -> None:
     """Draw a grouped boxplot for one compound onto *ax*.
 
@@ -1823,40 +1824,52 @@ def _plot_compound_boxplot(
         Used as the subplot title.
     ylabel:
         Y-axis label string.
+    all_groups:
+        The complete sorted list of file_group labels across all files in the
+        analysis.  When provided every group always appears on the x-axis;
+        groups with no data for this compound are shown as blank columns.
+        When *None* only groups that have data are shown (legacy behaviour).
     """
     rng = np.random.default_rng(seed=42)
-    groups = sorted(compound_metrics["file_group"].dropna().unique()) if not compound_metrics.empty else []
+
+    if all_groups is not None:
+        groups = all_groups
+    elif not compound_metrics.empty:
+        groups = sorted(compound_metrics["file_group"].dropna().unique())
+    else:
+        groups = []
+
     data_per_group: list[list[float]] = []
     real_vals_all: list[float] = []   # only genuine data values, used for y-axis scaling
-    valid_groups: list[str] = []
     for g in groups:
-        group_rows = compound_metrics.loc[compound_metrics["file_group"] == g]
-        vals = group_rows[metric].dropna().tolist()
-        if log_scale:
-            vals = [np.log10(v) for v in vals if v is not None and v > 0]
+        if compound_metrics.empty:
+            vals: list[float] = []
+        else:
+            group_rows = compound_metrics.loc[compound_metrics["file_group"] == g]
+            vals = group_rows[metric].dropna().tolist()
+            if log_scale:
+                vals = [np.log10(v) for v in vals if v is not None and v > 0]
         if vals:
             real_vals_all.extend(vals)
         data_per_group.append(vals)
-        valid_groups.append(g)
 
-    if not data_per_group:
-        ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
-                ha="center", va="center", fontsize=8, color="gray")
+    def _make_title() -> str:
         title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
         if metric == "mz_centroid":
             mz_val = atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-            title_bottom = f"Atlas m/z: {mz_val}"
-            ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
-        elif metric == "rt_peak":
+            return f"{title_top}\nAtlas m/z: {mz_val}"
+        if metric == "rt_peak":
             rt_val = f"{atlas_ref:.3f} min" if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-            title_bottom = f"Atlas RT: {rt_val}"
-            ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
-        else:
-            ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
-        
+            return f"{title_top}\nAtlas RT: {rt_val}"
+        return title_top
+
+    if not groups:
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
+                ha="center", va="center", fontsize=8, color="gray")
+        ax.set_title(_make_title(), fontsize=13, pad=2, loc="center", fontweight="bold")
         return
 
-    positions = list(range(len(valid_groups)))
+    positions = list(range(len(groups)))
     boxplot_data = [vals if vals else [np.nan] for vals in data_per_group]
     ax.boxplot(
         boxplot_data,
@@ -1880,7 +1893,7 @@ def _plot_compound_boxplot(
             s=8, color="steelblue", alpha=0.65, zorder=3,
         )
 
-    # Fit y-axis tightly to the actual data values only (excludes placeholder zeros)
+    # Fit y-axis tightly to the actual data values only (excludes placeholder NaNs)
     if real_vals_all:
         data_min = min(real_vals_all)
         data_max = max(real_vals_all)
@@ -1888,23 +1901,11 @@ def _plot_compound_boxplot(
         ax.set_ylim(data_min - data_range * 0.1, data_max + data_range * 0.15)
 
     ax.set_xticks(positions)
-    ax.set_xticklabels(valid_groups, rotation=45, ha="right", fontsize=10)
+    ax.set_xticklabels(groups, rotation=45, ha="right", fontsize=10)
     ax.tick_params(axis="y", labelsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
 
-    # Title formatting: large top line, smaller below
-    title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
-    if metric == "mz_centroid":
-        mz_val = atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-        title_bottom = f"Atlas m/z: {mz_val}"
-        ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
-    elif metric == "rt_peak":
-        rt_val = f"{atlas_ref:.3f} min" if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-        title_bottom = f"Atlas RT: {rt_val}"
-        ax.set_title(f"{title_top}\n{title_bottom}", fontsize=13, pad=2, loc="center", fontweight="bold")
-    else:
-        ax.set_title(title_top, fontsize=13, pad=2, loc="center", fontweight="bold")
-    
+    ax.set_title(_make_title(), fontsize=13, pad=2, loc="center", fontweight="bold")
 
     # For linear scales, remove scientific notation multiplier and offset
     if not log_scale:
@@ -1923,18 +1924,25 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     atlas_ref_dict = kwargs["atlas_ref_dict"]
     metric_configs = kwargs["metric_configs"]
     cmp_metrics = kwargs["cmp_metrics"]
+    all_groups = kwargs.get("all_groups")  # global group list for consistent x-axis
 
     safe_stem = f"{_display_compound_idx(cmp_idx):04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
+
+    # Scale figure width with the number of groups so x-axis labels stay readable.
+    n_groups = len(all_groups) if all_groups else 1
+    fig_width = max(10, min(80, n_groups * 0.25))
+
     for metric, log_scale, ylabel, atlas_attr, metric_dir_str in metric_configs:
         pdf_path = Path(metric_dir_str) / f"{safe_stem}.pdf"
         atlas_ref = atlas_ref_dict.get(atlas_attr) if atlas_attr else None
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(fig_width, 6))
         fig.subplots_adjust(bottom=0.2, left=0.12, right=0.97, top=0.88)
         try:
             _plot_compound_boxplot(
                 ax, cmp_metrics, metric, log_scale,
                 atlas_ref, compound_name, adduct, ylabel,
                 compound_idx=cmp_idx,
+                all_groups=all_groups,
             )
             with PdfPages(pdf_path) as pdf:
                 pdf.savefig(fig, bbox_inches="tight")
@@ -1984,7 +1992,7 @@ def make_boxplots(
     _METRIC_CONFIGS = [
         ("peak_height", False, "Peak Height (intensity)", None),
         ("peak_height", True,  "Peak Height (log₁₀)", None),
-        ("rt_peak", False, "RT Peak (min)", "atlas_rt_peak"),
+        ("rt_peak", False, "RT Peak (mins)", "atlas_rt_peak"),
         ("mz_centroid", False, "m/z Centroid", "atlas_mz"),
     ]
     metric_configs_with_dirs: list[tuple] = []
@@ -2008,6 +2016,11 @@ def make_boxplots(
             f"Sample curation UIDs: {list(mc_uids)[:3]} | Sample per_file UIDs: {list(pf_uids)[:3]}"
         )
 
+    # Compute the global sorted list of file groups for displaying in the boxplots
+    all_groups: list[str] = sorted(
+        per_file_df["file_group"].dropna().unique().tolist()
+    ) if "file_group" in per_file_df.columns else []
+
     # One task per compound
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
@@ -2025,6 +2038,7 @@ def make_boxplots(
             "atlas_ref_dict": atlas_lookup.get(mz_rt_uid, {}),
             "metric_configs": metric_configs_with_dirs,
             "cmp_metrics": pf_groups.get(mz_rt_uid, pd.DataFrame()),
+            "all_groups": all_groups,
         })
 
     if not tasks:
@@ -2345,11 +2359,11 @@ def make_peak_height_filtered_csv(
 
     df = pd.read_csv(source_csv)
 
-    # ── Identify metadata vs sample columns ──────────────────────────────────
+    # Identify metadata vs sample columns
     _META_COLS = {"compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
     data_cols = [c for c in df.columns if c not in _META_COLS]
 
-    # ── 1. Control-signal filter ──────────────────────────────────────────────
+    # Control-signal filter
     _CTRL_PATTERNS = ("ExCtrl", "InjBL")
     ctrl_cols     = [c for c in data_cols if any(p in c for p in _CTRL_PATTERNS)]
     non_ctrl_cols = [c for c in data_cols if c not in ctrl_cols]
@@ -2504,8 +2518,6 @@ def make_log_fold_changes_csv(
     if use_filter and "control_filter" in df.columns:
         df = df[df["control_filter"] == "keep"].reset_index(drop=True)
 
-    # Metadata columns — same as peak_height_filtered.csv but without control_filter.
-    # Preserve ordered output: compound_index, mz_rt_uid, compound_name, inchi_key, adduct
     _ID_COL_NAMES = {"compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
     _ID_COL_ORDER = ["compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"]
     id_cols   = [c for c in _ID_COL_ORDER if c in df.columns]
@@ -2518,7 +2530,7 @@ def make_log_fold_changes_csv(
 
     data_num = df[data_cols].apply(pd.to_numeric, errors="coerce")
 
-    # ── Group replicate columns by sample_name (13th underscore-split field) ──
+    # Group replicate columns by sample_name (13th underscore-split field)
     group_to_cols: dict[str, list[str]] = {}
     ungrouped_cols: list[str] = []
     for col in data_num.columns:
@@ -2546,20 +2558,12 @@ def make_log_fold_changes_csv(
         df[id_cols].to_csv(output_csv, sep=",", index=False)
         return
 
-    logger.info(
-        "Identified %d sample groups: %s",
-        len(group_to_cols),
-        list(group_to_cols.keys()),
-    )
-    #for grp, cols in group_to_cols.items():
-    #    logger.info(f"  Group '{grp}': {len(cols)} replicate(s) — {cols}")
-
-    # ── Compute per-group mean across replicates ──────────────────────────────
+    # Compute per-group mean across replicates
     group_means: dict[str, np.ndarray] = {}
     for grp, cols in group_to_cols.items():
         group_means[grp] = data_num[cols].mean(axis=1).to_numpy(dtype=float)
 
-    # ── Build output: id columns + pairwise LFC columns ──────────────────────
+    # Build output: id columns + pairwise LFC columns
     lfc_records: dict[str, object] = {col: df[col].to_numpy() for col in id_cols}
 
     n_comparisons = 0
@@ -2701,7 +2705,7 @@ def make_metabomap(
         One row per ``(inchi_key, compound_name)`` with columns:
         ``inchi_key, cpd_id, compound_name, <GroupA>_vs_<GroupB>, ...``
     """
-    # ── 1. Setup paths ────────────────────────────────────────────────────────
+    # Setup paths
     analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
     curr_pol = fpf.normalize_polarity(summary_obj.polarity)   # "pos" or "neg"
     sib_pol  = "neg" if curr_pol == "pos" else "pos"
@@ -2725,7 +2729,7 @@ def make_metabomap(
 
     metabomaps_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 2. Load both polarity CSVs ────────────────────────────────────────────
+    # Load both polarity CSVs
     _META_COLS = {"control_filter", "compound_index", "mz_rt_uid",
                   "compound_name", "inchi_key", "adduct"}
     _EXCLUDE_GROUPS = ("QC", "ISTD")
@@ -2750,9 +2754,7 @@ def make_metabomap(
         if c not in _META_COLS and c != "_polarity"
     ]
 
-    # ── 3. Select best row per (inchi_key, compound_name) ────────────────────
-    # "Best" = highest max peak height across non-control sample columns.
-    # Control columns (ExCtrl, InjBL) are excluded from the selection score.
+    # Select best row per (inchi_key, compound_name)
     _CTRL_PATTERNS = ("ExCtrl", "InjBL")
     non_ctrl_sample_cols = [
         c for c in all_sample_cols
@@ -2785,7 +2787,7 @@ def make_metabomap(
     best["chosen_adduct"]   = best["adduct"]   if "adduct"    in best.columns else ""
     best["chosen_polarity"] = best["_polarity"]
 
-    # ── 4. Build the merged peak-heights table ────────────────────────────────
+    # Build the merged peak-heights table
     # Keep only sample columns that are actually present in the best-row selection
     present_sample_cols = [c for c in all_sample_cols if c in best.columns]
 
@@ -2805,7 +2807,7 @@ def make_metabomap(
     merged_data_df.to_csv(merged_tsv, sep="\t", index=False)
     logger.info(f"Wrote merged_peak_heights.tsv ({len(merged_data_df)} compounds x {len(present_sample_cols)} sample columns)")
 
-    # ── 5. Group sample columns by sample_name (index 12) and compute LFC ────
+    # Group sample columns by sample_name (index 12) and compute LFC
     _LFC_META = {"inchi_key", "cpd_id", "compound_name", "chosen_adduct", "chosen_polarity"}
     sample_data_cols = [c for c in merged_data_df.columns if c not in _LFC_META]
 
