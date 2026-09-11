@@ -106,6 +106,8 @@ def _make_parameters_cell(auto_id_obj: "AutoIdentification", run_params: dict) -
             src += f"    '{key}': '{run_params[key]}',\n"
         else:
             src += f"    '{key}': {run_params[key]},\n"
+    src += "    'gui_width': None,  # preferred app width in inches (None = auto)\n"
+    src += "    'gui_height': None,  # preferred app height in inches (None = auto)\n"
     src += "}"
     return nbformat.v4.new_code_cell(src)
 

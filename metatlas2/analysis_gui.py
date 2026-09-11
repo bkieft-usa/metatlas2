@@ -20,7 +20,8 @@ logger = lcf.get_logger("analysis_gui")
 def build_dash_app(
     analysis_gui_obj,
     port=8050,
-    shutdown_holder=None
+    shutdown_holder=None,
+    run_parameters=None,
 ):
     logger.debug("Starting the app factory for the Analysis GUI...")
 
@@ -214,18 +215,39 @@ def build_dash_app(
     FIXED_CHROME = 340   # dropdown + textarea + id-notes + status divs + buttons + padding
     BUTTON_ROW_H = 48    # height of each button row between/below the graphs
 
+    # Resolve user-supplied dimensions (inches → pixels at 96 dpi)
+    _rp = run_parameters or {}
+    _gui_width_in = _rp.get("gui_width") or None
+    _gui_height_in = _rp.get("gui_height") or None
+    DPI = 96  # standard screen DPI for CSS px conversion
+
     n_rows = (
         len(analysis_gui_obj.notes["ms1_notes"])
         + len(analysis_gui_obj.notes["ms2_notes"])
         + len(analysis_gui_obj.notes["other_notes"])
     )
-    left_bar_h = n_rows * PX_PER_ROW + FIXED_CHROME
+
+    if _gui_height_in is not None:
+        left_bar_h = int(float(_gui_height_in) * DPI)
+    else:
+        left_bar_h = n_rows * PX_PER_ROW + FIXED_CHROME
+
     graph_avail_h = left_bar_h - 2 * BUTTON_ROW_H   # subtract two button rows
     ms1_height = max(int(graph_avail_h * 0.6), 200)
     ms2_height = max(int(graph_avail_h * 0.4), 150)
 
-    # 3 left : 8 graph column ratio → 11 total parts
-    app_width = int(left_bar_h * (12 / 8) * 1.5)
+    if _gui_width_in is not None:
+        app_width = int(float(_gui_width_in) * DPI)
+    else:
+        app_width = int(left_bar_h * (12 / 8) * 1.5)
+
+    _auto_left_bar_h = n_rows * PX_PER_ROW + FIXED_CHROME
+    _font_scale = left_bar_h / _auto_left_bar_h if _auto_left_bar_h > 0 else 1.0
+    _font_scale = max(0.5, min(_font_scale, 2.0))
+
+    def _fs(base_rem: float) -> str:
+        """Return a scaled rem font-size string."""
+        return f"{round(base_rem * _font_scale, 3)}rem"
 
     app.layout = dbc.Container(
         [
@@ -233,6 +255,7 @@ def build_dash_app(
             dcc.Store(id="controls-compound-idx", storage_type="memory", data=starting_compound_idx),
             dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
             dcc.Store(id="ms2-scan-fp-store", storage_type="memory", data=None),
+            dcc.Store(id="ms2-yaxis-scale-store", storage_type="memory", data="linear"),
             keyboard_listener,
             dbc.Row(
                 [
@@ -240,12 +263,12 @@ def build_dash_app(
                         [
                             html.Div(
                                 f"{project_shortname}  |  {chrom}  |  {pol}  |  {analysis_type}  |  RTA{rta}  |  TGA{tga}",
-                                style={"fontSize": "1rem", "fontWeight": "bold", "marginBottom": "0.5rem", "color": "#333"}
+                                style={"fontSize": _fs(1.0), "fontWeight": "bold", "marginBottom": "0.5rem", "color": "#333"}
                             ),
                             dbc.Row(
                                 [
                                     dbc.Col(
-                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=starting_compound_idx, clearable=False, style={"width": "100%", "fontSize": "1.5rem"}),
+                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=starting_compound_idx, clearable=False, style={"width": "100%", "fontSize": _fs(1.5)}),
                                         width=11, className="mb-3",
                                     ),
                                 ],
@@ -262,53 +285,53 @@ def build_dash_app(
                                     "border": "1px solid #ced4da",
                                     "borderRadius": "0.25rem",
                                     "padding": "0.375rem 0.75rem",
-                                    "fontSize": "1rem"
+                                    "fontSize": _fs(1.0),
                                 },
                                 className="my-2",
                                 children="No identification notes"
                             ),
                             html.Div(
                                 [
-                                    html.Label("MS1 quality:", className="fw-bold", style={"fontSize": "1.5rem"}),
+                                    html.Label("MS1 quality:", className="fw-bold", style={"fontSize": _fs(1.5)}),
                                     dcc.RadioItems(
                                         id="ms1-radio",
                                         options=[{"label": f"[{analysis_gui_obj.notes['ms1_hotkeys'].get(lbl, '')}] {lbl}", "value": lbl} for lbl in analysis_gui_obj.notes["ms1_notes"]],
                                         value=analysis_gui_obj.notes["ms1_notes"][0],
-                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
-                                        inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
+                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": _fs(1.5)},
+                                        inputStyle={"margin-right": "6px", "transform": f"scale({round(1.5 * _font_scale, 3)})"},
                                     ),
                                 ],
                                 className="my-3",
                             ),
                             html.Div(
                                 [
-                                    html.Label("MS2 quality:", className="fw-bold", style={"fontSize": "1.5rem"}),
+                                    html.Label("MS2 quality:", className="fw-bold", style={"fontSize": _fs(1.5)}),
                                     dcc.RadioItems(
                                         id="ms2-radio",
                                         options=[{"label": f"[{analysis_gui_obj.notes['ms2_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["ms2_notes"]],
                                         value=analysis_gui_obj.notes["ms2_notes"][0],
-                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
-                                        inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
+                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": _fs(1.5)},
+                                        inputStyle={"margin-right": "6px", "transform": f"scale({round(1.5 * _font_scale, 3)})"},
                                     ),
                                 ],
                                 className="my-3",
                             ),
                             html.Div(
                                 [
-                                    html.Label("Other notes:", className="fw-bold", style={"fontSize": "1.5rem"}),
+                                    html.Label("Other notes:", className="fw-bold", style={"fontSize": _fs(1.5)}),
                                     dcc.Checklist(
                                         id="other-checklist",
                                         options=[{"label": f"[{analysis_gui_obj.notes['other_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["other_notes"]],
                                         value=[],
-                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": "1.5rem"},
-                                        inputStyle={"margin-right": "6px", "transform": "scale(1.5)"},
+                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": _fs(1.5)},
+                                        inputStyle={"margin-right": "6px", "transform": f"scale({round(1.5 * _font_scale, 3)})"},
                                     ),
                                 ],
                                 className="my-3",
                             ),
-                            html.Div(id="status-current", className="my-2", style={"fontSize": "1rem"}),
-                            html.Div(id="status-previous", className="my-2", style={"fontSize": "1rem"}),
-                            html.Div(id="error-banner", className="my-2", style={"fontSize": "1rem"}),
+                            html.Div(id="status-current", className="my-2", style={"fontSize": _fs(1.0)}),
+                            html.Div(id="status-previous", className="my-2", style={"fontSize": _fs(1.0)}),
+                            html.Div(id="error-banner", className="my-2", style={"fontSize": _fs(1.0)}),
                             dbc.Row(
                                 [
                                     dbc.Col(
@@ -350,49 +373,49 @@ def build_dash_app(
                                 [
                                     dbc.Col(
                                         dbc.Button(
-                                            "◀ Prev ID [j,<]", 
-                                            id="prev-btn", 
-                                            color="primary", 
-                                            className="me-2 w-100", 
-                                            style={"fontSize": "1rem"}), 
+                                            "◀ Prev ID [j,<]",
+                                            id="prev-btn",
+                                            color="primary",
+                                            className="me-2 w-100",
+                                            style={"fontSize": _fs(1.0)}),
                                             width=2),
                                     dbc.Col(
                                         html.Div(
-                                            id="compound-counter", 
-                                            className="fw-bold text-center", 
-                                            style={"fontSize": "1rem"}), 
+                                            id="compound-counter",
+                                            className="fw-bold text-center",
+                                            style={"fontSize": _fs(1.0)}),
                                             width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Next ID ▶  [k,>, ]", 
-                                            id="next-btn", 
-                                            color="primary", 
-                                            className="ms-2 w-100", 
-                                            style={"fontSize": "1rem"}), 
+                                            "Next ID ▶  [k,>, ]",
+                                            id="next-btn",
+                                            color="primary",
+                                            className="ms-2 w-100",
+                                            style={"fontSize": _fs(1.0)}),
                                             width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Accept Suggestions  [n]", 
-                                            id="accept-suggestions", 
-                                            color="warning", 
-                                            className="w-100", 
-                                            style={"fontSize": "1rem"}), 
+                                            "Accept Suggestions  [n]",
+                                            id="accept-suggestions",
+                                            color="warning",
+                                            className="w-100",
+                                            style={"fontSize": _fs(1.0)}),
                                             width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Snap to Isomer  [m]", 
-                                            id="snap-to-isomer", 
+                                            "Snap to Isomer  [m]",
+                                            id="snap-to-isomer",
                                             color="secondary",
-                                            className="w-100", 
-                                            style={"fontSize": "1rem"}), 
+                                            className="w-100",
+                                            style={"fontSize": _fs(1.0)}),
                                             width=2),
                                     dbc.Col(
                                         dcc.RadioItems(
                                             id="yaxis-scale-radio",
                                             options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
                                             value="linear",
-                                            labelStyle={"display": "inline-block", "margin-right": "12px", "fontSize": "1rem"},
-                                            inputStyle={"margin-right": "6px", "transform": "scale(1.3)"},
+                                            labelStyle={"display": "inline-block", "margin-right": "12px", "fontSize": _fs(1.0)},
+                                            inputStyle={"margin-right": "6px", "transform": f"scale({round(1.3 * _font_scale, 3)})"},
                                             className="w-100",
                                         ),
                                         width=1,
@@ -404,15 +427,27 @@ def build_dash_app(
                                 justify="start",
                             ),
                             dcc.Graph(
-                                id="ms2-graph", 
-                                config={"displayModeBar": True}, 
+                                id="ms2-graph",
+                                config={"displayModeBar": True},
                                 style={"height": f"{str(ms2_height)}px"}
                             ),
                             dbc.Row(
                                 [
-                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(html.Div(id="ms2-counter-1", className="fw-bold text-center", style={"fontSize": "1rem"}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": "1rem"}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
+                                    dbc.Col(html.Div(id="ms2-counter-1", className="fw-bold text-center", style={"fontSize": _fs(1.0)}), width=2),
+                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
+                                    dbc.Col(
+                                        dcc.RadioItems(
+                                            id="ms2-yaxis-scale-radio",
+                                            options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
+                                            value="linear",
+                                            labelStyle={"display": "inline-block", "margin-right": "12px", "fontSize": _fs(1.0)},
+                                            inputStyle={"margin-right": "6px", "transform": f"scale({round(1.3 * _font_scale, 3)})"},
+                                            className="w-100",
+                                        ),
+                                        width=1,
+                                        className="d-flex align-items-center",
+                                    ),
                                 ],
                                 className="my-2 align-items-center",
                                 style={"width": "100%"},
@@ -740,8 +775,8 @@ def build_dash_app(
 
             ms1_title_text = (
                 f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
-                f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: N/A  |  RT Δ: N/A<br>"
-                f"Atlas m/z: {row['atlas_mz']:.4f}  |  Meas M/Z: N/A  |  M/Z ppm Δ: N/A<br>"
+                f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  AutoID RT: N/A  |  RT Δ: N/A<br>"
+                f"Atlas m/z: {row['atlas_mz']:.4f}  |  AutoID M/Z: N/A  |  M/Z ppm Δ: N/A<br>"
                 f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
             )
             fig = go.Figure()
@@ -1057,8 +1092,8 @@ def build_dash_app(
 
         ms1_title_text = (
             f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
-            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  Meas RT: {row['rt_peak']:.4f}  |  RT Δ: {row['rt_error']:.3f}<br>"
-            f"Atlas m/z: {row['atlas_mz']:.4f}  |  Meas M/Z: {row['mz']:.4f}  |  M/Z ppm Δ: {row['mz_error']:.2f}<br>"
+            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  AutoID RT: {row['rt_peak']:.4f}  |  RT Δ: {row['rt_error']:.3f}<br>"
+            f"Atlas m/z: {row['atlas_mz']:.4f}  |  AutoID M/Z: {row['mz']:.4f}  |  M/Z ppm Δ: {row['mz_error']:.2f}<br>"
             f"<sub style='font-size:0.8em'>{isomer_str}</sub>"
         )
 
@@ -1200,7 +1235,7 @@ def build_dash_app(
                 ),
             )
 
-    def _make_ms2_figure(state):
+    def _make_ms2_figure(state, yaxis_scale="linear"):
         compound_idx = state["compound_idx"]
         row = _compound_row(compound_idx)
         rt_min, rt_max = state["rt_min"], state["rt_max"]
@@ -1225,6 +1260,19 @@ def build_dash_app(
             ce_label = _format_collision_energy_label(float(ce_val)) if ce_val is not None else "MS2"
         except (TypeError, ValueError):
             ce_label = "MS2"
+
+        use_log = (yaxis_scale == "log")
+
+        def _to_log_mirror(y_vals_raw):
+            result = []
+            for v in y_vals_raw:
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    result.append(np.nan)
+                elif v == 0.0:
+                    result.append(0.0)
+                else:
+                    result.append(np.sign(v) * np.log10(abs(v)))
+            return result
 
         fig = go.Figure()
 
@@ -1256,48 +1304,97 @@ def build_dash_app(
             # Scale the reference intensities and invert for mirror
             ref_y = [(-i * scale) if np.isfinite(i) else np.nan for i in r_int]
 
+            # Apply log transform if requested (after sign assignment)
+            plot_q_int = _to_log_mirror(q_int) if use_log else q_int
+            plot_ref_y = _to_log_mirror(ref_y) if use_log else ref_y
+
             # Plot Query (Top)
-            _add_ms2_stick_traces(fig, q_mz, q_int, "Query",
+            _add_ms2_stick_traces(fig, q_mz, plot_q_int, "Query",
                                   colors=frag_colors, default_color="red", line_width_px=stick_width_px)
 
             # Plot Reference (Bottom)
-            _add_ms2_stick_traces(fig, r_mz, ref_y, "Reference",
+            _add_ms2_stick_traces(fig, r_mz, plot_ref_y, "Reference",
                                   colors=frag_colors, default_color="red", line_width_px=stick_width_px)
 
             num_ref_fragments = hit.get('ref_frags', 0)
             num_matching_fragments = len(hit.get('matched_fragments', []))
-            label_points.extend(zip(q_mz, q_int))
-            label_points.extend(zip(r_mz, ref_y))
+            label_points.extend(zip(q_mz, plot_q_int))
+            label_points.extend(zip(r_mz, plot_ref_y))
         else:
             # Fallback to raw spectrum if no hit is selected/available
             mz = _sanitize_numeric_list(scan.get('frag_mzs', []))
             ints = _sanitize_numeric_list(scan.get('frag_ints', []))
-            _add_ms2_stick_traces(fig, mz, ints, "MS2", default_color="red", line_width_px=stick_width_px)
-            label_points.extend(zip(mz, ints))
+            plot_ints = _to_log_mirror(ints) if use_log else ints
+            _add_ms2_stick_traces(fig, mz, plot_ints, "MS2", default_color="red", line_width_px=stick_width_px)
+            label_points.extend(zip(mz, plot_ints))
 
         # ANNOTATION & STYLING
         fig.add_hline(y=0, line=dict(color="black", width=1.5))
 
-        y_vals = [y for _, y in label_points if not np.isnan(y)] or [0]
+        y_vals = [y for _, y in label_points if y is not None and not np.isnan(y)] or [0]
         y_min, y_max = min(y_vals), max(y_vals)
         y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
         label_pad, y_pad, TEXT_HEIGHT_OFFSET = y_span * 0.01, y_span * 0.01, y_span * 0.01
+
+        LABEL_CEILING_FRAC = 0.90   # labels above 90 % of y_max get flipped downward
+        LABEL_FLOOR_FRAC   = 0.90   # labels below 90 % of |y_min| get flipped upward
+        label_y_ceiling =  y_max * LABEL_CEILING_FRAC if y_max > 0 else 0.0
+        label_y_floor   =  y_min * LABEL_FLOOR_FRAC   if y_min < 0 else 0.0
 
         top_label_idxs = {idx for idx, _ in sorted(enumerate(label_points), key=lambda item: abs(item[1][1] if not np.isnan(item[1][1]) else 0), reverse=True)[:7]}
         top_labels_sorted = sorted([(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs and not np.isnan(mz_val)], key=lambda item: item[1])
 
         prev_mz, stagger_level = None, 0
         for idx, mz_val, y_val in top_labels_sorted:
-            y_base = (y_val + label_pad) if y_val >= 0 else (y_val - label_pad)
             if prev_mz is not None and abs(mz_val - prev_mz) < 5.0:
                 stagger_level += 1
             else:
                 stagger_level = 0
-            y_pos = y_base + (stagger_level * TEXT_HEIGHT_OFFSET if y_val >= 0 else -stagger_level * TEXT_HEIGHT_OFFSET)
+
+            if y_val >= 0:
+                y_base = y_val + label_pad + stagger_level * TEXT_HEIGHT_OFFSET
+                if y_base > label_y_ceiling:
+                    # Bar tip is too close to the title — place label inside the bar
+                    y_pos = y_val - label_pad
+                    yanchor = "top"
+                else:
+                    y_pos = y_base
+                    yanchor = "bottom"
+            else:
+                y_base = y_val - label_pad - stagger_level * TEXT_HEIGHT_OFFSET
+                if y_base < label_y_floor:
+                    # Bar tip is too close to the bottom — place label inside the bar
+                    y_pos = y_val + label_pad
+                    yanchor = "bottom"
+                else:
+                    y_pos = y_base
+                    yanchor = "top"
+
             fig.add_annotation(x=mz_val, y=y_pos, text=f"{mz_val:.4f}", showarrow=False,
-                               xanchor="center", yanchor="bottom" if y_val >= 0 else "top",
+                               xanchor="center", yanchor=yanchor,
                                font=dict(size=12))
             prev_mz = mz_val
+
+        # Build y-axis tick labels for log mode (show original intensity values)
+        yaxis_extra = {}
+        if use_log:
+            # Generate symmetric tick positions in log space and label with original values
+            abs_max_log = max(abs(y_min), abs(y_max), 1.0)
+            log_ticks_pos = [v for v in np.arange(0, abs_max_log + 1, 1.0) if v <= abs_max_log + 0.01]
+            tick_vals = sorted(set([-t for t in log_ticks_pos if t > 0] + log_ticks_pos))
+            tick_texts = []
+            for tv in tick_vals:
+                if tv == 0:
+                    tick_texts.append("0")
+                else:
+                    orig = 10 ** abs(tv)
+                    if orig >= 1e6:
+                        tick_texts.append(f"{orig:.2e}")
+                    elif orig >= 1000:
+                        tick_texts.append(f"{int(orig):,}")
+                    else:
+                        tick_texts.append(f"{orig:.0f}")
+            yaxis_extra = dict(tickvals=tick_vals, ticktext=tick_texts)
 
         fig.update_xaxes(
             title_text=f"m/z ({ce_label})",
@@ -1306,14 +1403,16 @@ def build_dash_app(
             title_font=dict(size=18),
             tickfont=dict(size=15),
         )
+        scale_label = " [log₁₀]" if use_log else ""
         fig.update_yaxes(
-            title_text=f"Intensity (Ref scaled x{scale:.2f})",
+            title_text=f"Intensity (Ref scaled x{scale:.2f}){scale_label}",
             showgrid=False,
             zeroline=False,
             range=[y_min - y_pad, y_max + y_pad],
             title_font=dict(size=18),
             tickfont=dict(size=15),
             autorange=False,
+            **yaxis_extra,
         )
 
         fname = "_".join(os.path.basename(scan.get("filename", "")).split(".")[0].split("_")[11:])
@@ -1821,17 +1920,22 @@ def build_dash_app(
         Output("ms2-graph", "figure"),
         Output("ms2-scan-fp-store", "data"),
         Input("session-store", "data"),
+        Input("ms2-yaxis-scale-radio", "value"),
         State("ms2-scan-fp-store", "data"),
         prevent_initial_call=False,
     )
-    def update_ms2_figure(state, old_fp_raw):
+    def update_ms2_figure(state, ms2_yaxis_scale, old_fp_raw):
         state = _ensure_valid_state(state)
-        # don't rebuild the ms2 plot of RT bound changes didn't impact the set of scans in the window
+        # don't rebuild the ms2 plot if RT bound changes didn't impact the set of scans in the window
+        # (but always rebuild when the scale changes)
         new_fp = _ms2_scan_fingerprint(state)
         # Serialize as a sorted list of lists for JSON storage in dcc.Store
         new_fp_serializable = sorted([list(item) for item in new_fp])
 
-        if old_fp_raw is not None:
+        triggered = [t["prop_id"] for t in dash.callback_context.triggered]
+        scale_changed = any("ms2-yaxis-scale-radio" in t for t in triggered)
+
+        if not scale_changed and old_fp_raw is not None:
             try:
                 old_fp = frozenset(tuple(item) for item in old_fp_raw)
                 if old_fp == new_fp:
@@ -1843,7 +1947,7 @@ def build_dash_app(
                 pass  # If comparison fails for any reason, fall through to full render
 
         try:
-            return _make_ms2_figure(state), new_fp_serializable
+            return _make_ms2_figure(state, ms2_yaxis_scale or "linear"), new_fp_serializable
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"update_ms2_figure error: {exc}")

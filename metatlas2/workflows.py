@@ -329,6 +329,7 @@ def run_analysis_gui(
         analysis_gui_obj=analysis_gui_obj,
         port=dash_app_port,
         shutdown_holder=shutdown_holder,
+        run_parameters=run_parameters,
     )
 
     server = make_server("0.0.0.0", dash_app_port, dash_app.server)
