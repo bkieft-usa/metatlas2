@@ -203,6 +203,36 @@ def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict
     params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
     return params
 
+def _validate_note_options_overrides(raw: Any) -> dict:
+    """Coerce and validate a note_options_overrides value."""
+    if not isinstance(raw, dict):
+        return {}
+    clean = {}
+    for note_type in ['ms1_notes', 'ms2_notes', 'other_notes']:
+        val = raw.get(note_type, None)
+        if val is None:
+            continue
+        if isinstance(val, dict):
+            clean[note_type] = {str(k): str(v) for k, v in val.items()}
+    return clean
+
+
+def _validate_gui_params(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate and coerce the GUI config block."""
+    params = dict(raw) if raw else {}
+    params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
+    params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 10))
+    gui_colors = params.get('gui_lcmsruns_colors')
+    params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
+    params['note_options_overrides'] = _validate_note_options_overrides(
+        params.get('note_options_overrides')
+    )
+    for dim_key in ('gui_width', 'gui_height'):
+        raw_val = params.get(dim_key)
+        params[dim_key] = float(raw_val) if raw_val is not None else None
+    return params
+
+
 def _validate_targeted_analysis_params(params: dict[str, Any], location: str) -> dict[str, Any]:
     """Validate and coerce a single PARAMS block from TARGETED_ANALYSES.
     """
@@ -233,22 +263,6 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
     params['ms2_mz_tolerance_ppm'] = float(params.get('ms2_mz_tolerance_ppm', 20.0))
     params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
-    params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
-    params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 10))
-    gui_colors = params.get('gui_lcmsruns_colors')
-    params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
-    note_overrides = params.get('note_options_overrides')
-    if not isinstance(note_overrides, dict):
-        params['note_options_overrides'] = {}
-    else:
-        clean_overrides = {}
-        for note_type in ['ms1_notes', 'ms2_notes', 'other_notes']:
-            val = note_overrides.get(note_type, None)
-            if val is None:
-                continue
-            if isinstance(val, dict):
-                clean_overrides[note_type] = {str(k): str(v) for k, v in val.items()}
-        params['note_options_overrides'] = clean_overrides
     params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
     # skip_outputs is a free-form field; pass through as-is (None or list)
@@ -258,14 +272,14 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
 def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2Config":
     from metatlas2.workflow_objects import Metatlas2Config, TargetedAnalysis
 
-    if 'WORKFLOWS' not in raw:
-        raise ValueError("Missing required configuration section: WORKFLOWS")
     for subsection in ("RT_ALIGNMENT", "TARGETED_ANALYSES"):
-        if subsection not in raw['WORKFLOWS']:
-            raise ValueError(f"Missing required WORKFLOWS subsection: {subsection}")
+        if subsection not in raw:
+            raise ValueError(f"Missing required configuration section: {subsection}")
+
+    gui_config = _validate_gui_params(dict(raw.get('GUI') or {}))
 
     rt_alignment_config: dict[str, Any] = {}
-    for chrom_key, chrom_cfg in raw['WORKFLOWS']['RT_ALIGNMENT'].items():
+    for chrom_key, chrom_cfg in raw['RT_ALIGNMENT'].items():
         chromatography = fpf.normalize_chromatography(chrom_key)
         location = f"RT_ALIGNMENT {chromatography}"
         if 'ATLAS' not in chrom_cfg:
@@ -280,7 +294,7 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
         rt_alignment_config[chromatography] = chrom_cfg
 
     targeted_analyses: list = []
-    for chrom_key, chrom_cfg in raw['WORKFLOWS']['TARGETED_ANALYSES'].items():
+    for chrom_key, chrom_cfg in raw['TARGETED_ANALYSES'].items():
         chromatography = fpf.normalize_chromatography(chrom_key)
         for polarity_key, pol_cfg in chrom_cfg.items():
             polarity = fpf.normalize_polarity(polarity_key)
@@ -318,17 +332,18 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
                         analysis_name_label=str(name_key),
                     ))
 
-    paths_config: dict[str, Any] = dict(raw['WORKFLOWS'].get('PATHS') or {})
+    paths_config: dict[str, Any] = dict(raw.get('PATHS') or {})
 
-    logger.info(
-        f"Loaded config from {source_name}: "
-        f"{len(rt_alignment_config)} RT alignment, "
-        f"{len(targeted_analyses)} targeted analyses"
-    )
+    # logger.info(
+    #     f"Loaded config from {source_name}: "
+    #     f"{len(rt_alignment_config)} RT alignment, "
+    #     f"{len(targeted_analyses)} targeted analyses"
+    # )
     return Metatlas2Config(
         paths_config=paths_config,
         rt_alignment_config=rt_alignment_config,
         targeted_analyses=targeted_analyses,
+        gui_config=gui_config,
     )
 
 def load_metatlas2_config(config_path: str) -> "Metatlas2Config":

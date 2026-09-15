@@ -694,7 +694,7 @@ def save_rt_alignment_model_to_db(
 
     # display model metadata in log for easy reference
     logger.info(f"RT Alignment Model Metadata for UID {rt_alignment_uid}:")
-    logger.info(f"  QC files used: {model_metadata['qc_files']}")
+    logger.info(f"  Number of QC files used: {len(model_metadata['qc_files'])}")
     logger.info(f"  Number of compounds used (by UID): {len(model_metadata['compounds_used'])}")
     logger.info(f"  Model type: {model_type}")
     logger.info(f"  R²: {model_metadata['r_squared']:.4f}")
@@ -2507,10 +2507,6 @@ def _transfer_istd_curation(
 def validate_override_parameters(override_parameters):
     if not isinstance(override_parameters, dict):
         raise ValueError("override_parameters must be a dict")
-    if not isinstance(override_parameters["gui_lcmsruns_colors"], (type(None), dict)):
-        raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
-    if not isinstance(override_parameters["gui_require_all_evaluated"], (type(None), bool)):
-        raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
     if not isinstance(override_parameters["ms1_min_peak_intensity"], (type(None), (int, float))):
         raise ValueError("override_parameters['ms1_min_peak_intensity'] must be a number or None")
     if not isinstance(override_parameters["ms1_min_num_points"], (type(None), int)):
@@ -2527,13 +2523,26 @@ def validate_override_parameters(override_parameters):
         raise ValueError("override_parameters['apply_cross_polarity_curation'] must be a boolean or None")
     if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
         raise ValueError("override_parameters['remove_flagged_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("gui_top_n_hits"), (type(None), int)):
-        raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
     if not isinstance(override_parameters.get("upload_to_gdrive"), (type(None), bool)):
         raise ValueError("override_parameters['upload_to_gdrive'] must be a boolean or None")
-    if not isinstance(override_parameters["note_options_overrides"], (type(None), dict)):
-        raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
-    if isinstance(override_parameters["note_options_overrides"], dict):
+    if override_parameters.get("gui_lcmsruns_colors") is not None:
+        if not isinstance(override_parameters["gui_lcmsruns_colors"], dict):
+            raise ValueError("override_parameters['gui_lcmsruns_colors'] must be a dict mapping LCMS run identifiers to color strings or None")
+    if override_parameters.get("gui_require_all_evaluated") is not None:
+        if not isinstance(override_parameters["gui_require_all_evaluated"], bool):
+            raise ValueError("override_parameters['gui_require_all_evaluated'] must be a boolean or None")
+    if override_parameters.get("gui_top_n_hits") is not None:
+        if not isinstance(override_parameters["gui_top_n_hits"], int):
+            raise ValueError("override_parameters['gui_top_n_hits'] must be an integer or None")
+    if override_parameters.get("gui_width") is not None:
+        if not isinstance(override_parameters["gui_width"], (int, float)):
+            raise ValueError("override_parameters['gui_width'] must be a number or None")
+    if override_parameters.get("gui_height") is not None:
+        if not isinstance(override_parameters["gui_height"], (int, float)):
+            raise ValueError("override_parameters['gui_height'] must be a number or None")
+    if override_parameters.get("note_options_overrides") is not None:
+        if not isinstance(override_parameters["note_options_overrides"], dict):
+            raise ValueError("override_parameters['note_options_overrides'] must be a dict mapping note types to option dicts or None")
         for note_type, options in override_parameters["note_options_overrides"].items():
             if note_type not in ["ms1_notes", "ms2_notes", "other_notes"]:
                 raise ValueError(f"Invalid note type in note_options_overrides: {note_type}")

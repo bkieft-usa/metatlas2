@@ -174,12 +174,17 @@ def _display_compound_idx(compound_idx: int) -> int:
     return int(compound_idx) + 1
 
 def _resolve_summary_note_options(summary_obj: "AnalysisSummary") -> tuple[list[str], list[str]]:
-    """Resolve MS1/MS2 option lists with the same owner/override logic as the GUI."""
+    """Resolve MS1/MS2 option lists with the same owner/override logic as the GUI.
+
+    Priority: override_parameters > config.gui_config > owner defaults.
+    """
     owner = summary_obj.config.owner
     ms2_defaults, ms1_defaults, _ = get_notes_opts(owner=owner)
 
-    overrides = getattr(summary_obj, "override_parameters", {}) or {}
-    note_overrides = overrides.get("note_options_overrides") or {}
+    _gui_cfg = summary_obj.config.gui_config if summary_obj.config else {}
+    _config_note_overrides = _gui_cfg.get("note_options_overrides") or {}
+    _param_note_overrides = (getattr(summary_obj, "override_parameters", {}) or {}).get("note_options_overrides") or {}
+    note_overrides = {**_config_note_overrides, **_param_note_overrides}
 
     ms1_options, _ = get_note_options_and_hotkeys(note_overrides.get("ms1_notes", {}), ms1_defaults)
     ms2_options, _ = get_note_options_and_hotkeys(note_overrides.get("ms2_notes", {}), ms2_defaults)
@@ -188,10 +193,11 @@ def _resolve_summary_note_options(summary_obj: "AnalysisSummary") -> tuple[list[
 def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
     """Raise if required GUI notes remain at unresolved defaults."""
     overrides = getattr(summary_obj, "override_parameters", {}) or {}
+    _gui_cfg = summary_obj.config.gui_config if summary_obj.config else {}
     force_eval = (
         overrides["gui_require_all_evaluated"]
         if overrides.get("gui_require_all_evaluated") is not None
-        else summary_obj.ta.params.get("gui_require_all_evaluated", False)
+        else _gui_cfg.get("gui_require_all_evaluated", False)
     )
     if not force_eval:
         return
@@ -258,8 +264,8 @@ def make_identification_figure(
     color_map = None
     if hasattr(summary_obj, "override_parameters") and summary_obj.override_parameters.get("gui_lcmsruns_colors"):
         color_map = summary_obj.override_parameters["gui_lcmsruns_colors"]
-    elif hasattr(summary_obj, "ta.params") and summary_obj.ta.params.get("gui_lcmsruns_colors"):
-        color_map = summary_obj.ta.params["gui_lcmsruns_colors"]
+    elif hasattr(summary_obj, "config") and summary_obj.config and summary_obj.config.gui_config.get("gui_lcmsruns_colors"):
+        color_map = summary_obj.config.gui_config["gui_lcmsruns_colors"]
 
     manual_curation_df = summary_obj.experimental_data.curation_df
     ms1_all_df = summary_obj.experimental_data.ms1_df
