@@ -991,7 +991,7 @@ def build_dash_app(
         lcmsruns_color_map = _gui_cfg.get("gui_lcmsruns_colors", {})
         if analysis_gui_obj.override_parameters.get('gui_lcmsruns_colors') is not None:
             lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
-    
+
         row = _compound_row(state["compound_idx"])
         compound_display_idx = state["compound_idx"]+1
         mz_rt_uid = row["mz_rt_uid"]
@@ -1939,7 +1939,7 @@ def build_dash_app(
         return _patch_with_seq(state, analyst_notes=txt)
 
 
-    # Only send relayoutData to the server after the user stops dragging a shape for 100ms
+    # Only send relayoutData to the server after the user stops dragging a shape for x ms
     app.clientside_callback(
         """
         (function() {
@@ -1969,35 +1969,35 @@ def build_dash_app(
         prevent_initial_call=True,
     )
 
-    # don't allow vertical dragging of the purple RT lines — snap them back to full paper height
-    app.clientside_callback(
-        """
-        function(relayoutData, figure) {
-            if (!relayoutData || !figure) return window.dash_clientside.no_update;
-            var keys = Object.keys(relayoutData);
-            var hasY = keys.some(function(k) {
-                return /shapes\[\\d+\]\\.(y0|y1)/.test(k);
-            });
-            var hasX = keys.some(function(k) {
-                return /shapes\[\\d+\]\\.x0/.test(k);
-            });
-            if (hasY && !hasX) {
-                // Pure vertical drag — snap all shapes back to full paper height
-                var fig = JSON.parse(JSON.stringify(figure));
-                (fig.layout.shapes || []).forEach(function(s) {
-                    s.y0 = 0;
-                    s.y1 = 1;
-                });
-                return fig;
-            }
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("ms1-graph", "figure", allow_duplicate=True),
-        Input("ms1-graph", "relayoutData"),
-        State("ms1-graph", "figure"),
-        prevent_initial_call=True,
-    )
+    # # don't allow vertical dragging of the purple RT lines — snap them back to full paper height
+    # app.clientside_callback(
+    #     """
+    #     function(relayoutData, figure) {
+    #         if (!relayoutData || !figure) return window.dash_clientside.no_update;
+    #         var keys = Object.keys(relayoutData);
+    #         var hasY = keys.some(function(k) {
+    #             return /shapes\[\\d+\]\\.(y0|y1)/.test(k);
+    #         });
+    #         var hasX = keys.some(function(k) {
+    #             return /shapes\[\\d+\]\\.x0/.test(k);
+    #         });
+    #         if (hasY && !hasX) {
+    #             // Pure vertical drag — snap all shapes back to full paper height
+    #             var fig = JSON.parse(JSON.stringify(figure));
+    #             (fig.layout.shapes || []).forEach(function(s) {
+    #                 s.y0 = 0;
+    #                 s.y1 = 1;
+    #             });
+    #             return fig;
+    #         }
+    #         return window.dash_clientside.no_update;
+    #     }
+    #     """,
+    #     Output("ms1-graph", "figure", allow_duplicate=True),
+    #     Input("ms1-graph", "relayoutData"),
+    #     State("ms1-graph", "figure"),
+    #     prevent_initial_call=True,
+    # )
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
