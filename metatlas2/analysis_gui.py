@@ -6,7 +6,6 @@ from dash import dcc, html, ctx, Input, Output, State
 import dash_bootstrap_components as dbc
 from dash_extensions import EventListener
 import traceback
-import json
 
 import metatlas2.database_interact as dbi
 import metatlas2.logging_config as lcf
@@ -32,11 +31,16 @@ def build_dash_app(
         manual_curation_df = manual_curation_df.sort_values("atlas_rt_peak").reset_index(drop=True)
     #logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
-    # Set some params — GUI-level settings come from config.gui_config (not ta.params)
+    # Resolve all GUI-level settings once at factory scope.
+    # override_parameters (from notebook cell) wins over config.gui_config for every key.
+    # None-valued overrides are ignored so that config defaults are preserved.
     _gui_cfg = analysis_gui_obj.config.gui_config if analysis_gui_obj.config else {}
-    top_n_hits = _gui_cfg.get("gui_top_n_hits", 20)
-    if analysis_gui_obj.override_parameters.get("gui_top_n_hits") is not None:
-        top_n_hits = analysis_gui_obj.override_parameters["gui_top_n_hits"]
+    _op = analysis_gui_obj.override_parameters or {}
+    _resolved_cfg = {**_gui_cfg, **{k: v for k, v in _op.items() if v is not None}}
+
+    top_n_hits = _resolved_cfg.get("gui_top_n_hits", 20)
+    lcmsruns_color_map = _resolved_cfg.get("gui_lcmsruns_colors", {})
+    force_eval = _resolved_cfg.get("gui_require_all_evaluated", False)
     async_flush_errors: dict = {}
 
     # Extract metadata for display
@@ -84,10 +88,17 @@ def build_dash_app(
     ms1_by_compound = {}
     ms2_by_compound = {}
 
-    # Index MS1 data
+    # Index MS1 data — pre-convert spec_rts/spec_ints list columns to numpy arrays once
+    # at startup so _compute_y_max_in_range() and the trace-building loop never pay the
+    # Python-list → ndarray conversion cost on every render.
     for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms1_df.groupby(["mz_rt_uid"], observed=True):
         if len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
+        group = group.copy()
+        if "spec_rts" in group.columns:
+            group["spec_rts"] = group["spec_rts"].apply(np.asarray)
+        if "spec_ints" in group.columns:
+            group["spec_ints"] = group["spec_ints"].apply(np.asarray)
         ms1_by_compound[mz_rt_uid] = group
 
     # Index MS2 data and pre-sort each scan's hits list by score descending.
@@ -260,10 +271,9 @@ def build_dash_app(
 
     # Resolve user-supplied dimensions (inches → pixels at 96 dpi).
     # Priority: override_parameters (notebook cell) > config.gui_config > auto
-    _op = analysis_gui_obj.override_parameters or {}
-    _gui_cfg = analysis_gui_obj.config.gui_config if analysis_gui_obj.config else {}
-    _gui_width_in = _op.get("gui_width") or _gui_cfg.get("gui_width") or None
-    _gui_height_in = _op.get("gui_height") or _gui_cfg.get("gui_height") or None
+    # Uses _resolved_cfg already built at factory scope above.
+    _gui_width_in = _resolved_cfg.get("gui_width") or None
+    _gui_height_in = _resolved_cfg.get("gui_height") or None
     DPI = 96  # standard screen DPI for CSS px conversion
 
     n_rows = (
@@ -318,7 +328,6 @@ def build_dash_app(
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
             dcc.Store(id="controls-compound-idx", storage_type="memory", data=starting_compound_idx),
             dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
-            dcc.Store(id="ms2-scan-fp-store", storage_type="memory", data=None),
             dcc.Store(id="ms2-yaxis-scale-store", storage_type="memory", data="linear"),
             dcc.Store(id="nav-trigger-store", storage_type="memory", data={"idx": starting_compound_idx, "ts": 0}),
             dcc.Store(id="ms1-render-key", storage_type="memory", data=None),
@@ -986,12 +995,7 @@ def build_dash_app(
 
     # main figures for ms data display
     def _make_ms1_figure(state, yaxis_scale="linear"):
-
-        _gui_cfg = analysis_gui_obj.config.gui_config if analysis_gui_obj.config else {}
-        lcmsruns_color_map = _gui_cfg.get("gui_lcmsruns_colors", {})
-        if analysis_gui_obj.override_parameters.get('gui_lcmsruns_colors') is not None:
-            lcmsruns_color_map = analysis_gui_obj.override_parameters['gui_lcmsruns_colors']
-
+        # lcmsruns_color_map is resolved once at factory scope from _resolved_cfg
         row = _compound_row(state["compound_idx"])
         compound_display_idx = state["compound_idx"]+1
         mz_rt_uid = row["mz_rt_uid"]
@@ -1029,12 +1033,15 @@ def build_dash_app(
         expanded_rt_max = _eic_rt_hi + 1
 
         def _compute_y_max_in_range(df, lo, hi):
-            """Return the max intensity across all files within [lo, hi]."""
+            """Return the max intensity across all files within [lo, hi].
+            spec_rts/spec_ints are pre-converted to numpy arrays at startup,
+            so no list→ndarray conversion is needed here.
+            """
             y_max = 1.0
             for r in df.itertuples(index=False):
-                rt_arr = np.asarray(getattr(r, "spec_rts", []))
-                int_arr = np.asarray(getattr(r, "spec_ints", []))
-                if len(rt_arr) == 0:
+                rt_arr = getattr(r, "spec_rts", None)
+                int_arr = getattr(r, "spec_ints", None)
+                if rt_arr is None or len(rt_arr) == 0:
                     continue
                 mask = (rt_arr >= lo) & (rt_arr <= hi)
                 if np.any(mask):
@@ -1216,15 +1223,13 @@ def build_dash_app(
             color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
             is_highlighted = fn in highlighted_files
 
-            rt_list = getattr(r, "spec_rts", [])
-            int_list = getattr(r, "spec_ints", [])
+            # spec_rts/spec_ints are pre-converted to numpy arrays at startup
+            rt_arr = getattr(r, "spec_rts", None)
+            int_arr = getattr(r, "spec_ints", None)
 
-            if len(rt_list) == 0:
+            if rt_arr is None or len(rt_arr) == 0:
                 logger.warning(f"MS1 data for {fn} has no RT points; skipping trace")
                 continue
-
-            rt_arr = np.asarray(rt_list)
-            int_arr = np.asarray(int_list)
 
             # Filter for RT window
             mask = (rt_arr >= expanded_rt_min) & (rt_arr <= expanded_rt_max)
@@ -1236,13 +1241,17 @@ def build_dash_app(
 
             ms1_file_count += 1
 
+            _MAX_HOVER_PTS = 75
+            _step = max(1, len(filt_rt) // _MAX_HOVER_PTS)
+            hover_rt = filt_rt[::_step]
+            hover_int = filt_int[::_step]
             fig.add_trace(go.Scattergl(
-                x=filt_rt,
-                y=filt_int,
+                x=hover_rt,
+                y=hover_int,
                 mode="lines",
                 line=dict(color=color, width=3),
                 opacity=0.001,
-                customdata=[fn],
+                customdata=[[fn]] * len(hover_rt),
                 hovertemplate=f"File: {short_name}<extra></extra>",
                 showlegend=False,
             ))
@@ -1490,12 +1499,17 @@ def build_dash_app(
                 ),
             )
 
-    def _make_ms2_figure(state, yaxis_scale="linear"):
+    def _make_ms2_figure(state, scans, yaxis_scale="linear"):
+        """Build the MS2 mirror plot.
+
+        Parameters
+        ----------
+        scans:
+            Pre-fetched DataFrame from _get_ms2_scans() — passed in by the
+            caller so we never call _get_ms2_scans() twice per update cycle.
+        """
         compound_idx = state["compound_idx"]
         row = _compound_row(compound_idx)
-        rt_min, rt_max = state["rt_min"], state["rt_max"]
-
-        scans = _get_ms2_scans(row, rt_min, rt_max)
 
         if scans.empty:
             fig = go.Figure()
@@ -1706,6 +1720,16 @@ def build_dash_app(
 
     logger.debug("App helpers defined successfully")
 
+    # Build the complete hotkey set once at factory scope.
+    # Captured as a closure by handle_keyboard so it is never rebuilt per keydown.
+    _ALL_HOTKEYS = (
+        set(analysis_gui_obj.notes["ms2_key_to_label"])
+        | set(analysis_gui_obj.notes["ms1_key_to_label"])
+        | set(analysis_gui_obj.notes["other_key_to_label"])
+        | {"a", "s", "d", "f", "j", "k", "l", ";", ">", "/", "n", "m",
+           "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
+    )
+
     # all app callbacks that fire when GUI is interacted with
     def _flush_and_load_compound(old_state, new_idx, delta=None):
         """Single canonical path for all compound navigation.
@@ -1792,10 +1816,7 @@ def build_dash_app(
 
     def _get_force_eval_and_warnings(state, delta):
         """Return warning messages for required-evaluation navigation logic."""
-        _gui_cfg = analysis_gui_obj.config.gui_config if analysis_gui_obj.config else {}
-        force_eval = _gui_cfg.get("gui_require_all_evaluated", False)
-        if analysis_gui_obj.override_parameters.get("gui_require_all_evaluated") is not None:
-            force_eval = analysis_gui_obj.override_parameters["gui_require_all_evaluated"]
+        # force_eval is resolved once at factory scope from _resolved_cfg
         ms2_warning = None
         ms1_warning = None
         if (
@@ -2063,7 +2084,11 @@ def build_dash_app(
         points = click_data.get("points", [])
         if not points:
             raise dash.exceptions.PreventUpdate
-        fp = points[0].get("customdata")
+        # customdata is [[fn]] per point — extract the filename from the inner list.
+        raw_cd = points[0].get("customdata")
+        if not raw_cd:
+            raise dash.exceptions.PreventUpdate
+        fp = raw_cd[0] if isinstance(raw_cd, (list, tuple)) else raw_cd
         if not fp:
             raise dash.exceptions.PreventUpdate
         highlighted = list(state.get("highlighted_files") or [])
@@ -2092,15 +2117,7 @@ def build_dash_app(
         if not key:
             raise dash.exceptions.PreventUpdate
 
-        ALL_HOTKEYS = (
-            set(analysis_gui_obj.notes["ms2_key_to_label"])
-            | set(analysis_gui_obj.notes["ms1_key_to_label"])
-            | set(analysis_gui_obj.notes["other_key_to_label"])
-            | {"a", "s", "d", "f", "j", "k", "l", ";", ">", "/", "n", "m",
-            "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
-        )
-
-        if key not in ALL_HOTKEYS:
+        if key not in _ALL_HOTKEYS:
             raise dash.exceptions.PreventUpdate
 
         if tag in ("TEXTAREA", "SELECT"):
@@ -2194,23 +2211,6 @@ def build_dash_app(
 
         raise dash.exceptions.PreventUpdate
 
-    def _ms2_scan_fingerprint(state):
-        """Return a frozenset representing the current MS2 render state.
-        Used to prevent re-rendering the MS2 figure if the set of scans in the RT window hasn't changed.
-        """
-        compound_idx = state["compound_idx"]
-        row = _compound_row(compound_idx)
-        scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
-        selected_idx = max(0, int(state.get("ms2_idx", 0)))
-        fp = set()
-        if not scans.empty and "scan_rt" in scans.columns:
-            for scan_rt in scans["scan_rt"]:
-                try:
-                    fp.add((int(compound_idx), round(float(scan_rt), 4), int(selected_idx)))
-                except (TypeError, ValueError):
-                    pass
-        return frozenset(fp)
-
     @app.callback(
         Output("ms1-graph", "figure"),
         Output("error-banner", "children"),
@@ -2293,57 +2293,50 @@ def build_dash_app(
 
     @app.callback(
         Output("ms2-graph", "figure"),
-        Output("ms2-scan-fp-store", "data"),
         Output("ms2-render-key", "data"),
         Input("session-store", "data"),
         Input("ms2-yaxis-scale-radio", "value"),
-        State("ms2-scan-fp-store", "data"),
         State("ms2-render-key", "data"),
         prevent_initial_call=False,
     )
-    def update_ms2_figure(state, ms2_yaxis_scale, old_fp_raw, prev_ms2_render_key):
+    def update_ms2_figure(state, ms2_yaxis_scale, prev_ms2_render_key):
         state = _ensure_valid_state(state)
 
         triggered = [t["prop_id"] for t in dash.callback_context.triggered]
         scale_changed = any("ms2-yaxis-scale-radio" in t for t in triggered)
 
-        # Skip even the fingerprint computation when only note/sidebar fields changed.
-        # The MS2 figure only depends on compound, RT bounds, ms2_idx, and scale.
+        # Fetch scans once — used for both the fingerprint check and figure building.
+        row = _compound_row(state["compound_idx"])
+        scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
+
+        # Build a lightweight fingerprint: sorted list of scan RTs (rounded to 4 dp).
+        # This captures whether the set of scans in the RT window changed without any
+        # frozenset→JSON→frozenset round-trip through dcc.Store.
+        scan_rt_fp = sorted(
+            round(float(rt), 4)
+            for rt in scans["scan_rt"]
+            if not (isinstance(rt, float) and np.isnan(rt))
+        ) if not scans.empty and "scan_rt" in scans.columns else []
+
+        # The render key now embeds the scan-RT fingerprint directly, so a single
+        # dict comparison handles both "nothing changed" and "RT nudge with no new scans".
         ms2_render_key = {
             "compound_idx": state.get("compound_idx"),
-            "rt_min": state.get("rt_min"),
-            "rt_max": state.get("rt_max"),
             "ms2_idx": state.get("ms2_idx"),
             "ms2_yaxis_scale": ms2_yaxis_scale,
+            "scan_rt_fp": scan_rt_fp,
         }
         if not scale_changed and prev_ms2_render_key == ms2_render_key:
             raise dash.exceptions.PreventUpdate
 
-        # don't rebuild the ms2 plot if RT bound changes didn't impact the set of scans in the window
-        # (but always rebuild when the scale changes)
-        new_fp = _ms2_scan_fingerprint(state)
-        # Serialize as a sorted list of lists for JSON storage in dcc.Store
-        new_fp_serializable = sorted([list(item) for item in new_fp])
-
-        if not scale_changed and old_fp_raw is not None:
-            try:
-                old_fp = frozenset(tuple(item) for item in old_fp_raw)
-                if old_fp == new_fp:
-                    logger.debug("update_ms2_figure: scan set unchanged, skipping re-render")
-                    raise dash.exceptions.PreventUpdate
-            except dash.exceptions.PreventUpdate:
-                raise
-            except Exception:
-                pass  # If comparison fails for any reason, fall through to full render
-
         try:
-            return _make_ms2_figure(state, ms2_yaxis_scale or "linear"), new_fp_serializable, ms2_render_key
+            return _make_ms2_figure(state, scans, ms2_yaxis_scale or "linear"), ms2_render_key
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"update_ms2_figure error: {exc}")
             empty = go.Figure()
             empty.update_layout(margin=dict(l=50, r=20, t=40, b=40))
-            return empty, new_fp_serializable, ms2_render_key
+            return empty, ms2_render_key
 
     @app.callback(
         Output("status-current", "children"),
