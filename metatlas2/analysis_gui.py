@@ -27,6 +27,9 @@ def build_dash_app(
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.experimental_data.curation_df
+    # Sort by Atlas RT peak so compounds appear in RT order in the GUI
+    if "atlas_rt_peak" in manual_curation_df.columns:
+        manual_curation_df = manual_curation_df.sort_values("atlas_rt_peak").reset_index(drop=True)
     #logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
     # Set some params — GUI-level settings come from config.gui_config (not ta.params)
@@ -38,10 +41,10 @@ def build_dash_app(
 
     # Extract metadata for display
     project_shortname = analysis_gui_obj.project_name.split("_")[4]
-    chrom = analysis_gui_obj.chromatography
-    pol = analysis_gui_obj.polarity
-    analysis_type = analysis_gui_obj.analysis_type
-    analysis_name = analysis_gui_obj.analysis_name
+    chrom = analysis_gui_obj.chromatography.upper()
+    pol = analysis_gui_obj.polarity.upper()
+    analysis_type = analysis_gui_obj.analysis_type.upper()
+    analysis_name = analysis_gui_obj.analysis_name.upper()
     rta = analysis_gui_obj.rt_alignment_number
     tga = analysis_gui_obj.analysis_number
 
@@ -104,6 +107,27 @@ def build_dash_app(
             group = group.copy()
             group["hits"] = group["hits"].apply(_presort_hits)
         ms2_by_compound[mz_rt_uid] = group
+
+    # Pre-build compact marker data for MS1 triangle markers.
+    # Stores (scan_rt, best_score) tuples per compound, pre-sorted by score descending.
+    # Pre-sorting at startup means per-drag filtering + top-100 slice requires no sort step.
+    ms2_markers_by_compound = {}
+    for uid, group_df in ms2_by_compound.items():
+        markers = []
+        for r in group_df.itertuples(index=False):
+            rt = getattr(r, "scan_rt", None)
+            if rt is None or (isinstance(rt, float) and np.isnan(rt)):
+                continue
+            hits = getattr(r, "hits", [])
+            if hits and isinstance(hits[0], dict):
+                score = hits[0].get("score", None)
+                best_score = float(score) if isinstance(score, (int, float)) and np.isfinite(score) else float("-inf")
+            else:
+                best_score = float("-inf")
+            markers.append((float(rt), best_score))
+        # Sort by score descending so [:100] slice always gives the top-100 by score
+        markers.sort(key=lambda x: x[1], reverse=True)
+        ms2_markers_by_compound[uid] = markers
 
     def _compound_row(idx):
         return manual_curation_df.iloc[idx]
@@ -518,11 +542,11 @@ def build_dash_app(
                                     ),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Hotkeys",
+                                            "Hotkeys Help",
                                             id="help-btn",
-                                            color="light",
+                                            color="dark",
                                             size="sm",
-                                            style={"marginTop": "0.5rem", "fontWeight": "bold"},
+                                            style={"marginTop": "0.5rem"},
                                             title="Keyboard shortcuts",
                                         ),
                                         width="auto",
@@ -556,7 +580,7 @@ def build_dash_app(
                                 [
                                     dbc.Col(
                                         dbc.Button(
-                                            "◀ Prev ID [j,<]",
+                                            "◀ Prev ID",
                                             id="prev-btn",
                                             color="primary",
                                             className="me-2 w-100",
@@ -583,7 +607,7 @@ def build_dash_app(
                                         width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Next ID ▶  [k,>, ]",
+                                            "Next ID ▶",
                                             id="next-btn",
                                             color="primary",
                                             className="ms-2 w-100",
@@ -591,7 +615,7 @@ def build_dash_app(
                                             width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Accept Suggestions  [n]",
+                                            "Accept Suggestions",
                                             id="accept-suggestions",
                                             color="warning",
                                             className="w-100",
@@ -599,7 +623,7 @@ def build_dash_app(
                                             width=2),
                                     dbc.Col(
                                         dbc.Button(
-                                            "Snap to Isomer  [m]",
+                                            "Snap to Isomer",
                                             id="snap-to-isomer",
                                             color="secondary",
                                             className="w-100",
@@ -629,9 +653,27 @@ def build_dash_app(
                             ),
                             dbc.Row(
                                 [
-                                    dbc.Col(dbc.Button("◀ Prev MS2  [l]", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
-                                    dbc.Col(html.Div(id="ms2-counter-1", className="fw-bold text-center", style={"fontSize": _fs(1.0)}), width=2),
-                                    dbc.Col(dbc.Button("Next MS2 ▶  [;]", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
+                                    dbc.Col(dbc.Button("◀ Prev MS2", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
+                                                    dbc.Col(
+                                                        html.Div(
+                                                            [
+                                                                html.Div(
+                                                                    id="ms2-counter-1",
+                                                                    className="fw-bold text-center mb-1",
+                                                                    style={"fontSize": _fs(0.85)},
+                                                                ),
+                                                                dbc.Progress(
+                                                                    id="ms2-progress-1",
+                                                                    value=0,
+                                                                    style={"height": "8px"},
+                                                                    color="secondary",
+                                                                    className="w-100",
+                                                                ),
+                                                            ],
+                                                            className="d-flex flex-column justify-content-center",
+                                                        ),
+                                                        width=2),
+                                                    dbc.Col(dbc.Button("Next MS2 ▶", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
                                     dbc.Col(
                                         dcc.RadioItems(
                                             id="ms2-yaxis-scale-radio",
@@ -976,8 +1018,15 @@ def build_dash_app(
         # Uses an incremental cache: only re-scans newly-exposed slivers when the window grows,
         # and does a full rescan when the window shrinks (so y_max correctly decreases).
         y_min_positive_data = None
-        expanded_rt_min = state["rt_min"] - 1
-        expanded_rt_max = state["rt_max"] + 1
+        _rt_peak = row.get("rt_peak", np.nan)
+        try:
+            _rt_peak = float(_rt_peak) if _rt_peak is not None and not (isinstance(_rt_peak, float) and np.isnan(_rt_peak)) else np.nan
+        except (TypeError, ValueError):
+            _rt_peak = np.nan
+        _eic_rt_lo = min(state["rt_min"], _rt_peak) if not np.isnan(_rt_peak) else state["rt_min"]
+        _eic_rt_hi = max(state["rt_max"], _rt_peak) if not np.isnan(_rt_peak) else state["rt_max"]
+        expanded_rt_min = _eic_rt_lo - 1
+        expanded_rt_max = _eic_rt_hi + 1
 
         def _compute_y_max_in_range(df, lo, hi):
             """Return the max intensity across all files within [lo, hi]."""
@@ -1154,8 +1203,7 @@ def build_dash_app(
         
         # Now add MS1 data traces
         highlighted_files = state.get("highlighted_files") or []
-        expanded_rt_min = state["rt_min"] - 1
-        expanded_rt_max = state["rt_max"] + 1
+        # expanded_rt_min/max already computed above (incorporates rt_peak)
 
         # Keep an invisible file-specific trace for hover/click events, then group other traces (for speed)
         color_groups: dict = {}
@@ -1291,7 +1339,7 @@ def build_dash_app(
         )
 
         ms1_title_text = (
-            f"<span style='font-size:1.2em'>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</span><br>"
+            f"<span style='font-size:1.2em'><b>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</b></span><br>"
             f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  AutoID RT: {row['rt_peak']:.4f}  |  RT Δ: {row['rt_error']:.3f}<br>"
             f"Atlas m/z: {row['atlas_mz']:.4f}  |  AutoID M/Z: {row['mz']:.4f}  |  M/Z ppm Δ: {row['mz_error']:.2f}"
         )
@@ -1346,13 +1394,28 @@ def build_dash_app(
         # Isomer annotation box in top-right corner (50% transparent background)
         if isomer_lines:
             isomer_annotation_text = "<br>".join(isomer_lines)
+            # Label above the box
+            fig.add_annotation(
+                text="<b>Isomers</b>",
+                xref="paper", yref="paper",
+                x=0.99, y=0.99,
+                xanchor="right", yanchor="bottom",
+                showarrow=False,
+                font=dict(size=15, color="black"),
+                align="right",
+                bgcolor="rgba(0,0,0,0)",
+                bordercolor="rgba(0,0,0,0)",
+                borderwidth=0,
+                borderpad=2,
+            )
+            # Box with isomer details (slightly larger font)
             fig.add_annotation(
                 text=isomer_annotation_text,
                 xref="paper", yref="paper",
                 x=0.99, y=0.99,
                 xanchor="right", yanchor="top",
                 showarrow=False,
-                font=dict(size=11, color="black"),
+                font=dict(size=13, color="black"),
                 align="right",
                 bgcolor="rgba(255,255,255,0.5)",
                 bordercolor="rgba(100,100,100,0.5)",
@@ -1360,35 +1423,12 @@ def build_dash_app(
                 borderpad=6,
             )
 
-        # MS2 scan RT markers: one upward triangle per top-N scan.
-        # Uses _get_ms2_scans (top-N, pre-sorted) instead of _get_all_ms2_scans_in_window
-        # to avoid a separate full-scan DataFrame iteration on every RT drag.
-        ms2_scans_topn = _get_ms2_scans(row, expanded_rt_min, expanded_rt_max)
-        ms2_marker_rts = []
-        ms2_marker_hover = []
-        if not ms2_scans_topn.empty and "scan_rt" in ms2_scans_topn.columns:
-            for _scan_row in ms2_scans_topn.itertuples(index=False):
-                _rt = getattr(_scan_row, "scan_rt", None)
-                if _rt is None or (isinstance(_rt, float) and np.isnan(_rt)):
-                    continue
-                _ce_val = getattr(_scan_row, "collision_energy", None)
-                try:
-                    _ce_label = _format_collision_energy_label(float(_ce_val)) if _ce_val is not None else "MS2"
-                except (TypeError, ValueError):
-                    _ce_label = "MS2"
-                _hits = getattr(_scan_row, "hits", [])
-                if len(_hits) > 0:
-                    _score = _hits[0].get("score", None)
-                    if isinstance(_score, (int, float)) and np.isfinite(_score):
-                        _score_str = f"{_score:.4f}"
-                    else:
-                        _score_str = "NA"
-                else:
-                    _score_str = "NA"
-                ms2_marker_rts.append(_rt)
-                ms2_marker_hover.append(
-                    f"CE: {_ce_label}<br>Score: {_score_str}<br>RT: {_rt:.4f} min"
-                )
+        # MS2 scan RT markers: top-100 by score, filtered from pre-built compact tuple list.
+        # Markers are pre-sorted by score descending at startup, so [:100] is free.
+        # No hover payload — hoverinfo="skip" omits text arrays from the JSON entirely.
+        all_markers = ms2_markers_by_compound.get(mz_rt_uid, [])
+        in_window = [rt for rt, _ in all_markers if expanded_rt_min <= rt <= expanded_rt_max]
+        ms2_marker_rts = in_window[:100]
         if ms2_marker_rts:
             marker_y = -y_marker_band / 2
             fig.add_trace(go.Scatter(
@@ -1398,8 +1438,7 @@ def build_dash_app(
                 marker=dict(color="black", size=10, symbol="triangle-up"),
                 cliponaxis=False,
                 showlegend=False,
-                text=ms2_marker_hover,
-                hovertemplate="%{text}<extra></extra>",
+                hoverinfo="skip",
             ))
 
         return fig
@@ -1641,15 +1680,15 @@ def build_dash_app(
                 f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
                 f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
                 f"ppm Δ: {hit.get('ppm_error', 0):.2f}"
-                f"</span><br>"
-                f"{hit.get('ref_name', 'Unknown')}  |  {fname}<br><br>"
+                f"<br>"
+                f"Hit: {hit.get('ref_name', 'Unknown')}  |  File: {fname}</span><br><br>"
             )
         else:
             scan_info = (
                 f"<span style='font-size:1.2em'>"
                 f"<b>No Hit</b>"
-                f"</span><br>"
-                f"{fname}<br><br>"
+                f"<br>"
+                f"File: {fname}</span><br><br>"
             )
 
         fig.add_annotation(text=scan_info, xref="x domain", yref="y domain",
@@ -2312,6 +2351,7 @@ def build_dash_app(
         Output("compound-progress", "value"),
         Output("compound-progress", "label"),
         Output("ms2-counter-1", "children"),
+        Output("ms2-progress-1", "value"),
         Input("session-store", "data"),
         prevent_initial_call=False,
     )
@@ -2322,17 +2362,17 @@ def build_dash_app(
         current_1based = state["compound_idx"] + 1
         comp_txt = f"{current_1based} / {n_total}"
         progress_val = round(current_1based / n_total * 100, 1)
-        #progress_label = f"{current_1based}/{n_total}"
         progress_label = ""
 
         scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
         n_scans = len(scans)
         ms2_idx = max(0, min(int(state.get("ms2_idx", 0)), max(n_scans - 1, 0)))
         ms2_txt_1 = f"MS2: {ms2_idx + 1}/{n_scans}" if n_scans > 0 else "MS2: No scans"
+        ms2_progress_val = round((ms2_idx + 1) / max(n_scans, 1) * 100, 1) if n_scans > 0 else 0
 
         pending = html.Span(
             [
-                html.I("Current analysis: ", style={"color": "black"}),
+                html.I("Pending changes: ", style={"color": "black"}),
                 html.Br(), f"{row['compound_name']} ({row['adduct']}) [{current_1based}]",
                 html.Br(), f"RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
                 html.Br(), f"MS1: {state['ms1_note']}",
@@ -2343,7 +2383,7 @@ def build_dash_app(
             style={"color": "#b8860b", "fontSize": "16px", "fontWeight": "bold"},
         )
 
-        return pending, comp_txt, progress_val, progress_label, ms2_txt_1
+        return pending, comp_txt, progress_val, progress_label, ms2_txt_1, ms2_progress_val
 
     @app.callback(
         Output("save-toast", "is_open"),
@@ -2362,11 +2402,15 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         toast_body = html.Span(
             [
-                f"{s['name']} ({s['adduct']})",
+                f"[{s['index']}] {s['name']} ({s['adduct']})",
                 html.Br(),
-                f"[{s['index']}]  MS1: {s['ms1']}  MS2: {s['ms2']}",
+                f"MS1: {s['ms1']}",
                 html.Br(),
-                f"RT [{s['rt_min']:.4f}, {s['rt_max']:.4f}]  @ {s['timestamp']}",
+                f"MS2: {s['ms2']}",
+                html.Br(),
+                f"RT [{s['rt_min']:.4f}, {s['rt_max']:.4f}]",
+                #html.Br(),
+                #f"@ {s['timestamp']}",
             ],
             style={"fontSize": "0.85rem"},
         )
