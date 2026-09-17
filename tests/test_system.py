@@ -225,70 +225,70 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
     mutation is required in tests.
     """
     path.write_text(textwrap.dedent(f"""\
-        WORKFLOWS:
-          PATHS:
-            owner: jgi
-            msms_refs_path:
-            msms_refs_db_filter:
-            gdrive_subfolder:
-          RT_ALIGNMENT:
-            HILICZ:
-              ATLAS:
-                uid: {atlas_uid}
-              PARAMS:
-                upload_to_gdrive: false
-                include_lcmsruns:
-                exclude_lcmsruns:
-                  - NEG
-                use_existing_rt_alignment: false
-                remove_unided_compounds: false
-                only_keep_data_in_feature: true
-                atlas_extra_time: 2.0
-                ms1_min_peak_intensity: 0
-                ms1_min_num_points: 0
-                ms1_mz_tolerance_ppm: 5.0
-                apply_model_to_min_max: true
-                polynomial_degree: 2
-                min_observations_per_compound: 1
-                min_compounds_for_modeling: 2
-                r2_threshold: 0.5
-                exclude_inchikeys: []
-          TARGETED_ANALYSES:
-            HILICZ:
-              POS:
-                EMA:
-                  DEFAULT:
-                    ATLAS:
-                      uid: {atlas_uid}
-                    PARAMS:
-                      include_lcmsruns:
-                      exclude_lcmsruns:
-                        data_extraction:
-                          - QC
-                          - NEG
-                      apply_alignment: true
-                      remove_unided_compounds: true
-                      remove_flagged_compounds: true
-                      only_keep_data_in_feature: false
-                      apply_cross_polarity_curation: true
-                      suggested_min_conf: 0.75
-                      atlas_extra_time: 0.5
-                      ms1_min_peak_intensity: 1e5
-                      ms1_min_num_points: 5
-                      ms1_mz_tolerance_ppm: 5.0
-                      ms2_min_num_scans: 1
-                      ms2_min_precursor_intensity: 0
-                      ms2_min_score: 0.25
-                      ms2_min_matching_frags: 1
-                      ms2_mz_tolerance_ppm: 20.0
-                      ms2_frag_mz_tolerance: 0.05
-                      gui_require_all_evaluated: false
-                      gui_top_n_hits: 10
-                      gui_lcmsruns_colors: {{}}
-                      note_options_overrides: {{}}
-                      create_curation_notebooks: false
-                      upload_to_gdrive: false
-                      skip_outputs:
+        PATHS:
+          owner: jgi
+          msms_refs_path:
+          msms_refs_db_filter:
+          gdrive_subfolder:
+        GUI:
+          gui_require_all_evaluated: false
+          gui_top_n_hits: 10
+          gui_lcmsruns_colors: {{}}
+          note_options_overrides: {{}}
+        RT_ALIGNMENT:
+          HILICZ:
+            ATLAS:
+              uid: {atlas_uid}
+            PARAMS:
+              upload_to_gdrive: false
+              include_lcmsruns:
+              exclude_lcmsruns:
+                - NEG
+              use_existing_rt_alignment: false
+              remove_unided_compounds: false
+              only_keep_data_in_feature: true
+              atlas_extra_time: 2.0
+              ms1_min_peak_intensity: 0
+              ms1_min_num_points: 0
+              ms1_mz_tolerance_ppm: 5.0
+              apply_model_to_min_max: true
+              polynomial_degree: 2
+              min_observations_per_compound: 1
+              min_compounds_for_modeling: 2
+              r2_threshold: 0.5
+              exclude_inchikeys: []
+        TARGETED_ANALYSES:
+          HILICZ:
+            POS:
+              EMA:
+                DEFAULT:
+                  ATLAS:
+                    uid: {atlas_uid}
+                  PARAMS:
+                    include_lcmsruns:
+                    exclude_lcmsruns:
+                      data_extraction:
+                        - QC
+                        - NEG
+                    apply_alignment: true
+                    remove_unided_compounds: true
+                    remove_flagged_compounds: true
+                    only_keep_data_in_feature: false
+                    apply_cross_polarity_curation: true
+                    suggested_min_conf: 0.75
+                    atlas_extra_time: 0.5
+                    ms1_min_peak_intensity: 1e5
+                    ms1_min_num_points: 5
+                    ms1_mz_tolerance_ppm: 5.0
+                    ms2_min_num_scans: 1
+                    ms2_min_precursor_intensity: 0
+                    ms2_min_score: 0.25
+                    ms2_min_matching_frags: 1
+                    ms2_mz_tolerance_ppm: 20.0
+                    ms2_frag_mz_tolerance: 0.05
+                    create_curation_notebooks: false
+                    upload_to_gdrive: false
+                    skip_outputs:
     """))
     return path
 
@@ -871,39 +871,25 @@ class TestRunTargetedAnalysis:
         assert ta.analysis_type.upper() == "EMA"
         assert ta.analysis_name.upper() == "DEFAULT"
 
-    def test_load_metatlas2_config_missing_workflows_raises(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A YAML missing the WORKFLOWS key should raise a ValueError."""
-        from metatlas2.load_tools import load_metatlas2_config
-
-        bad = tmp_path / "no_workflows.yaml"
-        bad.write_text("PATHS:\n  owner: jgi\n")
-
-        with pytest.raises(ValueError, match="WORKFLOWS"):
-            load_metatlas2_config(str(bad))
-
     def test_load_metatlas2_config_missing_rt_alignment_raises(
         self,
         tmp_path: Path,
     ) -> None:
-        """A YAML missing WORKFLOWS.RT_ALIGNMENT should raise a ValueError."""
+        """A YAML missing RT_ALIGNMENT should raise a ValueError."""
         from metatlas2.load_tools import load_metatlas2_config
 
         bad = tmp_path / "no_rt_alignment.yaml"
         bad.write_text(textwrap.dedent("""\
-            WORKFLOWS:
-              PATHS:
-                owner: jgi
-              TARGETED_ANALYSES:
-                HILICZ:
-                  POS:
-                    EMA:
-                      DEFAULT:
-                        ATLAS:
-                          uid: some-uid
-                        PARAMS: {}
+            PATHS:
+              owner: jgi
+            TARGETED_ANALYSES:
+              HILICZ:
+                POS:
+                  EMA:
+                    DEFAULT:
+                      ATLAS:
+                        uid: some-uid
+                      PARAMS: {}
         """))
 
         with pytest.raises(ValueError, match="RT_ALIGNMENT"):
@@ -913,19 +899,18 @@ class TestRunTargetedAnalysis:
         self,
         tmp_path: Path,
     ) -> None:
-        """A YAML missing WORKFLOWS.TARGETED_ANALYSES should raise a ValueError."""
+        """A YAML missing TARGETED_ANALYSES should raise a ValueError."""
         from metatlas2.load_tools import load_metatlas2_config
 
         bad = tmp_path / "no_targeted_analyses.yaml"
         bad.write_text(textwrap.dedent("""\
-            WORKFLOWS:
-              PATHS:
-                owner: jgi
-              RT_ALIGNMENT:
-                HILICZ:
-                  ATLAS:
-                    uid: some-uid
-                  PARAMS: {}
+            PATHS:
+              owner: jgi
+            RT_ALIGNMENT:
+              HILICZ:
+                ATLAS:
+                  uid: some-uid
+                PARAMS: {}
         """))
 
         with pytest.raises(ValueError, match="TARGETED_ANALYSES"):

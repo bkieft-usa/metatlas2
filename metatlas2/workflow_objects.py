@@ -197,6 +197,7 @@ class Metatlas2Config:
     paths_config: dict[str, Any] = field(default_factory=dict)
     rt_alignment_config: dict[str, Any] = field(default_factory=dict)
     targeted_analyses: list[TargetedAnalysis] = field(default_factory=list)
+    gui_config: dict[str, Any] = field(default_factory=dict)
 
     def get_targeted_analysis(
         self,
@@ -270,6 +271,7 @@ class Metatlas2Config:
             paths_config=dict(snapshot.get("paths_config") or {}),
             rt_alignment_config=dict(snapshot.get("rt_alignment_config") or {}),
             targeted_analyses=targeted_analyses,
+            gui_config=dict(snapshot.get("gui_config") or {}),
         )
 
     def to_json(self) -> str:
@@ -1133,9 +1135,11 @@ class CurationStageBase(ABC):
         )
 
     def _populate_note_options(self) -> None:
-        """Resolve note options and hotkey mappings into ``self.notes``."""
         ms2_notes_opts, ms1_notes_opts, other_notes_opts = gno.get_notes_opts(owner=self.owner)
-        note_overrides = self.override_parameters.get("note_options_overrides") or {}
+        _gui_cfg = self.config.gui_config if self.config else {}
+        _config_note_overrides = _gui_cfg.get("note_options_overrides") or {}
+        _param_note_overrides = self.override_parameters.get("note_options_overrides") or {}
+        note_overrides = {**_config_note_overrides, **_param_note_overrides}
 
         ms1_options, ms1_hotkeys = gno.get_note_options_and_hotkeys(
             note_overrides.get("ms1_notes", {}), ms1_notes_opts

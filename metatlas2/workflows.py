@@ -329,6 +329,7 @@ def run_analysis_gui(
         analysis_gui_obj=analysis_gui_obj,
         port=dash_app_port,
         shutdown_holder=shutdown_holder,
+        run_parameters=run_parameters,
     )
 
     server = make_server("0.0.0.0", dash_app_port, dash_app.server)
@@ -416,9 +417,17 @@ def run_analysis_summary(
     if auto_curate:
         logger.info("auto_curate=True: applying automatic curation defaults to curation_df (skipping manual GUI)...")
         asm.apply_auto_curation_defaults(summary_obj.experimental_data.curation_df)
-    elif summary_obj.ta.params.get("gui_require_all_evaluated", True):
-        logger.info("Checking that all compounds have been evaluated in the GUI before allowing summary generation...")
-        dbi.check_require_evaluated(summary_obj)
+    else:
+        _gui_cfg = summary_obj.config.gui_config if summary_obj.config else {}
+        _overrides = getattr(summary_obj, "override_parameters", {}) or {}
+        _force_eval = (
+            _overrides["gui_require_all_evaluated"]
+            if _overrides.get("gui_require_all_evaluated") is not None
+            else _gui_cfg.get("gui_require_all_evaluated", True)
+        )
+        if _force_eval:
+            logger.info("Checking that all compounds have been evaluated in the GUI before allowing summary generation...")
+            dbi.check_require_evaluated(summary_obj)
 
     logger.info("Updating compound mz_rt values for the curated atlas based on the manual curation...")
     dbi.update_compound_mzrt_for_atlas(

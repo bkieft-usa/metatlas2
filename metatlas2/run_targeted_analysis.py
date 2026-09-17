@@ -203,7 +203,7 @@ def set_up_paths(
     owner = config.owner
     user = os.environ.get("USER", "other")
     if not owner:
-        raise ValueError("Owner not specified in config under WORKFLOWS.PATHS.owner")
+        raise ValueError("Owner not specified in config under PATHS.owner")
     if user is None:
         raise ValueError("USER environment variable is not set")
     project_output_dir = Path(project_output_path) / owner / user / project_name
