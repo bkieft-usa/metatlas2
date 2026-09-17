@@ -591,128 +591,118 @@ EOF
 
 # Create analysis configuration
 cat > configs/analysis_config.yaml << 'EOF'
-WORKFLOWS:
-  PATHS:
-    owner: dev
-    msms_refs_path: databases/msms_refs/ms2_references.json
-    gdrive_subfolder: 
-  RT_ALIGNMENT:
-    HILICZ:
-      ATLAS:
-        uid: dev-qc-hilicz-pos
-      PARAMS:
-          upload_to_gdrive: false
-          include_lcmsruns: # 'QC'
-          exclude_lcmsruns:
-            - NEG
-          use_existing_rt_alignment: true
-          remove_unided_compounds: false
-          only_keep_data_in_feature: true
-          atlas_extra_time: 0.0
-          ms1_min_peak_intensity: 0
-          ms1_min_num_points: 0
-          ms1_mz_tolerance_ppm: 5.0
-          apply_model_to_min_max: true
-          polynomial_degree: 2
-          min_observations_per_compound: 1
-          min_compounds_for_modeling: 2
-          r2_threshold: 0.5
-  TARGETED_ANALYSES:
-    HILICZ:
-      POS:
-        EMA:
-          MAIN:
-            ATLAS:
-              uid: dev-ema-hilicz-pos
-            PARAMS:
-              include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
-              exclude_lcmsruns:
-                data_extraction:
-                  - QC
-                  - NEG
-                gui: # INJBL, BLANK
-                id_sheet: # INJBL, BLANK, REFSTD
-                chromatograms: # INJBL, BLANK
-                id_plots: # INJBL, BLANK, REFSTD
-                data_sheets: # INJBL, BLANK
-              apply_alignment: true
-              remove_unided_compounds: true
-              remove_flagged_compounds: true
-              only_keep_data_in_feature: false
-              apply_cross_polarity_curation: true
-              suggested_min_conf: 0.75
-              atlas_extra_time: 0
-              ms1_min_peak_intensity: 1e4
-              ms1_min_num_points: 1
-              ms1_mz_tolerance_ppm: 5.0
-              ms2_min_num_scans: 1
-              ms2_min_precursor_intensity: 0
-              ms2_min_score: 0.0
-              ms2_min_matching_frags: 0
-              ms2_mz_tolerance_ppm: 20.0
-              ms2_frag_mz_tolerance: 0.05
-              gui_require_all_evaluated: false
-              gui_top_n_hits: 10
-              gui_lcmsruns_colors:
-                ISTD: blue
-                QC: orange
-                EXCTRL: red
-                TXCTRL: green
-                REFSTD: black
-              note_options_overrides:
-                ms1_notes:
-                ms2_notes:
-                other_notes:
-              create_curation_notebooks: true
-              upload_to_gdrive: false
-              skip_outputs:
-      NEG:
-        EMA:
-          MAIN:
-            ATLAS:
-              uid: dev-ema-hilicz-neg
-            PARAMS:
-              include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
-              exclude_lcmsruns:
-                data_extraction:
-                  - QC
-                  - POS
-                gui: # INJBL, BLANK
-                id_sheet: # INJBL, BLANK, REFSTD
-                chromatograms: # INJBL, BLANK
-                id_plots: # INJBL, BLANK, REFSTD
-                data_sheets: # INJBL, BLANK
-              apply_alignment: true
-              remove_unided_compounds: true
-              remove_flagged_compounds: true
-              only_keep_data_in_feature: false
-              apply_cross_polarity_curation: true
-              suggested_min_conf: 0.75
-              atlas_extra_time: 0
-              ms1_min_peak_intensity: 1e4
-              ms1_min_num_points: 1
-              ms1_mz_tolerance_ppm: 5.0
-              ms2_min_num_scans: 0
-              ms2_min_precursor_intensity: 0
-              ms2_min_score: 0.0
-              ms2_min_matching_frags: 0
-              ms2_mz_tolerance_ppm: 20.0
-              ms2_frag_mz_tolerance: 0.05
-              gui_require_all_evaluated: false
-              gui_top_n_hits: 10
-              gui_lcmsruns_colors:
-                ISTD: blue
-                QC: orange
-                EXCTRL: red
-                TXCTRL: green
-                REFSTD: black
-              note_options_overrides:
-                ms1_notes:
-                ms2_notes:
-                other_notes:
-              create_curation_notebooks: true
-              upload_to_gdrive: false
-              skip_outputs:
+PATHS:
+  owner: dev
+  msms_refs_path: databases/msms_refs/ms2_references.json
+  gdrive_subfolder:
+GUI:
+  gui_width: # preferred app width in inches (null = auto)
+  gui_height: # preferred app height in inches (null = auto)
+  gui_require_all_evaluated: false
+  gui_top_n_hits: 10
+  gui_lcmsruns_colors:
+    ISTD: blue
+    QC: orange
+    EXCTRL: red
+    TXCTRL: green
+    REFSTD: black
+  note_options_overrides:
+    ms1_notes:
+    ms2_notes:
+    other_notes:
+RT_ALIGNMENT:
+  HILICZ:
+    ATLAS:
+      uid: dev-qc-hilicz-pos
+    PARAMS:
+      upload_to_gdrive: false
+      include_lcmsruns: # 'QC'
+      exclude_lcmsruns:
+        - NEG
+      use_existing_rt_alignment: true
+      remove_unided_compounds: false
+      only_keep_data_in_feature: true
+      atlas_extra_time: 0.0
+      ms1_min_peak_intensity: 0
+      ms1_min_num_points: 0
+      ms1_mz_tolerance_ppm: 5.0
+      apply_model_to_min_max: true
+      polynomial_degree: 2
+      min_observations_per_compound: 1
+      min_compounds_for_modeling: 2
+      r2_threshold: 0.5
+TARGETED_ANALYSES:
+  HILICZ:
+    POS:
+      EMA:
+        MAIN:
+          ATLAS:
+            uid: dev-ema-hilicz-pos
+          PARAMS:
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui: # INJBL, BLANK
+              id_sheet: # INJBL, BLANK, REFSTD
+              chromatograms: # INJBL, BLANK
+              id_plots: # INJBL, BLANK, REFSTD
+              data_sheets: # INJBL, BLANK
+            apply_alignment: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            only_keep_data_in_feature: false
+            apply_cross_polarity_curation: true
+            suggested_min_conf: 0.75
+            atlas_extra_time: 0
+            ms1_min_peak_intensity: 1e4
+            ms1_min_num_points: 1
+            ms1_mz_tolerance_ppm: 5.0
+            ms2_min_num_scans: 1
+            ms2_min_precursor_intensity: 0
+            ms2_min_score: 0.0
+            ms2_min_matching_frags: 0
+            ms2_mz_tolerance_ppm: 20.0
+            ms2_frag_mz_tolerance: 0.05
+            create_curation_notebooks: true
+            upload_to_gdrive: false
+            skip_outputs:
+    NEG:
+      EMA:
+        MAIN:
+          ATLAS:
+            uid: dev-ema-hilicz-neg
+          PARAMS:
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - POS
+              gui: # INJBL, BLANK
+              id_sheet: # INJBL, BLANK, REFSTD
+              chromatograms: # INJBL, BLANK
+              id_plots: # INJBL, BLANK, REFSTD
+              data_sheets: # INJBL, BLANK
+            apply_alignment: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: true
+            only_keep_data_in_feature: false
+            apply_cross_polarity_curation: true
+            suggested_min_conf: 0.75
+            atlas_extra_time: 0
+            ms1_min_peak_intensity: 1e4
+            ms1_min_num_points: 1
+            ms1_mz_tolerance_ppm: 5.0
+            ms2_min_num_scans: 0
+            ms2_min_precursor_intensity: 0
+            ms2_min_score: 0.0
+            ms2_min_matching_frags: 0
+            ms2_mz_tolerance_ppm: 20.0
+            ms2_frag_mz_tolerance: 0.05
+            create_curation_notebooks: true
+            upload_to_gdrive: false
+            skip_outputs:
 EOF
 
 echo "   Created configs/compounds_config.yaml"
