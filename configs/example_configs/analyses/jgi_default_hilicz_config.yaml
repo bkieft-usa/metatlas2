@@ -79,6 +79,7 @@ TARGETED_ANALYSES:
             ms2_min_matching_frags: 0
             ms2_mz_tolerance_ppm: 20.0
             ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
             upload_to_gdrive: false
             skip_outputs:
@@ -114,6 +115,7 @@ TARGETED_ANALYSES:
             ms2_min_matching_frags: 1
             ms2_mz_tolerance_ppm: 20.0
             ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
             upload_to_gdrive: false
             skip_outputs:
@@ -151,6 +153,7 @@ TARGETED_ANALYSES:
             ms2_min_matching_frags: 0
             ms2_mz_tolerance_ppm: 20.0
             ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
             upload_to_gdrive: false
             skip_outputs:
@@ -186,6 +189,7 @@ TARGETED_ANALYSES:
             ms2_min_matching_frags: 1
             ms2_mz_tolerance_ppm: 20.0
             ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
             upload_to_gdrive: false
             skip_outputs:
