@@ -51,8 +51,9 @@ def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 
         try:
             conn = duckdb.connect(str(db_path), read_only=read_only)
             try:
-                # Begin explicit transaction for write connections
+                # Cap DuckDB's internal buffer pool on write connections
                 if not read_only:
+                    conn.execute("SET memory_limit='8GB'")
                     conn.execute("BEGIN TRANSACTION")
                 
                 yield conn
@@ -64,12 +65,11 @@ def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 
                 
                 return  # Success - exit the retry loop
             except Exception as e:
-                # Rollback on any error during the transaction
                 if not read_only:
                     try:
                         conn.execute("ROLLBACK")
                     except:
-                        pass  # Rollback may fail if connection is broken
+                        pass
                 raise
             finally:
                 conn.close()
@@ -83,7 +83,7 @@ def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 
                         f"(attempt {attempt + 1}/{max_retries})"
                     )
                     time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
+                    retry_delay *= 2 
                 else:
                     logger.error(
                         f"Failed to acquire database lock after {max_retries} attempts. "
@@ -91,10 +91,7 @@ def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 
                     )
                     raise
             else:
-                # Not a lock error, raise immediately
                 raise
-    
-    # Should not reach here, but just in case
     if last_error:
         raise last_error
 
@@ -130,6 +127,7 @@ def _generate_uid(entity_type: str, decorator: str | None = None) -> str:
         "manual_curation":   ("mcr", False),
         "project":           ("prj", False),
         "workflow_stage_run":("wfr", False),
+        "msms_ref":          ("msms-ref", False),
     }
 
     entry = _UID_PREFIX.get(entity_type)
@@ -1132,6 +1130,43 @@ def _create_database_tables(conn, db_type: str = "main"):
             )
         """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reference_fragmentation_data (
+                ref_uid                        TEXT PRIMARY KEY,
+                database                       TEXT,
+                ref_id                         TEXT,
+                name                           TEXT,
+                inchi_key                      TEXT,
+                precursor_mz                   REAL,
+                polarity                       TEXT,
+                adduct                         TEXT,
+                fragmentation_method           TEXT,
+                collision_energy               REAL,
+                instrument                     TEXT,
+                instrument_type                TEXT,
+                formula                        TEXT,
+                mono_isotopic_molecular_weight REAL,
+                inchi                          TEXT,
+                smiles                         TEXT,
+                mz                             REAL[],
+                intensities                    REAL[],
+                created_by                     TEXT,
+                created_date                   TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rfd_inchi_key
+                ON reference_fragmentation_data (inchi_key)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rfd_polarity
+                ON reference_fragmentation_data (polarity)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rfd_database
+                ON reference_fragmentation_data (database)
+        """)
+
     # Project-database-only tables
     elif db_type == "project":
         conn.execute("""
@@ -1294,6 +1329,171 @@ def _create_database_tables(conn, db_type: str = "main"):
                 PRIMARY KEY (mz_rt_uid, rt_alignment_number, analysis_number)
             )
         """)
+
+def batch_save_msms_refs(
+    db_path: str,
+    records: list[dict],
+    batch_size: int = 5000,
+) -> int:
+    """Bulk-insert MSMS reference spectra into ``reference_fragmentation_data``.
+
+    Every call always inserts **new** rows — duplicates are intentional and
+    allowed by design.  Each row receives a freshly generated ``ref_uid`` so
+    that re-importing the same source file (e.g. after an update) simply adds
+    more rows without touching existing ones.
+
+    Args:
+        db_path:    Path to the main metatlas DuckDB file.
+        records:    List of dicts, each containing the pre-parsed and
+                    pre-filtered fields for one spectrum.  Required keys:
+                    ``database``, ``ref_id``, ``name``, ``inchi_key``,
+                    ``precursor_mz``, ``polarity``, ``mz`` (list[float]),
+                    ``intensities`` (list[float]).  All other fields are
+                    optional and default to ``None``.
+        batch_size: Number of rows per ``executemany`` call (default 5 000).
+
+    Returns:
+        Total number of rows inserted.
+    """
+    prov = get_provenance()
+    total_inserted = 0
+
+    with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+        batch: list[tuple] = []
+        for rec in records:
+            ref_uid = _generate_uid("msms_ref")
+            batch.append((
+                ref_uid,
+                rec.get("database"),
+                rec.get("ref_id"),
+                rec.get("name"),
+                rec.get("inchi_key"),
+                rec.get("precursor_mz"),
+                rec.get("polarity"),
+                rec.get("adduct"),
+                rec.get("fragmentation_method"),
+                rec.get("collision_energy"),
+                rec.get("instrument"),
+                rec.get("instrument_type"),
+                rec.get("formula"),
+                rec.get("mono_isotopic_molecular_weight"),
+                rec.get("inchi"),
+                rec.get("smiles"),
+                rec.get("mz"),
+                rec.get("intensities"),
+                prov["analyst"],
+                prov["timestamp"],
+            ))
+            if len(batch) >= batch_size:
+                conn.executemany("""
+                    INSERT INTO reference_fragmentation_data VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                """, batch)
+                total_inserted += len(batch)
+                batch = []
+
+        if batch:
+            conn.executemany("""
+                INSERT INTO reference_fragmentation_data VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+            """, batch)
+            total_inserted += len(batch)
+
+    logger.info(f"Inserted {total_inserted} MSMS reference spectra into reference_fragmentation_data.")
+    return total_inserted
+
+
+def query_msms_refs(
+    db_path: str,
+    inchi_keys: list[str] | None = None,
+    database_filter: str | None = None,
+    polarity: str | None = None,
+) -> list[dict]:
+    """Query ``reference_fragmentation_data`` and return matching rows as dicts.
+
+    All filter arguments are optional.  When provided they are applied as exact
+    equality matches (``=``).  Pass multiple InChI keys via *inchi_keys* to
+    retrieve spectra for a specific set of compounds.
+
+    The ``mz`` and ``intensities`` columns are returned as Python lists (DuckDB
+    native ``REAL[]`` → Python list).
+
+    Args:
+        db_path:         Path to the main metatlas DuckDB file.
+        inchi_keys:      If provided, only return rows whose ``inchi_key`` is in
+                         this list.
+        database_filter: If provided, only return rows where ``database`` equals
+                         this string.
+        polarity:        If provided, only return rows where ``polarity`` equals
+                         this string (e.g. ``"positive"`` or ``"negative"``).
+
+    Returns:
+        List of dicts, one per matching row, with all columns from
+        ``reference_fragmentation_data``.  Returns an empty list when no rows
+        match.
+    """
+    conditions: list[str] = []
+    params: list = []
+
+    if database_filter:
+        conditions.append("database = ?")
+        params.append(database_filter)
+    if polarity:
+        conditions.append("polarity = ?")
+        params.append(polarity)
+    if inchi_keys is not None:
+        # Coerce numpy arrays to plain Python lists
+        if not isinstance(inchi_keys, list):
+            inchi_keys = list(inchi_keys)
+        if len(inchi_keys) == 0:
+            return []
+        placeholders = ", ".join(["?"] * len(inchi_keys))
+        conditions.append(f"inchi_key IN ({placeholders})")
+        params.extend(inchi_keys)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    query = f"""
+        SELECT ref_uid, database, ref_id, name, inchi_key,
+               precursor_mz, polarity, adduct, fragmentation_method,
+               collision_energy, instrument, instrument_type,
+               formula, mono_isotopic_molecular_weight, inchi, smiles,
+               mz, intensities, created_by, created_date
+        FROM reference_fragmentation_data
+        {where_clause}
+        ORDER BY inchi_key, ref_uid
+    """
+
+    columns = [
+        "ref_uid", "database", "ref_id", "name", "inchi_key",
+        "precursor_mz", "polarity", "adduct", "fragmentation_method",
+        "collision_energy", "instrument", "instrument_type",
+        "formula", "mono_isotopic_molecular_weight", "inchi", "smiles",
+        "mz", "intensities", "created_by", "created_date",
+    ]
+
+    with get_db_connection(db_path, read_only=True) as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    result = []
+    for row in rows:
+        rec = dict(zip(columns, row))
+        # Ensure mz/intensities are plain Python lists (DuckDB returns them as lists already)
+        rec["mz"] = list(rec["mz"]) if rec["mz"] is not None else []
+        rec["intensities"] = list(rec["intensities"]) if rec["intensities"] is not None else []
+        result.append(rec)
+
+    logger.info(
+        "query_msms_refs: %d row(s) returned from reference_fragmentation_data "
+        "(database_filter=%r, polarity=%r, inchi_keys=%s)",
+        len(result),
+        database_filter,
+        polarity,
+        f"{len(inchi_keys)} keys" if inchi_keys is not None else "all",
+    )
+    return result
+
 
 def save_config_to_db(
     project_db_path: str,

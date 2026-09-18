@@ -16,7 +16,7 @@ from scipy.optimize import linear_sum_assignment
 
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
-from metatlas2.utils import should_disable_tqdm
+from metatlas2.utils import should_disable_tqdm, get_max_workers
 
 logger = lcf.get_logger('ms2_hit_detection')
 
@@ -337,7 +337,7 @@ def find_ms2_hits(auto_id_obj):
     dataset = auto_id_obj.experimental_data
     wp = auto_id_obj.ta.params
     polarity = auto_id_obj.ta.polarity
-    
+
     ms2_df = dataset.ms2_df
     if ms2_df.empty:
         logger.warning("No MS2 data found. Skipping hit detection.")
@@ -345,12 +345,31 @@ def find_ms2_hits(auto_id_obj):
 
     unique_ms2_inchi_keys = ms2_df['inchi_key'].dropna().unique()
     groups = ms2_df.groupby(['mz_rt_uid', 'filename'])
-    refs_by_inchi_key = ldt.load_msms_refs_file(
-        file_path=Path(auto_id_obj.paths['msms_refs_path']),
-        database_filter=auto_id_obj.msms_refs_db_filter,
-        polarity=polarity,
-        inchi_keys=unique_ms2_inchi_keys
-    )
+
+    msms_refs_path = getattr(auto_id_obj.config, 'msms_refs_path', None) or None
+    main_db_path = auto_id_obj.paths.get('main_db_path')
+
+    if msms_refs_path:
+        # Analyst override: load from a specific .jsonl file on disk
+        logger.info(f"MSMS refs override: loading from file {msms_refs_path}")
+        refs_by_inchi_key = ldt.load_msms_refs_file(
+            file_path=Path(msms_refs_path),
+            database_filter=auto_id_obj.msms_refs_db_filter,
+            polarity=polarity,
+            inchi_keys=unique_ms2_inchi_keys,
+        )
+    else:
+        if not main_db_path:
+            raise ValueError(
+                "No msms_refs_path override and no main_db_path available. "
+                "Cannot load MSMS reference spectra."
+            )
+        refs_by_inchi_key = ldt.load_msms_refs_from_db(
+            db_path=main_db_path,
+            database_filter=auto_id_obj.msms_refs_db_filter,
+            polarity=polarity,
+            inchi_keys=unique_ms2_inchi_keys,
+        )
     ms2_inchi_keys_without_refs = set(unique_ms2_inchi_keys) - set(refs_by_inchi_key.keys())
     if ms2_inchi_keys_without_refs:
         logger.warning(f"No reference spectra found for {len(ms2_inchi_keys_without_refs)} inchi_keys: {', '.join(list(ms2_inchi_keys_without_refs))}")
@@ -370,17 +389,22 @@ def find_ms2_hits(auto_id_obj):
             wp.get('limit_to_n_hits', 20)
         ))
 
+    # Free reference spectra now that all jobs are built
+    del refs_by_inchi_key
+
     logger.info(f"Finding reference hits for {len(jobs)} compound-file groups...")
     results_map = {}
-    # Cap workers at 5 to limit concurrent memory from score matrices and
-    # alignment data held in worker processes simultaneously.
-    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 5)) as executor:
+    max_workers = get_max_workers(auto_id_obj.config.max_workers if auto_id_obj.config else None)
+    logger.info(f"Using {max_workers} worker processes for MS2 hit detection.")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_process_compound_batch, job) for job in jobs]
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Detecting MS2 Hits", disable=should_disable_tqdm()):
             uid, filename, hits_list = fut.result()
             results_map[(uid, filename)] = hits_list
 
     ms2_df = _assign_hits(ms2_df, results_map)
+    # Free the hit-record dict now that jobs are built
+    del results_map
 
     ms2_df, ms1_df = _filter_out_ms2_data(ms2_df, auto_id_obj.experimental_data.ms1_df, wp.get('ms2_min_score', 0), wp.get('ms2_min_matching_frags', 0))
 
