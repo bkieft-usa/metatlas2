@@ -107,7 +107,15 @@ def _process_compound_batch(job):
     Designed to run in a worker process via :class:`concurrent.futures.ProcessPoolExecutor`.
     Builds :class:`matchms.Spectrum` objects from raw scan data, applies a vectorised
     precursor m/z PPM filter, computes CosineHungarian scores against every candidate
-    reference, and calls :func:`_align_spectra_for_plotting` for each passing hit.
+    reference, and calls :func:`_align_spectra_for_plotting` for each hit.
+
+    **All** candidate hits (those passing the precursor PPM filter) are stored,
+    regardless of score or fragment-match count.  The ``min_score`` and
+    ``min_frags`` thresholds are used only by :func:`_filter_out_ms2_data` to
+    decide which **compounds** to retain — not to suppress individual hits.
+    This ensures that, for a compound with at least one high-scoring scan, all
+    lower-scoring hits are still visible in the output (they provide context
+    about whether the good hit is trustworthy).
 
     Args:
         job: A tuple of
@@ -120,15 +128,19 @@ def _process_compound_batch(job):
               ``precursor_MZ``, and ``precursor_intensity``.
             * ``ref_spectra`` - list of :class:`matchms.Spectrum` reference objects.
             * ``frag_mz_tolerance`` - fragment m/z tolerance in Da for scoring/alignment.
-            * ``min_score`` - minimum cosine score threshold.
-            * ``min_frags`` - minimum number of matched fragments threshold.
+            * ``min_score`` - minimum cosine score threshold (used only for compound
+              retention in :func:`_filter_out_ms2_data`, not for hit suppression here).
+            * ``min_frags`` - minimum matched-fragment count threshold (same usage as
+              ``min_score``).
             * ``ms2_mz_tolerance_ppm`` - precursor PPM filter (``None`` disables it).
             * ``limit_to_n_hits`` - maximum hits to return per scan (``None`` = unlimited).
+              Applied after sorting by score descending so the top-N hits are kept.
 
     Returns:
         A 3-tuple ``(uid, filename, all_scan_results)`` where ``all_scan_results``
         is a list (one entry per input scan) of hit-record lists.  Each hit record
-        is a ``dict`` containing score, alignment, and metadata fields.
+        is a ``dict`` containing score, alignment, and metadata fields.  Scans with
+        no candidate references (after the PPM filter) get an empty list.
     """
     (uid, filename, scans_data, ref_spectra,
      frag_mz_tolerance, min_score, min_frags,
@@ -158,7 +170,7 @@ def _process_compound_batch(job):
         return uid, filename, [[] for _ in range(len(scans_data))]
 
     ref_precursor_mzs = np.array([float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra])
-    q_mzs_np = np.array(q_mzs)[:, None] 
+    q_mzs_np = np.array(q_mzs)[:, None]
     
     if ms2_mz_tolerance_ppm is None:
         candidate_mask = np.ones((len(queries), len(ref_spectra)), dtype=bool)
@@ -172,15 +184,15 @@ def _process_compound_batch(job):
         score_matrix = cosine_hungarian.matrix(references=ref_spectra, queries=queries)
         scores = score_matrix['score'].T
         matches = score_matrix['matches'].T
-    passing = candidate_mask & (scores >= min_score) & (matches >= min_frags)
 
     all_scan_results = [[] for _ in range(len(scans_data))]
     
     for q_idx in range(len(queries)):
-        ref_indices = np.where(passing[q_idx])[0]
+        ref_indices = np.where(candidate_mask[q_idx])[0]
         if ref_indices.size == 0:
             continue
             
+        # Sort all candidates by score descending; apply limit_to_n_hits cap
         sorted_ref_indices = ref_indices[np.argsort(-scores[q_idx, ref_indices])]
         if limit_to_n_hits:
             sorted_ref_indices = sorted_ref_indices[:limit_to_n_hits]
@@ -195,12 +207,11 @@ def _process_compound_batch(job):
         for r_idx in sorted_ref_indices:
             ref = ref_spectra[r_idx]
             
-            # Perform alignment ONLY for the top N hits
             align_res = _align_spectra_for_plotting(
-                q_mz_np, 
-                q_int_np, 
-                ref.mz, 
-                ref.intensities, 
+                q_mz_np,
+                q_int_np,
+                ref.mz,
+                ref.intensities,
                 frag_mz_tolerance
             )
 
@@ -231,16 +242,27 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
     """Remove compounds that have no passing MS2 hits and synchronise the MS1 DataFrame.
 
     When both ``min_score`` and ``min_frags`` are 0 the filter is skipped and all
-    scans are retained.  Otherwise only compounds that have at least one
-    ``in_feature`` scan with a non-empty ``hits`` list are kept.  The MS1 DataFrame
-    is then trimmed to the same set of compound UIDs.
+    scans are retained.  Otherwise a compound is kept if **at least one**
+    ``in_feature`` scan across **any** file for that compound has at least one
+    hit whose ``score >= min_score`` AND ``num_matches >= min_frags``.
+
+    Because :func:`_process_compound_batch` now stores **all** candidate hits
+    (not just those above the thresholds), the score/frags check is applied
+    here by inspecting each hit dict.  When a compound qualifies, **all** of
+    its scans are retained — including scans from other files and scans whose
+    hits fall below the thresholds — so that low-scoring hits remain visible
+    as context alongside the good hit.
+
+    The MS1 DataFrame is then trimmed to the same set of compound UIDs.
 
     Args:
         ms2_df: :class:`pandas.DataFrame` of MS2 scans with a ``hits`` column
-            populated by :func:`_assign_hits`.
+            populated by :func:`_assign_hits`.  Each element of ``hits`` is a
+            list of dicts with at least ``score`` and ``num_matches`` keys.
         ms1_df: :class:`pandas.DataFrame` of MS1 data to synchronise.
-        min_score: Minimum cosine score used during hit detection (for log messages).
-        min_frags: Minimum matched-fragment count used during hit detection (for log messages).
+        min_score: Minimum cosine score a hit must have to count as "passing".
+        min_frags: Minimum matched-fragment count a hit must have to count as
+            "passing".
 
     Returns:
         A 2-tuple ``(filtered_ms2_df, filtered_ms1_df)`` with standardised columns.
@@ -260,12 +282,23 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
 
     ms2_steps = [("all ms2 scans", starting_scans, starting_uids)]
 
+    def _scan_has_passing_hit(hits_list, min_score, min_frags):
+        """Return True if any hit in hits_list meets both score and frags thresholds."""
+        if not isinstance(hits_list, list):
+            return False
+        return any(
+            isinstance(h, dict)
+            and h.get('score', 0.0) >= min_score
+            and h.get('num_matches', 0) >= min_frags
+            for h in hits_list
+        )
+
     in_feature_df = ms2_df[ms2_df['in_feature'] == True]
     if in_feature_df.empty:
         keep_uids = set()
     else:
         compounds_with_hits_mask = in_feature_df.groupby('mz_rt_uid')['hits'].apply(
-            lambda x: any(isinstance(h, list) and len(h) > 0 for h in x)
+            lambda x: any(_scan_has_passing_hit(h, min_score, min_frags) for h in x)
         )
         keep_uids = set(compounds_with_hits_mask[compounds_with_hits_mask].index)
     ms2_df = ms2_df[ms2_df['mz_rt_uid'].isin(keep_uids)].reset_index(drop=True)
@@ -277,17 +310,66 @@ def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
 
     # drop compounds with no passing MS2 hits (if we made it this far, there were MS2 filters)
     if not ms1_df.empty and not ms2_df.empty:
-        ms1_starting_entries = len(ms1_df)
-        ms1_starting_uids = ms1_df['mz_rt_uid'].nunique()
         valid_uids = ms2_df['mz_rt_uid'].unique()
         ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(valid_uids)].copy()
-        ms1_steps = [
-            ("all ms2 data", ms1_starting_entries, ms1_starting_uids),
-            ("pass MS1 & MS2", len(ms1_df), ms1_df['mz_rt_uid'].nunique()),
-        ]
-        ldt.log_filter_table(ms1_steps, ms1_starting_entries, ms1_starting_uids, title="MS1 sync with MS2 hits summary")
+        logger.info(f"Synced MS1 and MS2 data: retained {len(ms1_df)} EIC points for {ms1_df['mz_rt_uid'].nunique()} compounds.")
 
     return ms2_df, ms1_df
+
+def _keep_top_scan_per_compound_file(ms2_df: pd.DataFrame) -> pd.DataFrame:
+    """Retain only the highest-scoring scan per ``(mz_rt_uid, filename)`` group.
+
+    For each ``(mz_rt_uid, filename)`` group the scan whose best hit score is
+    highest is kept; all other scans in that group are dropped.  The best hit
+    score for a scan is defined as the ``score`` field of the first element of
+    its ``hits`` list (hits are stored in descending score order), or ``-1``
+    when the ``hits`` list is empty.
+
+    This filter is applied **after** :func:`_assign_hits` so that every scan
+    already has its ``hits`` list populated.  It runs **before**
+    :func:`_filter_out_ms2_data` so that the compound-level gate operates on
+    the already-reduced set of scans, saving memory.
+
+    When ``keep_top_scan_per_compound_file=False`` in the workflow params this
+    function is not called and all scans are forwarded unchanged.
+
+    Args:
+        ms2_df: Wide-format MS2 DataFrame (one row per scan) with a ``hits``
+                column populated by :func:`_assign_hits`.
+
+    Returns:
+        Filtered MS2 DataFrame with at most one scan row per
+        ``(mz_rt_uid, filename)`` group.
+    """
+    if ms2_df.empty:
+        return ms2_df
+
+    starting_scans = len(ms2_df)
+    starting_uids = ms2_df['mz_rt_uid'].nunique()
+
+    def _best_score(hits):
+        """Return the top hit score for a scan, or -1 if no hits."""
+        if isinstance(hits, list) and hits and isinstance(hits[0], dict):
+            return hits[0].get('score', -1.0)
+        return -1.0
+
+    best_scores = ms2_df['hits'].apply(_best_score)
+    # For each (mz_rt_uid, filename) group, find the index of the row with the
+    # highest best_score.  idxmax() returns the first occurrence on ties.
+    group_best_idx = (
+        best_scores
+        .groupby([ms2_df['mz_rt_uid'], ms2_df['filename']])
+        .idxmax()
+    )
+    ms2_df = ms2_df.loc[group_best_idx.values].reset_index(drop=True)
+
+    logger.info(
+        f"keep_top_scan_per_compound_file: reduced MS2 from {starting_scans} scans "
+        f"({starting_uids} compounds) to {len(ms2_df)} scans "
+        f"({ms2_df['mz_rt_uid'].nunique()} compounds)."
+    )
+    return ms2_df
+
 
 def _assign_hits(ms2_df, results_map):
     """Assign scored hits back to every row of ms2_df in a single O(n) pass.
@@ -405,6 +487,9 @@ def find_ms2_hits(auto_id_obj):
     ms2_df = _assign_hits(ms2_df, results_map)
     # Free the hit-record dict now that jobs are built
     del results_map
+
+    if wp.get('keep_top_scan_per_compound_file', True):
+        ms2_df = _keep_top_scan_per_compound_file(ms2_df)
 
     ms2_df, ms1_df = _filter_out_ms2_data(ms2_df, auto_id_obj.experimental_data.ms1_df, wp.get('ms2_min_score', 0), wp.get('ms2_min_matching_frags', 0))
 

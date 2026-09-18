@@ -674,19 +674,39 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
     """Filter wide-format MS1 DataFrame by minimum in-feature point count and intensity.
 
     Each row of *ms1_df* represents one compound x one file with list columns
-    ``spec_rts``, ``spec_ints``, and ``in_feature``.  Rows are kept only when
-    the in-feature subset meets both thresholds.  Uses vectorised numpy helpers
-    to avoid slow Python-level ``apply(lambda row: ...)`` loops.
+    ``spec_rts``, ``spec_ints``, and ``in_feature``.
+
+    Filtering is applied at the **compound level** (``mz_rt_uid``).  Each
+    threshold is evaluated independently across all files for a compound:
+
+    * ``min_pts`` — a compound qualifies for this threshold if **any** of its
+      ``(mz_rt_uid, filename)`` rows has at least ``min_pts`` in-feature scan
+      points.
+    * ``min_int`` — a compound qualifies for this threshold if **any** of its
+      rows has at least one in-feature point with intensity ≥ ``min_int``
+      (equivalently, the per-row max in-feature intensity ≥ ``min_int``).
+
+    Both active thresholds must be satisfied (AND), but each is checked
+    independently across all files — a single file does not need to satisfy
+    both simultaneously.
+
+    When a compound qualifies, **all** of its rows (across every file) are
+    retained, including files that individually fall below the thresholds.
+    This prevents the situation where a compound with strong signal in one
+    file appears to have zero signal in all other files simply because those
+    files had lower (but real) intensities.
 
     Args:
         ms1_df:   Wide-format MS1 DataFrame (one row per compound x file).
-        min_pts:  Minimum number of in-feature scan points required per row.
-                  ``None`` or ``0`` skips this filter.
-        min_int:  Minimum peak intensity (max of in-feature intensities) required
-                  per row.  ``None`` or ``0`` skips this filter.
+        min_pts:  Minimum number of in-feature scan points required in at
+                  least one file per compound.  ``None`` or ``0`` skips this
+                  filter.
+        min_int:  Minimum peak intensity threshold: a compound qualifies if
+                  at least one in-feature point in any file reaches this
+                  value.  ``None`` or ``0`` skips this filter.
 
     Returns:
-        Filtered MS1 DataFrame.
+        Filtered MS1 DataFrame with all rows for qualifying compounds retained.
     """
     if ms1_df.empty:
         logger.warning("No MS1 data found. Skipping point filtering.")
@@ -726,21 +746,29 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
             index=in_feature_col.index,
         )
 
+    passing_uids = set(ms1_df['mz_rt_uid'].unique())
+
     if min_pts is not None and min_pts > 0:
         counts = _in_feature_count(ms1_df['in_feature'])
-        ms1_df = ms1_df[counts >= min_pts]
-        steps.append((f"min_pts >= {min_pts}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
-        if ms1_df.empty:
+        pts_pass_uids = set(ms1_df.loc[counts >= min_pts, 'mz_rt_uid'].unique())
+        passing_uids = passing_uids & pts_pass_uids
+        steps.append((f"min_pts >= {min_pts}", len(ms1_df[ms1_df['mz_rt_uid'].isin(passing_uids)]), len(passing_uids)))
+        if not passing_uids:
+            ms1_df = ms1_df.iloc[0:0]
             ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
 
     if min_int is not None and min_int > 0:
         max_ints = _in_feature_max_int(ms1_df['in_feature'], ms1_df['spec_ints'])
-        ms1_df = ms1_df[max_ints >= min_int]
-        steps.append((f"min_intensity >= {min_int}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
-        if ms1_df.empty:
+        int_pass_uids = set(ms1_df.loc[max_ints >= min_int, 'mz_rt_uid'].unique())
+        passing_uids = passing_uids & int_pass_uids
+        steps.append((f"min_intensity >= {min_int}", len(ms1_df[ms1_df['mz_rt_uid'].isin(passing_uids)]), len(passing_uids)))
+        if not passing_uids:
+            ms1_df = ms1_df.iloc[0:0]
             ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
+
+    ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(passing_uids)]
 
     no_feature_mask = ~ms1_df["in_feature"].apply(lambda x: isinstance(x, list) and any(x))
     ms1_df = ms1_df[~no_feature_mask]

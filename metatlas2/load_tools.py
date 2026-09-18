@@ -425,9 +425,9 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
     params['ms2_mz_tolerance_ppm'] = float(params.get('ms2_mz_tolerance_ppm', 20.0))
     params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
+    params['keep_top_scan_per_compound_file'] = bool(params.get('keep_top_scan_per_compound_file', True))
     params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
-    # skip_outputs is a free-form field; pass through as-is (None or list)
     params['skip_outputs'] = params.get('skip_outputs', None)
     return params
 
