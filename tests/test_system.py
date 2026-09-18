@@ -225,7 +225,7 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
     mutation is required in tests.
     """
     path.write_text(textwrap.dedent(f"""\
-        PATHS:
+        GENERAL:
           owner: jgi
           msms_refs_path:
           msms_refs_db_filter:
@@ -880,7 +880,7 @@ class TestRunTargetedAnalysis:
 
         bad = tmp_path / "no_rt_alignment.yaml"
         bad.write_text(textwrap.dedent("""\
-            PATHS:
+            GENERAL:
               owner: jgi
             TARGETED_ANALYSES:
               HILICZ:
@@ -904,7 +904,7 @@ class TestRunTargetedAnalysis:
 
         bad = tmp_path / "no_targeted_analyses.yaml"
         bad.write_text(textwrap.dedent("""\
-            PATHS:
+            GENERAL:
               owner: jgi
             RT_ALIGNMENT:
               HILICZ:
