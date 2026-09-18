@@ -215,20 +215,12 @@ def set_up_paths(
     rta_dir = project_output_dir / f"RTA{rt_alignment_number}"
     analysis_dir = rta_dir / f"TGA{analysis_number}"
 
-    # Resolve msms_refs_path relative to METATLAS_DATA_DIR if not absolute
-    msms_refs_path_raw = config.msms_refs_path
-    if msms_refs_path_raw and not Path(msms_refs_path_raw).is_absolute():
-        msms_refs_path_resolved = str(Path(data_dir) / msms_refs_path_raw)
-    else:
-        msms_refs_path_resolved = str(msms_refs_path_raw) if msms_refs_path_raw else None
-
     paths = {
         "lcmsruns_directory": str(Path(lcmsruns_path) / owner / project_name),
         "project_directory": str(project_output_dir),
         "log_path": str(project_output_dir / f"{project_short}.log"),
         "project_db_path": str(project_output_dir / f"{project_name}.duckdb"),
         "main_db_path": str(main_db_path),
-        "msms_refs_path": msms_refs_path_resolved,
         "pubchem_cache_path": str(pubchem_cache_path),
         "modelseed_table_path": str(modelseed_table_path),
         "parquet_output_dir": str(parquet_output_dir),

@@ -1410,7 +1410,7 @@ def build_dash_app(
                 x=0.99, y=0.99,
                 xanchor="right", yanchor="bottom",
                 showarrow=False,
-                font=dict(size=15, color="black"),
+                font=dict(size=18, color="black"),
                 align="right",
                 bgcolor="rgba(0,0,0,0)",
                 bordercolor="rgba(0,0,0,0)",
@@ -1424,7 +1424,7 @@ def build_dash_app(
                 x=0.99, y=0.99,
                 xanchor="right", yanchor="top",
                 showarrow=False,
-                font=dict(size=13, color="black"),
+                font=dict(size=16, color="black"),
                 align="right",
                 bgcolor="rgba(255,255,255,0.5)",
                 bordercolor="rgba(100,100,100,0.5)",
@@ -1432,9 +1432,7 @@ def build_dash_app(
                 borderpad=6,
             )
 
-        # MS2 scan RT markers: top-100 by score, filtered from pre-built compact tuple list.
-        # Markers are pre-sorted by score descending at startup, so [:100] is free.
-        # No hover payload — hoverinfo="skip" omits text arrays from the JSON entirely.
+        # MS2 scan RT markers: top-100 by score
         all_markers = ms2_markers_by_compound.get(mz_rt_uid, [])
         in_window = [rt for rt, _ in all_markers if expanded_rt_min <= rt <= expanded_rt_max]
         ms2_marker_rts = in_window[:100]
@@ -1688,7 +1686,7 @@ def build_dash_app(
         if hit:
             scan_info = (
                 f"<span style='font-size:1.2em'>"
-                f"<b>CoS.: {hit.get('score', 0):.4f}</b>  |  "
+                f"<b>CoS: {hit.get('score', 0):.4f}</b>  |  "
                 f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
                 f"RT: {scan.get('scan_rt', 0):.4f} min | "
                 f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
@@ -1700,7 +1698,9 @@ def build_dash_app(
         else:
             scan_info = (
                 f"<span style='font-size:1.2em'>"
-                f"<b>No Hit</b>"
+                f"<b>No Hit</b>  |  "
+                f"RT: {scan.get('scan_rt', 0):.4f} min | "
+                f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
                 f"<br>"
                 f"File: {fname}</span><br><br>"
             )
@@ -2366,7 +2366,7 @@ def build_dash_app(
         pending = html.Span(
             [
                 html.I("Pending changes: ", style={"color": "black"}),
-                html.Br(), f"{row['compound_name']} ({row['adduct']}) [{current_1based}]",
+                html.Br(), f"[{current_1based}] {row['compound_name']} ({row['adduct']})",
                 html.Br(), f"RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
                 html.Br(), f"MS1: {state['ms1_note']}",
                 html.Br(), f"MS2: {state['ms2_note']}",
@@ -2397,13 +2397,17 @@ def build_dash_app(
             [
                 f"[{s['index']}] {s['name']} ({s['adduct']})",
                 html.Br(),
+                f"RT [{s['rt_min']:.4f}, {s['rt_max']:.4f}]",
+                html.Br(),
                 f"MS1: {s['ms1']}",
                 html.Br(),
                 f"MS2: {s['ms2']}",
                 html.Br(),
-                f"RT [{s['rt_min']:.4f}, {s['rt_max']:.4f}]",
-                #html.Br(),
-                #f"@ {s['timestamp']}",
+                f"Other: {s['other']}",
+                html.Br(),
+                f"Analyst Notes: {s['analyst_notes'][:50]}{'...' if len(s['analyst_notes']) > 50 else ''}",
+                html.Br(),
+                f"Timestamp: {s['timestamp']}",
             ],
             style={"fontSize": "0.85rem"},
         )

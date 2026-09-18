@@ -12,7 +12,7 @@ from pathlib import Path
 import metatlas2.file_and_project_format as fpf
 import metatlas2.logging_config as lcf
 import metatlas2.load_tools as ldt
-from metatlas2.utils import should_disable_tqdm
+from metatlas2.utils import should_disable_tqdm, get_max_workers
 logger = lcf.get_logger('extract_data_from_h5')
 
 def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
@@ -54,28 +54,53 @@ def _load_h5_table(file_path, key, columns=None, mz_bounds=None):
         df[float_cols] = df[float_cols].astype(np.float32, copy=False)
     return df
 
-def _expand_atlas_windows(atlas: pd.DataFrame, extra_time: float, ms1_mz_tolerance_ppm: float, polarity: str) -> pd.DataFrame:
+def _expand_atlas_windows(
+    atlas: pd.DataFrame,
+    extra_time: float,
+    ms1_mz_tolerance_ppm: float,
+    polarity: str,
+    extract_extra_time: float | None = None,
+) -> pd.DataFrame:
     """Add padded m/z and RT bound columns to the atlas DataFrame.
 
     Computes ``mz_min``/``mz_max`` from the ppm tolerance and
     ``rt_min_pad``/``rt_max_pad`` by subtracting/adding *extra_time* to the
-    atlas RT bounds.  These columns are consumed by the interval-join helpers.
+    atlas RT bounds.  These columns are consumed by the interval-join helpers
+    to determine which scan points are tagged ``in_feature``.
+
+    When *extract_extra_time* is provided (and larger than *extra_time*), two
+    additional columns ``rt_min_extract`` / ``rt_max_extract`` are added.
+    These wider windows are used by :func:`_process_one_file` to pre-filter
+    the raw HDF5 data before the join, so that ``only_keep_data_in_feature``
+    can be set to ``False`` (retaining the full EIC shape) while still
+    discarding data that is far outside any atlas feature.  When
+    *extract_extra_time* is ``None`` the extract columns are set equal to the
+    pad columns (no additional pre-filtering).
 
     Args:
         atlas:                 Atlas compound DataFrame (must have ``mz``,
                                ``rt_min``, ``rt_max`` columns).
-        extra_time:            Extra time (minutes) added to each RT window.
+        extra_time:            Extra time (minutes) added to each RT window to
+                               define the ``in_feature`` tag boundary.
         ms1_mz_tolerance_ppm:  m/z tolerance in ppm used to compute the
                                ``mz_min``/``mz_max`` search window.
         polarity:              Polarity string (``"positive"`` or
                                ``"negative"``) written into the output.
+        extract_extra_time:    Optional wider RT padding (minutes) used only
+                               for the HDF5 pre-filter step.  Must be ≥
+                               *extra_time*.  ``None`` means no extra
+                               pre-filtering beyond the ``in_feature`` window.
 
     Returns:
         Copy of *atlas* with ``polarity``, ``mz_min``, ``mz_max``,
-        ``rt_min_pad``, and ``rt_max_pad`` columns added.
+        ``rt_min_pad``, ``rt_max_pad``, ``rt_min_extract``, and
+        ``rt_max_extract`` columns added.
     """
+    eet = extra_time if extract_extra_time is None else max(extract_extra_time, extra_time)
     logger.info(
-        f"Expanding atlas windows for {len(atlas)} compounds with extra_time={extra_time} and mz_tolerance_ppm={ms1_mz_tolerance_ppm}"
+        f"Expanding atlas windows for {len(atlas)} compounds with "
+        f"extra_time={extra_time}, extract_extra_time={eet}, "
+        f"mz_tolerance_ppm={ms1_mz_tolerance_ppm}"
     )
 
     out = atlas.copy()
@@ -84,8 +109,12 @@ def _expand_atlas_windows(atlas: pd.DataFrame, extra_time: float, ms1_mz_toleran
     tol = mz * ms1_mz_tolerance_ppm * 1e-6
     out["mz_min"] = (mz - tol).astype(np.float32)
     out["mz_max"] = (mz + tol).astype(np.float32)
-    out["rt_min_pad"] = (out["rt_min"].to_numpy(dtype=np.float64) - extra_time).astype(np.float32)
-    out["rt_max_pad"] = (out["rt_max"].to_numpy(dtype=np.float64) + extra_time).astype(np.float32)
+    rt_min = out["rt_min"].to_numpy(dtype=np.float64)
+    rt_max = out["rt_max"].to_numpy(dtype=np.float64)
+    out["rt_min_pad"] = (rt_min - extra_time).astype(np.float32)
+    out["rt_max_pad"] = (rt_max + extra_time).astype(np.float32)
+    out["rt_min_extract"] = (rt_min - eet).astype(np.float32)
+    out["rt_max_extract"] = (rt_max + eet).astype(np.float32)
     return out
 
 def _interval_join_mz(query_mz, atlas_mz_min, atlas_mz_max, chunk_size=50_000):
@@ -250,6 +279,13 @@ def _process_one_file(run, atlas, only_in_feature):
     pre-filter, and joins the result to *atlas* via
     :func:`_join_ms1_to_atlas` / :func:`_join_ms2_to_atlas`.
 
+    When the atlas contains ``rt_min_extract`` / ``rt_max_extract`` columns
+    (added by :func:`_expand_atlas_windows` when ``extract_extra_time`` is
+    set), the raw HDF5 data is pre-filtered to those wider RT windows before
+    the join.  This allows ``only_keep_data_in_feature=False`` (full EIC
+    shape) while still discarding data that is far outside any atlas feature,
+    reducing memory usage compared to loading the entire chromatogram.
+
     Args:
         run:             :class:`LCMSRun` object with ``file_path`` and
                          ``filename`` attributes.
@@ -265,9 +301,28 @@ def _process_one_file(run, atlas, only_in_feature):
     polarity = atlas['polarity'].iloc[0] if 'polarity' in atlas.columns else 'unknown'
     ms1_key = {"positive": "ms1_pos", "negative": "ms1_neg"}.get(polarity)
     ms2_key = {"positive": "ms2_pos", "negative": "ms2_neg"}.get(polarity)
-    
-    ms1_df = _load_h5_table(run.file_path, ms1_key, columns=["mz", "rt", "i"], 
+
+    ms1_df = _load_h5_table(run.file_path, ms1_key, columns=["mz", "rt", "i"],
                             mz_bounds=(float(atlas["mz_min"].min()), float(atlas["mz_max"].max())))
+
+    # Pre-filter MS1 rows to the extract RT windows when they are present and
+    # wider than the in-feature windows (i.e. extract_extra_time was set).
+    if (
+        not ms1_df.empty
+        and "rt_min_extract" in atlas.columns
+        and "rt_max_extract" in atlas.columns
+        and not only_in_feature
+    ):
+        rt_global_min = float(atlas["rt_min_extract"].min())
+        rt_global_max = float(atlas["rt_max_extract"].max())
+        rt_arr = ms1_df["rt"].to_numpy()
+        rt_mask = (rt_arr >= rt_global_min) & (rt_arr <= rt_global_max)
+        if not rt_mask.all():
+            logger.debug(
+                f"Pre-filtered MS1 from {len(ms1_df)} to {int(rt_mask.sum())} rows "
+                f"using extract RT window [{rt_global_min:.3f}, {rt_global_max:.3f}] for {run.filename}"
+            )
+            ms1_df = ms1_df.loc[rt_mask].reset_index(drop=True)
 
     ms2_df = _load_h5_table(run.file_path, ms2_key, columns=["mz", "i", "rt", "precursor_MZ", "precursor_intensity", "collision_energy"]) if ms2_key else pd.DataFrame()
 
@@ -436,12 +491,12 @@ def _merge_wide_ms1(
     accumulator: pd.DataFrame,
     new_chunk: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Incrementally merge a per-file wide MS1 chunk into the running accumulator.
+    """Append a per-file wide MS1 chunk to a running accumulator.
 
-    Because each chunk already has exactly one row per ``mz_rt_uid`` (for a
-    single file), and the accumulator contains rows for previously processed
-    files, a simple :func:`pd.concat` is sufficient — no second ``groupby``
-    is needed.
+    This helper is retained for use in tests and any external callers.
+    The main :func:`extract_data_from_raw` pipeline now collects all chunks
+    in a list and calls :func:`pandas.concat` once at the end to avoid
+    creating N-1 intermediate DataFrames.
 
     Args:
         accumulator: Current wide-format MS1 accumulator (may be empty on the
@@ -463,10 +518,12 @@ def _merge_wide_ms2(
     accumulator: pd.DataFrame,
     new_chunk: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Incrementally merge a per-file wide MS2 chunk into the running accumulator.
+    """Append a per-file wide MS2 chunk to a running accumulator.
 
-    Because each chunk already has exactly one row per ``(mz_rt_uid, scan_rt)``
-    (for a single file), a simple :func:`pd.concat` is sufficient.
+    This helper is retained for use in tests and any external callers.
+    The main :func:`extract_data_from_raw` pipeline now collects all chunks
+    in a list and calls :func:`pandas.concat` once at the end to avoid
+    creating N-1 intermediate DataFrames.
 
     Args:
         accumulator: Current wide-format MS2 accumulator (may be empty on the
@@ -617,19 +674,39 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
     """Filter wide-format MS1 DataFrame by minimum in-feature point count and intensity.
 
     Each row of *ms1_df* represents one compound x one file with list columns
-    ``spec_rts``, ``spec_ints``, and ``in_feature``.  Rows are kept only when
-    the in-feature subset meets both thresholds.  Uses vectorised numpy helpers
-    to avoid slow Python-level ``apply(lambda row: ...)`` loops.
+    ``spec_rts``, ``spec_ints``, and ``in_feature``.
+
+    Filtering is applied at the **compound level** (``mz_rt_uid``).  Each
+    threshold is evaluated independently across all files for a compound:
+
+    * ``min_pts`` — a compound qualifies for this threshold if **any** of its
+      ``(mz_rt_uid, filename)`` rows has at least ``min_pts`` in-feature scan
+      points.
+    * ``min_int`` — a compound qualifies for this threshold if **any** of its
+      rows has at least one in-feature point with intensity ≥ ``min_int``
+      (equivalently, the per-row max in-feature intensity ≥ ``min_int``).
+
+    Both active thresholds must be satisfied (AND), but each is checked
+    independently across all files — a single file does not need to satisfy
+    both simultaneously.
+
+    When a compound qualifies, **all** of its rows (across every file) are
+    retained, including files that individually fall below the thresholds.
+    This prevents the situation where a compound with strong signal in one
+    file appears to have zero signal in all other files simply because those
+    files had lower (but real) intensities.
 
     Args:
         ms1_df:   Wide-format MS1 DataFrame (one row per compound x file).
-        min_pts:  Minimum number of in-feature scan points required per row.
-                  ``None`` or ``0`` skips this filter.
-        min_int:  Minimum peak intensity (max of in-feature intensities) required
-                  per row.  ``None`` or ``0`` skips this filter.
+        min_pts:  Minimum number of in-feature scan points required in at
+                  least one file per compound.  ``None`` or ``0`` skips this
+                  filter.
+        min_int:  Minimum peak intensity threshold: a compound qualifies if
+                  at least one in-feature point in any file reaches this
+                  value.  ``None`` or ``0`` skips this filter.
 
     Returns:
-        Filtered MS1 DataFrame.
+        Filtered MS1 DataFrame with all rows for qualifying compounds retained.
     """
     if ms1_df.empty:
         logger.warning("No MS1 data found. Skipping point filtering.")
@@ -669,21 +746,29 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
             index=in_feature_col.index,
         )
 
+    passing_uids = set(ms1_df['mz_rt_uid'].unique())
+
     if min_pts is not None and min_pts > 0:
         counts = _in_feature_count(ms1_df['in_feature'])
-        ms1_df = ms1_df[counts >= min_pts]
-        steps.append((f"min_pts >= {min_pts}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
-        if ms1_df.empty:
+        pts_pass_uids = set(ms1_df.loc[counts >= min_pts, 'mz_rt_uid'].unique())
+        passing_uids = passing_uids & pts_pass_uids
+        steps.append((f"min_pts >= {min_pts}", len(ms1_df[ms1_df['mz_rt_uid'].isin(passing_uids)]), len(passing_uids)))
+        if not passing_uids:
+            ms1_df = ms1_df.iloc[0:0]
             ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
 
     if min_int is not None and min_int > 0:
         max_ints = _in_feature_max_int(ms1_df['in_feature'], ms1_df['spec_ints'])
-        ms1_df = ms1_df[max_ints >= min_int]
-        steps.append((f"min_intensity >= {min_int}", len(ms1_df), ms1_df['mz_rt_uid'].nunique()))
-        if ms1_df.empty:
+        int_pass_uids = set(ms1_df.loc[max_ints >= min_int, 'mz_rt_uid'].unique())
+        passing_uids = passing_uids & int_pass_uids
+        steps.append((f"min_intensity >= {min_int}", len(ms1_df[ms1_df['mz_rt_uid'].isin(passing_uids)]), len(passing_uids)))
+        if not passing_uids:
+            ms1_df = ms1_df.iloc[0:0]
             ldt.log_filter_table(steps, starting_entries, starting_compounds, title="MS1 point filtering summary")
             return ms1_df
+
+    ms1_df = ms1_df[ms1_df['mz_rt_uid'].isin(passing_uids)]
 
     no_feature_mask = ~ms1_df["in_feature"].apply(lambda x: isinstance(x, list) and any(x))
     ms1_df = ms1_df[~no_feature_mask]
@@ -783,8 +868,8 @@ def extract_data_from_raw(
     polarity = _POL_TO_H5[canonical_pol]
 
     used_params = [
-        "atlas_extra_time", "ms1_mz_tolerance_ppm", "only_keep_data_in_feature",
-        "ms1_min_num_points", "ms1_min_peak_intensity",
+        "atlas_extra_time", "extract_extra_time", "ms1_mz_tolerance_ppm",
+        "only_keep_data_in_feature", "ms1_min_num_points", "ms1_min_peak_intensity",
         "ms2_min_num_scans", "ms2_min_precursor_intensity",
     ]
     logger.info("Running extraction with the following workflow parameters:")
@@ -798,6 +883,7 @@ def extract_data_from_raw(
         wp.get("atlas_extra_time", 0.0),
         wp.get("ms1_mz_tolerance_ppm", 5.0),
         polarity,
+        extract_extra_time=wp.get("extract_extra_time", None),
     )
     runs = [r for r in lcmsruns if getattr(r, "file_format", "h5") == "h5"]
 
@@ -811,11 +897,12 @@ def extract_data_from_raw(
 
     logger.info(f"Extracting data for {len(runs)} files in stage '{stage}' with polarity '{polarity}'...")
 
-    final_ms1_df = pd.DataFrame()
-    final_ms2_df = pd.DataFrame()
-
     only_in_feature = wp.get("only_keep_data_in_feature", False)
-    with ProcessPoolExecutor(max_workers=min(mp.cpu_count(), 5)) as executor:
+    max_workers = get_max_workers(obj.config.max_workers if obj.config else None)
+    logger.info(f"Using {max_workers} worker processes for data extraction.")
+    ms1_chunks: list[pd.DataFrame] = []
+    ms2_chunks: list[pd.DataFrame] = []
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_process_one_file, run, atlas_expanded, only_in_feature): run
             for run in runs
@@ -827,9 +914,17 @@ def extract_data_from_raw(
             disable=should_disable_tqdm(),
         ):
             m1_long, m2_long = fut.result()
-            final_ms1_df = _merge_wide_ms1(final_ms1_df, _widen_one_file_ms1(m1_long))
-            final_ms2_df = _merge_wide_ms2(final_ms2_df, _widen_one_file_ms2(m2_long))
+            w1 = _widen_one_file_ms1(m1_long)
+            w2 = _widen_one_file_ms2(m2_long)
             del m1_long, m2_long
+            if not w1.empty:
+                ms1_chunks.append(w1)
+            if not w2.empty:
+                ms2_chunks.append(w2)
+
+    final_ms1_df = pd.concat(ms1_chunks, ignore_index=True) if ms1_chunks else pd.DataFrame()
+    final_ms2_df = pd.concat(ms2_chunks, ignore_index=True) if ms2_chunks else pd.DataFrame()
+    del ms1_chunks, ms2_chunks
 
     # Sort MS1 list columns by RT (required for correct np.interp downstream)
     final_ms1_df = _sort_ms1_lists_by_rts(final_ms1_df)

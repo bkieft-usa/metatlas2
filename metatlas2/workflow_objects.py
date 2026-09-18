@@ -149,14 +149,20 @@ class MS2Hit:
         }
 
 class PathsConfig(TypedDict, total=False):
-    """Dictionary type for the paths on disk for a given run."""
+    """Dictionary type for the paths on disk for a given run.
+
+    Note: MSMS reference spectra are now stored in the ``reference_fragmentation_data``
+    table of the main DuckDB (``main_db_path``).  The ``msms_refs_path`` field has been
+    removed.  To override with a custom ``.jsonl`` file, set ``PATHS.msms_refs_path``
+    in the analysis YAML config — it is read at runtime from
+    ``auto_id_obj.config.msms_refs_path`` in :func:`~metatlas2.ms2_hit_detection.find_ms2_hits`.
+    """
 
     lcmsruns_directory: str
     project_directory: str
     log_path: str
     project_db_path: str
     main_db_path: str
-    msms_refs_path: str | None
     pubchem_cache_path: str
     modelseed_table_path: str
     parquet_output_dir: str
@@ -194,7 +200,7 @@ class TargetedAnalysis:
 @dataclass
 class Metatlas2Config:
 
-    paths_config: dict[str, Any] = field(default_factory=dict)
+    general_config: dict[str, Any] = field(default_factory=dict)
     rt_alignment_config: dict[str, Any] = field(default_factory=dict)
     targeted_analyses: list[TargetedAnalysis] = field(default_factory=list)
     gui_config: dict[str, Any] = field(default_factory=dict)
@@ -232,19 +238,24 @@ class Metatlas2Config:
 
     @property
     def owner(self) -> str:
-        return (self.paths_config.get('owner') or 'jgi').lower()
+        return (self.general_config.get('owner') or 'jgi').lower()
 
     @property
     def msms_refs_path(self) -> str | None:
-        return self.paths_config.get('msms_refs_path', None)
+        return self.general_config.get('msms_refs_path', None)
 
     @property
     def msms_refs_db_filter(self) -> str | None:
-        return self.paths_config.get('msms_refs_db_filter', None)
+        return self.general_config.get('msms_refs_db_filter', None)
 
     @property
     def gdrive_subfolder(self) -> str | None:
-        return self.paths_config.get('gdrive_subfolder', None)
+        return self.general_config.get('gdrive_subfolder', None)
+
+    @property
+    def max_workers(self) -> int | None:
+        val = self.general_config.get('max_workers', None)
+        return int(val) if val is not None else None
 
     def to_snapshot(self) -> dict[str, Any]:
         return asdict(self)
@@ -268,7 +279,7 @@ class Metatlas2Config:
             ))
 
         return cls(
-            paths_config=dict(snapshot.get("paths_config") or {}),
+            general_config=dict(snapshot.get("general_config") or {}),
             rt_alignment_config=dict(snapshot.get("rt_alignment_config") or {}),
             targeted_analyses=targeted_analyses,
             gui_config=dict(snapshot.get("gui_config") or {}),
@@ -501,6 +512,147 @@ class NewCompoundsConfig:
                     logger.warning(f"Failed to create Compound for row {row.get('compound_name', 'Unknown')}: {e}")
 
         dbi.batch_save_compounds(main_db_path, compounds)
+
+
+@dataclass
+class NewMsmsRefsConfig:
+    """Configuration for the ``metatlas2.sh add-msms-refs`` command.
+
+    Parsed from a YAML file with an ``MSMS_REFS`` top-level key that lists
+    one or more source ``.jsonl`` files to import.
+    """
+
+    entries: list[dict]
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "NewMsmsRefsConfig":
+        with open(path, 'r') as f:
+            raw = yaml.safe_load(f)
+
+        if 'MSMS_REFS' not in raw:
+            raise ValueError(f"Missing required top-level key 'MSMS_REFS' in {path}")
+
+        entries_raw = raw['MSMS_REFS']
+        if not isinstance(entries_raw, list):
+            raise ValueError(f"'MSMS_REFS' must be a list of entries in {path}")
+
+        entries = []
+        for i, entry in enumerate(entries_raw):
+            if not isinstance(entry, dict):
+                raise ValueError(f"MSMS_REFS entry {i} must be a dict with a 'path' key")
+            if 'path' not in entry:
+                raise ValueError(f"MSMS_REFS entry {i} is missing required 'path' key")
+            entries.append({
+                'path': str(entry['path']),
+                'database_filter': entry.get('database_filter', None),
+            })
+
+        logger.info(f"Loaded MSMS refs configuration from {path}: {len(entries)} source file(s)")
+        return cls(entries=entries)
+
+    def execute(self) -> None:
+        """Stream each source ``.jsonl`` file and bulk-insert spectra into the main DB.
+
+        This is the entry-point for ``metatlas2.sh add-msms-refs``.
+        """
+        import json as _json
+        import numpy as _np
+
+        paths = rtg.set_up_paths(config=self)
+        main_db_path = paths.get("main_db_path")
+
+        total_inserted = 0
+        total_skipped = 0
+
+        for entry in self.entries:
+            source_path = Path(entry['path'])
+            db_filter = entry.get('database_filter')
+
+            if not source_path.exists():
+                logger.error(f"MSMS refs source file not found: {source_path}. Skipping.")
+                continue
+
+            logger.info(
+                f"Importing MSMS refs from {source_path}"
+                + (f" (database_filter='{db_filter}')" if db_filter else "")
+                + "..."
+            )
+
+            records: list[dict] = []
+            n_skipped = 0
+
+            with source_path.open('r') as fh:
+                for line_num, line in enumerate(fh, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = _json.loads(line)
+                    except _json.JSONDecodeError as e:
+                        logger.warning(f"  Line {line_num}: JSON parse error — {e}")
+                        n_skipped += 1
+                        continue
+
+                    # Optional database filter
+                    if db_filter and rec.get('database') != db_filter:
+                        continue
+
+                    mz_list = rec.get('mz')
+                    int_list = rec.get('intensities')
+                    if not mz_list or not int_list or len(mz_list) != len(int_list):
+                        n_skipped += 1
+                        continue
+
+                    mz = _np.array(mz_list, dtype=_np.float32)
+                    intensities = _np.array(int_list, dtype=_np.float32)
+
+                    # Apply the same precursor_mz + 2.5 truncation used at query time
+                    precursor_mz = rec.get('precursor_mz')
+                    try:
+                        precursor_mz = float(precursor_mz) if precursor_mz is not None else None
+                    except (TypeError, ValueError):
+                        precursor_mz = None
+                    if precursor_mz is not None and not _np.isnan(precursor_mz):
+                        mask = mz < precursor_mz + 2.5
+                        mz = mz[mask]
+                        intensities = intensities[mask]
+
+                    if len(mz) == 0:
+                        n_skipped += 1
+                        continue
+
+                    records.append({
+                        'database': rec.get('database'),
+                        'ref_id': rec.get('id'),
+                        'name': rec.get('name'),
+                        'inchi_key': rec.get('inchi_key', ''),
+                        'precursor_mz': precursor_mz,
+                        'polarity': rec.get('polarity'),
+                        'adduct': rec.get('adduct'),
+                        'fragmentation_method': rec.get('fragmentation_method'),
+                        'collision_energy': rec.get('collision_energy'),
+                        'instrument': rec.get('instrument'),
+                        'instrument_type': rec.get('instrument_type'),
+                        'formula': rec.get('formula'),
+                        'mono_isotopic_molecular_weight': rec.get('mono_isotopic_molecular_weight'),
+                        'inchi': rec.get('inchi'),
+                        'smiles': rec.get('smiles'),
+                        'mz': mz.tolist(),
+                        'intensities': intensities.tolist(),
+                    })
+
+            inserted = dbi.batch_save_msms_refs(main_db_path, records)
+            total_inserted += inserted
+            total_skipped += n_skipped
+            logger.info(
+                f"  {source_path.name}: inserted {inserted} spectra"
+                + (f", skipped {n_skipped}" if n_skipped else "")
+            )
+
+        logger.info(
+            f"add-msms-refs complete: {total_inserted} spectra inserted total"
+            + (f", {total_skipped} skipped" if total_skipped else "")
+        )
 
 @dataclass
 class Compound:

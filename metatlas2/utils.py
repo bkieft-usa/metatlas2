@@ -3,8 +3,19 @@ from __future__ import annotations
 import os
 import sys
 import getpass
+import multiprocessing as mp
 import numpy as np
 from datetime import datetime
+
+def get_max_workers(max_workers: int | None = None) -> int:
+    """Return the number of parallel worker processes to use for extraction.
+    """
+    default = 2
+    if max_workers is None or max_workers <= 0:
+        workers = default
+    else:
+        workers = min(int(max_workers), mp.cpu_count())
+    return workers
 
 def _is_jupyter() -> bool:
     """Return True when running inside a Jupyter kernel (notebook or lab)."""

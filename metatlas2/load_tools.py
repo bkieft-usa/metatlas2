@@ -17,6 +17,14 @@ import metatlas2.file_and_project_format as fpf
 import metatlas2.logging_config as lcf
 logger = lcf.get_logger('load_tools')
 
+# ---------------------------------------------------------------------------
+# Polarity normalisation shared by both MSMS-refs loaders
+# ---------------------------------------------------------------------------
+_POLARITY_TO_MATCHMS: dict[str, str] = {
+    'pos': 'positive', 'positive': 'positive',
+    'neg': 'negative', 'negative': 'negative',
+}
+
 DEFAULT_EXCLUDE_LCMSRUNS = {
     'gui': ['INJBL', 'BLANK'],
     'id_sheet': ['INJBL', 'BLANK', 'REFSTD'],
@@ -65,10 +73,6 @@ def load_msms_refs_file(
         + "..."
     )
 
-    _POLARITY_TO_MATCHMS = {
-        'pos': 'positive', 'positive': 'positive',
-        'neg': 'negative', 'negative': 'negative',
-    }
     if polarity is not None:
         polarity_norm = _POLARITY_TO_MATCHMS.get(polarity.lower())
         if polarity_norm is None:
@@ -176,6 +180,162 @@ def load_msms_refs_file(
 
     return refs_by_inchi_key
 
+
+def load_msms_refs_from_db(
+    db_path: str,
+    database_filter: str | None = None,
+    polarity: str | None = None,
+    inchi_keys: list[str] | None = None,
+) -> dict[str, list[Spectrum]]:
+    """Load MSMS reference spectra from the ``reference_fragmentation_data`` table
+    in the main metatlas DuckDB and return a dict mapping inchi_key ->
+    list of matchms Spectrum objects.
+
+    This is the database-backed counterpart to :func:`load_msms_refs_file`.
+    The two functions share the same signature and return type so that
+    :func:`~metatlas2.ms2_hit_detection.find_ms2_hits` can dispatch between
+    them transparently.
+
+    Args:
+        db_path:         Path to the main metatlas DuckDB file.
+        database_filter: If provided, only load spectra where ``database``
+                         matches this string exactly.
+        polarity:        If provided, only load spectra for the specified
+                         polarity (``"pos"``, ``"positive"``, ``"neg"``, or
+                         ``"negative"``).
+        inchi_keys:      If provided, only load spectra for these InChI keys.
+
+    Returns:
+        dict mapping inchi_key (str) -> list of matchms Spectrum objects.
+
+    Raises:
+        ValueError: If no spectra remain after applying the filters.
+    """
+    import metatlas2.database_interact as dbi
+
+    logger.info(
+        f"Loading reference spectra from DB at {db_path}"
+        + (f" (database='{database_filter}')" if database_filter else "")
+        + (f" (polarity='{polarity}')" if polarity else "")
+        + (f" (filtered to {len(inchi_keys)} inchi_keys)" if inchi_keys is not None else "")
+        + "..."
+    )
+
+    if polarity is not None:
+        polarity_norm = _POLARITY_TO_MATCHMS.get(polarity.lower())
+        if polarity_norm is None:
+            raise ValueError(
+                f"Unrecognised polarity value {polarity!r}. "
+                f"Expected one of: {list(_POLARITY_TO_MATCHMS.keys())}."
+            )
+    else:
+        polarity_norm = None
+
+    # Build parameterised query
+    conditions: list[str] = []
+    params: list = []
+
+    if database_filter:
+        conditions.append("database = ?")
+        params.append(database_filter)
+    if polarity_norm:
+        conditions.append("polarity = ?")
+        params.append(polarity_norm)
+    if inchi_keys is not None:
+        # Coerce numpy arrays (from ms2_df.unique()) to plain Python lists
+        if not isinstance(inchi_keys, list):
+            inchi_keys = list(inchi_keys)
+        if len(inchi_keys) == 0:
+            # Empty list → nothing can match; raise immediately
+            raise ValueError(
+                f"No spectra remained after filtering in reference_fragmentation_data at {db_path}. "
+                "inchi_keys filter was an empty list — no spectra can match. "
+                "Pass None to load all spectra, or provide at least one InChI key."
+            )
+        placeholders = ", ".join(["?"] * len(inchi_keys))
+        conditions.append(f"inchi_key IN ({placeholders})")
+        params.extend(inchi_keys)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    query = f"""
+        SELECT ref_uid, database, ref_id, name, inchi_key,
+               precursor_mz, mz, intensities
+        FROM reference_fragmentation_data
+        {where_clause}
+    """
+
+    refs_by_inchi_key: dict[str, list[Spectrum]] = {}
+    n_skipped = 0
+
+    # Stream rows in small chunks to avoid materialising the full result set in
+    # Python RAM.  Processing happens inside the connection context so the cursor
+    # stays open; each chunk is discarded after processing.
+    _FETCH_CHUNK = 500
+    with dbi.get_db_connection(db_path, read_only=True) as conn:
+        # Cap DuckDB's internal buffer pool so it cannot silently consume all RAM
+        # while scanning the table before streaming rows to Python.
+        conn.execute("SET memory_limit='1GB'")
+        cursor = conn.execute(query, params)
+        while True:
+            chunk = cursor.fetchmany(_FETCH_CHUNK)
+            if not chunk:
+                break
+            for row in chunk:
+                (ref_uid, database, ref_id, name, inchi_key,
+                 precursor_mz, mz_list, int_list) = row
+
+                if not mz_list or not int_list or len(mz_list) != len(int_list):
+                    n_skipped += 1
+                    continue
+
+                # DuckDB returns REAL[] columns as Python lists — cast to float32 arrays
+                mz = np.array(mz_list, dtype=np.float32)
+                intensities = np.array(int_list, dtype=np.float32)
+
+                if len(mz) == 0:
+                    n_skipped += 1
+                    continue
+
+                # matchms requires m/z ascending
+                if len(mz) > 1 and not np.all(mz[:-1] <= mz[1:]):
+                    order = np.argsort(mz, kind='stable')
+                    mz = mz[order]
+                    intensities = intensities[order]
+
+                spec = Spectrum(
+                    mz=mz,
+                    intensities=intensities,
+                    metadata={
+                        'precursor_mz': float(precursor_mz) if precursor_mz is not None else 0.0,
+                        'database': str(database or ''),
+                        'id': str(ref_id or ''),
+                        'name': str(name or ''),
+                        'inchi_key': str(inchi_key or ''),
+                    }
+                )
+                refs_by_inchi_key.setdefault(str(inchi_key or ''), []).append(spec)
+
+    if not refs_by_inchi_key:
+        parts = []
+        if database_filter:
+            parts.append(f"database_filter={database_filter!r}")
+        if polarity_norm:
+            parts.append(f"polarity={polarity!r} (normalized to {polarity_norm!r})")
+        detail = "; ".join(parts) if parts else "table may be empty or all records were unparseable"
+        raise ValueError(
+            f"No spectra remained after filtering in reference_fragmentation_data at {db_path}. "
+            f"{detail}. "
+            "Check filter values and the 'database'/'polarity' fields in the table."
+        )
+
+    total = sum(len(v) for v in refs_by_inchi_key.values())
+    logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
+    if n_skipped > 0:
+        logger.warning(f"  Skipped {n_skipped} rows due to empty or mismatched mz/intensity arrays.")
+
+    return refs_by_inchi_key
+
+
 def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict[str, Any]:
     _VALID_MODEL_TYPES = {"polynomial", "linear", "median_offset"}
     model_type = str(params.get('model_type', 'polynomial')).lower()
@@ -238,6 +398,7 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     """
     params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_ANALYSES
     excl = params.get('exclude_lcmsruns')
+    eet = params.get('extract_extra_time')
     if excl is None:
         params['exclude_lcmsruns'] = {step: list(runs) for step, runs in DEFAULT_EXCLUDE_LCMSRUNS.items()}
     elif isinstance(excl, dict):
@@ -254,6 +415,7 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['apply_cross_polarity_curation'] = bool(params.get('apply_cross_polarity_curation', True))
     params['suggested_min_conf'] = float(params.get('suggested_min_conf', 0.75))
     params['atlas_extra_time'] = float(params.get('atlas_extra_time', 0.5))
+    params['extract_extra_time'] = float(eet) if eet is not None else None
     params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
     params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
     params['ms1_mz_tolerance_ppm'] = float(params.get('ms1_mz_tolerance_ppm', 5.0))
@@ -263,9 +425,9 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
     params['ms2_mz_tolerance_ppm'] = float(params.get('ms2_mz_tolerance_ppm', 20.0))
     params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
+    params['keep_top_scan_per_compound_file'] = bool(params.get('keep_top_scan_per_compound_file', True))
     params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
-    # skip_outputs is a free-form field; pass through as-is (None or list)
     params['skip_outputs'] = params.get('skip_outputs', None)
     return params
 
@@ -332,15 +494,13 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
                         analysis_name_label=str(name_key),
                     ))
 
-    paths_config: dict[str, Any] = dict(raw.get('PATHS') or {})
+    _general_raw = raw.get('GENERAL') or {}
+    general_config: dict[str, Any] = dict(_general_raw)
+    _mw = general_config.get('max_workers')
+    general_config['max_workers'] = int(_mw) if _mw is not None else None
 
-    # logger.info(
-    #     f"Loaded config from {source_name}: "
-    #     f"{len(rt_alignment_config)} RT alignment, "
-    #     f"{len(targeted_analyses)} targeted analyses"
-    # )
     return Metatlas2Config(
-        paths_config=paths_config,
+        general_config=general_config,
         rt_alignment_config=rt_alignment_config,
         targeted_analyses=targeted_analyses,
         gui_config=gui_config,

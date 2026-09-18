@@ -1,6 +1,7 @@
-PATHS:
+GENERAL:
   owner: test_owner
   msms_refs_path: ms2_references.json
+  max_workers:
 GUI:
   gui_require_all_evaluated: false
   gui_top_n_hits: 20

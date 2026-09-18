@@ -75,9 +75,21 @@ def _scan_dict(
 
 def _ms2_df(uid: str, filename: str = "f.h5", n_scans: int = 1,
             in_feature: bool = True, hits=None) -> pd.DataFrame:
-    """Build a minimal wide-format MS2 DataFrame."""
+    """Build a minimal wide-format MS2 DataFrame.
+
+    ``hits`` is a list of per-scan hit lists.  Element ``hits[i]`` is the list
+    of hit dicts for scan ``i``.  When ``hits`` is ``None`` every scan gets an
+    empty hits list.  When ``hits`` is a plain list (not a list-of-lists, e.g.
+    ``[]``) every scan also gets an empty hits list.
+    """
     rows = []
     for i in range(n_scans):
+        if hits is None:
+            scan_hits = []
+        elif isinstance(hits, list) and i < len(hits):
+            scan_hits = hits[i]
+        else:
+            scan_hits = []
         rows.append({
             "mz_rt_uid":           uid,
             "filename":            filename,
@@ -90,7 +102,7 @@ def _ms2_df(uid: str, filename: str = "f.h5", n_scans: int = 1,
             "frag_ints":           [1e4, 5e4, 2e5],
             "collision_energy":    35.0,
             "in_feature":          in_feature,
-            "hits":                hits if hits is not None else [],
+            "hits":                scan_hits,
         })
     return pd.DataFrame(rows)
 
@@ -318,7 +330,7 @@ class TestFilterOutMs2Data:
 
     def test_compound_with_hits_retained(self):
         uid = "uid-001"
-        ms2 = _ms2_df(uid, hits=[[{"score": 0.9}]])
+        ms2 = _ms2_df(uid, hits=[[{"score": 0.9, "num_matches": 2}]])
         ms1 = _ms1_df(uid)
         out_ms2, _ = _filter_out_ms2_data(ms2, ms1, min_score=0.5, min_frags=1)
         assert uid in out_ms2["mz_rt_uid"].values
@@ -334,7 +346,7 @@ class TestFilterOutMs2Data:
         uid_with_hits = "uid-001"
         uid_no_hits   = "uid-002"
         ms2 = pd.concat([
-            _ms2_df(uid_with_hits, hits=[[{"score": 0.9}]]),
+            _ms2_df(uid_with_hits, hits=[[{"score": 0.9, "num_matches": 2}]]),
             _ms2_df(uid_no_hits,   hits=[]),
         ], ignore_index=True)
         ms1 = pd.concat([_ms1_df(uid_with_hits), _ms1_df(uid_no_hits)], ignore_index=True)
@@ -345,14 +357,14 @@ class TestFilterOutMs2Data:
     def test_out_of_feature_scans_do_not_count_as_hits(self):
         uid = "uid-001"
         # Scan has a hit but is NOT in_feature → should not count
-        ms2 = _ms2_df(uid, in_feature=False, hits=[[{"score": 0.9}]])
+        ms2 = _ms2_df(uid, in_feature=False, hits=[[{"score": 0.9, "num_matches": 2}]])
         ms1 = _ms1_df(uid)
         out_ms2, _ = _filter_out_ms2_data(ms2, ms1, min_score=0.5, min_frags=1)
         assert uid not in out_ms2["mz_rt_uid"].values
 
     def test_output_has_final_columns(self):
         uid = "uid-001"
-        ms2 = _ms2_df(uid, hits=[[{"score": 0.9}]])
+        ms2 = _ms2_df(uid, hits=[[{"score": 0.9, "num_matches": 2}]])
         ms1 = _ms1_df(uid)
         out_ms2, _ = _filter_out_ms2_data(ms2, ms1, min_score=0, min_frags=0)
         expected_cols = {"mz_rt_uid", "filename", "inchi_key", "adduct", "scan_rt",
@@ -372,8 +384,8 @@ class TestFilterOutMs2Data:
     def test_multiple_scans_one_with_hit_retains_compound(self):
         uid = "uid-001"
         ms2 = pd.concat([
-            _ms2_df(uid, hits=[[{"score": 0.9}]]),   # scan 1: has hit
-            _ms2_df(uid, hits=[]),                    # scan 2: no hit
+            _ms2_df(uid, hits=[[{"score": 0.9, "num_matches": 2}]]),   # scan 1: has hit
+            _ms2_df(uid, hits=[]),                                       # scan 2: no hit
         ], ignore_index=True)
         ms1 = _ms1_df(uid)
         out_ms2, _ = _filter_out_ms2_data(ms2, ms1, min_score=0.5, min_frags=1)
@@ -455,8 +467,11 @@ class TestProcessCompoundBatch:
         _, _, results = _process_compound_batch(self._job([scan], [self._ref()]))
         assert results[0] == []
 
-    def test_min_score_threshold_filters_low_scoring_hits(self):
-        # Use a completely different reference so the score is low
+    def test_min_score_threshold_does_not_filter_hits_in_process_batch(self):
+        # _process_compound_batch now stores ALL candidate hits regardless of
+        # score — the min_score threshold is enforced only by
+        # _filter_out_ms2_data at the compound level.  A low-scoring hit
+        # against a completely different reference should still be stored.
         bad_ref = _ref_spectrum(
             precursor_mz=ADENINE_MZ,
             mz=[500.0, 600.0, 700.0],
@@ -466,7 +481,9 @@ class TestProcessCompoundBatch:
         _, _, results = _process_compound_batch(
             self._job([scan], [bad_ref], min_score=0.9)
         )
-        assert results[0] == []
+        # Hit is stored even though score < min_score=0.9
+        assert len(results[0]) == 1
+        assert results[0][0]["score"] < 0.9
 
     def test_ppm_filter_excludes_mismatched_precursor(self):
         # Reference precursor is 10 Da away from query precursor
