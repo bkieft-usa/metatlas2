@@ -1,11 +1,12 @@
-PATHS:
+GENERAL:
   owner: jgi
-  msms_refs_path: /global/cfs/cdirs/metatlas/databases/msms_refs/msms_refs_20260602140911.json
+  msms_refs_path:
   msms_refs_db_filter: metatlas
   gdrive_subfolder: 0B-ZDcHbPi-aqZzE5V3hOZFc0dms
+  max_workers: 5
 GUI:
-  gui_width: # preferred app width in inches (null = auto)
-  gui_height: # preferred app height in inches (null = auto)
+  gui_width:
+  gui_height:
   gui_require_all_evaluated: false
   gui_top_n_hits: 10
   gui_lcmsruns_colors:
@@ -65,8 +66,10 @@ TARGETED_ANALYSES:
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: false
+            apply_istd_curation_to_ema: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0.5
+            extract_extra_time:
             ms1_min_peak_intensity: 0
             ms1_min_num_points: 0
             ms1_mz_tolerance_ppm: 5.0
@@ -101,6 +104,7 @@ TARGETED_ANALYSES:
             apply_cross_polarity_curation: false
             suggested_min_conf: 0.75
             atlas_extra_time: 0
+            extract_extra_time:
             ms1_min_peak_intensity: 5e5
             ms1_min_num_points: 5
             ms1_mz_tolerance_ppm: 5.0
@@ -134,8 +138,10 @@ TARGETED_ANALYSES:
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: false
+            apply_istd_curation_to_ema: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0.5
+            extract_extra_time:
             ms1_min_peak_intensity: 0
             ms1_min_num_points: 0
             ms1_mz_tolerance_ppm: 5.0
@@ -170,6 +176,7 @@ TARGETED_ANALYSES:
             apply_cross_polarity_curation: false
             suggested_min_conf: 0.75
             atlas_extra_time: 0
+            extract_extra_time:
             ms1_min_peak_intensity: 5e5
             ms1_min_num_points: 5
             ms1_mz_tolerance_ppm: 5.0
