@@ -1,6 +1,6 @@
 # Manual Curation and Analysis Summary
 
-After running `run_targeted_analysis.py`, a Jupyter notebook is generated for each atlas (e.g. `HILICZ_ISTD_POS_RTA0_TGA0.ipynb`). Opening this notebook and sequentially running the cells launches an interactive curation GUI and — once curation is complete — runs all summary exports of the results.
+After running `run_targeted_analysis.py`, a Jupyter notebook is generated for each targeted analysis (e.g. `MyProject_RTA0_TGA0_HILICZ_POS_EMA_DEFAULT.ipynb`). Opening this notebook and sequentially running the cells launches an interactive curation GUI and — once curation is complete — runs all summary exports of the results.
 
 ---
 
@@ -9,9 +9,9 @@ After running `run_targeted_analysis.py`, a Jupyter notebook is generated for ea
 Notebooks are written to the analysis output directory:
 
 ```
-<projects_dir>/<project_name>/RTA<N>/TGA<M>/
-    HILICZ_ISTD_POS_RTA0_TGA0.ipynb
-    HILICZ_EMA_POS_RTA0_TGA0.ipynb
+$METATLAS_DATA_DIR/projects/targeted_outputs/<owner>/<user>/<project_name>/RTA<N>/TGA<M>/
+    <project_name>_RTA<N>_TGA<M>_HILICZ_POS_EMA_DEFAULT.ipynb
+    <project_name>_RTA<N>_TGA<M>_HILICZ_POS_ISTD_DEFAULT.ipynb
     ...
 ```
 
@@ -23,9 +23,9 @@ The notebook has six cells:
 
 | Cell | Type | Purpose |
 |---|---|---|
-| 1 | Markdown | Header — project name, chromatography, polarity, analysis type, and iteration numbers |
+| 1 | Markdown | Header — project name |
 | 2 | Code | Imports — loads required libraries and sets up logging |
-| 3 | Code | Variables — project name, config path, atlas UID, iteration numbers |
+| 3 | Code | `RUN_PARAMS` — project name, atlas UID, chromatography, polarity, analysis type/name, and iteration numbers |
 | 4 | Code | `OVERRIDE_PARAMS` — optional parameter overrides for the GUI session |
 | 5 | Code | **GUI cell** — launches the interactive curation app |
 | 6 | Code | **Summary cell** — exports all summary files after curation |
@@ -36,15 +36,27 @@ The notebook has six cells:
 
 Cell 4 contains an `OVERRIDE_PARAMS` dictionary. Any parameter set to a non-`None` value will override the corresponding value from the analysis configuration file (e.g., `analysis.yaml`) for this GUI session only. Leave a parameter as `None` to use the config value.
 
-The purpose of this cell is to further filter the results or update the GUI interface (e.g., increase ms2_min_score to be more strict, change gui_lcmsruns_colors to change LCMS run file color displays in MS1 plots) without having to rerun a new targeted analysis.
+The purpose of this cell is to further filter the results or update the GUI interface (e.g., increase `ms2_min_score` to be more strict, change `gui_lcmsruns_colors` to change LCMS run file color displays in MS1 plots) without having to rerun a new targeted analysis.
 
 ```python
 OVERRIDE_PARAMS = {
-    'ms1_min_peak_intensity': None,     # current value: 100000.0
-    'ms1_min_num_points':     None,     # current value: 5
-    'ms2_min_score':          None,     # current value: 0.1
-    'ms2_min_matching_frags': None,     # current value: 1
-    'gui_lcmsruns_colors':    None,     # current value: {'ISTD': 'blue', ...}
+    # Analysis parameters
+    'ms1_min_peak_intensity':       None,  # current value: 100000.0
+    'ms1_min_num_points':           None,  # current value: 5
+    'ms2_min_score':                None,  # current value: 0.25
+    'ms2_min_matching_frags':       None,  # current value: 1
+    'remove_unided_compounds':      None,  # current value: True
+    'remove_flagged_compounds':     None,  # current value: True
+    'apply_istd_curation_to_ema':   None,  # current value: True
+    'apply_cross_polarity_curation': None, # current value: True
+    'upload_to_gdrive':             None,  # current value: False
+    # GUI parameters
+    'gui_width':                    None,
+    'gui_height':                   None,
+    'gui_require_all_evaluated':    None,  # current value: False
+    'gui_top_n_hits':               None,  # current value: 10
+    'gui_lcmsruns_colors':          None,  # current value: {'ISTD': 'blue', ...}
+    'note_options_overrides':       None,
 }
 ```
 
@@ -52,7 +64,7 @@ OVERRIDE_PARAMS = {
 
 ## Step 3: Run the GUI cell
 
-Run cell 5. The Dash app launches and link (localhost URL) is printed in the output. Click or copy the URL to open the curation GUI in a new browser tab.
+Run cell 5. The Dash app launches and a link (localhost URL or JupyterHub proxy URL) is printed in the output. Click or copy the URL to open the curation GUI in a new browser tab.
 
 ---
 
@@ -67,7 +79,7 @@ Run cell 5. The Dash app launches and link (localhost URL) is printed in the out
 | **Accept Suggestions** | Apply the auto-identification's suggested RT bounds and MS1/MS2 notes (hotkey `n`). |
 | **Snap to Isomer** | Cycle RT bounds to the next overlapping isomer's window (hotkey `m`). |
 | **Analyst notes** | Free-text note saved with the compound (not used in scoring). |
-| **Identification notes** | Free-text identification note saved with the compound, usually comes from the atlas to notify analyst. |
+| **Identification notes** | Free-text identification note from the atlas, displayed for analyst reference. |
 | **MS1 quality** | Radio — set the MS1 evaluation outcome (see table [below](#ms1-quality-options), various hotkeys). |
 | **◀ Prev MS2 / Next MS2 ▶** | Cycle through available MS2 scans for this compound (hotkeys `l` or `;`). |
 | **MS2 quality** | Radio — score the MS2 match (see table [below](#ms2-quality-options), various hotkeys). |
@@ -142,7 +154,7 @@ All hotkeys are active when focus is on the GUI page (not in a text input field)
 
 ## Adjusting RT bounds
 
-Drag the dashed purple vertical RT-min and RT-max lines in the MS1 EIC plot to adjust the peak integration window, or use the hotkeys `a`, `s`, `d`, and `f` to move the rt_min left or right and rt_max left or right, respectively, by a default of 0.05 minutes per click. You can also use the `m` or `n` hotkeys to snap the rt_min and rt_max to the closest isomer and the suggested rt bounds (dashed organe vertical lines), respectively. Changes are saved to the database automatically when you navigate to the next compound or click **Save and Exit**.
+Drag the dashed purple vertical RT-min and RT-max lines in the MS1 EIC plot to adjust the peak integration window, or use the hotkeys `a`, `s`, `d`, and `f` to move the rt_min left or right and rt_max left or right, respectively, by a default of 0.05 minutes per click. You can also use the `m` or `n` hotkeys to snap the rt_min and rt_max to the closest isomer and the suggested rt bounds (dashed orange vertical lines), respectively. Changes are saved to the database automatically when you navigate to the next compound or click **Save and Exit**.
 
 ---
 
@@ -150,7 +162,7 @@ Drag the dashed purple vertical RT-min and RT-max lines in the MS1 EIC plot to a
 
 Click **Save and Exit** in the bottom-right corner of the GUI when curation is complete. This flushes all unsaved changes to the database and closes the GUI app. The button is disabled after clicking and a confirmation message appears, and you can safely close the browser tab and return to the notebook.
 
-> **Important:** It is recommended but not required to click **Save and Exit** before running the Summary cell. If you do not, make sure there are no unsaved changes by navigating to a new compound (to initiate a databse flush) before closing the GUI browser tab. Changes are flushed to the analysis database continuously as you navigate, but the final flush is only guaranteed after clicking this button. If `gui_require_all_evaluated: true` is set in the config, the GUI will warn you if any compounds still have `ms2_notes = "no selection"`.
+> **Important:** It is recommended but not required to click **Save and Exit** before running the Summary cell. If you do not, make sure there are no unsaved changes by navigating to a new compound (to initiate a database flush) before closing the GUI browser tab. Changes are flushed to the analysis database continuously as you navigate, but the final flush is only guaranteed after clicking this button. If `gui_require_all_evaluated: true` is set in the config, the GUI will warn you if any compounds still have `ms2_notes = "no selection"`.
 
 ---
 
@@ -158,16 +170,16 @@ Click **Save and Exit** in the bottom-right corner of the GUI when curation is c
 
 Run cell 6 after closing the GUI. This calls the analysis summarizer, which:
 
-1. Creates a post-curation atlas.
-2. Saves the curated atlas UID to `curated_atlases.csv` in the analysis output directory.
-3. Runs all summary export functions (described below).
-4. Saves a copy of `analysis_config.yaml` to the analysis output directory for later recall.
+1. Creates a post-curation (`MANUALLY_CURATED`) atlas from the analyst's accepted identifications.
+2. Runs all summary export functions (described below).
+3. Optionally uploads outputs to Google Drive (if `upload_to_gdrive: true` in the config).
+4. Changes group ownership of the project output folder to the shared `metatlas` group.
 
 ---
 
 ## Summary outputs
 
-All files are written to the analysis output directory (`TGA<N>/`) unless noted otherwise.
+All files are written to the analysis results output directory (`TGA<N>/<CHROM>-<POL>-<TYPE>-<NAME>/`) unless noted otherwise.
 
 ### Identification figures
 
@@ -225,9 +237,14 @@ One row per compound with the following column groups:
 
 Each box represents one compound; points are coloured by run type (ISTD, QC, EXCTRL, etc.).
 
-### Manual curation CSV
+### Quantitative data sheets
 
-**`manually_curated_compound_data.csv`** — a flat CSV export of the full `manual_curation` database table. Contains one row per compound with all fields from the curation table including RT bounds, notes, auto-ID suggestions, and measurement statistics.
+**Multiple CSV files** — filtered peak height data and log fold change tables:
+
+| File | Contents |
+|---|---|
+| `peak_height_filtered.csv` | Filtered peak heights per compound per run (after applying `remove_flagged_compounds` and `remove_unided_compounds`) |
+| `log_fold_changes.csv` | Log₂ fold changes computed from filtered peak heights |
 
 ### Best MS2 hit fragment ions CSV
 
@@ -243,13 +260,13 @@ Each box represents one compound; points are coloured by run type (ISTD, QC, EXC
 | `mz_peak` | Measured precursor m/z |
 | `spectrum` | Query fragment spectrum as JSON `[[mz0, mz1, …], [int0, int1, …]]` (fragments below 1×10⁴ intensity are filtered out) |
 
-### Post-curation atlas CSV
+### Metabomap
 
-**`<atlas_uid>.csv`** — the full post-curation atlas as a flat CSV, exported for downstream use.
+**`metabomap.csv`** — a merged positive/negative mode peak height and log fold change table, combining results across polarities for the same project. Only generated when both polarities have been analyzed.
 
-### Config snapshot
+### Analysis Parquet files
 
-**`analysis_config.yaml`** — a copy of the `analysis.yaml` used for this run, saved alongside the outputs for reproducibility.
+**Parquet output files** written to `$METATLAS_DATA_DIR/projects/parquet_outputs/` — unified compound-level and compound-file-level data in Parquet format for downstream programmatic analysis. These can be queried using `wfs.run_parquet_query()`.
 
 ---
 
@@ -272,3 +289,15 @@ Individual quality score thresholds:
 | **RT (HILICZ)** | RT error ≤ 0.5 min | RT error ≤ 1.0 min | RT error > 1.0 min |
 | **RT (C18)** | RT error ≤ 0.3 min | RT error ≤ 0.5 min | RT error > 0.5 min |
 | **MS2** | Cosine score from MS2 quality radio selection (0, 0.5, or 1.0) | — | — |
+
+---
+
+## Skipping manual curation (automated pipeline)
+
+If manual curation is not required, pass `--skip-curation` to `metatlas2.sh run`. This applies automatic curation defaults to all compounds and runs the analysis summary immediately after auto-identification:
+
+- `ms1_notes` → `"keep"` (for all compounds that passed auto-ID)
+- `ms2_notes` → `"0.5, curation skipped, putative match"`
+- `analyst_notes` → appends `"(manual curation skipped)"`
+
+The summary outputs are identical to the manual curation path, but no GUI notebook is opened.
