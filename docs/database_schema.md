@@ -13,16 +13,17 @@ This document describes the metatlas2 database schema, table structure, and how 
   - [atlases Table](#atlases-table)
   - [atlas_compound_associations Table](#atlas_compound_associations-table)
   - [projects Table](#projects-table)
+  - [reference_fragmentation_data Table](#reference_fragmentation_data-table)
 - [Project Database Schema](#project-database-schema)
   - [lcmsruns Table](#lcmsruns-table)
   - [atlases Table (Project)](#atlases-table-project)
-  - [compounds Table (Project)](#compounds-table-project)
   - [compound_mzrt Table (Project)](#compound_mzrt-table-project)
   - [atlas_compound_associations Table (Project)](#atlas_compound_associations-table-project)
   - [rt_alignment Table](#rt_alignment-table)
+  - [workflow_runs Table](#workflow_runs-table)
+  - [project_config Table](#project_config-table)
   - [ms1_data Table](#ms1_data-table)
   - [ms2_data Table](#ms2_data-table)
-  - [ms2_hits Table](#ms2_hits-table)
   - [manual_curation Table](#manual_curation-table)
 - [Workflow Objects and Database Mapping](#workflow-objects-and-database-mapping)
 - [Database Relationships and Visual Schema](#database-relationships-and-visual-schema)
@@ -37,27 +38,28 @@ This document describes the metatlas2 database schema, table structure, and how 
 Metatlas2 uses lightweight **DuckDB** for data storage. The system maintains two types of databases:
 
 ### 1. **Main Database** (Knowledge Repository)
-- **Purpose**: Central repository of reference compounds and atlases
-- **Location**: Central location for all analysts, typically at `/global/cfs/cdirs/metatlas/databases/main_db/main.duckdb`
+- **Purpose**: Central repository of reference compounds, atlases, and MS/MS reference spectra
+- **Location**: Central location for all analysts, typically at `$METATLAS_DATA_DIR/databases/main_db/metatlas.duckdb`
 - **Scope**: Shared across all projects, analysts, and owners (i.e., JGI and EGSB)
-- **Content**: 
-  - Compound metadata (chemical structures, identifiers, pubchem data)
-  - Reference RT/MZ data (compound_mzrt entries, added after curation)
+- **Content**:
+  - Compound metadata (chemical structures, identifiers, PubChem data)
+  - Reference RT/MZ data (`compound_mzrt` entries, added when atlases are created)
   - Reference atlases (curated sets of compounds)
   - Compound-atlas associations (one compound can belong to many atlases)
+  - MS/MS reference spectra (`reference_fragmentation_data`)
   - Project registry (tracks all projects for meta-analysis)
 
 ### 2. **Project Database** (Experimental Results)
 - **Purpose**: Stores project-specific experimental data and derived results in a standardized format
-- **Location**: Within each project directory, typically at `/global/cfs/cdirs/metatlas/projects/targeted_outputs/<owner>/<project_name>/<project_name>.duckdb`
-- **Scope**: Single database for each project, analyst, and owner (i.e., JGI and EGSB)
+- **Location**: Within each project directory, typically at `$METATLAS_DATA_DIR/projects/targeted_outputs/<owner>/<user>/<project_name>/<project_name>.duckdb`
+- **Scope**: Single database for each project run
 - **Content**:
-  - LCMS run metadata (information about each .parquet file)
+  - LCMS run metadata (information about each raw file)
   - Project-specific atlases (RT-aligned, Auto-IDed, manually curated, etc.)
   - RT alignment models and parameters
   - Extracted MS1/MS2 spectral data
-  - MS2 spectral matching results
   - Manual curation decisions and notes
+  - Config snapshots and stored paths for reproducibility
 
 This separation allows for:
 - **Reusability**: Reference data shared across projects
@@ -69,11 +71,11 @@ This separation allows for:
 
 ## Main Database Schema
 
-The main database contains five core tables that define reference compounds, atlases, and project tracking.
+The main database contains six core tables.
 
 ### compounds Table
 
-Stores immutable chemical compound metadata. Each compound represents a unique molecular entity.
+Stores immutable chemical compound metadata. Each compound represents a unique molecular entity identified by its InChIKey.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -83,95 +85,96 @@ Stores immutable chemical compound metadata. Each compound represents a unique m
 | `inchi` | TEXT | Full InChI string |
 | `smiles` | TEXT | SMILES structure notation |
 | `formula` | TEXT | Molecular formula |
-| `compound_classes` | TEXT | Classification terms (pipe-separated) |
-| `compound_pathways` | TEXT | Biochemical pathways (pipe-separated) |
-| `compound_tags` | TEXT | Custom tags (pipe-separated) |
+| `classes` | TEXT | Classification terms |
+| `pathways` | TEXT | Biochemical pathways |
+| `tags` | TEXT | Custom tags |
 | `mono_isotopic_molecular_weight` | REAL | Monoisotopic molecular weight |
 | `iupac_name` | TEXT | IUPAC systematic name |
 | `pubchem_cid` | TEXT | PubChem compound ID |
 | `cas_number` | TEXT | CAS registry number |
-| `synonyms` | TEXT | Alternative names (pipe-separated) |
+| `synonyms` | TEXT | Alternative names |
 | `created_by` | TEXT | Username of creator |
 | `created_date` | TEXT | ISO timestamp of creation |
 
 **Key Points**:
-- `compound_uid` is the primary key used to reference compounds throughout the system. It is linked to a specific InChIKey and cannot be duplicated (see below).
-- `inchi_key` provides a standard, collision-resistant molecular identifier
+- `compound_uid` is the primary key used to reference compounds throughout the system
+- `inchi_key` provides a standard, collision-resistant molecular identifier; duplicate InChIKeys are rejected on insert
 - Chemical properties (InChI, SMILES, formula) are immutable once created
-- Metadata fields support pipe-separated lists for flexibility
 
 ### compound_mzrt Table
 
-Stores retention time (RT) and mass-to-charge ratio (m/z) reference data for compounds. A single compound can have multiple mzrt entries for different adducts, chromatography methods, confidence levels, or reference standard runs. For example, if an analyst desposits a new Atlas (a store of compound m/z and RT information) into the database via add_atlases_to_db.py, a new compound_mzrt table entry will be created if the input information doesn't match an existing entry exactly.
+Stores retention time (RT) and mass-to-charge ratio (m/z) reference data for compounds. A single compound can have multiple mzrt entries for different adducts, chromatography methods, or confidence levels. New entries are created whenever an atlas is added via `add_atlases_to_db.py`.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `mz_rt_uid` | TEXT (PK) | Unique identifier (e.g., `mzrt-x1y2z3...`) |
 | `compound_uid` | TEXT | Links to compounds table |
+| `prev_mz_rt_uid` | TEXT | UID of the parent mzrt entry (for derived/updated entries) |
 | `compound_name` | TEXT | Denormalized for convenience |
 | `inchi_key` | TEXT | Denormalized for convenience |
 | `adduct` | TEXT | Adduct form (e.g., `[M+H]+`, `[M-H]-`) |
+| `rt_space` | TEXT | RT space identifier (e.g., `HF_Aug2019`) |
 | `rt_peak` | REAL | Peak retention time (minutes) |
 | `rt_min` | REAL | RT window start (minutes) |
 | `rt_max` | REAL | RT window end (minutes) |
 | `mz` | REAL | Mass-to-charge ratio |
 | `mz_tolerance` | REAL | m/z tolerance (ppm) |
-| `chromatography` | TEXT | Chromatography type (e.g., `HILIC`, `C18`) |
+| `chromatography` | TEXT | Chromatography type (e.g., `hilicz`, `c18`) |
 | `polarity` | TEXT | Ionization polarity (`positive` or `negative`) |
 | `confidence` | TEXT | Identification confidence level |
 | `source` | TEXT | Data origin (e.g., file path, reference) |
-| `ms1_notes` | TEXT | MS1-related notes |
-| `ms2_notes` | TEXT | MS2-related notes |
-| `other_notes` | TEXT | General notes |
-| `analyst_notes` | TEXT | Analyst comments |
-| `identification_notes` | TEXT | Identification-specific notes |
+| `identification_notes` | TEXT | Notes about expected peak characteristics, displayed in the curation GUI |
 | `created_by` | TEXT | Username of creator |
 | `created_date` | TEXT | ISO timestamp of creation |
 
 **Key Points**:
 - Each entry represents a specific adduct of a compound under specific conditions
 - RT values define the expected elution window for targeted extraction (minutes)
-- `mz_tolerance` defines the m/z extraction window (typically 5-20 ppm), but this can be overridden during analysis time
-- `chromatography` and `polarity` define the analytical method
-- `identification_notes` will typically derive from notes made during the actual reference standard annotation of the compound, to indicate what kind of peak should be observed, while `analyst_notes` will typically be notes made during the manual curation of data during a targeted analysis
+- `mz_tolerance` defines the m/z extraction window (typically 5–20 ppm)
+- `prev_mz_rt_uid` links derived entries (e.g., RT-aligned, manually curated) back to their source
 
 ### atlases Table
 
-Defines collections of compounds for targeted analysis. Atlases organize compound sets by analytical method and purpose.
+Defines collections of compounds for targeted analysis. Atlases organize compound sets by analytical method and purpose. This table schema is **shared** between the main database and project databases.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `atlas_uid` | TEXT (PK) | Unique identifier (e.g., `atl-ref-method-a1b2...`) |
+| `atlas_uid` | TEXT (PK) | Unique identifier (e.g., `atl-ref-hilicz-pos-qc-...`) |
 | `atlas_name` | TEXT | Human-readable atlas name |
 | `atlas_description` | TEXT | Detailed description of atlas purpose |
-| `chromatography` | TEXT | Chromatography method (e.g., `HILIC`, `C18`) |
+| `chromatography` | TEXT | Chromatography method (e.g., `hilicz`, `c18`) |
 | `polarity` | TEXT | Ionization polarity (`positive` or `negative`) |
-| `analysis_type` | TEXT | Analysis category (e.g., `targeted`, `discovery`) |
-| `atlas_type` | TEXT | Atlas category (see below) |
+| `analysis_type` | TEXT | Analysis category (e.g., `qc`, `istd`, `ema`) |
+| `analysis_name` | TEXT | Named variant within the analysis type (e.g., `main`, `default`) |
+| `atlas_type` | TEXT | Atlas lifecycle stage (see below) |
+| `source_atlas_uid` | TEXT | UID of parent atlas (if derived) |
+| `rt_alignment_number` | INTEGER | RT alignment iteration (project DB only) |
+| `analysis_number` | INTEGER | Analysis iteration (project DB only) |
 | `created_by` | TEXT | Username of creator |
 | `created_date` | TEXT | ISO timestamp of creation |
 | `source` | TEXT | File path or origin reference |
 
-**Atlas Types**:
+**Atlas Types** (values of `atlas_type`):
 - `REFERENCE`: Original reference atlas from main database
-- `RT-ALIGNED`: RT-adjusted atlas for a specific project - usually starts as clone of `REFERENCE` and creates `RT-ALIGNED`
-- `AUTO-ID`: Auto-identified atlas from experimental data - usually starts as clone of `RT-ALIGNED` and creates `AUTO-ID`
-- `CURATED`: Manually curated/refined atlas - usually starts as clone of `AUTO-ID` and creates `CURATED`
+- `RT_ALIGNED`: RT-adjusted atlas for a specific project
+- `AUTO_IDED`: Auto-identified atlas from experimental data
+- `MANUALLY_CURATED`: Manually curated/refined atlas
 
 **Key Points**:
-- Each atlas targets a specific analytical method (analysis type [ISTD, QC, EMA], chromatography, polarity, project-specific compounds, etc.)
-- Atlases are collections; actual compounds in the Compound table are linked via `atlas_compound_associations`
+- Each atlas targets a specific analytical method (analysis type, chromatography, polarity)
+- Atlases are collections; actual compounds are linked via `atlas_compound_associations`
+- The `analysis_name` field (new vs. old schema) allows multiple named variants of the same analysis type
 
 ### atlas_compound_associations Table
 
-Junction table linking atlases to their constituent compounds and mzrt entries.
+Junction table linking atlases to their constituent compounds and mzrt entries. This table schema is **shared** between the main database and project databases.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `association_uid` | TEXT (PK) | Unique association identifier |
 | `atlas_uid` | TEXT (FK) | References atlases table |
-| `compound_uid` | TEXT (FK) | References compounds table |
-| `mz_rt_uid` | TEXT (FK) | References compound_mzrt table |
+| `compound_uid` | TEXT | Compound UID |
+| `mz_rt_uid` | TEXT | References compound_mzrt table |
 | `association_order` | INTEGER | Display/processing order |
 | `created_by` | TEXT | Username of creator |
 | `created_date` | TEXT | ISO timestamp of creation |
@@ -180,7 +183,7 @@ Junction table linking atlases to their constituent compounds and mzrt entries.
 - Enables many-to-many relationship between atlases and compounds
 - Each association links to a specific mzrt entry (adduct + method combination)
 - `association_order` preserves compound ordering within the atlas
-- Foreign keys enforce referential integrity
+- In the main database, `atlas_uid` has a foreign key constraint; in project databases it does not
 
 ### projects Table
 
@@ -198,89 +201,78 @@ Tracks all projects created with metatlas2 for meta-analysis and project discove
 - Automatically populated when a project is set up via `Project.setup()`
 - Enables discovery of all project databases for cross-project meta-analysis
 - Each project is registered once; duplicate entries are prevented
-- `project_db_path` provides the full path to the project's DuckDB file
+
+### reference_fragmentation_data Table
+
+Stores MS/MS reference spectra for compound identification. Populated via `metatlas2.sh add-msms-refs`.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `ref_uid` | TEXT (PK) | Unique identifier (e.g., `msms-ref-...`) |
+| `database` | TEXT | Source database name (e.g., `metatlas`, `mzcloud`) |
+| `ref_id` | TEXT | Reference spectrum ID in the source database |
+| `name` | TEXT | Compound name from the reference |
+| `inchi_key` | TEXT | InChI Key for matching to compounds |
+| `precursor_mz` | REAL | Precursor m/z |
+| `polarity` | TEXT | Ionization polarity (`positive` or `negative`) |
+| `adduct` | TEXT | Adduct form |
+| `fragmentation_method` | TEXT | Fragmentation method (e.g., `HCD`) |
+| `collision_energy` | REAL | Collision energy (eV) |
+| `instrument` | TEXT | Instrument name |
+| `instrument_type` | TEXT | Instrument type |
+| `formula` | TEXT | Molecular formula |
+| `mono_isotopic_molecular_weight` | REAL | Monoisotopic molecular weight |
+| `inchi` | TEXT | Full InChI string |
+| `smiles` | TEXT | SMILES string |
+| `mz` | REAL[] | Array of fragment m/z values |
+| `intensities` | REAL[] | Array of fragment intensities |
+| `created_by` | TEXT | Username of creator |
+| `created_date` | TEXT | ISO timestamp of creation |
+
+**Key Points**:
+- Indexed on `inchi_key`, `polarity`, and `database` for fast lookup during MS2 matching
+- Re-importing the same source file adds new rows (no deduplication); each row gets a fresh `ref_uid`
+- Can be overridden at runtime with a custom `.jsonl` file via `GENERAL.msms_refs_path` in the analysis config
 
 ---
 
 ## Project Database Schema
 
-Project databases extend the main database schema with experimental data and project-specific tables.
+Project databases share the `atlases`, `compound_mzrt`, and `atlas_compound_associations` tables with the main database schema, and add the following project-specific tables.
 
 ### lcmsruns Table
 
-Catalogs all LCMS data files (.parquet, .raw, .mzML) available for a project.
+Catalogs all LCMS data files (`.raw`, `.mzML`, `.h5`) available for a project.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `file_path` | TEXT (PK) | Absolute path to parquet file |
+| `file_path` | TEXT (PK) | Absolute path to the raw file |
 | `filename` | TEXT | Base filename |
-| `file_format` | TEXT | Original format (e.g., `raw`, `mzML`) |
-| `file_type` | TEXT | File category (e.g., `sample`, `QC`, `blank`) |
+| `file_format` | TEXT | Original format (`raw`, `mzML`, `h5`) |
+| `file_type` | TEXT | File category (`experimental`, `qc`, `istd`, `exctrl`, `injbl`, `refstd`) |
 | `chromatography` | TEXT | Chromatography method |
-| `ms_level` | INTEGER | MS level (1 or 2) |
+| `ms_level` | TEXT | MS level (`ms1` or `ms2`) |
 | `polarity` | TEXT | Ionization polarity |
 | `created_by` | TEXT | Username of creator |
 | `created_date` | TEXT | ISO timestamp of creation |
 
 **Key Points**:
-- Each row represents one parquet file (converted from raw/mzML)
+- Each row represents one raw file (`.raw`, `.mzML`, or `.h5`)
 - `file_path` serves as primary key and reference for data extraction
-- Metadata enables filtering LCMS runs by method and file type
-- Both MS1 and MS2 files are cataloged
+- `file_type` is inferred from filename substrings (see [LCMS File Categorization](run_targeted_analysis.md#lcms-file-categorization))
+- `ms_level` is inferred from the filename (e.g., `MS1` or `MS2` position in the filename)
 
 ### atlases Table (Project)
 
-Project atlases extend the main database atlases with project-specific tracking.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `atlas_uid` | TEXT (PK) | Unique identifier |
-| `atlas_name` | TEXT | Human-readable name |
-| `atlas_description` | TEXT | Description |
-| `chromatography` | TEXT | Chromatography method |
-| `polarity` | TEXT | Ionization polarity |
-| `analysis_type` | TEXT | Analysis category |
-| `atlas_type` | TEXT | Atlas category |
-| `source_atlas_uid` | TEXT | UID of parent atlas (if derived) |
-| `rt_alignment_number` | INTEGER | RT alignment iteration |
-| `analysis_number` | INTEGER | Analysis iteration |
-| `created_by` | TEXT | Username of creator |
-| `created_date` | TEXT | ISO timestamp of creation |
-| `source` | TEXT | File path or origin |
-
-**Additional Fields (vs Main Database)**:
-- `source_atlas_uid`: Links derived atlases to their reference atlas
-- `rt_alignment_number`: Associates atlas with specific RT alignment
-- `analysis_number`: Associates atlas with specific analysis iteration
-
-**Key Points**:
-- Project atlases are typically derived from main database reference atlases
-- RT-Aligned atlases have adjusted RT values for project-specific chromatography
-- Auto-IDed atlases have compounds flagged as present/absent in the empirical LCMSRun data
-- Curated atlases have compound notes and remove/keep designations from the GUI
-- Multiple atlas versions can exist per analysis iteration
-
-### compounds Table (Project)
-
-Identical schema to main database compounds table. Compound metadata is copied to project databases for self-contained analysis and faster queries.
+Identical schema to the main database `atlases` table. Project atlases are typically derived from main database reference atlases and have `rt_alignment_number` and `analysis_number` populated.
 
 ### compound_mzrt Table (Project)
 
-Identical schema to main database compound_mzrt table. MZRT data is copied and may be modified (e.g., RT-aligned values).
+Identical schema to the main database `compound_mzrt` table. MZRT data is copied from the main database and may be modified (e.g., RT-aligned values, manually curated RT bounds). The `prev_mz_rt_uid` field links each derived entry back to its source.
 
 ### atlas_compound_associations Table (Project)
 
-Similar to main database, but foreign keys reference only the atlas (not compound/mzrt tables directly).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `association_uid` | TEXT (PK) | Unique association identifier |
-| `atlas_uid` | TEXT (FK) | References project atlases table |
-| `compound_uid` | TEXT | Compound UID (no FK constraint) |
-| `mz_rt_uid` | TEXT | MZRT UID (no FK constraint) |
-| `association_order` | INTEGER | Display/processing order |
-| `created_by` | TEXT | Username of creator |
-| `created_date` | TEXT | ISO timestamp of creation |
+Same schema as the main database, but without foreign key constraints on `compound_uid` and `mz_rt_uid` (since project databases may contain derived entries not present in the main DB).
 
 ### rt_alignment Table
 
@@ -292,7 +284,7 @@ Stores retention time alignment models and metadata.
 | `project_name` | TEXT | Project name |
 | `rt_alignment_number` | INTEGER | Alignment iteration number |
 | `qc_atlas_uid` | TEXT | Atlas used for RT alignment |
-| `model_type` | TEXT | Model type (e.g., `polynomial`) |
+| `model_type` | TEXT | Model type (e.g., `polynomial`, `linear`, `median_offset`) |
 | `polynomial_degree` | INTEGER | Polynomial degree (if applicable) |
 | `r_squared` | REAL | Model fit R² value |
 | `rmse` | REAL | Root mean squared error |
@@ -306,9 +298,43 @@ Stores retention time alignment models and metadata.
 
 **Key Points**:
 - Each RT alignment produces one model entry
-- Model parameters enable RT correction for subsequent analyses
 - Quality metrics (R², RMSE) assess alignment quality
-- `rt_alignment_number` links to aligned atlases
+- `rt_alignment_number` links to aligned atlases in the `atlases` table
+
+### workflow_runs Table
+
+Tracks the lifecycle stage of each atlas through the workflow. Used to guard against re-running completed stages and to look up atlas UIDs by stage.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `run_uid` | TEXT (PK) | Unique identifier |
+| `rt_alignment_number` | INTEGER | RT alignment iteration |
+| `analysis_number` | INTEGER | Analysis iteration |
+| `chromatography` | TEXT | Chromatography method |
+| `polarity` | TEXT | Ionization polarity |
+| `analysis_type` | TEXT | Analysis type |
+| `analysis_name` | TEXT | Named analysis variant |
+| `stage` | TEXT | Workflow stage (`RT_ALIGNED`, `AUTO_IDED`, `MANUALLY_CURATED`) |
+| `atlas_uid` | TEXT | Atlas UID for this stage |
+| `source_atlas_uid` | TEXT | Source atlas UID |
+| `override_params` | TEXT | JSON-encoded parameter overrides (from GUI/summary) |
+| `created_by` | TEXT | Username of creator |
+| `created_date` | TEXT | ISO timestamp of creation |
+
+### project_config Table
+
+Stores the full config YAML and paths JSON for each run, enabling later stages (GUI, summary) to reconstruct the workflow context without the original YAML file.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `config_uid` | TEXT (PK) | Unique identifier |
+| `rt_alignment_number` | INTEGER | RT alignment iteration |
+| `analysis_number` | INTEGER | Analysis iteration |
+| `config_yaml` | TEXT | Full YAML config as a JSON-serialized string |
+| `paths_json` | TEXT | JSON-encoded paths dict |
+| `config_path` | TEXT | Original path to the config file |
+| `created_by` | TEXT | Username of creator |
+| `created_date` | TEXT | ISO timestamp of creation |
 
 ### ms1_data Table
 
@@ -316,24 +342,27 @@ Stores extracted MS1 spectral data for each compound in each LCMS run.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `ms1_data_uid` | TEXT (PK) | Unique identifier |
-| `compound_uid` | TEXT | Compound identifier |
-| `inchi_key` | TEXT | InChI key |
-| `adduct` | TEXT | Adduct form |
+| `mz_rt_uid` | VARCHAR | Compound MZRT identifier |
+| `filename` | VARCHAR | LCMS run filename |
+| `inchi_key` | VARCHAR | InChI key |
+| `adduct` | VARCHAR | Adduct form |
+| `spec_rts` | REAL[] | Array of retention times across the extraction window |
+| `spec_ints` | REAL[] | Array of intensities across the extraction window |
+| `spec_mzs` | REAL[] | Array of m/z values across the extraction window |
+| `in_feature` | BOOLEAN[] | Boolean array indicating which points are within the atlas RT window |
 | `rt_alignment_number` | INTEGER | RT alignment iteration |
 | `analysis_number` | INTEGER | Analysis iteration |
-| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
-| `file_path` | TEXT | LCMS run file path |
-| `mz` | TEXT | JSON-encoded m/z array |
-| `raw_spectrum` | TEXT | JSON-encoded intensity array |
-| `created_by` | TEXT | Username of creator |
-| `created_date` | TEXT | ISO timestamp of creation |
+| `analysis_type` | VARCHAR | Analysis workflow type (e.g., `istd`, `ema`) |
+| `analysis_name` | VARCHAR | Named analysis variant |
+| `created_by` | VARCHAR | Username of creator |
+| `created_date` | VARCHAR | ISO timestamp of creation |
+
+**Primary Key**: `(mz_rt_uid, filename, rt_alignment_number, analysis_number)`
 
 **Key Points**:
 - One entry per compound per LCMS run
-- `raw_spectrum` contains JSON array of intensities across RT window
-- `mz` contains corresponding m/z values
-- Links to specific RT alignment, analysis iteration, and analysis type
+- `spec_rts`, `spec_ints`, `spec_mzs` are parallel arrays of the full EIC across the extraction window
+- `in_feature` marks which data points fall within the atlas RT bounds (used for peak detection)
 
 ### ms2_data Table
 
@@ -341,121 +370,93 @@ Stores extracted MS2 fragmentation spectra.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `ms2_data_uid` | TEXT (PK) | Unique identifier |
-| `compound_uid` | TEXT | Compound identifier |
-| `inchi_key` | TEXT | InChI key |
-| `adduct` | TEXT | Adduct form |
-| `rt_alignment_number` | INTEGER | RT alignment iteration |
-| `analysis_number` | INTEGER | Analysis iteration |
-| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
-| `file_path` | TEXT | LCMS run file path |
-| `rt` | REAL | Retention time of scan |
-| `raw_spectrum` | TEXT | JSON-encoded fragment spectrum |
+| `mz_rt_uid` | VARCHAR | Compound MZRT identifier |
+| `filename` | VARCHAR | LCMS run filename |
+| `inchi_key` | VARCHAR | InChI key |
+| `adduct` | VARCHAR | Adduct form |
+| `scan_rt` | REAL | Retention time of the MS2 scan |
+| `frag_mzs` | REAL[] | Array of fragment m/z values |
+| `frag_ints` | REAL[] | Array of fragment intensities |
 | `precursor_MZ` | REAL | Precursor m/z |
 | `precursor_intensity` | REAL | Precursor intensity |
 | `collision_energy` | REAL | Collision energy (eV) |
-| `created_by` | TEXT | Username of creator |
-| `created_date` | TEXT | ISO timestamp of creation |
+| `in_feature` | BOOLEAN | Whether the scan falls within the atlas RT window |
+| `hits` | VARCHAR | JSON-encoded list of MS2 library hit results |
+| `rt_alignment_number` | INTEGER | RT alignment iteration |
+| `analysis_number` | INTEGER | Analysis iteration |
+| `analysis_type` | VARCHAR | Analysis workflow type |
+| `analysis_name` | VARCHAR | Named analysis variant |
+| `created_by` | VARCHAR | Username of creator |
+| `created_date` | VARCHAR | ISO timestamp of creation |
+
+**Primary Key**: `(mz_rt_uid, filename, scan_rt, rt_alignment_number, analysis_number)`
 
 **Key Points**:
 - Multiple MS2 scans can exist per compound per run
-- `raw_spectrum` is JSON array of (m/z, intensity) pairs
-- Precursor information links MS2 to parent ion
-- Links to specific RT alignment, analysis iteration, and analysis type
-
-### ms2_hits Table
-
-Stores spectral matching results from comparing experimental MS2 to reference libraries.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ms2_hit_uid` | TEXT (PK) | Unique identifier |
-| `compound_uid` | TEXT | Compound identifier |
-| `inchi_key` | TEXT | InChI key |
-| `adduct` | TEXT | Adduct form |
-| `rt_alignment_number` | INTEGER | RT alignment iteration |
-| `analysis_number` | INTEGER | Analysis iteration |
-| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
-| `file_path` | TEXT | LCMS run file path |
-| `database` | TEXT | Reference database name |
-| `ref_id` | TEXT | Reference spectrum ID |
-| `ref_name` | TEXT | Reference compound name |
-| `score` | REAL | Matching score (0-1) |
-| `num_matches` | INTEGER | Number of matched fragments |
-| `mz_theoretical` | REAL | Theoretical precursor m/z |
-| `mz_measured` | REAL | Measured precursor m/z |
-| `ppm_error` | REAL | m/z error in ppm |
-| `rt` | REAL | Retention time |
-| `qry_intensity_peak` | REAL | Query peak intensity |
-| `ref_frags` | INTEGER | Number of reference fragments |
-| `data_frags` | INTEGER | Number of query fragments |
-| `matched_fragments` | TEXT | JSON list of matched fragment m/z |
-| `aligned_fragment_colors` | TEXT | JSON color coding for visualization |
-| `qry_spectrum` | TEXT | JSON-encoded query spectrum |
-| `ref_spectrum` | TEXT | JSON-encoded reference spectrum |
-| `created_by` | TEXT | Username of creator |
-| `created_date` | TEXT | ISO timestamp of creation |
-
-**Key Points**:
-- Multiple hits can exist per compound (different reference matches)
-- Spectral matching scores support identification confidence
-- Links to specific RT alignment, analysis iteration, and analysis type
-- Both query and reference spectra stored for visualization
-- Links to specific RT alignment and analysis iterations
+- `hits` stores the JSON-encoded MS2 library matching results (scores, matched fragments, reference spectra) for each scan
+- `in_feature` indicates whether the scan falls within the atlas RT window
 
 ### manual_curation Table
 
-Stores manual curation decisions and compound identification results.
+Stores manual curation decisions and compound identification results. This is the central table for tracking analyst decisions.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `curation_uid` | TEXT (PK) | Unique identifier |
-| `compound_uid` | TEXT | Compound identifier |
-| `inchi_key` | TEXT | InChI key |
-| `adduct` | TEXT | Adduct form |
-| `rt_alignment_number` | INTEGER | RT alignment iteration |
-| `analysis_number` | INTEGER | Analysis iteration |
-| `compound_name` | TEXT | Compound name |
-| `auto_ided` | BOOLEAN | Auto-identification flag |
-| `polarity` | TEXT | Ionization polarity |
-| `chromatography` | TEXT | Chromatography method |
-| `analysis_type` | TEXT | Analysis workflow type (e.g., ISTD, EMA) |
+| `mz_rt_uid` | VARCHAR | Compound MZRT identifier |
+| `compound_uid` | VARCHAR | Compound identifier |
+| `inchi_key` | VARCHAR | InChI key |
+| `adduct` | VARCHAR | Adduct form |
+| `compound_name` | VARCHAR | Compound name |
+| `passed_autoid` | BOOLEAN | Whether the compound passed auto-identification filters |
+| `passed_curation` | BOOLEAN | Whether the compound passed manual curation |
+| `polarity` | VARCHAR | Ionization polarity |
+| `chromatography` | VARCHAR | Chromatography method |
 | `mz_tolerance` | REAL | m/z tolerance (ppm) |
 | `atlas_mz` | REAL | Atlas reference m/z |
 | `atlas_rt_peak` | REAL | Atlas reference RT peak |
 | `atlas_rt_min` | REAL | Atlas reference RT min |
 | `atlas_rt_max` | REAL | Atlas reference RT max |
-| `original_rt_peak` | REAL | Pre-alignment RT peak |
-| `original_rt_min` | REAL | Pre-alignment RT min |
-| `original_rt_max` | REAL | Pre-alignment RT max |
+| `mz` | REAL | Measured m/z |
 | `rt_peak` | REAL | Curated RT peak |
 | `rt_min` | REAL | Curated RT min |
 | `rt_max` | REAL | Curated RT max |
-| `ms1_notes` | TEXT | MS1 quality/decision |
-| `ms2_notes` | TEXT | MS2 quality/decision |
-| `other_notes` | TEXT | Additional notes |
-| `identification_notes` | TEXT | Identification rationale |
-| `analyst_notes` | TEXT | Analyst comments |
-| `best_ms1_file` | TEXT | Best MS1 file path |
-| `best_ms1_rt` | REAL | RT of best MS1 peak |
-| `best_ms1_mz` | REAL | m/z of best MS1 peak |
-| `best_ms1_intensity` | REAL | Intensity of best MS1 peak |
-| `best_ms1_ppm_error` | REAL | m/z error of best MS1 peak |
-| `best_ms1_rt_error` | REAL | RT error of best MS1 peak |
-| `isomers` | TEXT | Potential isomer information |
+| `initial_rt_min` | REAL | Pre-curation RT min (from auto-ID) |
+| `initial_rt_max` | REAL | Pre-curation RT max (from auto-ID) |
+| `rt_error` | REAL | RT error (measured − atlas RT) |
+| `mz_error` | REAL | m/z error (ppm) |
+| `ms1_notes` | VARCHAR | MS1 quality/decision note |
+| `ms2_notes` | VARCHAR | MS2 quality/decision note |
+| `other_notes` | VARCHAR | Additional observation note |
+| `identification_notes` | VARCHAR | Identification rationale (from atlas) |
+| `analyst_notes` | VARCHAR | Free-text analyst comments |
+| `max_eic_rt` | REAL[] | RT values of the best EIC peak |
+| `max_eic_intensity` | REAL[] | Intensity values of the best EIC peak |
+| `isomers` | VARCHAR | Potential isomer information |
 | `suggested_rt_min` | REAL | Algorithm-suggested RT min |
 | `suggested_rt_max` | REAL | Algorithm-suggested RT max |
 | `suggested_rt_peak` | REAL | Algorithm-suggested RT peak |
 | `rt_suggestion_confidence` | REAL | Confidence in RT suggestion |
-| `created_by` | TEXT | Username of creator |
-| `created_date` | TEXT | ISO timestamp of creation |
+| `formula` | VARCHAR | Molecular formula |
+| `smiles` | VARCHAR | SMILES string |
+| `inchi` | VARCHAR | Full InChI string |
+| `pubchem_cid` | VARCHAR | PubChem compound ID |
+| `mono_isotopic_molecular_weight` | REAL | Monoisotopic molecular weight |
+| `iupac_name` | VARCHAR | IUPAC systematic name |
+| `rt_alignment_number` | INTEGER | RT alignment iteration |
+| `analysis_number` | INTEGER | Analysis iteration |
+| `analysis_type` | VARCHAR | Analysis workflow type |
+| `analysis_name` | VARCHAR | Named analysis variant |
+| `created_by` | VARCHAR | Username of creator |
+| `created_date` | VARCHAR | ISO timestamp of creation |
+
+**Primary Key**: `(mz_rt_uid, rt_alignment_number, analysis_number)`
 
 **Key Points**:
-- Central table for tracking manual decisions and quality assessments, kept in memory during GUI analysis and manipulated in real time (and used to flush changes to the project database tables during curation).
-- `ms1_notes`, `ms2_notes` store standardized quality decisions
-- `best_ms1_*` fields identify the highest-quality samples/data for each compound to display in summaries
-- Acts as the bridge between automated and manual identification workflows
-- `analysis_type` allows the same compound to be analyzed independently in different workflows (e.g., ISTD vs EMA) within the same RT alignment and analysis iteration
+- Central table for tracking manual decisions and quality assessments
+- Kept in memory during GUI analysis and manipulated in real time; flushed to the database on navigation or Save and Exit
+- `ms1_notes`, `ms2_notes`, `other_notes` store standardized quality decisions from the GUI radio buttons
+- `max_eic_rt` / `max_eic_intensity` identify the highest-quality EIC peak for display in summaries
+- `analysis_type` and `analysis_name` allow the same compound to be analyzed independently in different workflows within the same RT alignment and analysis iteration
 
 ---
 
@@ -465,14 +466,18 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 
 | Workflow Class | Database Table(s) | Mapping Type |
 |---------------|-------------------|--------------|
-| **Compound** | `compounds` | 1:1 - Direct mapping to compound metadata |
-| **CompoundMZRT** | `compound_mzrt` | 1:1 - Maps to RT/MZ reference data |
-| **Atlas** | `atlases`, `atlas_compound_associations`, `compound_mzrt` | Composite - Spans multiple tables to represent complete atlas |
-| **LCMSRun** | `lcmsruns` | 1:1 - Direct mapping to LCMS file metadata |
-| **RTAlign** | `rt_alignment` | 1:1 - Core fields map to table; runtime attributes not stored |
-| **AutoIdentification** | `ms1_data`, `ms2_data`, `ms2_hits` | Orchestrator - Coordinates extraction and storage across multiple tables |
-| **ManualCuration** | `manual_curation` | Collection - DataFrame wrapper for multiple curation rows |
-| **ExperimentalData** | `ms1_data`, `ms2_data`, `ms2_hits` | Container - Aggregates data from multiple experimental tables |
+| **Compound** | `compounds` | 1:1 — Direct mapping to compound metadata |
+| **CompoundMZRT** | `compound_mzrt` | 1:1 — Maps to RT/MZ reference data |
+| **Atlas** | `atlases`, `atlas_compound_associations`, `compound_mzrt` | Composite — Spans multiple tables to represent complete atlas |
+| **LCMSRun** | `lcmsruns` | 1:1 — Direct mapping to LCMS file metadata |
+| **RTAlign** | `rt_alignment`, `workflow_runs` | Orchestrator — Writes model to `rt_alignment`, registers stage in `workflow_runs` |
+| **AutoIdentification** | `ms1_data`, `ms2_data`, `manual_curation`, `workflow_runs` | Orchestrator — Coordinates extraction and storage across multiple tables |
+| **ExperimentalData** | `ms1_data`, `ms2_data` | Container — Aggregates data from multiple experimental tables as DataFrames |
+| **AnalysisGUI** | `manual_curation`, `workflow_runs` | Interactive — Reads curation data, writes analyst decisions back to DB |
+| **AnalysisSummary** | `manual_curation`, `atlases`, `workflow_runs` | Summary — Reads all tables, writes curated atlas and summary outputs |
+| **NewCompoundsConfig** | `compounds` | Config — Orchestrates bulk insert of compounds |
+| **NewAtlasesConfig** | `atlases`, `compound_mzrt`, `atlas_compound_associations` | Config — Orchestrates atlas creation |
+| **NewMsmsRefsConfig** | `reference_fragmentation_data` | Config — Orchestrates bulk insert of MS/MS reference spectra |
 
 ---
 
@@ -494,6 +499,9 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │    inchi             │      │
 │    smiles            │      │
 │    formula           │      │
+│    classes           │      │
+│    pathways          │      │
+│    tags              │      │
 │    ...               │      │
 └──────────────────────┘      │
          △                    │
@@ -509,9 +517,10 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │    inchi_key         │   │  │
 │    adduct            │   │  │
 │    rt_peak/min/max   │   │  │
-│    mz                │   │  │
+│    mz / mz_tolerance │   │  │
 │    chromatography    │   │  │
 │    polarity          │   │  │
+│    prev_mz_rt_uid    │   │  │
 │    ...               │   │  │
 └──────────────────────┘   │  │
          △                 │  │
@@ -524,8 +533,8 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 ├──────────────────────────────────────────┤
 │ PK association_uid                       │
 │ FK atlas_uid                             │
-│ FK compound_uid                          │
-│ FK mz_rt_uid                             │
+│    compound_uid                          │
+│    mz_rt_uid                             │
 │    association_order                     │
 └──────────────────────────────────────────┘
          △
@@ -541,9 +550,23 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │    chromatography    │
 │    polarity          │
 │    analysis_type     │
+│    analysis_name     │
 │    atlas_type        │
+│    source_atlas_uid  │
 │    ...               │
 └──────────────────────┘
+
+┌──────────────────────────────────────────┐
+│   reference_fragmentation_data           │
+├──────────────────────────────────────────┤
+│ PK ref_uid                               │
+│    database / ref_id / name              │
+│    inchi_key  (indexed)                  │
+│    polarity   (indexed)                  │
+│    precursor_mz                          │
+│    mz[]  /  intensities[]               │
+│    ...                                   │
+└──────────────────────────────────────────┘
 ```
 
 ### Project Database Schema Diagram
@@ -553,49 +576,38 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │                      PROJECT DATABASE TABLES                        │
 └─────────────────────────────────────────────────────────────────────┘
 
-        ┌──────────────────────┐
-        │     lcmsruns         │
-        ├──────────────────────┤
-        │ PK file_path         │
-        │    filename          │
-        │    file_type         │
-        │    chromatography    │
-        │    polarity          │
-        │    ms_level          │
+        ┌──────────────────────┐    ┌──────────────────────┐
+        │     lcmsruns         │    │   project_config     │
+        ├──────────────────────┤    ├──────────────────────┤
+        │ PK file_path         │    │ PK config_uid        │
+        │    filename          │    │    rt_alignment_num  │
+        │    file_type         │    │    analysis_num      │
+        │    chromatography    │    │    config_yaml       │
+        │    polarity          │    │    paths_json        │
+        │    ms_level          │    └──────────────────────┘
         └──────────────────────┘
                  │
                  │ used by
                  ▼
-        ┌──────────────────────┐
-        │   rt_alignment       │
-        ├──────────────────────┤
-        │ PK rt_alignment_uid  │
-        │    rt_alignment_num  │
-        │    qc_atlas_uid      │
-        │    model_type        │
-        │    coefficients      │
-        │    r_squared         │
-        │    ...               │
-        └──────────────────────┘
-                 │
-                 │ generates
+        ┌──────────────────────┐    ┌──────────────────────┐
+        │   rt_alignment       │    │   workflow_runs      │
+        ├──────────────────────┤    ├──────────────────────┤
+        │ PK rt_alignment_uid  │    │ PK run_uid           │
+        │    rt_alignment_num  │    │    rt_alignment_num  │
+        │    qc_atlas_uid      │    │    analysis_num      │
+        │    model_type        │    │    stage             │
+        │    coefficients      │    │    atlas_uid         │
+        │    r_squared         │    │    chromatography    │
+        │    ...               │    │    polarity          │
+        └──────────────────────┘    │    analysis_type     │
+                 │                  │    analysis_name     │
+                 │ generates        └──────────────────────┘
                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  Atlas Tables (copied/derived from Main DB)                        │
 ├────────────────────────────────────────────────────────────────────┤
-│                                                                    │
-│  ┌──────────────┐    ┌─────────────────────┐    ┌──────────────┐   │
-│  │  compounds   │    │ atlas_compound_     │    │   atlases    │   │
-│  │              │◄───┤   associations      │───►│              │   │
-│  │ compound_uid │    │                     │    │  atlas_uid   │   │
-│  └──────┬───────┘    └──────────┬──────────┘    └──────────────┘   │
-│         │                       │                                  │
-│         ▼                       ▼                                  │
-│  ┌──────────────┐    ┌─────────────────────┐                       │
-│  │compound_mzrt │    │   mz_rt_uid         │                       │
-│  │              │◄───┤                     │                       │
-│  │  mz_rt_uid   │    │                     │                       │
-│  └──────────────┘    └─────────────────────┘                       │
+│  atlases  ←→  atlas_compound_associations  ←→  compound_mzrt      │
+│  (RT_ALIGNED → AUTO_IDED → MANUALLY_CURATED via source_atlas_uid) │
 └────────────────────────────────────────────────────────────────────┘
                  │
                  │ defines extraction targets
@@ -604,30 +616,33 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │  Experimental Data Tables                                          │
 ├────────────────────────────────────────────────────────────────────┤
 │                                                                    │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
-│  │  ms1_data    │    │  ms2_data    │    │  ms2_hits    │          │
-│  ├──────────────┤    ├──────────────┤    ├──────────────┤          │
-│  │ compound_uid │    │ compound_uid │    │ compound_uid │          │
-│  │ file_path    │    │ file_path    │    │ file_path    │          │
-│  │ rt_align_num │    │ rt_align_num │    │ rt_align_num │          │
-│  │ analysis_num │    │ analysis_num │    │ analysis_num │          │
-│  │ raw_spectrum │    │ raw_spectrum │    │ score        │          │
-│  │ ...          │    │ rt           │    │ ref_spectrum │          │
-│  └──────────────┘    │ ...          │    │ ...          │          │
-│                      └──────────────┘    └──────────────┘          │
-│         │                    │                 │                   │
-│         │                    │                 │ informs           │
-│         ▼                    ▼                 ▼                   │
+│  ┌──────────────┐              ┌──────────────┐                    │
+│  │  ms1_data    │              │  ms2_data    │                    │
+│  ├──────────────┤              ├──────────────┤                    │
+│  │ mz_rt_uid   │              │ mz_rt_uid   │                    │
+│  │ filename     │              │ filename     │                    │
+│  │ spec_rts[]   │              │ scan_rt      │                    │
+│  │ spec_ints[]  │              │ frag_mzs[]   │                    │
+│  │ spec_mzs[]   │              │ frag_ints[]  │                    │
+│  │ in_feature[] │              │ hits (JSON)  │                    │
+│  │ rt_align_num │              │ rt_align_num │                    │
+│  │ analysis_num │              │ analysis_num │                    │
+│  └──────────────┘              └──────────────┘                    │
+│         │                            │                             │
+│         │                            │ informs                     │
+│         ▼                            ▼                             │
 │                   ┌────────────────────┐                           │
 │                   │ manual_curation    │                           │
 │                   ├────────────────────┤                           │
-│                   │ compound_uid       │                           │
+│                   │ mz_rt_uid          │                           │
 │                   │ rt_align_num       │                           │
 │                   │ analysis_num       │                           │
 │                   │ ms1_notes          │                           │
 │                   │ ms2_notes          │                           │
 │                   │ rt_peak/min/max    │                           │
-│                   │ best_ms1_file      │                           │
+│                   │ passed_autoid      │                           │
+│                   │ passed_curation    │                           │
+│                   │ max_eic_rt[]       │                           │
 │                   │ ...                │                           │
 │                   └────────────────────┘                           │
 └────────────────────────────────────────────────────────────────────┘
@@ -639,18 +654,20 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 - `compounds` → `compound_mzrt`: One-to-many (one compound can have multiple adducts/methods)
 - `atlases` ↔ `compounds`: Many-to-many via `atlas_compound_associations`
 - `atlases` ↔ `compound_mzrt`: Many-to-many via `atlas_compound_associations`
+- `reference_fragmentation_data`: Independent table, matched to compounds by `inchi_key` at query time
 
 **Project Database:**
 - `lcmsruns` → `rt_alignment`: QC files used to build RT correction model
-- `rt_alignment` → `atlases`: RT alignment generates aligned atlas versions
+- `rt_alignment` → `atlases`: RT alignment generates RT_ALIGNED atlas versions
+- `workflow_runs`: Tracks which atlas UID corresponds to each stage (RT_ALIGNED, AUTO_IDED, MANUALLY_CURATED)
 - `atlases` → `compound_mzrt`: Atlas defines which compounds to extract
-- `compound_mzrt` → `ms1_data`, `ms2_data`: Extraction targets for spectral data
-- `ms2_data` → `ms2_hits`: Spectral matching produces hits
-- `ms1_data`, `ms2_data`, `ms2_hits` → `manual_curation`: Synthesized curation decisions
+- `compound_mzrt` → `ms1_data`, `ms2_data`: Extraction targets for spectral data (matched by `mz_rt_uid`)
+- `ms2_data.hits` → MS2 library matching results (embedded JSON, sourced from `reference_fragmentation_data`)
+- `ms1_data`, `ms2_data` → `manual_curation`: Synthesized curation decisions
 
 **Cross-Database:**
 - Project `atlases.source_atlas_uid` → Main `atlases.atlas_uid`: Derivation lineage
-- Project `compounds.compound_uid` copied from Main DB for self-contained analysis
-- Project `compound_mzrt` may be modified (RT-aligned, Manually Curated) from Main/Project DB values
+- Project `compound_mzrt.prev_mz_rt_uid` → Main/Project `compound_mzrt.mz_rt_uid`: RT-aligned/curated entry lineage
+- Project `manual_curation` → Project `compound_mzrt`: Curated RT bounds written back to `compound_mzrt` for the MANUALLY_CURATED atlas
 
 ---

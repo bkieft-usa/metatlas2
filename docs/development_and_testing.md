@@ -1,202 +1,227 @@
 # Development & Testing
 
-This document covers the metatlas2 system test, how to run and extend it, how to regenerate test fixtures, and how the CI/CD pipeline works.
+This document covers the metatlas2 test suite, how to run and extend it, and how the CI/CD pipeline works.
 
 ---
 
-## System Test Overview
+## Test Suite Overview
 
-The system test is a full end-to-end integration test that runs the entire metatlas2 pipeline against synthetic fixtures and validates that the outputs are correct. It is the primary quality gate for the codebase.
+The test suite is split into two tiers:
 
-**What is tested:**
-- Pipeline completes without errors
-- All expected output files and directories are created
-- Project DuckDB contains all required tables with non-empty data
-- RT alignment model meets minimum R² quality threshold
-- Table row counts fall within expected ranges defined in the baseline file
-- Output artifacts (CSVs, notebooks) are valid and non-empty
+| Tier | Marker | When it runs | What it covers |
+|---|---|---|---|
+| **Unit tests** | `unit` (or no marker) | Every push to every branch | Fast, isolated tests with no Docker, no network, no real databases |
+| **System tests** | `system` | Only on pull requests targeting `main` | End-to-end integration tests that exercise the full Python pipeline against synthetic fixtures |
+
+**What the system tests cover:**
+- `add-compounds` pipeline: creates the main database, persists compounds, handles duplicates
+- `add-atlases` pipeline: creates atlases from TSV files, validates compound associations
+- `run` pipeline: project setup, RT alignment, and auto-identification stages against synthetic HDF5 data
 
 **What is NOT tested:**
-- Scientific accuracy of peak picking or compound identification (covered by manual curation)
 - GUI / Jupyter notebook rendering
 - Slurm job submission
+- Real network calls (PubChem is patched to return canned data)
+- Real NERSC/Shifter container runtime
 
 ---
 
-## Running the System Test
+## Running the Tests
 
 ### Prerequisites
 
 | Environment | Requirements |
 |---|---|
-| NERSC | `metatlas2.sh` on PATH, Shifter access, `uv` available |
-| Local dev | Docker installed and running, `uv` on PATH |
+| Local dev | Python 3.11+, `uv` on PATH |
 | GitHub Actions | Handled automatically (see [CI/CD](#cicd)) |
 
-### Run it
+### Install test dependencies
 
 ```bash
-nox -s system_test
+uv pip install -e ".[test]"
 ```
 
-Nox auto-detects the environment based on environment variables:
-
-| Env var present | Environment detected | Container runtime |
-|---|---|---|
-| `NERSC_HOST` or `SLURM_CLUSTER_NAME` | NERSC | Shifter via `metatlas2.sh --dev` |
-| Neither | Local / CI | Docker via `docker run` |
-
-To use a specific Docker image tag (instead of `latest`):
+### Run unit tests only (fast, no Docker required)
 
 ```bash
-METATLAS2_IMAGE_TAG=sha-abc1234 nox -s system_test
+pytest tests/ -m "not system"
 ```
 
-### What happens during a run
+### Run system tests only
 
-1. **Validation** — nox checks that `tests/fixtures/data/` and `configs/system_test_analysis.yaml` exist.
-2. **Temp directory** — a temporary data directory is created and the fixtures are copied into it:
-   - NERSC: `/tmp/metatlas-test-data-<pid>/`
-   - Docker: `tempfile.mkdtemp()` (e.g. `/tmp/metatlas2-test-data-XXXX/`)
-3. **Pipeline run** — the container runs the full pipeline against the fixtures. Outputs are written to:
-   ```
-   <temp_dir>/projects/targeted_outputs/test_owner/<project_name>/
-   ```
-4. **pytest validation** — `tests/test_system.py` is run against the output directory (path passed via the `TEST_OUTPUT_DIR` env var).
-5. **Cleanup** — the temp directory is deleted after pytest completes (even on failure).
+```bash
+pytest tests/test_system.py -m "system"
+```
+
+### Run the full test suite
+
+```bash
+pytest tests/
+```
 
 ---
 
-## Test Fixtures
+## Test Structure
 
-Static fixtures are committed to the repository in `tests/fixtures/data/`. They provide a minimal but complete synthetic dataset that exercises every stage of the pipeline.
-
-### Structure
+All tests live in the `tests/` directory:
 
 ```
-tests/fixtures/data/
-├── databases/
-│   └── main_db/
-│       └── metatlas.duckdb         # Main database: compounds, atlases
-├── lcmsruns/
-│   └── test_owner/
-│       └── 20260420_JGI_BPK_000000_SYSTEM-TEST_pilot_EXPXXXX_HILICZ_XXXXXXXX/
-│           ├── mzML/               # 10 synthetic mzML files (ISTD, QC, Sample)
-│           ├── parquet/            # Converted parquet files (MS1 + MS2)
-│           └── raw/
-└── ms2_references.json              # MS2 reference library
+tests/
+├── conftest.py                      # Shared fixtures: synthetic HDF5 writer, atlas/compound builders
+├── test_system.py                   # System tests (marked @pytest.mark.system)
+├── test_analysis_summary.py         # Unit tests for analysis_summary.py
+├── test_create_curation_container.py # Unit tests for create_curation_container.py
+├── test_extract_data_from_h5.py     # Unit tests for extract_data_from_h5.py
+├── test_file_and_project_format.py  # Unit tests for file_and_project_format.py
+├── test_lcmsruns_tools.py           # Unit tests for lcmsruns_tools.py
+├── test_ms2_hit_detection.py        # Unit tests for ms2_hit_detection.py
+├── test_msms_refs_db.py             # Unit tests for MSMS refs database operations
+├── test_rt_align_tools.py           # Unit tests for rt_align_tools.py
+└── test_utils.py                    # Unit tests for utils.py
 ```
 
-### Fixture contents
+### Shared fixtures (`conftest.py`)
 
-| File / Table | Description |
+The `conftest.py` file provides:
+
+- **`write_synthetic_h5(path, ...)`** — writes a minimal HDF5 file (using PyTables, the same library the production code uses) with configurable MS1/MS2 rows for positive and negative polarity. This exercises the real HDF5 read path end-to-end without mocking I/O.
+- **`_make_compound_mzrt(...)`** — builds a `CompoundMZRT` dataclass directly for atlas construction.
+- **`_make_atlas(compounds, ...)`** — wraps a list of `CompoundMZRT` objects into an `Atlas` dataclass.
+- Compound constants (`ADENINE_MZ`, `ADENINE_RT`, etc.) used across multiple test files.
+
+### System test fixtures (`test_system.py`)
+
+The system tests create a complete but minimal environment in `tmp_path`:
+
+| Fixture | What it creates |
 |---|---|
-| `metatlas.duckdb` | Contains a QC atlas (3 amino acid compounds for RT alignment) and a target atlas (2 compounds for auto-ID) |
-| `ms2_references.json` | Minimal MS2 reference library matching the target compounds |
-| `mzML/` | 10 synthetic LC-MS files: 2 ISTD, 3 QC, 5 Sample — all in positive mode |
-| `parquet/` | Pre-converted parquet files for the mzML files above (MS1 and MS2 scan data with gaussian peaks) |
-
-### Regenerating fixtures
-
-Fixtures should only need to be regenerated if the database schema, parquet format, or test compound set changes. **Do not regenerate casually** — this updates the committed baseline and will affect all future test comparisons.
-
-```bash
-python tests/fixtures/generate_fixtures.py
-```
-
-After regenerating, update the baseline:
-
-```bash
-python tests/fixtures/generate_fixtures.py --update-baseline
-```
-
-Or manually edit `tests/fixtures/expected_baseline.json` to reflect the new expected row counts.
-
-Commit both the updated fixtures and the updated baseline together.
+| `data_dir` | A `METATLAS_DATA_DIR`-compatible directory tree under `tmp_path` |
+| `metatlas_data_dir` | Patches `METATLAS_DATA_DIR` env var to point at `data_dir` |
+| `main_db_path` | Path to `databases/main_db/metatlas.duckdb` |
+| `adenine_tsv` | A two-compound TSV file (adenine + riboflavin) |
+| `compounds_yaml` | A `create_compounds.yaml` pointing at `adenine_tsv` |
+| `atlas_tsv` | A two-compound atlas TSV file |
+| `atlases_yaml` | A `create_atlases.yaml` pointing at `atlas_tsv` |
+| `analysis_yaml` | A minimal `analysis.yaml` with the four-level `TARGETED_ANALYSES` structure |
+| `seeded_analysis_yaml` | An `analysis_yaml` whose atlas UIDs match a real seeded database |
 
 ---
 
-## Validation Tests (`tests/test_system.py`)
+## System Test Classes
 
-pytest runs the following tests after the pipeline completes:
+### `TestAddCompounds`
+
+Tests for `metatlas2.sh add-compounds` (`add_compounds_to_db.py`):
 
 | Test | What it checks |
 |---|---|
-| `test_pipeline_completed` | Output directory exists |
-| `test_required_files_exist` | `<project>.duckdb`, `RTA0/`, `RTA0/TGA0/`, `rt_aligned_atlases.csv`, `auto_ided_atlases.csv` all exist |
-| `test_database_schema` | All 7 required tables are present in the project database |
-| `test_database_data_quality` | Every required table has at least one row |
-| `test_rt_alignment_quality` | RT alignment R² ≥ 0.3, degree ≥ 1, ≥ 2 compounds used |
-| `test_baseline_comparison` | Row counts for all tables fall within ranges in `expected_baseline.json` |
-| `test_output_artifacts_quality` | CSV and notebook output files are valid and non-empty |
+| `test_add_compounds_creates_main_database` | Running add-compounds creates the main DuckDB file |
+| `test_add_compounds_persists_compounds_to_db` | Compounds from the TSV are queryable from the database |
+| `test_add_compounds_correct_compound_count` | Exact compound count matches the input TSV |
+| `test_add_compounds_idempotent_on_rerun` | Running twice does not duplicate rows |
 
-### Required database tables
+### `TestAddAtlases`
 
-| Table | Stage that populates it |
+Tests for `metatlas2.sh add-atlases` (`add_atlases_to_db.py`):
+
+| Test | What it checks |
 |---|---|
-| `lcmsruns` | Project Setup |
-| `rt_alignment` | RT Alignment |
-| `atlases` | RT Alignment / Auto-ID |
-| `atlas_compound_associations` | RT Alignment / Auto-ID |
-| `ms1_data` | Auto-ID |
-| `ms2_data` | Auto-ID |
-| `manual_curation` | Auto-ID |
-| `ms2_hits` *(optional)* | Auto-ID (only if MS2 matches found) |
+| `test_add_atlases_creates_atlas_in_db` | Running add-atlases creates an atlas record in the database |
+| `test_add_atlases_correct_compound_count` | Atlas compound count matches the input TSV |
+| `test_add_atlases_compound_associations` | `atlas_compound_associations` table is populated correctly |
 
-### Baseline file
+### `TestRunWorkflow`
 
-`tests/fixtures/expected_baseline.json` defines the acceptable row count ranges and minimum R² threshold for each release. Example:
+Tests for `metatlas2.sh run` (`run_targeted_analysis.py`):
 
-```json
-{
-  "table_row_counts": {
-    "lcmsruns":  { "min": 35, "max": 45 },
-    "ms1_data":  { "min": 30, "max": 40 }
-  },
-  "rt_alignment": {
-    "min_r2": 0.3
-  }
-}
-```
-
-If the baseline file is missing, `test_baseline_comparison` is skipped (not failed), so a fresh checkout can still run tests.
+| Test | What it checks |
+|---|---|
+| `test_project_setup_creates_database` | Project setup creates the project DuckDB file |
+| `test_project_setup_populates_lcmsruns` | `lcmsruns` table is populated with the synthetic HDF5 files |
+| `test_rt_alignment_runs_successfully` | RT alignment completes and writes a model to the database |
+| `test_auto_identification_runs_successfully` | Auto-ID completes and populates `ms1_data` and `manual_curation` tables |
 
 ---
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/docker.yml`) runs automatically on every push to `main` with two sequential jobs:
+GitHub Actions (`.github/workflows/tests.yml` and `.github/workflows/docker.yml`) run automatically.
 
-### Job 1: `build-push`
+### Workflow: `tests.yml`
 
-Builds the Docker image and pushes it to the GitHub Container Registry with two tags:
+Runs on every push to any branch (except `main`) and on every pull request targeting `main`.
 
-| Tag | Value |
-|---|---|
-| `sha-<short-sha>` | e.g. `sha-a1b2c3d` |
-| `latest` | Always points to the most recent `main` build |
+#### Job 1: `unit-tests`
 
-Full image path: `ghcr.io/bkieft-usa/metatlas2:<tag>`
-
-### Job 2: `system-test`
-
-Runs after `build-push` succeeds:
+Runs on every push to every branch:
 
 1. Checks out the repository
 2. Sets up Python 3.11
-3. Installs `uv`, `nox`, `pytest`, and `duckdb`
-4. Pulls the freshly built `latest` image
-5. Runs `nox -s system_test`
+3. Installs `uv` and project + test dependencies (`uv pip install -e ".[test]"`)
+4. Runs `pytest tests/ -m "not system"`
+5. Uploads test results as a GitHub Actions artifact (retained for 14 days)
 
-On failure, test outputs are uploaded as a GitHub Actions artifact (retained for 7 days) to aid debugging:
-- `/tmp/metatlas2-test-output-*/`
-- `~/.test_owner_metabolomics_data/`
+#### Job 2: `system-tests`
 
-### Triggering a manual test run
+Runs only on pull requests targeting `main`, after `unit-tests` passes:
 
-You can re-run the `system-test` job from the GitHub Actions UI without pushing new code. To test against a specific image tag:
+1. Checks out the repository
+2. Sets up Python 3.11
+3. Installs `uv` and project + test dependencies
+4. Runs `pytest tests/test_system.py -m "system"`
+5. Uploads test results as a GitHub Actions artifact (retained for 14 days)
+6. On failure, uploads `/tmp/pytest-*/` output directories for debugging (retained for 7 days)
 
-1. Edit the `Run system test` step's `METATLAS2_IMAGE_TAG` env var, or
-2. Set it as a repository variable in **Settings → Secrets and variables → Actions → Variables**.
+### Workflow: `docker.yml`
+
+Runs only on pushes to `main` (i.e., after a PR is merged):
+
+1. Builds the Docker image for `linux/amd64` and `linux/arm64`
+2. Pushes two tags to GHCR:
+   - `sha-<7chars>` — immutable, traceable to the triggering commit
+   - `latest` — floating pointer to the most recent build
 
 ---
+
+## pytest Markers
+
+| Marker | Description |
+|---|---|
+| `system` | End-to-end system tests; only run on PRs targeting `main` |
+| `unit` | Fast unit tests with no external dependencies (default for branch pushes) |
+
+Tests without a marker are treated as unit tests and run on every push.
+
+To run only tests with a specific marker:
+
+```bash
+pytest tests/ -m "system"
+pytest tests/ -m "not system"
+pytest tests/ -m "unit"
+```
+
+---
+
+## Adding New Tests
+
+### Unit tests
+
+Add a new file `tests/test_<module_name>.py`. Use `conftest.py` fixtures for HDF5 files, atlas objects, and compound objects. Mark slow or integration-heavy tests with `@pytest.mark.system`.
+
+### System tests
+
+Add a new test class or method to `tests/test_system.py` and decorate it with `@pytest.mark.system`. Use the `metatlas_data_dir` fixture to ensure `METATLAS_DATA_DIR` is patched, and use `tmp_path` for all filesystem I/O.
+
+### Patching PubChem
+
+All system tests that call `add_compounds_to_db` must patch PubChem to avoid real network calls:
+
+```python
+from unittest.mock import patch
+
+def _fake_pubchem_info(compounds, **kwargs):
+    return compounds  # return input unchanged
+
+with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+    add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+```

@@ -16,13 +16,22 @@ Complete the one-time environment setup described in [initial_setup.md](initial_
 metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml
 ```
 
-The `metatlas2.sh` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
+The `metatlas2.sh` wrapper runs the command inside a Shifter (NERSC) or Docker (local) container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--config_path` | Yes | — | Path to the atlas YAML config file (e.g. `configs/create_atlases.yaml`). |
+
+### Related subcommands
+
+| Subcommand | Description |
+|---|---|
+| `add-atlases` | Add reference atlases from TSV/CSV files to the main database (this document). |
+| `add-msms-refs` | Add MS/MS reference spectra from `.jsonl` files to the main database. See `configs/example_configs/msms/` for an example config. |
+| `get-atlases fetch` | Fetch and export atlas data from the main database by UID. |
+| `get-atlases query` | Query the main database for atlases matching filter criteria. |
 
 ---
 
@@ -59,6 +68,21 @@ Each atlas entry has three fields:
 | `desc` | Yes* | Short description stored in the database. |
 
 \* These fields must be present in the YAML but can be left empty (null). Entries with an empty `path` are skipped.
+
+Multiple atlases of the same analysis type can be listed as a YAML list under the same key:
+
+```yaml
+ATLASES:
+  HILICZ:
+    POS:
+      EMA:
+        - path: /data/atlases/HILICZ/HILICZ_EMA_POS_batch1.tsv
+          name: HILICZ EMA Atlas Positive Batch 1
+          desc: EMA compounds batch 1
+        - path: /data/atlases/HILICZ/HILICZ_EMA_POS_batch2.tsv
+          name: HILICZ EMA Atlas Positive Batch 2
+          desc: EMA compounds batch 2
+```
 
 ### Example
 
@@ -123,18 +147,18 @@ These are stored in the database if present but are not required for validation:
 | `smiles` | SMILES string. |
 | `formula` | Molecular formula. |
 | `mono_isotopic_molecular_weight` | Monoisotopic molecular weight (Da). |
-| `compound_classes` | Classification labels. |
-| `compound_pathways` | Pathway associations. |
+| `identification_notes` | Notes about the compound's expected peak characteristics, displayed in the curation GUI. |
+| `confidence` | Identification confidence level. |
 
 ---
 
 ## What the script does
 
-1. Loads and validates the config file.
+1. Loads and validates the config file (`NewAtlasesConfig.from_yaml()`).
 2. For each atlas entry with a non-empty `path`:
    a. Reads the TSV/CSV file and validates required columns.
    b. Applies default values for `rt_min`, `rt_max`, and `mz_tolerance` if absent.
-   c. Constructs an `Atlas` object and validates it (checks for duplicate compounds, valid m/z and RT values, required adduct, etc.).
+   c. Constructs an `Atlas` object and validates it (checks for valid m/z and RT values, required adduct, etc.).
    d. Saves the atlas to the main DuckDB database.
 3. Logs a summary table with each atlas UID, name, and compound count.
 
@@ -145,7 +169,7 @@ These are stored in the database if present but are not required for validation:
 After running the script, atlas UIDs are printed in log output like:
 
 ```
-Atlas: Default HILICZ QC Atlas Positive (UID: atl-ref-qc-hilicz-pos-cdf8c6709c6e4953b75917e72e851130) - 42 compounds
+Created new atlas: Default HILICZ QC Atlas Positive (UID: atl-ref-qc-hilicz-pos-cdf8c6709c6e4953b75917e72e851130) - 42 compounds
 ```
 
 Copy these UIDs into your analysis YAML configuration file under the corresponding `ATLAS: uid:` fields before running the targeted analysis workflow.
@@ -154,6 +178,7 @@ Copy these UIDs into your analysis YAML configuration file under the correspondi
 
 ## Notes
 
-- Only atlases with a non-empty `path` are processed; entries with null paths are silently skipped. This allows the config template to remain the same and accomodate all atlas inputs.
-- If an atlas file is listed in the config but the file cannot be found, a warning is logged and the entry is skipped rather than raising a fatal error, so make sure you check the logs after running if you don't see the expected atlases in the standard output.
-- By design, re-running the script with the same config will create new atlases with new UIDs.
+- Only atlases with a non-empty `path` are processed; entries with null paths are silently skipped. This allows the config template to remain the same and accommodate all atlas inputs.
+- If an atlas file is listed in the config but the file cannot be found, an error is raised immediately during config validation (before any database writes occur).
+- By design, re-running the script with the same config will create new atlases with new UIDs. There is no deduplication of atlases — only compounds are deduplicated.
+- All atlases created by this script are assigned `atlas_type = "REFERENCE"` and `analysis_name = "MAIN"` in the database.

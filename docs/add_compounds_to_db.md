@@ -16,14 +16,14 @@ Complete the one-time environment setup described in [initial_setup.md](initial_
 metatlas2.sh add-compounds --config_path /path/to/create_compounds.yaml
 ```
 
-The `metatlas2.sh` wrapper runs the command inside a Shifter container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
+The `metatlas2.sh` wrapper runs the command inside a Shifter (NERSC) or Docker (local) container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--config_path` | Yes | — | Path to the compounds YAML config file (e.g. `configs/create_compounds.yaml`). |
-| `--overwrite_db` | No | `False` | If set, **drops and recreates** the main database before loading. Use with caution — this deletes all existing compound and atlas records, it is only used for debugging purposes. |
+| `--overwrite_db` | No | `False` | If set, **drops and recreates** the main database before loading. Use with caution — this deletes all existing compound, atlas, and MS/MS reference records. Only used for debugging purposes. |
 
 ---
 
@@ -65,7 +65,7 @@ COMPOUNDS:
 
 - **Chromatography label** — arbitrary string identifying the chromatographic method (e.g. `HILICZ`, `C18`). Must match the labels used later in `create_atlases.yaml` and `analysis.yaml`.
 - **Polarity** — `POS` or `NEG`.
-- **PATHS** — list of absolute or relative file paths to compound input files. Empty entries (bare `-`) are silently skipped.
+- **PATHS** — list of absolute or relative file paths to compound input files. Empty entries (bare `-`) are silently skipped. All paths are validated to exist before any database writes occur.
 
 ### Example
 
@@ -118,25 +118,28 @@ These columns are used if present. Missing numeric columns are set to `0.0` or e
 | `pubchem_cid` | PubChem compound ID. |
 | `cas_number` | CAS registry number. |
 | `synonyms` | Semicolon-separated list of synonyms. |
-| `compound_classes` | Classification labels (e.g. `Amino acid`). |
-| `compound_pathways` | Pathway associations. |
-| `compound_tags` | Free-text tags. |
+| `classes` | Classification labels (e.g. `Amino acid`). Stored in the `classes` column of the `compounds` table. |
+| `pathways` | Pathway associations. Stored in the `pathways` column of the `compounds` table. |
+| `tags` | Free-text tags. Stored in the `tags` column of the `compounds` table. |
 
 ---
 
 ## What the script does
 
-1. Loads and validates the config file.
-2. Creates (or overwrites) the main DuckDB database if needed.
+1. Loads and validates the config file (`NewCompoundsConfig.from_yaml()`), including checking that all input file paths exist.
+2. Creates (or overwrites) the main DuckDB database if needed (`dbi.create_metatlas_database()`).
 3. For each non-empty path listed under `COMPOUNDS`:
    a. Reads the TSV/CSV file and validates required columns.
-   b. Queries PubChem (using local cache if `use_pubchem_cache: true`) to enrich metadata.
-   c. Creates `Compound` and `CompoundMZRT` objects and writes them to the database.
-4. Logs a summary of compounds loaded per file.
+   b. Queries PubChem (using local JSON cache if `use_pubchem_cache: true`) to enrich metadata.
+   c. Creates `Compound` dataclass objects from each row.
+4. Bulk-inserts all compounds into the database (`dbi.batch_save_compounds()`). Duplicate compounds (same InChIKey) are ignored to avoid creating multiple entries for the same molecule.
+5. Logs a summary of compounds loaded per file.
 
 ---
 
 ## Notes
 
-- Running the script multiple times with the same input compounds is safe, as duplicate compounds (unique InChIKey) will be ignored to avoid different entries for the same molecule.
+- Running the script multiple times with the same input compounds is safe — duplicate compounds (matched by InChIKey) are silently skipped.
 - Compounds must exist in the main database before atlases referencing them can be created (see [add_atlases_to_db.md](add_atlases_to_db.md)).
+- The PubChem cache is stored at `$METATLAS_DATA_DIR/databases/pubchem_cache/pubchem_global_cache.json`. Set `update_pubchem_cache: true` to refresh it with the latest PubChem data for your compounds.
+- Unlike atlases, compounds do **not** store RT/MZ reference data — that information lives in the `compound_mzrt` table and is populated when atlases are created via `add_atlases_to_db.py`.
