@@ -268,7 +268,9 @@ def make_identification_figure(
         color_map = summary_obj.config.gui_config["gui_lcmsruns_colors"]
 
     manual_curation_df = summary_obj.experimental_data.curation_df
-    ms1_all_df = summary_obj.experimental_data.ms1_df
+    ms1_all_df = summary_obj.experimental_data.ms1_df_full_range
+    if ms1_all_df is None or ms1_all_df.empty:
+        ms1_all_df = summary_obj.experimental_data.ms1_df
     ms2_all_df = summary_obj.experimental_data.ms2_df
 
     total_files = ms1_all_df["filename"].nunique() if (ms1_all_df is not None and not ms1_all_df.empty) else 0
@@ -573,10 +575,8 @@ def _plot_eic(
 ) -> None:
     """Plot EIC traces for all files of one compound.
 
-    Each row of ms1_compound_df holds the full EIC for one file in wide
-    format: spec_rts (list of RTs), spec_ints (list of intensities).
-    Only points where in_feature=True are included since the df has already
-    been filtered upstream.
+    Each row of ms1_compound_df holds the EIC for one file in wide format:
+    spec_rts (list of RTs), spec_ints (list of intensities).
     """
     rt_min = mc_row.get("rt_min", np.nan)
     rt_max = mc_row.get("rt_max", np.nan)
@@ -608,7 +608,8 @@ def _plot_eic(
                 alpha=0.7,
                 )
 
-    ax.set_xlim([rt_min-2.0, rt_max+2.0])
+    if not safe_isnan(rt_min) and not safe_isnan(rt_max):
+        ax.set_xlim([safe_float(rt_min) - 2.0, safe_float(rt_max) + 2.0])
     ax.set_xlabel("Retention Time (min)", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=14, weight="bold")
     ax.tick_params(labelsize=14)

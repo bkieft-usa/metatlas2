@@ -6,8 +6,8 @@
 # next metatlas2.sh run.
 #
 # Prerequisites:
-#   1. Set ZENODO_TOKEN in your environment (or ~/.bashrc):
-#        export ZENODO_TOKEN="your-personal-access-token"
+#   1. Set ZENODO_ACCESS_TOKEN in your environment (or ~/.bashrc):
+#        export ZENODO_ACCESS_TOKEN="your-personal-access-token"
 #      Generate one at: https://zenodo.org/account/settings/applications/tokens/new/
 #      Required scopes: deposit:write, deposit:actions
 #
@@ -36,10 +36,10 @@ set -euo pipefail
 ZENODO_API="https://zenodo.org/api"
 DB_FILENAME="metatlas.duckdb"
 
-if [[ -z "${ZENODO_TOKEN:-}" ]]; then
-    echo "Error: ZENODO_TOKEN is not set." >&2
+if [[ -z "${ZENODO_ACCESS_TOKEN:-}" ]]; then
+    echo "Error: ZENODO_ACCESS_TOKEN is not set." >&2
     echo "Generate a token at https://zenodo.org/account/settings/applications/tokens/new/" >&2
-    echo "then: export ZENODO_TOKEN=your-token" >&2
+    echo "then: export ZENODO_ACCESS_TOKEN=your-token" >&2
     exit 1
 fi
 
@@ -74,38 +74,34 @@ fi
 if [[ -n "${CONCEPT_ID}" ]]; then
     echo "Creating new version of Zenodo deposit (concept ID: ${CONCEPT_ID})..."
 
-    # Get the latest published record for this concept
+    # Find the latest published record ID for this concept via the deposit API.
+    # The /records/{concept_id} endpoint returns the latest published record.
     LATEST_RECORD=$(curl -s \
-        -H "Authorization: Bearer ${ZENODO_TOKEN}" \
+        -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
         "${ZENODO_API}/records/${CONCEPT_ID}" \
     )
     LATEST_ID=$(echo "${LATEST_RECORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    echo "  Latest published record ID: ${LATEST_ID}"
 
-    # Create a new version draft from the latest published record
+    # Create a new version draft via the deposit API (not the /records/ API).
     NEW_VERSION=$(curl -s -X POST \
-        -H "Authorization: Bearer ${ZENODO_TOKEN}" \
-        "${ZENODO_API}/records/${LATEST_ID}/versions" \
+        -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
+        "${ZENODO_API}/deposit/depositions/${LATEST_ID}/actions/newversion" \
     )
-    DEPOSIT_ID=$(echo "${NEW_VERSION}" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+    # The newversion action returns the *parent* record; the new draft ID is in links.latest_draft.
+    DRAFT_URL=$(echo "${NEW_VERSION}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+url = d.get('links', {}).get('latest_draft')
+if not url:
+    raise SystemExit('latest_draft URL not found. Response: ' + json.dumps(d))
+print(url)
+")
+    # Extract the numeric deposit ID from the draft URL.
+    DEPOSIT_ID=$(basename "${DRAFT_URL}")
     echo "New version draft created: deposit ID ${DEPOSIT_ID}"
 
-    # Delete the old file(s) from the draft so we can upload the new one
-    echo "Removing old files from draft..."
-    OLD_FILES=$(curl -s \
-        -H "Authorization: Bearer ${ZENODO_TOKEN}" \
-        "${ZENODO_API}/deposit/depositions/${DEPOSIT_ID}/files" \
-    )
-    echo "${OLD_FILES}" | python3 -c "
-import sys, json
-files = json.load(sys.stdin)
-for f in files:
-    print(f['id'])
-" | while read -r FILE_ID; do
-        curl -s -X DELETE \
-            -H "Authorization: Bearer ${ZENODO_TOKEN}" \
-            "${ZENODO_API}/deposit/depositions/${DEPOSIT_ID}/files/${FILE_ID}"
-        echo "  Deleted file ID: ${FILE_ID}"
-    done
+    # No need to delete old files — the bucket PUT below overwrites by filename.
 
 else
     echo "Creating new Zenodo deposit..."
@@ -128,7 +124,7 @@ print(json.dumps({
 }))
 ")
     NEW_DEPOSIT=$(curl -s -X POST \
-        -H "Authorization: Bearer ${ZENODO_TOKEN}" \
+        -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "${METADATA}" \
         "${ZENODO_API}/deposit/depositions" \
@@ -138,32 +134,53 @@ print(json.dumps({
 fi
 
 # ---------------------------------------------------------------------------
-# Upload the database file
+# Upload the database file via the S3-compatible bucket API.
+#
+# The legacy /files endpoint has an nginx body-size limit (~100 MB) that
+# rejects large files with HTTP 413.  The bucket API streams directly to
+# Zenodo's object store and has no such limit.
 # ---------------------------------------------------------------------------
 DB_SIZE=$(du -sh "${DB_PATH}" | cut -f1)
 echo "Uploading ${DB_FILENAME} (${DB_SIZE}) to deposit ${DEPOSIT_ID}..."
 
+# Retrieve the deposit record to get the bucket URL.
+DEPOSIT_META=$(curl -s \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
+    "${ZENODO_API}/deposit/depositions/${DEPOSIT_ID}" \
+)
+BUCKET_URL=$(echo "${DEPOSIT_META}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+links = d.get('links', {})
+bucket = links.get('bucket')
+if not bucket:
+    raise SystemExit('bucket URL not found in deposit metadata: ' + json.dumps(links))
+print(bucket)
+")
+echo "  Bucket URL: ${BUCKET_URL}"
+
+# Stream the file directly to the bucket (no nginx body-size limit).
 UPLOAD_RESPONSE=$(curl -s -X PUT \
-    -H "Authorization: Bearer ${ZENODO_TOKEN}" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
     -H "Content-Type: application/octet-stream" \
-    --data-binary @"${DB_PATH}" \
-    "${ZENODO_API}/deposit/depositions/${DEPOSIT_ID}/files/${DB_FILENAME}" \
+    --upload-file "${DB_PATH}" \
+    "${BUCKET_URL}/${DB_FILENAME}" \
 )
 
-UPLOAD_ID=$(echo "${UPLOAD_RESPONSE}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','ERROR'))" 2>/dev/null || echo "ERROR")
-if [[ "${UPLOAD_ID}" == "ERROR" ]]; then
+UPLOAD_KEY=$(echo "${UPLOAD_RESPONSE}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key','ERROR'))" 2>/dev/null || echo "ERROR")
+if [[ "${UPLOAD_KEY}" == "ERROR" ]]; then
     echo "Error: Upload failed. Response:" >&2
     echo "${UPLOAD_RESPONSE}" >&2
     exit 1
 fi
-echo "Upload complete (file ID: ${UPLOAD_ID})"
+echo "Upload complete (key: ${UPLOAD_KEY})"
 
 # ---------------------------------------------------------------------------
 # Publish the deposit
 # ---------------------------------------------------------------------------
 echo "Publishing deposit ${DEPOSIT_ID}..."
 PUBLISH_RESPONSE=$(curl -s -X POST \
-    -H "Authorization: Bearer ${ZENODO_TOKEN}" \
+    -H "Authorization: Bearer ${ZENODO_ACCESS_TOKEN}" \
     "${ZENODO_API}/deposit/depositions/${DEPOSIT_ID}/actions/publish" \
 )
 

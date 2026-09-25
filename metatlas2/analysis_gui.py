@@ -26,14 +26,9 @@ def build_dash_app(
 
     # Set up basic GUI params
     manual_curation_df = analysis_gui_obj.experimental_data.curation_df
-    # Sort by Atlas RT peak so compounds appear in RT order in the GUI
     if "atlas_rt_peak" in manual_curation_df.columns:
         manual_curation_df = manual_curation_df.sort_values("atlas_rt_peak").reset_index(drop=True)
-    #logger.info(f"Starting manual curation with {len(manual_curation_df)} compounds")
 
-    # Resolve all GUI-level settings once at factory scope.
-    # override_parameters (from notebook cell) wins over config.gui_config for every key.
-    # None-valued overrides are ignored so that config defaults are preserved.
     _gui_cfg = analysis_gui_obj.config.gui_config if analysis_gui_obj.config else {}
     _op = analysis_gui_obj.override_parameters or {}
     _resolved_cfg = {**_gui_cfg, **{k: v for k, v in _op.items() if v is not None}}
@@ -60,7 +55,7 @@ def build_dash_app(
 
     # Create the app
     try:
-        if os.getenv('METATLAS2_STANDALONE') == 'true':
+        if os.getenv('METATLAS2_STANDALONE') == 'true' or not os.getenv('JUPYTERHUB_SERVICE_PREFIX'):
             requests_prefix = "/"
         else:
             requests_prefix = f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/"
@@ -248,7 +243,7 @@ def build_dash_app(
         first_blank_idx = blank_positions[0]
         return manual_curation_df.index.get_loc(first_blank_idx)
 
-    use_starting_index_finder = False
+    use_starting_index_finder = True
     if use_starting_index_finder is True:
         starting_compound_idx = _find_starting_compound_idx()
         if starting_compound_idx > 0:

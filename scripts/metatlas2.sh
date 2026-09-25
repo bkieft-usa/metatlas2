@@ -42,13 +42,11 @@
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
 # Versioned Zenodo DOI for the main metatlas DuckDB.
 # Update this value after running scripts/upload_main_db_to_zenodo.sh on NERSC.
 # Non-NERSC (Docker) runs will automatically download the DB if the local
 # version stamp does not match this DOI.
-# ---------------------------------------------------------------------------
-ZENODO_MAIN_DB_DOI=""   # e.g. "https://doi.org/10.5281/zenodo.XXXXXXX"
+ZENODO_MAIN_DB_DOI="https://doi.org/10.5281/zenodo.22968291"
 
 IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
 IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
@@ -91,7 +89,7 @@ if [[ "${STANDALONE_MODE}" == "false" ]]; then
     fi
 fi
 
-# Docker-mode
+EXTRA_CONFIG_MOUNT=""
 if [[ "${RUNTIME}" == "docker" && "${STANDALONE_MODE}" == "false" ]]; then
     CONFIG_PATH=""
     for i in "${!PASSTHROUGH_ARGS[@]}"; do
@@ -102,17 +100,14 @@ if [[ "${RUNTIME}" == "docker" && "${STANDALONE_MODE}" == "false" ]]; then
     done
 
     if [[ -n "${CONFIG_PATH}" ]]; then
-        # Resolve to absolute path for comparison
+        # Resolve to absolute path
         CONFIG_ABS="$(cd "$(dirname "${CONFIG_PATH}")" 2>/dev/null && pwd)/$(basename "${CONFIG_PATH}")" || CONFIG_ABS="${CONFIG_PATH}"
         DATA_ABS="$(cd "${METATLAS_DATA_DIR}" && pwd)"
         if [[ "${CONFIG_ABS}" != "${DATA_ABS}"* ]]; then
-            echo "Error: --config path must be located under \$METATLAS_DATA_DIR when running with Docker." >&2
-            echo "  Config path:       ${CONFIG_ABS}" >&2
-            echo "  METATLAS_DATA_DIR: ${DATA_ABS}" >&2
-            echo "" >&2
-            echo "Place your config file under \${METATLAS_DATA_DIR}/configs/ and pass that path instead." >&2
-            echo "Example: --config \${METATLAS_DATA_DIR}/configs/jgi_default_hilicz_config.yaml" >&2
-            exit 1
+            # Config is outside $METATLAS_DATA_DIR — add a read-only mount of its directory.
+            CONFIG_DIR="$(dirname "${CONFIG_ABS}")"
+            EXTRA_CONFIG_MOUNT="${CONFIG_DIR}"
+            echo "Note: config file is outside \$METATLAS_DATA_DIR; adding read-only mount for ${CONFIG_DIR}"
         fi
     fi
 fi
@@ -232,10 +227,6 @@ EOF
     exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# Build the container invocation based on detected runtime.
-# ---------------------------------------------------------------------------
-
 SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
 
 if [[ "${RUNTIME}" == "shifter" ]]; then
@@ -315,12 +306,10 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
 else
     # Docker (local macOS / non-NERSC HPC): explicit volume mounts needed.
 
-    # -----------------------------------------------------------------------
     # Ensure the main metatlas DuckDB is present and up-to-date.
     # Download from Zenodo if missing or if the local version stamp differs
     # from ZENODO_MAIN_DB_DOI.  Skipped when ZENODO_MAIN_DB_DOI is unset
     # (e.g. during development before the first Zenodo upload).
-    # -----------------------------------------------------------------------
     if [[ -n "${ZENODO_MAIN_DB_DOI}" ]]; then
         MAIN_DB_DIR="${METATLAS_DATA_DIR}/databases/main_db"
         MAIN_DB_PATH="${MAIN_DB_DIR}/metatlas.duckdb"
@@ -369,11 +358,20 @@ else
         "-e" "METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
         "-e" "HOME=${HOME}"
         "-e" "USER=${USER:-$(id -un)}"
-        "-e" "JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
         "-e" "PYTHONPATH=/app"
         "-v" "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}"
         "--user" "$(id -u):$(id -g)"
     )
+
+    # Only forward JUPYTERHUB_SERVICE_PREFIX when it is actually set (i.e. on JupyterHub).
+    if [[ -n "${JUPYTERHUB_SERVICE_PREFIX:-}" ]]; then
+        DOCKER_ARGS+=("-e" "JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX}")
+    fi
+
+    # Mount the config directory if it lives outside $METATLAS_DATA_DIR.
+    if [[ -n "${EXTRA_CONFIG_MOUNT}" ]]; then
+        DOCKER_ARGS+=("-v" "${EXTRA_CONFIG_MOUNT}:${EXTRA_CONFIG_MOUNT}:ro")
+    fi
 
     if [[ "${DEV_MODE}" == "true" ]]; then
         DOCKER_ARGS+=("-e" "PYTHONPATH=${REPO_DIR}:/app")
@@ -422,6 +420,7 @@ else
         fi
 
         docker run "${DOCKER_ARGS[@]}" \
+            -p "127.0.0.1:8050-8069:8050-8069" \
             --entrypoint /app/.venv/bin/python \
             "${IMAGE_FULL}" \
             -m metatlas2.run_targeted_analysis \

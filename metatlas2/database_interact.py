@@ -3075,6 +3075,82 @@ def _save_updated_infeature_tag_to_db(
     else:
         logger.info("Skipping DB write of in_feature (update_raw_in_feature=False); values updated in memory only.")
 
+def _build_ms1_full_range_df(
+    obj: "AnalysisSummary",
+    rt_padding: float = 2.0,
+) -> None:
+    """Build a copy of the MS1 DataFrame filtered to ±*rt_padding* min around
+    the analyst-selected RT window, for use in identification figures.
+
+    This runs **after** ``_update_infeature_tag`` (so ``curation_df`` has the
+    correct analyst RT bounds) but **before** ``_filter_to_infeature_data``
+    (which trims ``ms1_df`` to only in-feature points).  The result is stored
+    on ``summary_obj.experimental_data.ms1_df_full_range`` and contains all
+    scan points whose RT falls within ``[rt_min - rt_padding, rt_max + rt_padding]``.
+
+    Parameters
+    ----------
+    obj:
+        The ``AnalysisSummary`` object whose ``experimental_data`` is being
+        populated.
+    rt_padding:
+        Number of minutes to extend beyond the analyst RT window on each side
+        (default 2.0).
+    """
+    logger.info(
+        f"Building full-range MS1 DataFrame (±{rt_padding} min around RT window) "
+        "for identification figures..."
+    )
+    ms1_df = obj.experimental_data.ms1_df
+    if ms1_df is None or ms1_df.empty:
+        obj.experimental_data.ms1_df_full_range = pd.DataFrame()
+        return
+
+    curation_df = obj.experimental_data.curation_df
+    uid_to_rt_min = curation_df.set_index("mz_rt_uid")["rt_min"]
+    uid_to_rt_max = curation_df.set_index("mz_rt_uid")["rt_max"]
+
+    rt_min_map = ms1_df["mz_rt_uid"].map(uid_to_rt_min)
+    rt_max_map = ms1_df["mz_rt_uid"].map(uid_to_rt_max)
+
+    lo = rt_min_map.to_numpy(dtype=np.float64) - rt_padding
+    hi = rt_max_map.to_numpy(dtype=np.float64) + rt_padding
+
+    rts_col  = ms1_df["spec_rts"].tolist()
+    ints_col = ms1_df["spec_ints"].tolist()
+    mzs_col  = ms1_df["spec_mzs"].tolist()
+    inf_col  = ms1_df["in_feature"].tolist()
+
+    new_rts  = []
+    new_ints = []
+    new_mzs  = []
+    new_inf  = []
+
+    for rts_raw, ints_raw, mzs_raw, inf_raw, lo_val, hi_val in zip(
+        rts_col, ints_col, mzs_col, inf_col, lo, hi
+    ):
+        rts_arr  = np.asarray(rts_raw,  dtype=np.float64)
+        ints_arr = np.asarray(ints_raw, dtype=np.float64)
+        mzs_arr  = np.asarray(mzs_raw,  dtype=np.float64)
+        inf_arr  = np.asarray(inf_raw,  dtype=bool)
+        mask = (rts_arr >= lo_val) & (rts_arr <= hi_val)
+        new_rts.append(rts_arr[mask].tolist())
+        new_ints.append(ints_arr[mask].tolist())
+        new_mzs.append(mzs_arr[mask].tolist())
+        # in_feature within the full-range slice: preserve original in-window flags
+        new_inf.append(inf_arr[mask].tolist())
+
+    obj.experimental_data.ms1_df_full_range = ms1_df.assign(
+        spec_rts  = new_rts,
+        spec_ints = new_ints,
+        spec_mzs  = new_mzs,
+        in_feature= new_inf,
+    )
+    logger.info(
+        f"Full-range MS1 DataFrame built with {len(obj.experimental_data.ms1_df_full_range)} rows."
+    )
+
+
 def _filter_to_infeature_data(
     obj: "AnalysisSummary",
 ):
@@ -3120,6 +3196,8 @@ def load_and_filter_for_summary(summary_obj, update_raw_in_feature=False):
     _update_infeature_tag(summary_obj)
 
     _save_updated_infeature_tag_to_db(summary_obj, update_raw_in_feature)
+
+    _build_ms1_full_range_df(summary_obj)
 
     _filter_to_infeature_data(summary_obj)
 
@@ -3515,10 +3593,9 @@ def _load_data_from_db(
                 curation_df[_col] = curation_df[_col].apply(as_list)
 
     logger.info(
-        f"Loaded {len(curation_df)} manual curation entries "
-        f"(for {curation_df['mz_rt_uid'].nunique()} compounds), "
-        f"{len(ms1_df)} MS1 data points, "
-        f"and {len(ms2_df)} MS2 data points."
+        f"Loaded manual curation entries for {len(curation_df)} compounds: "
+        f"{len(ms1_df)} MS1 data points ({ms1_df['filename'].nunique()} total files), "
+        f"and {len(ms2_df)} MS2 data points ({ms2_df['filename'].nunique()} total files)."
     )
 
     obj.experimental_data = ExperimentalData()
