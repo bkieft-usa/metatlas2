@@ -5,8 +5,8 @@ GENERAL:
   gdrive_subfolder: 0B-ZDcHbPi-aqZzE5V3hOZFc0dms
   max_workers: 5
 GUI:
-  gui_width:
-  gui_height:
+  gui_width: 32
+  gui_height: 12
   gui_require_all_evaluated: false
   gui_top_n_hits: 10
   gui_lcmsruns_colors:
@@ -69,7 +69,7 @@ TARGETED_ANALYSES:
             apply_istd_curation_to_ema: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0.5
-            extract_extra_time:
+            extract_extra_time: 3.0
             ms1_min_peak_intensity: 0
             ms1_min_num_points: 0
             ms1_mz_tolerance_ppm: 5.0
@@ -105,7 +105,7 @@ TARGETED_ANALYSES:
             apply_cross_polarity_curation: false
             suggested_min_conf: 0.75
             atlas_extra_time: 0
-            extract_extra_time:
+            extract_extra_time: 3.0
             ms1_min_peak_intensity: 5e5
             ms1_min_num_points: 5
             ms1_mz_tolerance_ppm: 5.0
@@ -143,7 +143,7 @@ TARGETED_ANALYSES:
             apply_istd_curation_to_ema: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0.5
-            extract_extra_time:
+            extract_extra_time: 3.0
             ms1_min_peak_intensity: 0
             ms1_min_num_points: 0
             ms1_mz_tolerance_ppm: 5.0
@@ -179,7 +179,7 @@ TARGETED_ANALYSES:
             apply_cross_polarity_curation: false
             suggested_min_conf: 0.75
             atlas_extra_time: 0
-            extract_extra_time:
+            extract_extra_time: 3.0
             ms1_min_peak_intensity: 5e5
             ms1_min_num_points: 5
             ms1_mz_tolerance_ppm: 5.0

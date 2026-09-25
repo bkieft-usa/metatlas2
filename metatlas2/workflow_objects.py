@@ -1142,6 +1142,7 @@ class RTAlign:
 @dataclass
 class ExperimentalData:
     ms1_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    ms1_df_full_range: pd.DataFrame = field(default_factory=pd.DataFrame)
     ms2_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     curation_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
