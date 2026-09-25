@@ -340,7 +340,7 @@ def run_analysis_gui(
     t.start()
     time.sleep(1)
 
-    if os.getenv('METATLAS2_STANDALONE') == 'true':
+    if os.getenv('METATLAS2_STANDALONE') == 'true' or not os.getenv('JUPYTERHUB_SERVICE_PREFIX'):
         url = f"http://localhost:{dash_app_port}/"
     else:
         service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')

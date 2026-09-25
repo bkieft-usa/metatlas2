@@ -55,7 +55,7 @@ def build_dash_app(
 
     # Create the app
     try:
-        if os.getenv('METATLAS2_STANDALONE') == 'true':
+        if os.getenv('METATLAS2_STANDALONE') == 'true' or not os.getenv('JUPYTERHUB_SERVICE_PREFIX'):
             requests_prefix = "/"
         else:
             requests_prefix = f"{os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')}proxy/{port}/"

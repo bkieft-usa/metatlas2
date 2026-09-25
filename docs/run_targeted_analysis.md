@@ -12,11 +12,41 @@ The script can be run directly (`run` subcommand) or submitted as a Slurm batch 
 
 ## Prerequisites
 
-Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this workflow. Additionally:
+Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this workflow. If you are running **outside NERSC** (local laptop or non-NERSC HPC), see [run_anywhere.md](run_anywhere.md) for the full setup guide. Additionally:
 
 - The main metatlas database contains the compounds and atlases for your project. Run `metatlas2.sh add-compounds` and `metatlas2.sh add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)).
-- LCMS run data files (`.raw`, `.mzML`, or `.h5` format) are present at the expected path under `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/`.
+- LCMS run data files in `.h5` format are present at the expected path under `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/`. See [Raw data file placement](#raw-data-file-placement) below.
 - Atlas UIDs referenced in the input analysis configuration file (e.g., `analysis.yaml`) exist in the main database.
+
+---
+
+## Raw data file placement
+
+Raw LCMS data must be in `.h5` (HDF5) format. Place all files for a project directly in:
+
+```
+$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/
+```
+
+- `<owner>` must match the `GENERAL.owner` field in your analysis config YAML (e.g. `jgi`, `egsb`).
+- `<project_name>` must match the `--project` argument passed to `metatlas2.sh run` **exactly**.
+
+### Project name format
+
+The project name must contain **at least 5 underscore-delimited fields**. The 5th field (index 4) is extracted as the short name used in log filenames and output directory labels:
+
+```
+20260101_JGI_XX_000000_MYPROJECT_HILICZ_TESTXXXX
+│         │   │  │      └── field[4]: short name (used in log/output filenames)
+│         │   │  └── field[3]
+│         │   └── field[2]
+│         └── field[1]
+└── field[0]: date
+```
+
+A minimal valid project name: `20260101_JGI_XX_000000_MYPROJECT`
+
+> **Note:** This naming convention matches the NERSC LCMS project directory convention. If your project name does not follow this format, `metatlas2.sh run` will fail with a `ValueError` during path setup.
 
 ---
 
