@@ -15,9 +15,12 @@ Tested functions
 * :func:`_display_compound_idx`
 * :func:`_get_file_color`
 * :func:`_short_fname`
+* :func:`~metatlas2.database_interact._apply_remove_flagged_compounds`
 """
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -34,6 +37,7 @@ from metatlas2.analysis_summary import (
     rt_quality,
     total_score_and_msi,
 )
+from metatlas2.database_interact import _apply_remove_flagged_compounds
 
 
 # ===========================================================================
@@ -498,3 +502,164 @@ class TestShortFname:
         fname = "a_b_c"
         result = _short_fname(fname)
         assert result == "a_b_c"
+
+
+# ===========================================================================
+# _apply_remove_flagged_compounds
+# ===========================================================================
+
+def _make_summary_obj(
+    curation_rows: list[dict],
+    ms1_rows: list[dict] | None = None,
+    ms2_rows: list[dict] | None = None,
+    remove_flagged: bool = True,
+    override_remove_flagged=None,
+):
+    """Build a minimal summary_obj stub for _apply_remove_flagged_compounds tests."""
+    from metatlas2.workflow_objects import ExperimentalData
+
+    exp = ExperimentalData()
+    exp.curation_df = pd.DataFrame(curation_rows)
+    exp.ms1_df = pd.DataFrame(ms1_rows) if ms1_rows is not None else pd.DataFrame()
+    exp.ms2_df = pd.DataFrame(ms2_rows) if ms2_rows is not None else pd.DataFrame()
+
+    ta = SimpleNamespace(params={"remove_flagged_compounds": remove_flagged})
+    override_parameters = {}
+    if override_remove_flagged is not None:
+        override_parameters["remove_flagged_compounds"] = override_remove_flagged
+
+    return SimpleNamespace(
+        ta=ta,
+        override_parameters=override_parameters,
+        experimental_data=exp,
+    )
+
+
+class TestApplyRemoveFlaggedCompounds:
+    """Tests for _apply_remove_flagged_compounds in database_interact."""
+
+    def test_remove_flagged_true_drops_remove_compound(self):
+        """Compounds with ms1_notes == 'remove' are dropped when flag is True."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert list(obj.experimental_data.curation_df["mz_rt_uid"]) == ["uid1"]
+
+    def test_remove_flagged_false_keeps_all_compounds(self):
+        """No compounds are dropped when remove_flagged_compounds is False."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=False)
+        _apply_remove_flagged_compounds(obj)
+        assert len(obj.experimental_data.curation_df) == 2
+
+    def test_override_parameter_takes_precedence_over_ta_params(self):
+        """override_parameters['remove_flagged_compounds'] overrides ta.params."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        # ta.params says True but override says False → keep all
+        obj = _make_summary_obj(rows, remove_flagged=True, override_remove_flagged=False)
+        _apply_remove_flagged_compounds(obj)
+        assert len(obj.experimental_data.curation_df) == 2
+
+    def test_override_false_to_true_removes_flagged(self):
+        """override_parameters=True removes flagged even when ta.params=False."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=False, override_remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert list(obj.experimental_data.curation_df["mz_rt_uid"]) == ["uid1"]
+
+    def test_ms1_df_filtered_to_surviving_uids(self):
+        """ms1_df rows for removed compounds are also dropped."""
+        curation = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        ms1 = [
+            {"mz_rt_uid": "uid1", "filename": "f1.h5"},
+            {"mz_rt_uid": "uid2", "filename": "f2.h5"},
+        ]
+        obj = _make_summary_obj(curation, ms1_rows=ms1, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert list(obj.experimental_data.ms1_df["mz_rt_uid"]) == ["uid1"]
+
+    def test_ms2_df_filtered_to_surviving_uids(self):
+        """ms2_df rows for removed compounds are also dropped."""
+        curation = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        ms2 = [
+            {"mz_rt_uid": "uid1", "filename": "f1.h5"},
+            {"mz_rt_uid": "uid2", "filename": "f2.h5"},
+        ]
+        obj = _make_summary_obj(curation, ms2_rows=ms2, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert list(obj.experimental_data.ms2_df["mz_rt_uid"]) == ["uid1"]
+
+    def test_case_insensitive_remove_note(self):
+        """ms1_notes matching 'remove' in any case are treated as flagged."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "Remove"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "REMOVE"},
+            {"mz_rt_uid": "uid3", "ms1_notes": "keep"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert list(obj.experimental_data.curation_df["mz_rt_uid"]) == ["uid3"]
+
+    def test_whitespace_stripped_from_note(self):
+        """Leading/trailing whitespace in ms1_notes is stripped before comparison."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "  remove  "},
+            {"mz_rt_uid": "uid2", "ms1_notes": "keep"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert list(obj.experimental_data.curation_df["mz_rt_uid"]) == ["uid2"]
+
+    def test_nan_ms1_notes_not_treated_as_remove(self):
+        """NaN ms1_notes values are not treated as 'remove'."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": float("nan")},
+            {"mz_rt_uid": "uid2", "ms1_notes": "keep"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert len(obj.experimental_data.curation_df) == 2
+
+    def test_no_flagged_compounds_leaves_df_unchanged(self):
+        """When no compounds are flagged, curation_df is unchanged."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "keep"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "putative"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert len(obj.experimental_data.curation_df) == 2
+
+    def test_all_flagged_results_in_empty_curation_df(self):
+        """When all compounds are flagged, curation_df becomes empty."""
+        rows = [
+            {"mz_rt_uid": "uid1", "ms1_notes": "remove"},
+            {"mz_rt_uid": "uid2", "ms1_notes": "remove"},
+        ]
+        obj = _make_summary_obj(rows, remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)
+        assert obj.experimental_data.curation_df.empty
+
+    def test_empty_curation_df_is_a_noop(self):
+        """An empty curation_df is handled gracefully without error."""
+        obj = _make_summary_obj([], remove_flagged=True)
+        _apply_remove_flagged_compounds(obj)  # should not raise
+        assert obj.experimental_data.curation_df.empty
