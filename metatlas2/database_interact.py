@@ -3189,9 +3189,46 @@ def _filter_to_infeature_data(
     logger.info(f"Added {len(obj.experimental_data.ms1_df)} MS1 rows ({len(obj.experimental_data.ms1_df)/starting_ms1_count*100:.1f} percent of total) and {len(obj.experimental_data.ms2_df)} MS2 rows ({len(obj.experimental_data.ms2_df)/starting_ms2_count*100:.1f} percent of total) with in_feature=True to the summary object.")
 
 
+def _apply_remove_flagged_compounds(summary_obj) -> None:
+    """Drop compounds whose ``ms1_notes`` equals ``'remove'`` from all experimental data.
+    """
+    remove_flagged = summary_obj.ta.params.get("remove_flagged_compounds", True)
+    if summary_obj.override_parameters.get("remove_flagged_compounds") is not None:
+        remove_flagged = summary_obj.override_parameters.get("remove_flagged_compounds")
+    if not remove_flagged:
+        return
+
+    curation_df = summary_obj.experimental_data.curation_df
+    if curation_df is None or curation_df.empty:
+        return
+
+    flagged_mask = curation_df["ms1_notes"].fillna("").str.strip().str.lower() == "remove"
+    n_flagged = int(flagged_mask.sum())
+    if n_flagged == 0:
+        return
+
+    logger.info(
+        f"remove_flagged_compounds=True: removing {n_flagged} compound(s) "
+        f"whose ms1_notes == 'remove' from all summary outputs."
+    )
+    keep_mask = ~flagged_mask
+    summary_obj.experimental_data.curation_df = curation_df[keep_mask].copy()
+    surviving_uids = set(summary_obj.experimental_data.curation_df["mz_rt_uid"])
+    if not summary_obj.experimental_data.ms1_df.empty:
+        summary_obj.experimental_data.ms1_df = summary_obj.experimental_data.ms1_df[
+            summary_obj.experimental_data.ms1_df["mz_rt_uid"].isin(surviving_uids)
+        ]
+    if not summary_obj.experimental_data.ms2_df.empty:
+        summary_obj.experimental_data.ms2_df = summary_obj.experimental_data.ms2_df[
+            summary_obj.experimental_data.ms2_df["mz_rt_uid"].isin(surviving_uids)
+        ]
+
+
 def load_and_filter_for_summary(summary_obj, update_raw_in_feature=False):
 
     _load_data_from_db(summary_obj, [v.prev_mz_rt_uid for v in summary_obj.manually_curated_atlas_obj.compound_mzrts.values()]) # need the previous mz_rt_uids because of the cloning step
+
+    _apply_remove_flagged_compounds(summary_obj)
 
     _update_infeature_tag(summary_obj)
 
