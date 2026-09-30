@@ -370,6 +370,8 @@ else
         "-e" "HOME=${HOME}"
         "-e" "USER=${USER:-$(id -un)}"
         "-e" "PYTHONPATH=/app"
+        "-e" "NUMBA_CACHE_DIR=${METATLAS_DATA_DIR}/.numba_cache"
+        "-e" "MPLCONFIGDIR=${METATLAS_DATA_DIR}/.matplotlib_cache"
         "-v" "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}"
         "--user" "$(id -u):$(id -g)"
     )
@@ -385,8 +387,6 @@ else
     fi
 
     # Mount rclone config if present (for Google Drive upload on non-NERSC systems).
-    # The container runs as the host user (--user flag above) and HOME is forwarded
-    # via -e HOME, so rclone finds its config at the same path inside the container.
     if [[ -d "${HOME}/.config/rclone" ]]; then
         DOCKER_ARGS+=("-v" "${HOME}/.config/rclone:${HOME}/.config/rclone:ro")
     fi
@@ -418,18 +418,22 @@ else
             --entrypoint /bin/bash \
             "${IMAGE_FULL}" \
             -c "
-                /app/.venv/bin/python -m ipykernel install \
+                mkdir -p '${METATLAS_DATA_DIR}/.jupyter_data/kernels' \
+                && /app/.venv/bin/python -m ipykernel install \
                     --name metatlas2 \
                     --display-name 'metatlas2 (latest)' \
-                    --sys-prefix \
-                && /app/.venv/bin/jupyter lab \
+                    --prefix '${METATLAS_DATA_DIR}/.jupyter_data' \
+                && JUPYTER_DATA_DIR='${METATLAS_DATA_DIR}/.jupyter_data' \
+                   IPYTHONDIR='${METATLAS_DATA_DIR}/.ipython' \
+                   /app/.venv/bin/jupyter lab \
                     --ip=0.0.0.0 \
                     --port=${JUPYTER_PORT} \
                     --no-browser \
                     --allow-root \
                     --IdentityProvider.token='' \
                     --ServerApp.password='' \
-                    --ServerApp.root_dir=${METATLAS_DATA_DIR}
+                    --ServerApp.root_dir='${METATLAS_DATA_DIR}' \
+                    --MultiKernelManager.default_kernel_name=metatlas2
             "
 
     elif [[ "${SUBCOMMAND}" == "submit" ]]; then

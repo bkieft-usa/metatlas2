@@ -1032,7 +1032,8 @@ def make_final_id_sheet(
         rt_measured  = float(mc_row.get("rt_peak", np.nan))
         best_ms1_rt = float(mc_row.get("best_ms1_rt", np.nan))
         best_ms1_intensity = float(mc_row.get("best_ms1_intensity", np.nan))
-        best_ms1_file = mc_row.get("best_ms1_file", "")
+        _raw = mc_row.get("best_ms1_file", "")
+        best_ms1_file = "" if (not _raw or (isinstance(_raw, float) and np.isnan(_raw))) else str(_raw)
 
         # Compute MS1-based m/z and RT errors (absolute values)
         if not np.isnan(mz_measured) and not np.isnan(mz_theoretical) and mz_theoretical != 0:
