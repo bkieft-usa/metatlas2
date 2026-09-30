@@ -260,16 +260,12 @@ def build_dash_app(
         events=[{"event": "keydown", "props": ["key", "timeStamp", "target.tagName"]}],
     )
 
-    PX_PER_ROW = 52    # pixels per radio/checklist label row (label + margin)
-    FIXED_CHROME = 340   # dropdown + textarea + id-notes + status divs + buttons + padding
-    BUTTON_ROW_H = 48    # height of each button row between/below the graphs
-
-    # Resolve user-supplied dimensions (inches → pixels at 96 dpi).
-    # Priority: override_parameters (notebook cell) > config.gui_config > auto
-    # Uses _resolved_cfg already built at factory scope above.
+    PX_PER_ROW = 52
+    FIXED_CHROME = 340
+    BUTTON_ROW_H = 48
     _gui_width_in = _resolved_cfg.get("gui_width") or None
     _gui_height_in = _resolved_cfg.get("gui_height") or None
-    DPI = 96  # standard screen DPI for CSS px conversion
+    DPI = 96
 
     n_rows = (
         len(analysis_gui_obj.notes["ms1_notes"])
@@ -1178,6 +1174,9 @@ def build_dash_app(
                     f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
                     f"RT: {rt_str}  |  m/z: {mz_str}"
                 )
+        if isomer_lines:
+            #sort all isomers by ascending RT
+            isomer_lines.sort(key=lambda x: float(x.split("RT: ")[1].split("  |")[0]))
 
         # Add max EIC trace after isomer rectangles so it appears in the rangeslider
         max_eic_rt = row.get("max_eic_rt", [])
@@ -1195,7 +1194,7 @@ def build_dash_app(
                         y=filtered_int,
                         mode="lines",
                         name="Max EIC (slider)",
-                        line=dict(color="#0074D9", width=3, dash="dot"),
+                        line=dict(color="#0074D9", width=1, dash="dot"),
                         opacity=1.0,
                         hoverinfo="skip",
                         showlegend=False
@@ -1296,12 +1295,13 @@ def build_dash_app(
             f"{ms1_file_count} invisible hover/click traces"
         )
 
-        # Atlas RT peak line (black, static)
+        # Atlas RT peak line (purple, static)
         fig.add_trace(go.Scatter(
             x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
             y=[0.0, y_upper_bound],
             mode="lines",
-            line=dict(color="black", width=2.5),
+            opacity=0.75,
+            line=dict(color="purple", width=3.5),
             showlegend=False,
             hoverinfo="skip",
         ))
@@ -1312,7 +1312,8 @@ def build_dash_app(
                 x=[row["suggested_rt_min"], row["suggested_rt_min"]],
                 y=[0.0, y_upper_bound],
                 mode="lines",
-                line=dict(color="orange", width=2.5),
+                opacity=0.75,
+                line=dict(color="orange", width=3.5),
                 showlegend=False,
                 hoverinfo="skip",
             ))
@@ -1321,24 +1322,27 @@ def build_dash_app(
                 x=[row["suggested_rt_max"], row["suggested_rt_max"]],
                 y=[0.0, y_upper_bound],
                 mode="lines",
-                line=dict(color="orange", width=2.5, dash="dash"),
+                opacity=0.75,
+                line=dict(color="orange", width=3.5, dash="dash"),
                 showlegend=False,
                 hoverinfo="skip",
             ))
 
-        # RT min (purple, solid, editable): always span full y-axis
+        # RT min (green, solid, editable): always span full y-axis
         fig.add_shape(
             type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
             xref="x", yref="paper",
-            line=dict(color="purple", width=7),
+            opacity=0.75,
+            line=dict(color="green", width=9),
             name="RT min", editable=True,
         )
 
-        # RT max (purple, dashed, editable): always span full y-axis
+        # RT max (green, dashed, editable): always span full y-axis
         fig.add_shape(
             type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
             xref="x", yref="paper",
-            line=dict(color="purple", width=7, dash="dash"),
+            opacity=0.75,
+            line=dict(color="green", width=9, dash="dash"),
             name="RT max", editable=True,
         )
 
@@ -1686,7 +1690,7 @@ def build_dash_app(
                 f"RT: {scan.get('scan_rt', 0):.4f} min | "
                 f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
                 f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
-                f"ppm Δ: {hit.get('ppm_error', 0):.2f}"
+                f"<b>ppm Δ: {hit.get('ppm_error', 0):.2f}</b>"
                 f"<br>"
                 f"Hit: {hit.get('ref_name', 'Unknown')}  |  File: {fname}</span><br><br>"
             )
@@ -1985,36 +1989,6 @@ def build_dash_app(
         prevent_initial_call=True,
     )
 
-    # # don't allow vertical dragging of the purple RT lines — snap them back to full paper height
-    # app.clientside_callback(
-    #     """
-    #     function(relayoutData, figure) {
-    #         if (!relayoutData || !figure) return window.dash_clientside.no_update;
-    #         var keys = Object.keys(relayoutData);
-    #         var hasY = keys.some(function(k) {
-    #             return /shapes\[\\d+\]\\.(y0|y1)/.test(k);
-    #         });
-    #         var hasX = keys.some(function(k) {
-    #             return /shapes\[\\d+\]\\.x0/.test(k);
-    #         });
-    #         if (hasY && !hasX) {
-    #             // Pure vertical drag — snap all shapes back to full paper height
-    #             var fig = JSON.parse(JSON.stringify(figure));
-    #             (fig.layout.shapes || []).forEach(function(s) {
-    #                 s.y0 = 0;
-    #                 s.y1 = 1;
-    #             });
-    #             return fig;
-    #         }
-    #         return window.dash_clientside.no_update;
-    #     }
-    #     """,
-    #     Output("ms1-graph", "figure", allow_duplicate=True),
-    #     Input("ms1-graph", "relayoutData"),
-    #     State("ms1-graph", "figure"),
-    #     prevent_initial_call=True,
-    # )
-
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
         Input("ms1-graph", "relayoutData"),
@@ -2045,7 +2019,7 @@ def build_dash_app(
             except (IndexError, ValueError):
                 continue
             
-            # Process the editable purple lines
+            # Process the editable green lines
             if shape_idx == rt_min_shape_idx:
                 new_min = float(v)
                 updated = True

@@ -65,8 +65,7 @@ TARGETED_ANALYSES:
             remove_unided_compounds: false
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
-            apply_cross_polarity_curation: false
-            apply_istd_curation_to_ema: true
+            apply_cross_polarity_curation: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0.5
             extract_extra_time: 3.0
@@ -102,7 +101,8 @@ TARGETED_ANALYSES:
             remove_unided_compounds: true
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
-            apply_cross_polarity_curation: false
+            apply_cross_polarity_curation: true
+            apply_istd_curation_to_ema: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0
             extract_extra_time: 3.0
@@ -139,8 +139,7 @@ TARGETED_ANALYSES:
             remove_unided_compounds: false
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
-            apply_cross_polarity_curation: false
-            apply_istd_curation_to_ema: true
+            apply_cross_polarity_curation: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0.5
             extract_extra_time: 3.0
@@ -176,7 +175,8 @@ TARGETED_ANALYSES:
             remove_unided_compounds: true
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
-            apply_cross_polarity_curation: false
+            apply_cross_polarity_curation: true
+            apply_istd_curation_to_ema: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0
             extract_extra_time: 3.0
