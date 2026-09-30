@@ -193,13 +193,26 @@ After the pipeline completes, a Jupyter notebook is generated for each targeted 
 
 ### On a local laptop
 
-1. Start JupyterLab (using the standalone mode or your own Jupyter installation)
-2. Open the generated `.ipynb` notebook
-3. Run the GUI cell — the Dash app starts and a link is printed:
-   ```
-   ▶ Open Dash App ↗  →  http://localhost:8050/
-   ```
-4. Click the link to open the curation GUI in your browser
+Use the `jupyter` subcommand to launch JupyterLab in Docker with `$METATLAS_DATA_DIR` mounted and the `metatlas2` kernel pre-registered:
+
+```bash
+metatlas2.sh jupyter
+```
+
+This starts JupyterLab at `http://localhost:8889/lab`. Navigate to your project's output directory (`projects/targeted_outputs/<owner>/<user>/<project_name>/RTA<N>/TGA<M>/`) and open the generated `.ipynb` notebook.
+
+Run the GUI cell — the Dash app starts and a link is printed:
+```
+▶ Open Dash App ↗  →  http://localhost:8050/
+```
+Click the link to open the curation GUI in your browser. After curation, run the summary cell.
+
+To use a different JupyterLab port:
+```bash
+METATLAS2_JUPYTER_PORT=8890 metatlas2.sh jupyter
+# or
+metatlas2.sh --port 8890 jupyter
+```
 
 ### On a headless HPC (no display, SSH access)
 
@@ -207,16 +220,16 @@ The container exposes ports 8050–8069 on `127.0.0.1`. Use **VSCode SSH port fo
 
 **VSCode (recommended):**
 1. Connect to the remote machine via VSCode Remote SSH
-2. Open the generated notebook in VSCode's Jupyter extension or via the forwarded JupyterLab URL
-3. Run the GUI cell — VSCode automatically forwards `localhost:8050` to your local browser
-4. The link `http://localhost:8050/` opens directly in your local browser
+2. Run `metatlas2.sh jupyter` on the remote machine
+3. VSCode automatically forwards `localhost:8889` to your local browser — open `http://localhost:8889/lab`
+4. Open the generated notebook, run the GUI cell — VSCode also forwards `localhost:8050`
 
 **Manual SSH tunnel:**
 ```bash
 # On your local machine, in a separate terminal:
-ssh -L 8050:localhost:8050 user@remote-hpc
+ssh -L 8889:localhost:8889 -L 8050:localhost:8050 user@remote-hpc
 ```
-Then open `http://localhost:8050/` in your local browser after running the GUI cell on the remote.
+Then open `http://localhost:8889/lab` in your local browser after running `metatlas2.sh jupyter` on the remote.
 
 ---
 
@@ -228,9 +241,44 @@ Then open `http://localhost:8050/` in your local browser after running the GUI c
 | Filesystem mounts | Global NERSC filesystems auto-mounted | `$METATLAS_DATA_DIR` bind-mounted |
 | Main database | Already on shared filesystem | Auto-downloaded from Zenodo |
 | `submit` subcommand (SLURM) | ✅ Supported | ❌ Not supported (use `run` directly) |
+| `jupyter` subcommand | ❌ Not needed (use JupyterHub) | ✅ Launches JupyterLab for curation notebooks |
 | GUI URL | JupyterHub proxy URL | `http://localhost:8050/` |
-| GUI access | JupyterHub browser tab | Local browser via VSCode SSH or `ssh -L` |
+| GUI access | JupyterHub browser tab | Local browser via `metatlas2.sh jupyter` |
 | Parallel job submission | `sbatch` via `submit` | Run directly or use your HPC's scheduler |
+| Google Drive upload | rclone at NERSC shared path | rclone from container image; credentials from `~/.config/rclone` |
+
+---
+
+## Google Drive upload
+
+To upload summary outputs to Google Drive from a non-NERSC machine:
+
+### Prerequisites
+
+1. Install rclone on your laptop:
+   - **macOS**: `brew install rclone`
+   - **Linux**: `sudo apt install rclone` or see https://rclone.org/install/
+   - **Windows/WSL2**: Install in WSL: `sudo apt install rclone`
+
+2. Configure a Google Drive remote:
+   ```bash
+   rclone config
+   ```
+   Follow the interactive prompts to create a remote of type `drive`. Note the **folder ID** of the target Google Drive folder — it is the long alphanumeric string in the Drive URL: `https://drive.google.com/drive/folders/<FOLDER_ID>`.
+
+3. In your analysis config YAML, set:
+   ```yaml
+   GENERAL:
+     gdrive_subfolder: <FOLDER_ID>   # Google Drive folder ID from step 2
+   ```
+   And in each targeted analysis `PARAMS` block where you want uploads:
+   ```yaml
+   upload_to_gdrive: true
+   ```
+
+### How it works
+
+`metatlas2.sh` automatically bind-mounts `~/.config/rclone` into the container when it exists, so the rclone credentials configured on your laptop are available inside the container during the summary stage. The pipeline uses the `rclone` binary installed in the container image.
 
 ---
 

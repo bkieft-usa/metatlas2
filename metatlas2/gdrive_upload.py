@@ -4,6 +4,7 @@ import configparser
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 
@@ -18,7 +19,23 @@ from metatlas2.utils import should_disable_tqdm
 
 logger = logging.getLogger(__name__)
 
-RCLONE_PATH = "/global/cfs/cdirs/m342/USA/shared-envs/rclone/bin/rclone"
+_NERSC_RCLONE_PATH = "/global/cfs/cdirs/m342/USA/shared-envs/rclone/bin/rclone"
+
+def _get_rclone_path() -> str:
+    """Return the path to the rclone binary.
+
+    Checks the NERSC shared environment path first (for backward compatibility
+    on Perlmutter), then falls back to the system PATH via shutil.which.
+    If neither is found, returns the NERSC path so that downstream
+    FileNotFoundError handling in _rclone_copy() and _rclone_config_file()
+    is preserved unchanged.
+    """
+    if os.path.isfile(_NERSC_RCLONE_PATH):
+        return _NERSC_RCLONE_PATH
+    system_rclone = shutil.which("rclone")
+    if system_rclone:
+        return system_rclone
+    return _NERSC_RCLONE_PATH
 
 RCLONE_UPLOAD_EXCLUDES = [
     "*.yaml",
@@ -36,7 +53,7 @@ RCLONE_UPLOAD_EXCLUDES = [
 def _rclone_config_file() -> str | None:
     """Return the path to the rclone config file, or None if not found."""
     try:
-        result = subprocess.check_output([RCLONE_PATH, "config", "file"], text=True)
+        result = subprocess.check_output([_get_rclone_path(), "config", "file"], text=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
     lines = [l for l in result.splitlines() if l.strip()]
@@ -64,7 +81,7 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
     """
     dest = f"{drive}:{dest_path}"
     cmd = [
-        RCLONE_PATH, "copy", str(source), dest,
+        _get_rclone_path(), "copy", str(source), dest,
         "--progress",
         "--transfers", "32",
         "--checkers", "64",
@@ -101,16 +118,16 @@ def _rclone_copy(source: Path, drive: str, dest_path: Path, overwrite: bool = Fa
         logger.exception("rclone copy failed: %s", err)
         raise
     except FileNotFoundError:
-        logger.warning(f"rclone binary not found at {RCLONE_PATH} — skipping upload.")
+        logger.warning(f"rclone binary not found at {_get_rclone_path()} — skipping upload.")
 
 def _has_drive_access(drive: str) -> tuple[bool, str | None]:
     """Return whether the configured remote is accessible and an optional error message."""
-    cmd = [RCLONE_PATH, "lsjson", "--dirs-only", f"{drive}:"]
+    cmd = [_get_rclone_path(), "lsjson", "--dirs-only", f"{drive}:"]
     try:
         subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
         return True, None
     except FileNotFoundError:
-        return False, f"rclone binary not found at {RCLONE_PATH}."
+        return False, f"rclone binary not found at {_get_rclone_path()}."
     except subprocess.CalledProcessError as err:
         message = err.output.strip() if isinstance(err.output, str) else str(err)
         if not message:
@@ -126,7 +143,7 @@ def _get_drive_id_for_path(drive: str, dest_path: Path) -> str | None:
     if not parts:
         return None
     parent = f"{drive}:{'/'.join(parts[:-1])}" if len(parts) > 1 else f"{drive}:"
-    cmd = [RCLONE_PATH, "lsjson", "--dirs-only", parent]
+    cmd = [_get_rclone_path(), "lsjson", "--dirs-only", parent]
     try:
         result = subprocess.check_output(cmd, text=True)
     except subprocess.CalledProcessError as err:
