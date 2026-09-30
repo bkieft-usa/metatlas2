@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         imagemagick \
         libxrender1 \
+        rclone \
     && rm -rf /var/lib/apt/lists/*
 
 # Bring in uv from the official image

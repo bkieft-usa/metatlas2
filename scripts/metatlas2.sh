@@ -6,6 +6,7 @@
 # Usage:
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
+#   metatlas2 [--image TAG] [--dev] jupyter [--port PORT]
 #   metatlas2 [--image TAG] [--dev] add-compounds  --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-atlases    --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-msms-refs  --config_path FILE
@@ -23,6 +24,8 @@
 #                 Downloads dev data if needed to ~/.metatlas2-dev/.
 #   --update-data Force re-download of dev data (use with --standalone).
 #                 Useful when new Zenodo versions are published.
+#   --port PORT   JupyterLab port for the 'jupyter' subcommand (default: 8889).
+#                 Can also be set via METATLAS2_JUPYTER_PORT env var.
 #
 # Runtime detection (automatic, no flag needed):
 #   - If 'shifter' is found on PATH, Shifter is used (NERSC/Perlmutter).
@@ -56,6 +59,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PASSTHROUGH_ARGS=()
 UPDATE_DATA=false
+JUPYTER_PORT="${METATLAS2_JUPYTER_PORT:-8889}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --image)        IMAGE_TAG="$2"; shift 2 ;;
@@ -63,6 +67,8 @@ while [[ $# -gt 0 ]]; do
         --dev)          DEV_MODE=true; shift ;;
         --standalone)   STANDALONE_MODE=true; shift ;;
         --update-data)  UPDATE_DATA=true; shift ;;
+        --port)         JUPYTER_PORT="$2"; shift 2 ;;
+        --port=*)       JUPYTER_PORT="${1#*=}"; shift ;;
         *)              PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
@@ -254,7 +260,12 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
         fi
     fi
 
-    if [[ "${SUBCOMMAND}" == "submit" ]]; then
+    if [[ "${SUBCOMMAND}" == "jupyter" ]]; then
+        echo "Error: 'jupyter' is only supported in Docker mode." >&2
+        echo "On NERSC, use JupyterHub directly to open curation notebooks." >&2
+        exit 1
+
+    elif [[ "${SUBCOMMAND}" == "submit" ]]; then
         TMPSCRIPT="$(mktemp /tmp/metatlas2_XXXXXX.sh)"
         # shellcheck disable=SC2064
         trap "rm -f '${TMPSCRIPT}'" EXIT
@@ -373,13 +384,55 @@ else
         DOCKER_ARGS+=("-v" "${EXTRA_CONFIG_MOUNT}:${EXTRA_CONFIG_MOUNT}:ro")
     fi
 
+    # Mount rclone config if present (for Google Drive upload on non-NERSC systems).
+    # The container runs as the host user (--user flag above) and HOME is forwarded
+    # via -e HOME, so rclone finds its config at the same path inside the container.
+    if [[ -d "${HOME}/.config/rclone" ]]; then
+        DOCKER_ARGS+=("-v" "${HOME}/.config/rclone:${HOME}/.config/rclone:ro")
+    fi
+
     if [[ "${DEV_MODE}" == "true" ]]; then
         DOCKER_ARGS+=("-e" "PYTHONPATH=${REPO_DIR}:/app")
         DOCKER_ARGS+=("-v" "${REPO_DIR}:${REPO_DIR}:ro")
         echo "Dev mode enabled: using local repo at ${REPO_DIR}"
     fi
 
-    if [[ "${SUBCOMMAND}" == "submit" ]]; then
+    if [[ "${SUBCOMMAND}" == "jupyter" ]]; then
+        echo "=========================================="
+        echo "Metatlas2 JupyterLab (portable mode)"
+        echo "=========================================="
+        echo ""
+        echo "Data dir: ${METATLAS_DATA_DIR}"
+        echo ""
+        echo "Open your browser at:"
+        echo "   http://localhost:${JUPYTER_PORT}/lab"
+        echo ""
+        echo "Press Ctrl+C to stop"
+        echo "=========================================="
+        echo ""
+
+        docker run --rm -it \
+            "${DOCKER_ARGS[@]}" \
+            -p "127.0.0.1:${JUPYTER_PORT}:${JUPYTER_PORT}" \
+            -p "127.0.0.1:8050-8069:8050-8069" \
+            --entrypoint /bin/bash \
+            "${IMAGE_FULL}" \
+            -c "
+                /app/.venv/bin/python -m ipykernel install \
+                    --name metatlas2 \
+                    --display-name 'metatlas2 (latest)' \
+                    --sys-prefix \
+                && /app/.venv/bin/jupyter lab \
+                    --ip=0.0.0.0 \
+                    --port=${JUPYTER_PORT} \
+                    --no-browser \
+                    --allow-root \
+                    --IdentityProvider.token='' \
+                    --ServerApp.password='' \
+                    --ServerApp.root_dir=${METATLAS_DATA_DIR}
+            "
+
+    elif [[ "${SUBCOMMAND}" == "submit" ]]; then
         echo "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems." >&2
         exit 1
 
