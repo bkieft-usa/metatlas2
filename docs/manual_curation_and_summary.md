@@ -244,7 +244,7 @@ Each box represents one compound; points are coloured by run type (ISTD, QC, EXC
 | File | Contents |
 |---|---|
 | `peak_height_filtered.csv` | Filtered peak heights per compound per run (after applying `remove_flagged_compounds` and `remove_unided_compounds`) |
-| `log_fold_changes.csv` | Log₂ fold changes computed from filtered peak heights |
+| `group_mean_log_fold_changes.csv` | Log₂ fold changes computed from filtered peak heights |
 
 ### Best MS2 hit fragment ions CSV
 

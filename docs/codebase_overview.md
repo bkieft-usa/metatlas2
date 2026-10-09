@@ -80,7 +80,7 @@ This comprehensive guide covers:
 | `add_compounds_to_db.py` | Adds new compounds to main database so they are findable |
 | `add_msms_refs_to_db.py` | Adds MS/MS reference spectra to the main database from `.jsonl` files |
 | `get_atlases_from_db.py` | Fetches and exports atlas data from the main database |
-| `get_msms_refs_from_db.py` | Fetches and exports MS/MS reference spectra from the main database |
+| `get_db_table.py` | Exports any table from the main DuckDB as a CSV file |
 | `convert_raw_files.py` | An automated background script that converts .raw LCMS run files to .mzML, .h5, and parquet |
 
 ---
@@ -290,7 +290,7 @@ Four distinct layers interact every time the entrypoint script is called.
 | `run` | Shifter container on the **login node** | Uses the host network by default; exposes the Dash curation server and kernel ZMQ ports so JupyterLab can reach them |
 | `submit` | Shifter on login node writes the SLURM script, then **Shifter on a NERSC compute node** runs the workflow |
 | `add-compounds` / `add-atlases` / `add-msms-refs` | Shifter container on the **login node** | GPFS is auto-mounted read-write so the container can write to `metatlas.duckdb` on the shared CFS |
-| `get-atlases` / `get-msms-refs` | Shifter container on the **login node** | Read-only queries against the main database |
+| `get-atlases` / `get-db-table` | Shifter container on the **login node** | Read-only queries against the main database |
 | **Jupyter notebook** (Phases 4–5) | Shifter container launched by the **Jupyter kernel spec** on the JupyterHub spawner | JupyterHub connects to `ipykernel` inside the container over ZMQ; host network is used by default |
 
 ---
