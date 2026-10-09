@@ -615,11 +615,12 @@ class NewMsmsRefsConfig:
         try:
             parsed = ast.literal_eval(v)
             if (
-                isinstance(parsed, list)
-                and len(parsed) == 2
-                and isinstance(parsed[0], list)
-                and isinstance(parsed[1], list)
-            ):
+                    isinstance(parsed, list)
+                    and len(parsed) == 2
+                    and isinstance(parsed[0], list)
+                    and isinstance(parsed[1], list)
+                    and len(parsed[0]) == len(parsed[1])
+                ):
                 return [float(x) for x in parsed[0]], [float(x) for x in parsed[1]]
         except Exception:
             pass
