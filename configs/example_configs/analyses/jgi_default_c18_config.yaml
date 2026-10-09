@@ -1,0 +1,195 @@
+GENERAL:
+  owner: jgi
+  msms_refs_path:
+  msms_refs_db_filter: metatlas
+  gdrive_subfolder: 0B-ZDcHbPi-aqZzE5V3hOZFc0dms
+  max_workers: 5
+GUI:
+  gui_width: 32
+  gui_height: 12
+  gui_require_all_evaluated: false
+  gui_top_n_hits: 10
+  gui_lcmsruns_colors:
+    ISTD: blue
+    QC: orange
+    EXCTRL: red
+    TXCTRL: green
+    REFSTD: black
+  note_options_overrides:
+    ms1_notes:
+    ms2_notes:
+    other_notes:
+RT_ALIGNMENT:
+  C18:
+    ATLAS:
+      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261009-9318f06c532d4db98bd0e24c65095cda
+    PARAMS:
+        upload_to_gdrive: true
+        include_lcmsruns: # 'QC'
+        exclude_lcmsruns:
+          - NEG
+        use_existing_rt_alignment: true
+        remove_unided_compounds: false
+        only_keep_data_in_feature: true
+        atlas_extra_time: 2.0
+        ms1_min_peak_intensity: 0
+        ms1_min_num_points: 0
+        ms1_mz_tolerance_ppm: 5.0
+        apply_model_to_min_max: true
+        model_type: polynomial
+        polynomial_degree: 2
+        min_observations_per_compound: 1
+        min_compounds_for_modeling: 2
+        r2_threshold: 0.5
+        exclude_inchikeys:
+          - UGQMRVRMYYASKQ-SHKQESLVSA-N
+TARGETED_ANALYSES:
+  C18:
+    POS:
+      ISTD:
+        ISTDsEtcV7:
+          ATLAS:
+            uid: atlas-ipt-c18-pos-istd-istdsetc-bkieft-20261009-f298f7f8b94e4f26aa32238dcbf53f09
+          PARAMS:
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
+            apply_alignment: true
+            remove_unided_compounds: false
+            remove_flagged_compounds: false
+            only_keep_data_in_feature: false
+            apply_cross_polarity_curation: true
+            suggested_min_conf: 0.5
+            atlas_extra_time: 0.5
+            extract_extra_time:
+            ms1_min_peak_intensity: 0
+            ms1_min_num_points: 0
+            ms1_mz_tolerance_ppm: 5.0
+            ms2_min_num_scans: 0
+            ms2_min_precursor_intensity: 0
+            ms2_min_score: 0
+            ms2_min_matching_frags: 0
+            ms2_mz_tolerance_ppm: 20.0
+            ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
+            create_curation_notebooks: true
+            upload_to_gdrive: true
+            skip_outputs:
+      REF:
+        EMA:
+          ATLAS:
+            uid: atlas-ipt-c18-pos-ref-ema-bkieft-20261009-8849a3756e0e4d5cb8c3c33a43f8fbcc
+          PARAMS:
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - NEG
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
+            apply_alignment: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: false
+            only_keep_data_in_feature: false
+            apply_cross_polarity_curation: true
+            apply_istd_curation_to_ref: true
+            suggested_min_conf: 0.75
+            atlas_extra_time: 0
+            extract_extra_time:
+            ms1_min_peak_intensity: 5e5
+            ms1_min_num_points: 5
+            ms1_mz_tolerance_ppm: 5.0
+            ms2_min_num_scans: 1
+            ms2_min_precursor_intensity: 0
+            ms2_min_score: 0.5
+            ms2_min_matching_frags: 1
+            ms2_mz_tolerance_ppm: 20.0
+            ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
+            create_curation_notebooks: true
+            upload_to_gdrive: true
+            skip_outputs:
+    NEG:
+      ISTD:
+        ISTDsEtcV7:
+          ATLAS:
+            uid: atlas-ipt-c18-neg-istd-istdsetc-bkieft-20261009-c5b9ca0172a540e5b9374b1ad3f8f776
+          PARAMS:
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - POS
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
+            apply_alignment: true
+            remove_unided_compounds: false
+            remove_flagged_compounds: false
+            only_keep_data_in_feature: false
+            apply_cross_polarity_curation: true
+            suggested_min_conf: 0.5
+            atlas_extra_time: 0.5
+            extract_extra_time:
+            ms1_min_peak_intensity: 0
+            ms1_min_num_points: 0
+            ms1_mz_tolerance_ppm: 5.0
+            ms2_min_num_scans: 0
+            ms2_min_precursor_intensity: 0
+            ms2_min_score: 0
+            ms2_min_matching_frags: 0
+            ms2_mz_tolerance_ppm: 20.0
+            ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
+            create_curation_notebooks: true
+            upload_to_gdrive: true
+            skip_outputs:
+      REF:
+        EMA:
+          ATLAS:
+            uid: atlas-ipt-c18-neg-ref-ema-bkieft-20261009-6bad24582d5045238c6d0f304e79a3ac
+          PARAMS:
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
+            exclude_lcmsruns:
+              data_extraction:
+                - QC
+                - POS
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
+            apply_alignment: true
+            remove_unided_compounds: true
+            remove_flagged_compounds: false
+            only_keep_data_in_feature: false
+            apply_cross_polarity_curation: true
+            apply_istd_curation_to_ref: true
+            suggested_min_conf: 0.75
+            atlas_extra_time: 0
+            extract_extra_time:
+            ms1_min_peak_intensity: 5e5
+            ms1_min_num_points: 5
+            ms1_mz_tolerance_ppm: 5.0
+            ms2_min_num_scans: 1
+            ms2_min_precursor_intensity: 0
+            ms2_min_score: 0.5
+            ms2_min_matching_frags: 1
+            ms2_mz_tolerance_ppm: 20.0
+            ms2_frag_mz_tolerance: 0.05
+            keep_top_scan_per_compound_file: true
+            create_curation_notebooks: true
+            upload_to_gdrive: true
+            skip_outputs:
