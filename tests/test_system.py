@@ -1,3 +1,4 @@
+
 """System tests for the three main metatlas2.sh CLI routines.
 
 These tests exercise the full Python-layer logic that the shell wrapper
@@ -157,9 +158,6 @@ def compounds_yaml(tmp_path: Path, adenine_tsv: Path) -> Path:
     """Write a minimal compounds config YAML pointing at the local TSV."""
     p = tmp_path / "test_compounds.yaml"
     p.write_text(textwrap.dedent(f"""\
-        PARAMS:
-          use_pubchem_cache: false
-          update_pubchem_cache: false
         COMPOUNDS:
           HILICZ:
             POS:
@@ -210,9 +208,9 @@ def atlases_yaml(tmp_path: Path, atlas_tsv: Path) -> Path:
         ATLASES:
           HILICZ:
             POS:
-              EMA:
-                - path: {atlas_tsv}
-                  name: Test HILICZ POS EMA Atlas
+              REF:
+                EMA:
+                  path: {atlas_tsv}
                   desc: Synthetic atlas for system tests
     """))
     return p
@@ -260,8 +258,8 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
         TARGETED_ANALYSES:
           HILICZ:
             POS:
-              EMA:
-                DEFAULT:
+              REF:
+                EMA:
                   ATLAS:
                     uid: {atlas_uid}
                   PARAMS:
@@ -312,6 +310,623 @@ def _fake_pubchem_info(compounds: pd.DataFrame, **kwargs) -> pd.DataFrame:
     """Return the input DataFrame unchanged (simulates a cache-hit with no enrichment)."""
     return compounds
 
+
+def _fake_modelseed_info(compounds: pd.DataFrame, **kwargs) -> pd.DataFrame:
+    """Return the input DataFrame with an empty modelseed_id column (simulates no match)."""
+    result = compounds.copy()
+    result["modelseed_id"] = ""
+    return result
+
+
+def _fake_metacyc_info(compounds: pd.DataFrame, **kwargs) -> pd.DataFrame:
+    """Return the input DataFrame with an empty metacyc_id column (simulates no match)."""
+    result = compounds.copy()
+    result["metacyc_id"] = ""
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Canned PUG view JSON responses for unit tests (no network calls)
+# ---------------------------------------------------------------------------
+
+_FAKE_OTHER_IDENTIFIERS_JSON = {
+    "Record": {
+        "Section": [
+            {
+                "TOCHeading": "Other Identifiers",
+                "Section": [
+                    {
+                        "TOCHeading": "CAS",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "58-08-2"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "ChEBI ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "CHEBI:27732"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "ChEMBL ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "CHEMBL113"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "HMDB ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "HMDB0001847"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "KEGG ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "C07481"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "DrugBank ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "DB00201"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "MetaboLights ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "MTBLC27732"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "Metabolomics Workbench ID",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "MW0001"}]}}
+                        ],
+                    },
+                    {
+                        "TOCHeading": "Wikipedia",
+                        "Information": [
+                            {"Value": {"StringWithMarkup": [{"String": "Caffeine"}]}}
+                        ],
+                    },
+                ],
+            }
+        ]
+    }
+}
+
+_FAKE_DESCRIPTION_JSON = {
+    "Record": {
+        "Reference": [
+            {"ReferenceNumber": 1, "SourceName": "MeSH"},
+            {"ReferenceNumber": 2, "SourceName": "Wikipedia"},
+        ],
+        "Section": [
+            {
+                "TOCHeading": "Description",
+                "Information": [
+                    {
+                        "ReferenceNumber": 1,
+                        "Value": {
+                            "StringWithMarkup": [
+                                {"String": "A methylxanthine alkaloid found in coffee."}
+                            ]
+                        },
+                    },
+                    {
+                        "ReferenceNumber": 2,
+                        "Value": {
+                            "StringWithMarkup": [
+                                {"String": "Caffeine is a central nervous system stimulant."}
+                            ]
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+}
+
+_FAKE_DESCRIPTION_WIKIPEDIA_ONLY_JSON = {
+    "Record": {
+        "Reference": [
+            {"ReferenceNumber": 1, "SourceName": "Wikipedia"},
+        ],
+        "Section": [
+            {
+                "TOCHeading": "Description",
+                "Information": [
+                    {
+                        "ReferenceNumber": 1,
+                        "Value": {
+                            "StringWithMarkup": [
+                                {"String": "Caffeine is a central nervous system stimulant."}
+                            ]
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+}
+
+
+class TestPubChemPugViewParsing:
+    """Unit tests for PUG view JSON parsing helpers in pubchem_retrieval."""
+
+    def test_fetch_pubchem_xrefs_parses_all_fields(self) -> None:
+        """fetch_pubchem_xrefs should extract all known cross-reference fields."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value=_FAKE_OTHER_IDENTIFIERS_JSON,
+        ):
+            result = fetch_pubchem_xrefs("2519")
+
+        assert result["cas_number"] == "58-08-2"
+        assert result["chebi_id"] == "CHEBI:27732"
+        assert result["chembl_id"] == "CHEMBL113"
+        assert result["hmdb_id"] == "HMDB0001847"
+        assert result["kegg_id"] == "C07481"
+        assert result["drugbank_id"] == "DB00201"
+        assert result["metabolights_id"] == "MTBLC27732"
+        assert result["metabolomics_workbench_id"] == "MW0001"
+        assert result["wikipedia_url"] == "https://en.wikipedia.org/wiki/Caffeine"
+
+    def test_fetch_pubchem_xrefs_empty_on_api_failure(self) -> None:
+        """fetch_pubchem_xrefs should return all-empty strings when the API call fails."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value={},
+        ):
+            result = fetch_pubchem_xrefs("2519")
+
+        assert all(v == "" for v in result.values())
+
+    def test_fetch_pubchem_xrefs_missing_heading_returns_empty(self) -> None:
+        """fetch_pubchem_xrefs should return empty string for headings not present."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+
+        # JSON with only CAS — all other fields should be empty
+        partial_json = {
+            "Record": {
+                "Section": [
+                    {
+                        "TOCHeading": "Other Identifiers",
+                        "Section": [
+                            {
+                                "TOCHeading": "CAS",
+                                "Information": [
+                                    {"Value": {"StringWithMarkup": [{"String": "58-08-2"}]}}
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value=partial_json,
+        ):
+            result = fetch_pubchem_xrefs("2519")
+
+        assert result["cas_number"] == "58-08-2"
+        assert result["chebi_id"] == ""
+        assert result["wikipedia_url"] == ""
+
+    def test_fetch_pubchem_description_prefers_mesh_over_wikipedia(self) -> None:
+        """fetch_pubchem_description should prefer MeSH source over Wikipedia."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_description
+
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value=_FAKE_DESCRIPTION_JSON,
+        ):
+            result = fetch_pubchem_description("2519")
+
+        assert result == "A methylxanthine alkaloid found in coffee."
+
+    def test_fetch_pubchem_description_falls_back_to_first_when_no_preferred_source(
+        self,
+    ) -> None:
+        """fetch_pubchem_description should return the first entry when no preferred source exists."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_description
+
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value=_FAKE_DESCRIPTION_WIKIPEDIA_ONLY_JSON,
+        ):
+            result = fetch_pubchem_description("2519")
+
+        assert result == "Caffeine is a central nervous system stimulant."
+
+    def test_fetch_pubchem_description_empty_on_api_failure(self) -> None:
+        """fetch_pubchem_description should return empty string when the API call fails."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_description
+
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value={},
+        ):
+            result = fetch_pubchem_description("2519")
+
+        assert result == ""
+
+    def test_wikipedia_url_spaces_replaced_with_underscores(self) -> None:
+        """Wikipedia article titles with spaces should produce valid URLs."""
+        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+
+        spaced_json = {
+            "Record": {
+                "Section": [
+                    {
+                        "TOCHeading": "Other Identifiers",
+                        "Section": [
+                            {
+                                "TOCHeading": "Wikipedia",
+                                "Information": [
+                                    {
+                                        "Value": {
+                                            "StringWithMarkup": [
+                                                {"String": "Adenosine triphosphate"}
+                                            ]
+                                        }
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        with patch(
+            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            return_value=spaced_json,
+        ):
+            result = fetch_pubchem_xrefs("5957")
+
+        assert result["wikipedia_url"] == "https://en.wikipedia.org/wiki/Adenosine_triphosphate"
+
+    def test_new_compound_fields_stored_in_db(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """New xref and descriptor columns should be present in the compounds table after ingestion."""
+        import duckdb
+        from metatlas2.database_interact import create_metatlas_database
+
+        db_path = tmp_path / "test_new_fields.duckdb"
+        create_metatlas_database(str(db_path))
+
+        conn = duckdb.connect(str(db_path), read_only=True)
+        # PRAGMA table_info returns (cid, name, type, notnull, dflt_value, pk)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('compounds')").fetchall()}
+        conn.close()
+
+        expected_new_cols = {
+            "isomeric_smiles", "molecular_weight", "xlogp", "tpsa", "complexity",
+            "charge", "heavy_atom_count", "hbd_count", "hba_count", "rotatable_bond_count",
+            "chebi_id", "chembl_id", "hmdb_id", "kegg_id", "drugbank_id",
+            "metabolights_id", "metabolomics_workbench_id", "wikipedia_url",
+            "description", "pubchem_retrieval_date", "pubchem_compound_url",
+        }
+        missing = expected_new_cols - cols
+        assert not missing, f"Missing columns in compounds table: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Canned ModelSEED TSV data for unit tests (no network calls)
+# ---------------------------------------------------------------------------
+
+_FAKE_MODELSEED_TSV = """\
+id\tinchikey\tname\tformula\tcharge\tmass\tabbreviation\taliases\tstructural_cues\tpKa\tpKb\tsource\tlinked_compound\tis_obsolete\tis_cofactor
+cpd00001\tXLYOFNOQVPJJNP-UHFFFAOYSA-N\tH2O\tH2O\t0\t18.01\tH2O\t\t\t\t\t\t\t0\t0
+cpd00002\tZKHHHKXHFBATEZ-UHFFFAOYSA-N\tATP\tC10H12N5O13P3\t-4\t503.15\tATP\t\t\t\t\t\t\t0\t1
+cpd00003\tGFFGJBXGBJISGV-UHFFFAOYSA-N\tAdenine\tC5H5N5\t0\t135.13\tAde\t\t\t\t\t\t\t0\t0
+"""
+
+
+# ---------------------------------------------------------------------------
+# Canned ChEBI JSON responses for unit tests (no network calls)
+# The actual API returns database_accessions as a dict keyed by type string
+# (e.g. "MANUAL_X_REF", "CITATION", "CAS"), where each value is a list of
+# dicts with "source_name" and "accession_number" keys.
+# MetaCyc entries appear under "MANUAL_X_REF" with source_name == "MetaCyc".
+# ---------------------------------------------------------------------------
+
+_FAKE_CHEBI_JSON_WITH_METACYC = {
+    "chebi_accession": "CHEBI:27732",
+    "ascii_name": "caffeine",
+    "database_accessions": {
+        "MANUAL_X_REF": [
+            {"source_name": "MetaCyc", "accession_number": "CAFFEINE", "type": "MANUAL_X_REF"},
+            {"source_name": "DrugCentral", "accession_number": "463", "type": "MANUAL_X_REF"},
+        ],
+        "CAS": [
+            {"source_name": "CAS", "accession_number": "58-08-2", "type": "CAS"},
+        ],
+    },
+}
+
+_FAKE_CHEBI_JSON_NO_METACYC = {
+    "chebi_accession": "CHEBI:99999",
+    "ascii_name": "unknown compound",
+    "database_accessions": {
+        "CAS": [
+            {"source_name": "CAS", "accession_number": "99-99-9", "type": "CAS"},
+        ],
+    },
+}
+
+_FAKE_CHEBI_JSON_MULTIPLE_METACYC = {
+    "chebi_accession": "CHEBI:15422",
+    "ascii_name": "ATP",
+    "database_accessions": {
+        "MANUAL_X_REF": [
+            {"source_name": "MetaCyc", "accession_number": "ATP", "type": "MANUAL_X_REF"},
+            {"source_name": "MetaCyc", "accession_number": "CPD-12345", "type": "MANUAL_X_REF"},
+        ],
+    },
+}
+
+
+class TestMetaCycRetrieval:
+    """Unit tests for MetaCyc retrieval helpers in chebi_retrieval.
+
+    The actual implementation uses the ChEBI public JSON API:
+      GET https://www.ebi.ac.uk/chebi/backend/api/public/compound/{num}/
+    and reads data["database_accessions"] where each entry is a dict with
+    "source_name" and "accession_number" keys.
+    """
+
+    def _make_mock_resp(self, json_data: dict) -> Any:
+        """Build a mock requests.Response that returns json_data from .json()."""
+        from unittest.mock import MagicMock
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = json_data
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    def test_fetch_metacyc_id_from_chebi_returns_accession(self) -> None:
+        """fetch_metacyc_id_from_chebi should extract the MetaCyc accession from JSON."""
+        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+
+        mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_WITH_METACYC)
+        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+            mock_session.get.return_value = mock_resp
+            result = fetch_metacyc_id_from_chebi("CHEBI:27732")
+
+        assert result == "CAFFEINE"
+
+    def test_fetch_metacyc_id_from_chebi_returns_empty_when_no_metacyc(self) -> None:
+        """fetch_metacyc_id_from_chebi should return '' when no MetaCyc link exists."""
+        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+
+        mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_NO_METACYC)
+        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+            mock_session.get.return_value = mock_resp
+            result = fetch_metacyc_id_from_chebi("CHEBI:99999")
+
+        assert result == ""
+
+    def test_fetch_metacyc_id_from_chebi_joins_multiple_accessions(self) -> None:
+        """fetch_metacyc_id_from_chebi should semicolon-join multiple MetaCyc accessions."""
+        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+
+        mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_MULTIPLE_METACYC)
+        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+            mock_session.get.return_value = mock_resp
+            result = fetch_metacyc_id_from_chebi("CHEBI:15422")
+
+        assert "ATP" in result
+        assert "CPD-12345" in result
+        assert ";" in result
+
+    def test_fetch_metacyc_id_from_chebi_returns_empty_on_api_failure(self) -> None:
+        """fetch_metacyc_id_from_chebi should return '' on HTTP error."""
+        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+
+        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+            mock_session.get.side_effect = Exception("connection refused")
+            result = fetch_metacyc_id_from_chebi("CHEBI:27732")
+
+        assert result == ""
+
+    def test_fetch_metacyc_id_from_chebi_returns_empty_for_blank_input(self) -> None:
+        """fetch_metacyc_id_from_chebi should return '' without making an API call for blank input."""
+        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+
+        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+            result = fetch_metacyc_id_from_chebi("")
+            mock_session.get.assert_not_called()
+
+        assert result == ""
+
+    def test_retrieve_metacyc_info_adds_metacyc_id_column(self, tmp_path: Path) -> None:
+        """retrieve_metacyc_info should add a metacyc_id column mapped from chebi_id."""
+        import pandas as pd
+        from metatlas2.chebi_retrieval import retrieve_metacyc_info
+
+        cache_path = tmp_path / "chebi_cache.json"
+        mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_WITH_METACYC)
+
+        compounds = pd.DataFrame({
+            "inchi_key": ["RYYVLZVUVIJVGH-UHFFFAOYSA-N", "GFFGJBXGBJISGV-UHFFFAOYSA-N"],
+            "chebi_id":  ["CHEBI:27732", ""],
+        })
+
+        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session, \
+             patch("metatlas2.chebi_retrieval.time.sleep"):
+            mock_session.get.return_value = mock_resp
+            result = retrieve_metacyc_info(compounds, str(cache_path))
+
+        assert "metacyc_id" in result.columns
+        assert result.loc[result["chebi_id"] == "CHEBI:27732", "metacyc_id"].iloc[0] == "CAFFEINE"
+        assert result.loc[result["chebi_id"] == "", "metacyc_id"].iloc[0] == ""
+
+    def test_retrieve_metacyc_info_uses_cache(self, tmp_path: Path) -> None:
+        """retrieve_metacyc_info should use cached values and not make API calls for cached IDs."""
+        import json
+        import pandas as pd
+        from metatlas2.chebi_retrieval import retrieve_metacyc_info
+
+        cache_path = tmp_path / "chebi_cache.json"
+        cache_path.write_text(json.dumps({"CHEBI:27732": "CAFFEINE"}))
+
+        compounds = pd.DataFrame({
+            "inchi_key": ["RYYVLZVUVIJVGH-UHFFFAOYSA-N"],
+            "chebi_id":  ["CHEBI:27732"],
+        })
+
+        with patch("metatlas2.chebi_retrieval.requests.get") as mock_get:
+            result = retrieve_metacyc_info(compounds, str(cache_path))
+            mock_get.assert_not_called()
+
+        assert result["metacyc_id"].iloc[0] == "CAFFEINE"
+
+    def test_metacyc_id_column_in_compounds_table(self, tmp_path: Path) -> None:
+        """The compounds table should have a metacyc_id column after DB creation."""
+        import duckdb
+        from metatlas2.database_interact import create_metatlas_database
+
+        db_path = tmp_path / "test_metacyc_col.duckdb"
+        create_metatlas_database(str(db_path))
+
+        conn = duckdb.connect(str(db_path), read_only=True)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('compounds')").fetchall()}
+        conn.close()
+
+        assert "metacyc_id" in cols, "metacyc_id column missing from compounds table"
+
+
+class TestModelSEEDRetrieval:
+    """Unit tests for ModelSEED retrieval helpers in modelseed_retrieval."""
+
+    def test_retrieve_modelseed_info_maps_inchikey(self, tmp_path: Path) -> None:
+        """retrieve_modelseed_info should add a modelseed_id column mapped from InChIKey."""
+        import pandas as pd
+        from metatlas2.modelseed_retrieval import retrieve_modelseed_info
+
+        # Write a fake ModelSEED TSV cache
+        cache_path = tmp_path / "modelseed.tsv"
+        cache_path.write_text(_FAKE_MODELSEED_TSV)
+
+        compounds = pd.DataFrame({
+            "inchi_key": [
+                "GFFGJBXGBJISGV-UHFFFAOYSA-N",  # Adenine → cpd00003
+                "XLYO FNQVPJJNP-UHFFFAOYSA-N",  # not in table → ""
+            ],
+            "compound_name": ["Adenine", "Unknown"],
+        })
+
+        result = retrieve_modelseed_info(compounds, str(cache_path))
+
+        assert "modelseed_id" in result.columns
+        assert result.loc[result["inchi_key"] == "GFFGJBXGBJISGV-UHFFFAOYSA-N", "modelseed_id"].iloc[0] == "cpd00003"
+        assert result.loc[result["inchi_key"] == "XLYO FNQVPJJNP-UHFFFAOYSA-N", "modelseed_id"].iloc[0] == ""
+
+    def test_retrieve_modelseed_info_no_cache_path(self) -> None:
+        """retrieve_modelseed_info should return empty modelseed_id when no cache path given."""
+        import pandas as pd
+        from metatlas2.modelseed_retrieval import retrieve_modelseed_info
+
+        compounds = pd.DataFrame({
+            "inchi_key": ["GFFGJBXGBJISGV-UHFFFAOYSA-N"],
+            "compound_name": ["Adenine"],
+        })
+
+        result = retrieve_modelseed_info(compounds, modelseed_cache_path=None)
+
+        assert "modelseed_id" in result.columns
+        assert result["modelseed_id"].iloc[0] == ""
+
+    def test_retrieve_modelseed_info_multiple_cpd_ids_joined(self, tmp_path: Path) -> None:
+        """When multiple CPD IDs share an InChIKey they should be semicolon-joined."""
+        import pandas as pd
+        from metatlas2.modelseed_retrieval import retrieve_modelseed_info
+
+        # Two rows with the same InChIKey but different CPD IDs
+        tsv = (
+            "id\tinchikey\tname\n"
+            "cpd00001\tGFFGJBXGBJISGV-UHFFFAOYSA-N\tAdenine_v1\n"
+            "cpd99999\tGFFGJBXGBJISGV-UHFFFAOYSA-N\tAdenine_v2\n"
+        )
+        cache_path = tmp_path / "modelseed_multi.tsv"
+        cache_path.write_text(tsv)
+
+        compounds = pd.DataFrame({
+            "inchi_key": ["GFFGJBXGBJISGV-UHFFFAOYSA-N"],
+            "compound_name": ["Adenine"],
+        })
+
+        result = retrieve_modelseed_info(compounds, str(cache_path))
+
+        modelseed_id = result["modelseed_id"].iloc[0]
+        assert "cpd00001" in modelseed_id
+        assert "cpd99999" in modelseed_id
+        assert ";" in modelseed_id
+
+    def test_modelseed_id_column_in_compounds_table(self, tmp_path: Path) -> None:
+        """The compounds table should have a modelseed_id column after DB creation."""
+        import duckdb
+        from metatlas2.database_interact import create_metatlas_database
+
+        db_path = tmp_path / "test_modelseed_col.duckdb"
+        create_metatlas_database(str(db_path))
+
+        conn = duckdb.connect(str(db_path), read_only=True)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('compounds')").fetchall()}
+        conn.close()
+
+        assert "modelseed_id" in cols, "modelseed_id column missing from compounds table"
+
+    def test_modelseed_id_stored_after_add_compounds(
+        self,
+        tmp_path: Path,
+        metatlas_data_dir: Path,
+    ) -> None:
+        """modelseed_id should be stored in the compounds table after add_compounds_to_db."""
+        import duckdb
+        from metatlas2.add_compounds_to_db import add_compounds_to_db
+
+        # Write a minimal compounds TSV
+        tsv_path = tmp_path / "compounds.tsv"
+        tsv_path.write_text(
+            "compound_name\tinchi_key\n"
+            "Adenine\tGFFGJBXGBJISGV-UHFFFAOYSA-N\n"
+        )
+        compounds_yaml = tmp_path / "compounds.yaml"
+        compounds_yaml.write_text(
+            f"COMPOUNDS:\n  HILICZ:\n    POS:\n      PATHS:\n        - {tsv_path}\n"
+        )
+
+        def _fake_modelseed_with_match(compounds, **kwargs):
+            result = compounds.copy()
+            result["modelseed_id"] = result["inchi_key"].map(
+                {"GFFGJBXGBJISGV-UHFFFAOYSA-N": "cpd00003"}
+            ).fillna("")
+            return result
+
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_with_match):
+            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+
+        main_db_path = metatlas_data_dir / "databases" / "main_db" / "metatlas.duckdb"
+        conn = duckdb.connect(str(main_db_path), read_only=True)
+        row = conn.execute(
+            "SELECT modelseed_id FROM compounds WHERE inchi_key = ?",
+            ["GFFGJBXGBJISGV-UHFFFAOYSA-N"],
+        ).fetchone()
+        conn.close()
+
+        assert row is not None, "Adenine not found in compounds table"
+        assert row[0] == "cpd00003", f"Expected 'cpd00003', got {row[0]!r}"
+
+
 @pytest.mark.system
 class TestAddCompounds:
     """System tests for ``metatlas2.sh add-compounds``."""
@@ -329,7 +944,9 @@ class TestAddCompounds:
         """Running add_compounds_to_db should create the main DuckDB database file."""
         from metatlas2.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
 
         assert main_db_path.exists(), "Main database was not created by add_compounds_to_db"
@@ -344,7 +961,9 @@ class TestAddCompounds:
         import duckdb
         from metatlas2.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
@@ -365,7 +984,9 @@ class TestAddCompounds:
         import duckdb
         from metatlas2.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
@@ -390,7 +1011,9 @@ class TestAddCompounds:
         from metatlas2.add_compounds_to_db import add_compounds_to_db
 
         # First call: create the DB from scratch
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
 
         count_after_first = duckdb.connect(str(main_db_path), read_only=True).execute(
@@ -399,7 +1022,9 @@ class TestAddCompounds:
         assert count_after_first == 2, f"Expected 2 compounds after first run, got {count_after_first}"
 
         # Second call: same data, no overwrite — upsert must not duplicate.
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=False)
 
         count_after_second = duckdb.connect(str(main_db_path), read_only=True).execute(
@@ -408,7 +1033,9 @@ class TestAddCompounds:
         assert count_after_second == 2, f"Expected 2 compounds after second run (upsert), got {count_after_second}"
 
         # Third call: confirm idempotency holds across multiple reruns.
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=False)
 
         count_after_third = duckdb.connect(str(main_db_path), read_only=True).execute(
@@ -427,19 +1054,6 @@ class TestAddCompounds:
         with pytest.raises(Exception):
             add_compounds_to_db(str(tmp_path / "does_not_exist.yaml"))
 
-    def test_add_compounds_config_missing_params_key_raises(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A YAML missing the required PARAMS key should raise a ValueError through add_compounds_to_db."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
-
-        bad_yaml = tmp_path / "bad_compounds.yaml"
-        bad_yaml.write_text("COMPOUNDS:\n  HILICZ:\n    POS:\n      PATHS: []\n")
-
-        with pytest.raises(ValueError, match="PARAMS"):
-            add_compounds_to_db(str(bad_yaml))
-
     def test_add_compounds_config_missing_compounds_key_raises(
         self,
         tmp_path: Path,
@@ -448,7 +1062,7 @@ class TestAddCompounds:
         from metatlas2.add_compounds_to_db import add_compounds_to_db
 
         bad_yaml = tmp_path / "bad_compounds2.yaml"
-        bad_yaml.write_text("PARAMS:\n  use_pubchem_cache: false\n  update_pubchem_cache: false\n")
+        bad_yaml.write_text("PARAMS:\n  some_ignored_key: true\n")
 
         with pytest.raises(ValueError, match="COMPOUNDS"):
             add_compounds_to_db(str(bad_yaml))
@@ -462,9 +1076,6 @@ class TestAddCompounds:
 
         bad_yaml = tmp_path / "missing_tsv.yaml"
         bad_yaml.write_text(textwrap.dedent("""\
-            PARAMS:
-              use_pubchem_cache: false
-              update_pubchem_cache: false
             COMPOUNDS:
               HILICZ:
                 POS:
@@ -493,7 +1104,9 @@ class TestAddAtlases:
         """Ensure the main DB is populated with compounds before atlas tests run."""
         from metatlas2.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
 
     def test_add_atlases_creates_atlas_in_db(
@@ -528,7 +1141,7 @@ class TestAddAtlases:
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
         df = conn.execute(
-            "SELECT atlas_name, atlas_description, chromatography, polarity, analysis_type "
+            "SELECT atlas_description, chromatography, polarity, atlas_category "
             "FROM atlases"
         ).df()
         conn.close()
@@ -537,14 +1150,13 @@ class TestAddAtlases:
 
         assert len(df) == 1
         row = df.iloc[0]
-        assert row["atlas_name"] == "Test HILICZ POS EMA Atlas"
         assert row["atlas_description"] == "Synthetic atlas for system tests"
         assert normalize_chromatography(row["chromatography"]) == normalize_chromatography("HILICZ"), (
             f"Expected normalized chromatography '{normalize_chromatography('HILICZ')}', "
             f"got '{row['chromatography']}' (normalized: '{normalize_chromatography(row['chromatography'])}')"
         )
         assert row["polarity"].upper() == "POS"
-        assert row["analysis_type"].upper() == "EMA"
+        assert row["atlas_category"].upper() == "REF"
 
     def test_add_atlases_compounds_associated_with_atlas(
         self,
@@ -610,17 +1222,18 @@ class TestAddAtlases:
         """An atlas entry missing the 'name' field should raise a ValueError through add_atlases_to_db."""
         from metatlas2.add_atlases_to_db import add_atlases_to_db
 
-        bad_yaml = tmp_path / "missing_name.yaml"
+        bad_yaml = tmp_path / "missing_path.yaml"
         bad_yaml.write_text(textwrap.dedent(f"""\
             ATLASES:
               HILICZ:
                 POS:
-                  EMA:
-                    - path: {atlas_tsv}
-                      desc: Missing name field
+                  INVALID_CATEGORY:
+                    EMA:
+                      path: {atlas_tsv}
+                      desc: Invalid category
         """))
 
-        with pytest.raises(ValueError, match="name"):
+        with pytest.raises(ValueError, match="atlas_category"):
             add_atlases_to_db(str(bad_yaml))
 
     def test_add_atlases_nonexistent_tsv_raises(
@@ -635,9 +1248,9 @@ class TestAddAtlases:
             ATLASES:
               HILICZ:
                 POS:
-                  EMA:
-                    - path: /nonexistent/atlas.tsv
-                      name: Ghost Atlas
+                  REF:
+                    GhostAtlas:
+                      path: /nonexistent/atlas.tsv
                       desc: Should not be created
         """))
 
@@ -662,8 +1275,8 @@ class TestAddAtlases:
               HILICZ:
                 NEG:
                   QC:
-                    - path:
-                      name:
+                    QCv7:
+                      path:
                       desc:
         """))
 
@@ -720,7 +1333,9 @@ def seeded_main_db(
     from metatlas2.add_compounds_to_db import add_compounds_to_db
     from metatlas2.add_atlases_to_db import add_atlases_to_db
 
-    with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+    with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
         add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
     add_atlases_to_db(str(atlases_yaml))
 
@@ -851,14 +1466,18 @@ class TestRunTargetedAnalysis:
         config_path, atlas_uid = seeded_analysis_yaml
         config = load_metatlas2_config(str(config_path))
 
-        expected_chrom_key = normalize_chromatography("HILICZ")
+        # rt_alignment_config keys now preserve the YAML case (e.g. "HILIC" not "hilic").
+        # Use case-insensitive lookup via normalize_chromatography for the assertion.
+        chrom_keys_lc = {normalize_chromatography(k): k for k in config.rt_alignment_config}
+        expected_chrom_lc = normalize_chromatography("HILICZ")  # → "hilic"
         assert config.owner == "jgi"
-        assert expected_chrom_key in config.rt_alignment_config, (
-            f"Expected chromatography key '{expected_chrom_key}' in rt_alignment_config, "
-            f"got keys: {list(config.rt_alignment_config)}"
+        assert expected_chrom_lc in chrom_keys_lc, (
+            f"Expected a chromatography key normalising to '{expected_chrom_lc}' in "
+            f"rt_alignment_config, got keys: {list(config.rt_alignment_config)}"
         )
         # Verify the RT-alignment config block has the required structure.
-        rta_block = config.rt_alignment_config[expected_chrom_key]
+        actual_chrom_key = chrom_keys_lc[expected_chrom_lc]
+        rta_block = config.rt_alignment_config[actual_chrom_key]
         assert "ATLAS" in rta_block, "RT_ALIGNMENT block missing ATLAS section"
         assert "uid" in rta_block["ATLAS"], "RT_ALIGNMENT ATLAS block missing uid field"
         assert rta_block["ATLAS"]["uid"] == atlas_uid
@@ -868,8 +1487,8 @@ class TestRunTargetedAnalysis:
         ta = config.targeted_analyses[0]
         assert ta.atlas_uid == atlas_uid
         assert ta.polarity.upper() == "POS"
-        assert ta.analysis_type.upper() == "EMA"
-        assert ta.analysis_name.upper() == "DEFAULT"
+        assert ta.atlas_category.value.upper() == "REF"
+        assert ta.atlas_name.upper() == "EMA"
 
     def test_load_metatlas2_config_missing_rt_alignment_raises(
         self,
@@ -885,8 +1504,8 @@ class TestRunTargetedAnalysis:
             TARGETED_ANALYSES:
               HILICZ:
                 POS:
-                  EMA:
-                    DEFAULT:
+                  REF:
+                    EMA:
                       ATLAS:
                         uid: some-uid
                       PARAMS: {}
@@ -1149,7 +1768,7 @@ class TestRunTargetedAnalysis:
 
         conn = duckdb.connect(str(paths["project_db_path"]), read_only=True)
         df = conn.execute(
-            "SELECT chromatography, polarity, analysis_type, analysis_name "
+            "SELECT chromatography, polarity, atlas_category, atlas_name "
             "FROM workflow_runs WHERE stage = 'RT_ALIGNED'"
         ).df()
         conn.close()
@@ -1166,13 +1785,14 @@ class TestRunTargetedAnalysis:
             f"workflow_runs polarity '{row['polarity']}' does not match "
             f"config ta.polarity '{ta.polarity}'"
         )
-        assert row["analysis_type"] == ta.analysis_type, (
-            f"workflow_runs analysis_type '{row['analysis_type']}' does not match "
-            f"config ta.analysis_type '{ta.analysis_type}'"
+        ta_cat_val = ta.atlas_category.value if hasattr(ta.atlas_category, 'value') else str(ta.atlas_category)
+        assert row["atlas_category"] == ta_cat_val, (
+            f"workflow_runs atlas_category '{row['atlas_category']}' does not match "
+            f"config ta.atlas_category '{ta_cat_val}'"
         )
-        assert row["analysis_name"] == ta.analysis_name, (
-            f"workflow_runs analysis_name '{row['analysis_name']}' does not match "
-            f"config ta.analysis_name '{ta.analysis_name}'"
+        assert row["atlas_name"] == ta.atlas_name, (
+            f"workflow_runs atlas_name '{row['atlas_name']}' does not match "
+            f"config ta.atlas_name '{ta.atlas_name}'"
         )
 
     def test_generate_slurm_script_writes_file(

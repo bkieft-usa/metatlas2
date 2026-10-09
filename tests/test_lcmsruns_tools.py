@@ -5,19 +5,30 @@ Tested functions
 * :func:`_classify_file_type`
 * :func:`filter_lcmsruns_list`
 
+Algorithm overview (two-phase)
+-------------------------------
+Phase 1 — ``run_metadata`` (and ``sample_name`` for QC) for high-priority types:
+    ``qc``, ``istd``, ``injbl`` / ``injblk`` / ``blank`` — in that order.
+    ``qc`` is checked in both fields; ``istd`` / ``injbl`` are checked in
+    ``run_metadata`` only (they rarely appear in ``sample_name``).
+
+Phase 2 — ``sample_name`` then ``run_metadata`` for lower-priority types:
+    ``exctrl`` / ``txctrl``, ``refstd`` / ``standard``.
+
+Phase 3 — fallback: ``'experimental'``.
+
+Special case: ``QC-C18QU`` in either field is **not** a real QC run; the
+``qc`` segment is skipped when immediately followed by ``c18qu``.
+
 Regression cases covered
 ------------------------
-1. Compound ``sample_name`` values such as ``QC-SOPv7`` (hyphen + suffix after
-   a known key) must be classified by their first hyphen-segment, not by exact
-   match.
-2. ``ExCtrl-NA-NA-NA-NA`` and ``TxCtrl-NA-NA-NA-NA`` must be classified as
-   ``'exctrl'`` via the first segment.
-3. ``run_metadata`` fields that embed a type token as a hyphen-segment (e.g.
-   ``Rg80to1200-CE102040norm-filtrate-QC``) must be classified correctly.
-4. ``QC-C18QU`` embedded in ``run_metadata`` must be **skipped** so that the
-   next available classification (from ``sample_name``) is used instead.
-5. ``SAMPLE_NAME_TO_FILE_TYPE`` insertion order determines priority: ``qc``
-   is checked before ``istd``, ``exctrl``, etc.
+1. ``QC-SOPv7`` in ``sample_name`` → ``'qc'`` (first-segment match).
+2. ``ExCtrl-NA-NA-NA-NA`` / ``TxCtrl-NA-NA-NA-NA`` → ``'exctrl'`` via Phase 2.
+3. ``run_metadata`` ending in ``-QC`` → ``'qc'`` via Phase 1.
+4. ``QC-C18QU`` in ``run_metadata`` is skipped; next available key wins.
+5. ``ISTD`` / ``InjBL`` in ``run_metadata`` → ``'istd'`` / ``'injbl'`` via Phase 1,
+   even when ``ExCtrl`` is present in ``sample_name``.
+6. Real-world HILICZ filenames from the SorghSwg project.
 """
 
 from __future__ import annotations
@@ -51,65 +62,173 @@ def _run(file_type: str, polarity: str = "fps", chromatography: str = "hilic",
 
 
 # ===========================================================================
-# _classify_file_type — exact / single-segment sample_name
+# _classify_file_type — Phase 1: QC detection (sample_name and run_metadata)
 # ===========================================================================
 
-class TestClassifyFileTypeExact:
+class TestClassifyFileTypeQC:
 
-    def test_exact_qc(self):
+    def test_exact_qc_in_sample_name(self):
         assert _classify_file_type(_fields("QC")) == "qc"
 
-    def test_exact_qc_lowercase(self):
+    def test_exact_qc_lowercase_in_sample_name(self):
         assert _classify_file_type(_fields("qc")) == "qc"
 
-    def test_exact_istd(self):
-        assert _classify_file_type(_fields("ISTD")) == "istd"
-
-    def test_exact_exctrl(self):
-        assert _classify_file_type(_fields("EXCTRL")) == "exctrl"
-
-    def test_exact_txctrl_maps_to_exctrl(self):
-        assert _classify_file_type(_fields("TXCTRL")) == "exctrl"
-
-    def test_exact_injbl(self):
-        assert _classify_file_type(_fields("INJBL")) == "injbl"
-
-    def test_exact_blank_maps_to_injbl(self):
-        assert _classify_file_type(_fields("BLANK")) == "injbl"
-
-    def test_exact_refstd(self):
-        assert _classify_file_type(_fields("REFSTD")) == "refstd"
-
-    def test_exact_standard_maps_to_refstd(self):
-        assert _classify_file_type(_fields("STANDARD")) == "refstd"
-
-
-# ===========================================================================
-# _classify_file_type — compound sample_name (first-segment match)
-# ===========================================================================
-
-class TestClassifyFileTypeCompoundSampleName:
-
-    def test_qc_sopv7_classified_as_qc(self):
+    def test_qc_sopv7_in_sample_name(self):
         """QC-SOPv7: first segment 'qc' → 'qc'."""
         assert _classify_file_type(_fields("QC-SOPv7")) == "qc"
 
-    def test_qc_sopv7_lowercase(self):
+    def test_qc_sopv7_lowercase_in_sample_name(self):
         assert _classify_file_type(_fields("qc-sopv7")) == "qc"
 
-    def test_qc_v2_classified_as_qc(self):
+    def test_qc_v2_in_sample_name(self):
         assert _classify_file_type(_fields("QC-v2")) == "qc"
 
-    def test_istd_with_suffix_classified_as_istd(self):
-        assert _classify_file_type(_fields("ISTD-v2")) == "istd"
+    def test_qc_in_run_metadata_trailing(self):
+        """run_metadata ending in '-QC' must be classified as 'qc'."""
+        assert _classify_file_type(
+            _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC")
+        ) == "qc"
 
-    def test_exctrl_with_suffix_classified_as_exctrl(self):
+    def test_qc_in_run_metadata_with_exctrl_sample_name(self):
+        assert _classify_file_type(
+            _fields("ExCtrl-MeOH-PPL", "Rg80to1200-CE102040norm-filtrate-QC")
+        ) == "qc"
+
+    def test_qc_standalone_in_run_metadata(self):
+        """Standalone 'QC' in run_metadata (no other segments) → 'qc'."""
+        assert _classify_file_type(_fields("unknown", "QC")) == "qc"
+
+    def test_qc_in_sample_name_beats_istd_in_run_metadata(self):
+        """Phase 1 checks 'qc' before 'istd'; QC in sample_name wins."""
+        assert _classify_file_type(
+            _fields("QC-SOPv7", "Rg80to1200-CE102040norm-filtrate-ISTD")
+        ) == "qc"
+
+    def test_qc_c18qu_in_run_metadata_skipped(self):
+        """QC-C18QU in run_metadata must be skipped; ExCtrl in sample_name wins."""
+        assert _classify_file_type(
+            _fields("ExCtrl-MeOH-PPL", "Rg80to1200-CE102040norm-filtrate-QC-C18QU")
+        ) == "exctrl"
+
+    def test_qc_c18qu_in_run_metadata_skipped_experimental_fallback(self):
+        """QC-C18QU in run_metadata skipped; sample_name has no key → experimental."""
+        assert _classify_file_type(
+            _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC-C18QU")
+        ) == "experimental"
+
+    def test_qc_c18qu_alone_in_sample_name_is_not_qc(self):
+        """QC-C18QU as the entire sample_name: 'qc' segment is followed by
+        'c18qu' → skip → no other key → experimental."""
+        assert _classify_file_type(_fields("QC-C18QU")) == "experimental"
+
+    def test_mixed_case_qc(self):
+        assert _classify_file_type(_fields("Qc-SopV7")) == "qc"
+
+
+# ===========================================================================
+# _classify_file_type — Phase 1: ISTD detection (run_metadata only)
+# ===========================================================================
+
+class TestClassifyFileTypeISTD:
+
+    def test_istd_in_run_metadata_trailing(self):
+        """ISTD as last segment of run_metadata → 'istd'."""
+        assert _classify_file_type(
+            _fields("AB-T0-PPL", "Rg80to1200-CE102040norm-filtrate-ISTD")
+        ) == "istd"
+
+    def test_istd_in_run_metadata_standalone(self):
+        assert _classify_file_type(_fields("unknown", "ISTD")) == "istd"
+
+    def test_istd_in_run_metadata_with_exctrl_sample_name(self):
+        """ISTD in run_metadata beats ExCtrl in sample_name (Phase 1 wins)."""
+        assert _classify_file_type(
+            _fields("ExCtrl", "Rg70to1050-CE205060norm-ExCtrl-ISTD")
+        ) == "istd"
+
+    def test_istd_in_run_metadata_with_experimental_sample_name(self):
+        """ISTD in run_metadata; experimental sample_name → 'istd'."""
+        assert _classify_file_type(
+            _fields("WT-P1-S", "Rg70to1050-CE102040norm-Stem-ISTD")
+        ) == "istd"
+
+    def test_istd_in_run_metadata_lowercase(self):
+        assert _classify_file_type(
+            _fields("WT-P1-L", "Rg70to1050-CE102040norm-Leaf-istd")
+        ) == "istd"
+
+    def test_istd_only_in_sample_name_no_run_metadata_is_experimental(self):
+        """ISTD in sample_name only (no run_metadata) → 'experimental' under
+        the new algorithm (Phase 1 checks run_metadata only for ISTD)."""
+        assert _classify_file_type(_fields("ISTD")) == "experimental"
+
+    def test_istd_with_suffix_in_sample_name_only_is_experimental(self):
+        """ISTD-v2 in sample_name only → 'experimental'."""
+        assert _classify_file_type(_fields("ISTD-v2")) == "experimental"
+
+
+# ===========================================================================
+# _classify_file_type — Phase 1: InjBl detection (run_metadata only)
+# ===========================================================================
+
+class TestClassifyFileTypeInjBl:
+
+    def test_injbl_in_run_metadata(self):
+        assert _classify_file_type(
+            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-InjBL-MeOH")
+        ) == "injbl"
+
+    def test_injbl_in_run_metadata_with_exctrl_sample_name(self):
+        """InjBL in run_metadata beats ExCtrl in sample_name (Phase 1 wins)."""
+        assert _classify_file_type(
+            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH")
+        ) == "injbl"
+
+    def test_injblk_alias_in_run_metadata(self):
+        assert _classify_file_type(
+            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-InjBlk-MeOH")
+        ) == "injbl"
+
+    def test_blank_alias_in_run_metadata(self):
+        assert _classify_file_type(
+            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-Blank")
+        ) == "injbl"
+
+    def test_injbl_only_in_sample_name_no_run_metadata_is_experimental(self):
+        """InjBL in sample_name only → 'experimental' (Phase 1 checks run_metadata only)."""
+        assert _classify_file_type(_fields("INJBL")) == "experimental"
+
+    def test_blank_only_in_sample_name_no_run_metadata_is_experimental(self):
+        assert _classify_file_type(_fields("BLANK")) == "experimental"
+
+    def test_injbl_priority_over_exctrl_in_run_metadata(self):
+        """'injbl' is checked before 'exctrl' in Phase 1; InjBL wins."""
+        assert _classify_file_type(
+            _fields("unknown", "Rg70to1050-ExCtrl-InjBL-MeOH")
+        ) == "injbl"
+
+
+# ===========================================================================
+# _classify_file_type — Phase 2: ExCtrl / RefStd (sample_name then run_metadata)
+# ===========================================================================
+
+class TestClassifyFileTypePhase2:
+
+    def test_exctrl_in_sample_name(self):
+        assert _classify_file_type(_fields("EXCTRL")) == "exctrl"
+
+    def test_exctrl_with_suffix_in_sample_name(self):
         assert _classify_file_type(_fields("EXCTRL-batch1")) == "exctrl"
 
-    def test_refstd_with_suffix_classified_as_refstd(self):
-        assert _classify_file_type(_fields("REFSTD-pooled")) == "refstd"
+    def test_txctrl_maps_to_exctrl(self):
+        assert _classify_file_type(_fields("TXCTRL")) == "exctrl"
 
-    # C18 dataset patterns
+    def test_txctrl_na_classified_as_exctrl(self):
+        assert _classify_file_type(_fields("TxCtrl-NA-NA-NA-NA")) == "exctrl"
+
+    def test_exctrl_na_classified_as_exctrl(self):
+        assert _classify_file_type(_fields("ExCtrl-NA-NA-NA-NA")) == "exctrl"
+
     def test_exctrl_lcms_ppl_classified_as_exctrl(self):
         assert _classify_file_type(_fields("ExCtrl-LCMS-PPL")) == "exctrl"
 
@@ -143,14 +262,34 @@ class TestClassifyFileTypeCompoundSampleName:
     def test_exctrl_lcms_endo_classified_as_exctrl(self):
         assert _classify_file_type(_fields("ExCtrl-LCMS-ENDO")) == "exctrl"
 
-    # HILICZ dataset patterns
-    def test_txctrl_na_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("TxCtrl-NA-NA-NA-NA")) == "exctrl"
+    def test_refstd_in_sample_name(self):
+        assert _classify_file_type(_fields("REFSTD")) == "refstd"
 
-    def test_exctrl_na_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-NA-NA-NA-NA")) == "exctrl"
+    def test_refstd_with_suffix_in_sample_name(self):
+        assert _classify_file_type(_fields("REFSTD-pooled")) == "refstd"
 
-    # Experimental samples — must NOT match any key
+    def test_standard_maps_to_refstd(self):
+        assert _classify_file_type(_fields("STANDARD")) == "refstd"
+
+    def test_exctrl_in_run_metadata_only_no_sample_name_match(self):
+        """ExCtrl in run_metadata only (no sample_name match) → 'exctrl' via Phase 2."""
+        assert _classify_file_type(
+            _fields("AB-T1-ENDO", "Rg70to1050-CE102040norm-ExCtrl-S1")
+        ) == "exctrl"
+
+    def test_exctrl_sample_name_no_high_priority_run_metadata(self):
+        """ExCtrl in sample_name, run_metadata has no high-priority token → 'exctrl'."""
+        assert _classify_file_type(
+            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-S1")
+        ) == "exctrl"
+
+
+# ===========================================================================
+# _classify_file_type — Phase 3: experimental fallback
+# ===========================================================================
+
+class TestClassifyFileTypeExperimental:
+
     def test_ctrl_media_ppl_classified_as_experimental(self):
         assert _classify_file_type(_fields("Ctrl-Media-PPL")) == "experimental"
 
@@ -166,78 +305,6 @@ class TestClassifyFileTypeCompoundSampleName:
     def test_rttis_sample_classified_as_experimental(self):
         assert _classify_file_type(_fields("RtTis-Slyc-OMTmb-inf-35dag")) == "experimental"
 
-
-# ===========================================================================
-# _classify_file_type — run_metadata segment scanning
-# ===========================================================================
-
-class TestClassifyFileTypeRunMetadata:
-
-    def test_run_metadata_trailing_qc_classified_as_qc(self):
-        """run_metadata ending in '-QC' must be classified as 'qc'."""
-        assert _classify_file_type(
-            _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC")
-        ) == "qc"
-
-    def test_run_metadata_trailing_qc_filtrate_classified_as_qc(self):
-        assert _classify_file_type(
-            _fields("ExCtrl-MeOH-PPL", "Rg80to1200-CE102040norm-filtrate-QC")
-        ) == "qc"
-
-    def test_run_metadata_qc_c18qu_skipped_sample_name_exctrl(self):
-        """QC-C18QU in run_metadata must be skipped; ExCtrl in sample_name wins."""
-        assert _classify_file_type(
-            _fields("ExCtrl-MeOH-PPL", "Rg80to1200-CE102040norm-filtrate-QC-C18QU")
-        ) == "exctrl"
-
-    def test_run_metadata_qc_c18qu_skipped_sample_name_experimental(self):
-        """QC-C18QU in run_metadata skipped; sample_name has no key → experimental."""
-        assert _classify_file_type(
-            _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC-C18QU")
-        ) == "experimental"
-
-    def test_run_metadata_istd_classified_as_istd(self):
-        assert _classify_file_type(
-            _fields("AB-T0-PPL", "Rg80to1200-CE102040norm-filtrate-ISTD")
-        ) == "istd"
-
-    def test_run_metadata_injbl_meoh_classified_as_injbl(self):
-        assert _classify_file_type(
-            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-InjBL-MeOH")
-        ) == "injbl"
-
-    def test_run_metadata_exact_qc_standalone(self):
-        """Standalone 'QC' in run_metadata (no other segments) → 'qc'."""
-        assert _classify_file_type(_fields("unknown", "QC")) == "qc"
-
-    def test_run_metadata_exact_istd_standalone(self):
-        assert _classify_file_type(_fields("unknown", "ISTD")) == "istd"
-
-    # Priority: sample_name scanned first
-    def test_sample_name_wins_over_run_metadata(self):
-        """sample_name 'QC' must win even if run_metadata also has a key."""
-        assert _classify_file_type(
-            _fields("QC-SOPv7", "Rg80to1200-CE102040norm-filtrate-ISTD")
-        ) == "qc"
-
-    def test_qc_key_order_priority_over_exctrl_in_run_metadata(self):
-        """'qc' appears before 'exctrl' in SAMPLE_NAME_TO_FILE_TYPE, so a
-        run_metadata segment 'qc' wins over an 'exctrl' segment in the same
-        field."""
-        assert _classify_file_type(
-            _fields("unknown", "Rg80to1200-CE102040norm-filtrate-QC")
-        ) == "qc"
-
-
-# ===========================================================================
-# _classify_file_type — case insensitivity and edge cases
-# ===========================================================================
-
-class TestClassifyFileTypeEdgeCases:
-
-    def test_mixed_case_qc_sopv7(self):
-        assert _classify_file_type(_fields("Qc-SopV7")) == "qc"
-
     def test_empty_sample_name_returns_experimental(self):
         assert _classify_file_type(_fields("")) == "experimental"
 
@@ -247,10 +314,47 @@ class TestClassifyFileTypeEdgeCases:
     def test_unknown_sample_name_returns_experimental(self):
         assert _classify_file_type(_fields("T1-256534-8-Tr-RE")) == "experimental"
 
-    def test_qc_c18qu_alone_in_sample_name_is_not_qc(self):
-        """QC-C18QU as the entire sample_name: 'qc' segment is followed by
-        'c18qu' → skip → no other key → experimental."""
-        assert _classify_file_type(_fields("QC-C18QU")) == "experimental"
+    def test_wt_p1_s_with_stem_istd_run_metadata_is_istd(self):
+        """Experimental-looking sample_name but ISTD in run_metadata → 'istd'."""
+        assert _classify_file_type(
+            _fields("WT-P1-S", "Rg70to1050-CE102040norm-Stem-ISTD")
+        ) == "istd"
+
+
+# ===========================================================================
+# _classify_file_type — real-world HILICZ SorghSwg filenames
+# ===========================================================================
+
+class TestClassifyFileTypeRealWorldFilenames:
+    """Verify the four ambiguous SorghSwg filenames from the design discussion."""
+
+    def test_exctrl_4_with_istd_run_metadata_is_istd(self):
+        """..._36_ExCtrl_4_Rg70to1050-CE205060norm-ExCtrl-ISTD_Run114
+        ExCtrl in sample_name, ISTD in run_metadata → Phase 1 wins → 'istd'."""
+        assert _classify_file_type(
+            _fields("ExCtrl", "Rg70to1050-CE205060norm-ExCtrl-ISTD")
+        ) == "istd"
+
+    def test_wt_p1_s_2_with_stem_istd_is_istd(self):
+        """..._2_WT-P1-S_2_Rg70to1050-CE102040norm-Stem-ISTD_Run49
+        Experimental sample_name, ISTD in run_metadata → Phase 1 wins → 'istd'."""
+        assert _classify_file_type(
+            _fields("WT-P1-S", "Rg70to1050-CE102040norm-Stem-ISTD")
+        ) == "istd"
+
+    def test_exctrl_1_with_injbl_meoh_run_metadata_is_injbl(self):
+        """..._33_ExCtrl_1_Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH_Run16
+        ExCtrl in sample_name, InjBL in run_metadata → Phase 1 wins → 'injbl'."""
+        assert _classify_file_type(
+            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH")
+        ) == "injbl"
+
+    def test_exctrl_1_neg_ms2_with_s1_run_metadata_is_exctrl(self):
+        """..._NEG_MS2_33_ExCtrl_1_Rg70to1050-CE102040norm-ExCtrl-S1_Run15
+        ExCtrl in sample_name, no high-priority token in run_metadata → Phase 2 → 'exctrl'."""
+        assert _classify_file_type(
+            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-S1")
+        ) == "exctrl"
 
 
 # ===========================================================================

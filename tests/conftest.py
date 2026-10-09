@@ -62,17 +62,19 @@ def _make_atlas(
     *,
     polarity: str = "POS",
     chromatography: str = "HILICZ",
-    analysis_type: str = "EMA",
+    atlas_category: str = "REF",
+    atlas_name: str = "EMA",
 ) -> Atlas:
     """Wrap a list of :class:`CompoundMZRT` objects into an :class:`Atlas`."""
+    from metatlas2.workflow_objects import AtlasCategory
     compound_mzrts = {c.mz_rt_uid: c for c in compounds}
     return Atlas(
         atlas_uid=_uid(),
-        atlas_name="Test Atlas",
+        atlas_name=atlas_name,
         atlas_description="Synthetic atlas for unit tests",
         chromatography=chromatography,
         polarity=polarity,
-        analysis_type=analysis_type,
+        atlas_category=AtlasCategory(atlas_category),
         compound_mzrts=compound_mzrts,
     )
 
