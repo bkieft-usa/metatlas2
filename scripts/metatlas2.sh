@@ -11,8 +11,8 @@
 #   metatlas2 [--image TAG] [--dev] add-atlases    --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-msms-refs  --config_path FILE
 #   metatlas2 [--image TAG] [--dev] get-atlases    fetch  --atlas_uids UID1,UID2 [--output_path PATH]
-#   metatlas2 [--image TAG] [--dev] get-msms-refs  [--output_path PATH] [--tab-out] [--inchikeys K1,K2] [--database_filter DB] [--polarity POS]
 #   metatlas2 [--image TAG] [--dev] get-atlases   query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
+#   metatlas2 [--image TAG] [--dev] get-db-table  --table-name NAME [--output_path PATH] [--database_path PATH]
 #   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):
@@ -45,10 +45,6 @@
 
 set -euo pipefail
 
-# Versioned Zenodo DOI for the main metatlas DuckDB.
-# Update this value after running scripts/upload_main_db_to_zenodo.sh on NERSC.
-# Non-NERSC (Docker) runs will automatically download the DB if the local
-# version stamp does not match this DOI.
 ZENODO_MAIN_DB_DOI="https://doi.org/10.5281/zenodo.22968291"
 
 IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
@@ -275,27 +271,68 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
 
         sbatch "${TMPSCRIPT}"
 
-    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-msms-refs" ]]; then
-        if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
-            PY_MODULE="metatlas2.add_compounds_to_db"
-        elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
-            PY_MODULE="metatlas2.add_atlases_to_db"
-        elif [[ "${SUBCOMMAND}" == "add-msms-refs" ]]; then
-            PY_MODULE="metatlas2.add_msms_refs_to_db"
-        elif [[ "${SUBCOMMAND}" == "get-msms-refs" ]]; then
-            PY_MODULE="metatlas2.get_msms_refs_from_db"
-        else
-            PY_MODULE="metatlas2.get_atlases_from_db"
-        fi
-
+    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev)..."
         else
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=prod)..."
         fi
 
+        _parse_arg() {
+            local key="$1"; shift
+            local val=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    "${key}="*)  val="${1#*=}"; break ;;
+                    "${key}")    val="${2:-}"; break ;;
+                esac
+                shift
+            done
+            echo "${val}"
+        }
+        _has_flag() {
+            local flag="$1"; shift
+            for arg in "$@"; do [[ "$arg" == "$flag" ]] && return 0; done
+            return 1
+        }
+        # _py_str VAL — emit a Python expression: None if VAL is empty, else 'VAL'
+        _py_str() { [[ -n "$1" ]] && echo "'$1'" || echo "None"; }
+        SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
+
+        if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
+            PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${CONFIG_PATH}', overwrite_db=${OVERWRITE_PY})"
+        elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "add-msms-refs" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "get-db-table" ]]; then
+            TABLE_NAME="$(_parse_arg --table-name "${SUB_ARGS[@]}")"
+            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
+            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.get_db_table import export_table_to_csv; export_table_to_csv('${TABLE_NAME}', output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
+        else  # get-atlases
+            GET_SUBCOMMAND="${SUB_ARGS[0]:-}"
+            ATLAS_UIDS="$(_parse_arg --atlas_uids "${SUB_ARGS[@]}")"
+            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
+            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
+            CHROMATOGRAPHY="$(_parse_arg --chromatography "${SUB_ARGS[@]}")"
+            POLARITY="$(_parse_arg --polarity "${SUB_ARGS[@]}")"
+            ATLAS_CATEGORY="$(_parse_arg --atlas_category "${SUB_ARGS[@]}")"
+            ATLAS_NAME_KEY="$(_parse_arg --atlas_name_key "${SUB_ARGS[@]}")"
+            CREATED_BY="$(_parse_arg --created_by "${SUB_ARGS[@]}")"
+            if [[ "${GET_SUBCOMMAND}" == "fetch" ]]; then
+                PY_CALL="from metatlas2.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('${ATLAS_UIDS}'), output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
+            else
+                PY_CALL="from metatlas2.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_py_str "${DATABASE_PATH}"), chromatography=$(_py_str "${CHROMATOGRAPHY}"), polarity=$(_py_str "${POLARITY}"), atlas_category=$(_py_str "${ATLAS_CATEGORY}"), atlas_name_key=$(_py_str "${ATLAS_NAME_KEY}"), created_by=$(_py_str "${CREATED_BY}"))"
+            fi
+        fi
+
         shifter "${SHIFTER_ARGS[@]}" \
-            /app/.venv/bin/python -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
+            /app/.venv/bin/python -c "${PY_CALL}"
 
     else # run main targeted pipeline
         LOG_TO_STDOUT=false
@@ -440,28 +477,62 @@ else
         echo "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems." >&2
         exit 1
 
-    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-msms-refs" ]]; then
-        if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
-            PY_MODULE="metatlas2.add_compounds_to_db"
-        elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
-            PY_MODULE="metatlas2.add_atlases_to_db"
-        elif [[ "${SUBCOMMAND}" == "add-msms-refs" ]]; then
-            PY_MODULE="metatlas2.add_msms_refs_to_db"
-        elif [[ "${SUBCOMMAND}" == "get-msms-refs" ]]; then
-            PY_MODULE="metatlas2.get_msms_refs_from_db"
-        else
-            PY_MODULE="metatlas2.get_atlases_from_db"
-        fi
-
+    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev, runtime=docker)..."
         else
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=prod, runtime=docker)..."
         fi
 
+        _parse_arg() {
+            local key="$1"; shift
+            local val=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    "${key}="*)  val="${1#*=}"; break ;;
+                    "${key}")    val="${2:-}"; break ;;
+                esac
+                shift
+            done
+            echo "${val}"
+        }
+        SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
+
+        if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
+            PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${CONFIG_PATH}', overwrite_db=${OVERWRITE_PY})"
+        elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "add-msms-refs" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "get-db-table" ]]; then
+            TABLE_NAME="$(_parse_arg --table-name "${SUB_ARGS[@]}")"
+            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
+            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.get_db_table import export_table_to_csv; export_table_to_csv('${TABLE_NAME}', output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
+        else  # get-atlases
+            GET_SUBCOMMAND="${SUB_ARGS[0]:-}"
+            ATLAS_UIDS="$(_parse_arg --atlas_uids "${SUB_ARGS[@]}")"
+            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
+            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
+            CHROMATOGRAPHY="$(_parse_arg --chromatography "${SUB_ARGS[@]}")"
+            POLARITY="$(_parse_arg --polarity "${SUB_ARGS[@]}")"
+            ATLAS_CATEGORY="$(_parse_arg --atlas_category "${SUB_ARGS[@]}")"
+            ATLAS_NAME_KEY="$(_parse_arg --atlas_name_key "${SUB_ARGS[@]}")"
+            CREATED_BY="$(_parse_arg --created_by "${SUB_ARGS[@]}")"
+            if [[ "${GET_SUBCOMMAND}" == "fetch" ]]; then
+                PY_CALL="from metatlas2.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('${ATLAS_UIDS}'), output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
+            else
+                PY_CALL="from metatlas2.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_py_str "${DATABASE_PATH}"), chromatography=$(_py_str "${CHROMATOGRAPHY}"), polarity=$(_py_str "${POLARITY}"), atlas_category=$(_py_str "${ATLAS_CATEGORY}"), atlas_name_key=$(_py_str "${ATLAS_NAME_KEY}"), created_by=$(_py_str "${CREATED_BY}"))"
+            fi
+        fi
+
         docker run "${DOCKER_ARGS[@]}" \
             "${IMAGE_FULL}" \
-            /app/.venv/bin/python -m "${PY_MODULE}" "${PASSTHROUGH_ARGS[@]:1}"
+            /app/.venv/bin/python -c "${PY_CALL}"
 
     else # run main targeted pipeline
         LOG_TO_STDOUT=false
