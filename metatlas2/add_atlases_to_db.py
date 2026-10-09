@@ -1,4 +1,4 @@
-import argparse
+import os
 from pathlib import Path
 import logging
 from metatlas2.workflow_objects import NewAtlasesConfig
@@ -10,8 +10,9 @@ def add_atlases_to_db(
     """
     Creates atlases from config file paths and saves them to the database.
     """
-    config_dir = Path(config_path).parent
-    log_file = str(config_dir / "add_atlases_to_db.log")
+    data_dir = os.environ.get("METATLAS_DATA_DIR", "")
+    log_dir = Path(data_dir) / "logs" if data_dir else Path(config_path).parent
+    log_file = str(log_dir / "add_atlases_to_db.log")
     with lcf.temporary_logging(
         log_level=logging.INFO,
         log_file=log_file,
@@ -21,9 +22,3 @@ def add_atlases_to_db(
         logger = lcf.get_logger('workflow_objects')
         logger.info("Adding atlases from config file to database...")
         NewAtlasesConfig.from_yaml(config_path).execute()
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Add atlases to the database from a config file.')
-    parser.add_argument('--config_path', type=str, help='Path to the atlas config file.')
-    args = parser.parse_args()
-    add_atlases_to_db(args.config_path)

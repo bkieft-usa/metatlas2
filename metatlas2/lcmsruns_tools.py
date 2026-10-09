@@ -8,46 +8,29 @@ import metatlas2.logging_config as lcf
 
 logger = lcf.get_logger('lcmsruns_tools')
 
-SAMPLE_NAME_TO_FILE_TYPE: dict[str, str] = {
-    'qc':       'qc',
-    'istd':     'istd',
+_HIGH_PRIORITY_RUN_METADATA_TYPES: dict[str, str] = {
+    'qc':     'qc',
+    'istd':   'istd',
+    'injbl':  'injbl',
+    'injblk': 'injbl',
+    'blank':  'injbl',
+}
+
+_LOW_PRIORITY_SAMPLE_NAME_TYPES: dict[str, str] = {
     'exctrl':   'exctrl',
     'txctrl':   'exctrl',
-    'injbl':    'injbl',
-    'blank':    'injbl',
     'refstd':   'refstd',
     'standard': 'refstd',
+}
+
+SAMPLE_NAME_TO_FILE_TYPE: dict[str, str] = {
+    **_HIGH_PRIORITY_RUN_METADATA_TYPES,
+    **_LOW_PRIORITY_SAMPLE_NAME_TYPES,
 }
 
 
 def _classify_file_type(fields: dict) -> str:
     """Return the file_type category for a parsed filename field dict.
-
-    Classification iterates ``SAMPLE_NAME_TO_FILE_TYPE`` keys **in insertion
-    order** (``qc`` → ``istd`` → ``exctrl`` → …).  For each key, the
-    hyphen-delimited segments of ``sample_name`` are checked first, then those
-    of ``run_metadata``.  The first key whose segment is found in either field
-    wins, so a higher-priority key in ``run_metadata`` (e.g. ``qc``) beats a
-    lower-priority key in ``sample_name`` (e.g. ``exctrl``).
-
-    Special case: a ``qc`` segment is skipped when the immediately following
-    segment is ``c18qu`` (i.e. the token ``QC-C18QU`` is not a real QC run).
-
-    If no segment in either field matches any key, ``'experimental'`` is
-    returned.
-
-    Examples
-    --------
-    * ``sample_name="QC-SOPv7"``                                  → ``'qc'``
-    * ``sample_name="ExCtrl-LCMS-PPL"``                           → ``'exctrl'``
-    * ``sample_name="ExCtrl-MeOH-PPL"``,
-      ``run_metadata="...filtrate-QC"``                           → ``'qc'``
-      (``qc`` key checked before ``exctrl`` key; found in run_metadata)
-    * ``sample_name="ExCtrl-MeOH-PPL"``,
-      ``run_metadata="...filtrate-QC-C18QU"``                     → ``'exctrl'``
-      (``qc`` skipped due to C18QU; ``exctrl`` found in sample_name)
-    * ``sample_name="AB-T1-ENDO"``,
-      ``run_metadata="...cells-QC-C18QU"``                        → ``'experimental'``
     """
     sample_name  = fields.get("sample_name",  "").lower().strip()
     run_metadata = fields.get("run_metadata", "").lower().strip()
@@ -66,7 +49,17 @@ def _classify_file_type(fields: dict) -> str:
             return True
         return False
 
-    for key, file_type in SAMPLE_NAME_TO_FILE_TYPE.items():
+    for key, file_type in _HIGH_PRIORITY_RUN_METADATA_TYPES.items():
+        if key == "qc":
+            # QC may appear in sample_name (e.g. "QC-SOPv7") or run_metadata
+            if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
+                return file_type
+        else:
+            # ISTD / InjBl / blank: authoritative source is run_metadata only
+            if _key_found_in(key, rm_segs):
+                return file_type
+
+    for key, file_type in _LOW_PRIORITY_SAMPLE_NAME_TYPES.items():
         if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
             return file_type
 
@@ -98,6 +91,9 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
                     "filename": file_path.name,
                     "file_format": ext,
                     "file_type": _classify_file_type(fields),
+                    # chromatography: parse_file_name now uses canonical_chromatography
+                    # internally, so the case from the filename is already preserved
+                    # (e.g. "HILIC" stays "HILIC", alias "HILICZ" → "HILIC").
                     "chromatography": fields.get("chromatography", "unknown"),
                     "ms_level": fields.get("ms_level", "unknown").lower(),
                     "polarity": fields.get("polarity", "unknown").lower(),

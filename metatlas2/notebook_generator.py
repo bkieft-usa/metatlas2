@@ -24,14 +24,17 @@ def generate_gui_notebooks(
         kernel_name = f"metatlas2-{image_tag}"
         kernel_display_name = f"metatlas2 ({image_tag})"
 
+    from metatlas2.workflow_objects import AtlasCategory
+    _atlas_cat = auto_id_obj.auto_ided_atlas_obj.atlas_category
+    _cat_val = _atlas_cat.value if isinstance(_atlas_cat, AtlasCategory) else str(_atlas_cat)
     run_params = {
         "project_name": auto_id_obj.project_name,
         "rt_alignment_number": auto_id_obj.rt_alignment_number,
         "analysis_number": auto_id_obj.analysis_number,
-        "chromatography": fpf.normalize_chromatography(auto_id_obj.auto_ided_atlas_obj.chromatography),
+        "chromatography": fpf.canonical_chromatography(auto_id_obj.auto_ided_atlas_obj.chromatography),
         "polarity": auto_id_obj.auto_ided_atlas_obj.polarity,
-        "analysis_type": auto_id_obj.auto_ided_atlas_obj.analysis_type,
-        "analysis_name": auto_id_obj.auto_ided_atlas_obj.analysis_name,
+        "atlas_category": _cat_val,
+        "atlas_name": auto_id_obj.auto_ided_atlas_obj.atlas_name,
         "input_atlas_uid": auto_id_obj.auto_ided_atlas_obj.atlas_uid,
     }
 
@@ -58,13 +61,13 @@ def generate_gui_notebooks(
 
     logger.info("Generating notebook file...")
     fname = (
-        f"{run_params['project_name']}"
-        f"_RTA{run_params['rt_alignment_number']}"
-        f"_TGA{run_params['analysis_number']}"
-        f"_{run_params['chromatography'].upper()}"
-        f"_{run_params['polarity'].upper()}"
-        f"_{run_params['analysis_type'].upper()}"
-        f"_{run_params['analysis_name'].upper()}"
+        "CurationNotebook__"
+        f"{run_params['chromatography']}"
+        f"-{run_params['polarity']}"
+        f"-{run_params['atlas_name']}"
+        f"-RTA{run_params['rt_alignment_number']}"
+        f"-TGA{run_params['analysis_number']}"
+        f"__{run_params['project_name']}"
         f".ipynb"
     )
     out_path = os.path.join(auto_id_obj.paths['analysis_output_dir'], fname)
@@ -104,7 +107,7 @@ def _make_override_params_cell(auto_id_obj: "AutoIdentification") -> nbformat.No
         "ms2_min_matching_frags",
         "remove_unided_compounds",
         "remove_flagged_compounds",
-        "apply_istd_curation_to_ema",
+        "apply_istd_curation_to_ref",
         "apply_cross_polarity_curation",
         "upload_to_gdrive",
     ]
@@ -137,8 +140,8 @@ def _make_header_cell(run_params: dict) -> nbformat.NotebookNode:
         #f"**Analysis number:** {run_params['analysis_number']}  \n"
         #f"**Chromatography:** {run_params['chromatography']}  \n"
         #f"**Polarity:** {run_params['polarity']}  \n"
-        #f"**Analysis type:** {run_params['analysis_type']}  \n"
-        #f"**Analysis name:** {run_params['analysis_name']}  \n"
+        #f"**Atlas category:** {run_params['atlas_category']}  \n"
+        #f"**Atlas name:** {run_params['atlas_name']}  \n"
     )
     return nbformat.v4.new_markdown_cell(text)
 

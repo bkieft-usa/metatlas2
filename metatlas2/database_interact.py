@@ -7,19 +7,17 @@ import uuid
 import grp
 import re
 import os
-import sys
 import json
 import copy
-import getpass
+import math
 import shutil
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 from contextlib import contextmanager
 from tqdm.auto import tqdm
 
 import metatlas2.file_and_project_format as fpf
+import metatlas2.lcmsruns_tools as lrt
 import metatlas2.load_tools as ldt
 import metatlas2.logging_config as lcf
 from metatlas2.utils import should_disable_tqdm, as_list, get_provenance
@@ -112,10 +110,10 @@ def _generate_uid(entity_type: str, decorator: str | None = None) -> str:
     """
 
     _UID_PREFIX: dict[str, tuple[str, bool]] = {
-        "ref_atlas":         ("atl-ref", True),
-        "rt_atlas":          ("atl-rta", True),
-        "autoid_atlas":      ("atl-aid", True),
-        "curated_atlas":     ("atl-mcr", True),
+        "input_atlas":         ("atlas-ipt", True),
+        "rt_atlas":          ("atlas-rta", True),
+        "autoid_atlas":      ("atlas-aid", True),
+        "curated_atlas":     ("atlas-mcr", True),
         "mz_rt":             ("mzrt", True),
         "compound":          ("cmp", False),
         "association":       ("assoc", False),
@@ -143,12 +141,11 @@ def _generate_uid(entity_type: str, decorator: str | None = None) -> str:
     return f"{prefix}-{rand}"
 
 def create_new_atlas_from_dataframe(
-    atlas_df: pd.DataFrame, 
-    atlas_name: str, 
-    atlas_description: str, 
-    analysis_type: str,
-    analysis_name: str,
-    chromatography: str = None, 
+    atlas_df: pd.DataFrame,
+    atlas_description: str,
+    atlas_category: "AtlasCategory",
+    atlas_name: str,
+    chromatography: str = None,
     polarity: str = None,
     atlas_file_path: str = None,
     main_db_path: str = None
@@ -159,7 +156,7 @@ def create_new_atlas_from_dataframe(
     if not chromatography:
         chromatography = ldt.detect_atlas_input_chromatography(atlas_df)
     if not polarity:
-        polarity = ldt.detect_atlas_input_polarity(atlas_df)        
+        polarity = ldt.detect_atlas_input_polarity(atlas_df)
 
     # Required columns for constructing CompoundMZRTs (mz_rt_uid will be generated and is the unique key)
     required_cols = ['inchi_key', 'adduct', 'rt_peak', 'mz']
@@ -213,16 +210,24 @@ def create_new_atlas_from_dataframe(
         )
         compound_mzrts[mz_rt_uid] = compound_mzrt
 
-    atlas_uid = _generate_uid("ref_atlas", decorator=f"{chromatography.lower()}-{polarity.lower()}-{analysis_type.lower()}-{analysis_name.lower()}")
+    from metatlas2.workflow_objects import AtlasCategory
+    cat_val = atlas_category.value if isinstance(atlas_category, AtlasCategory) else str(atlas_category).upper()
+    prov = get_provenance()
+    user = prov["analyst"].lower()
+    date = prov["timestamp"][:10].replace("-", "")
+    atlas_uid = _generate_uid(
+        "input_atlas",
+        decorator=f"{chromatography.lower()}-{polarity.lower()}-{cat_val.lower()}-{atlas_name.lower()}-{user}-{date}"
+    )
+    from metatlas2.workflow_objects import AtlasStage
     atlas_obj = Atlas(
         atlas_uid=atlas_uid,
         atlas_name=atlas_name,
         atlas_description=atlas_description,
         chromatography=chromatography,
         polarity=polarity,
-        analysis_type=analysis_type,
-        analysis_name=analysis_name,
-        atlas_type="REFERENCE",
+        atlas_category=atlas_category,
+        atlas_stage=AtlasStage.INPUT,
         compound_mzrts=compound_mzrts,
         source=atlas_file_path,
     )
@@ -335,9 +340,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.atlas_description,
                         a.chromatography,
                         a.polarity,
-                        a.analysis_type,
-                        a.analysis_name,
-                        a.atlas_type,
+                        a.atlas_category,
+                        a.atlas_stage,
                         a.source_atlas_uid,
                         a.rt_alignment_number,
                         a.analysis_number,
@@ -385,9 +389,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.atlas_description,
                         a.chromatography,
                         a.polarity,
-                        a.analysis_type,
-                        a.analysis_name,
-                        a.atlas_type,
+                        a.atlas_category,
+                        a.atlas_stage,
                         a.source_atlas_uid,
                         a.rt_alignment_number,
                         a.analysis_number,
@@ -470,8 +473,8 @@ def query_atlases_metadata(
     database_path: str,
     chromatography: str | None = None,
     polarity: str | None = None,
-    analysis_type: str | None = None,
-    analysis_name: str | None = None,
+    atlas_category: str | None = None,
+    atlas_name: str | None = None,
     created_by: str | None = None,
 ) -> pd.DataFrame:
     """
@@ -485,8 +488,8 @@ def query_atlases_metadata(
         database_path: Path to the main (or project) database file.
         chromatography: Filter by chromatography method (partial match).
         polarity:       Filter by polarity (partial match).
-        analysis_type:  Filter by analysis type (partial match).
-        analysis_name:  Filter by analysis name (partial match).
+        atlas_category: Filter by atlas category (QC, ISTD, or REF; partial match).
+        atlas_name:     Filter by atlas name (partial match).
         created_by:     Filter by creator username (partial match).
 
     Returns:
@@ -500,8 +503,8 @@ def query_atlases_metadata(
     filter_map = {
         "chromatography": chromatography,
         "polarity": polarity,
-        "analysis_type": analysis_type,
-        "analysis_name": analysis_name,
+        "atlas_category": atlas_category,
+        "atlas_name": atlas_name,
         "created_by": created_by,
     }
     for column, value in filter_map.items():
@@ -517,9 +520,8 @@ def query_atlases_metadata(
             atlas_description,
             chromatography,
             polarity,
-            analysis_type,
-            analysis_name,
-            atlas_type,
+            atlas_category,
+            atlas_stage,
             created_by,
             created_date,
             source
@@ -776,39 +778,99 @@ def get_rt_alignment_model_from_db(
     return model_dict
 
 def _prepare_compound_record_from_dict(compound_data: dict) -> tuple | None:
-    """Prepare compound record from dictionary data."""
+    """Build a DuckDB-safe tuple for INSERT INTO compounds.
+
+    Converts any ``float('nan')`` values that may have leaked in from pandas
+    DataFrames into ``None`` (NULL) so that DuckDB does not raise a type-
+    conversion error when inserting into INTEGER or REAL columns.
+    """
+
+    def _safe_str(key: str, default: str | None = None) -> str | None:
+        val = compound_data.get(key, default)
+        if val is None:
+            return default
+        try:
+            if math.isnan(float(val)):
+                return default
+        except (TypeError, ValueError):
+            pass
+        s = str(val)
+        return s if s else default
+
+    def _safe_float(key: str) -> float | None:
+        val = compound_data.get(key)
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            return None if math.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    def _safe_int(key: str) -> int | None:
+        val = compound_data.get(key)
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            return None if math.isnan(f) else int(f)
+        except (TypeError, ValueError):
+            return None
+
     try:
         prov = get_provenance()
-        
+
         # Use provided compound_uid (should be set by calling function)
         compound_uid = compound_data.get('compound_uid')
         if not compound_uid:
             logger.error("Compound data missing compound_uid - this should be set by calling function")
             return None
-        
-        # Ensure we have a valid inchi_key
+
         inchi_key = compound_data.get('inchi_key', '')
         if not inchi_key:
             logger.warning("Compound data missing inchi_key - skipping")
             return None
-        
+
         return (
             compound_uid,
-            compound_data.get('compound_name', 'Unknown Compound'),
+            _safe_str('compound_name', 'Unknown Compound'),
             inchi_key,
-            compound_data.get('inchi'),
-            compound_data.get('smiles'),
-            compound_data.get('formula'),
-            compound_data.get('classes'),
-            compound_data.get('pathways'),
-            compound_data.get('tags'),
-            compound_data.get('mono_isotopic_molecular_weight'),
-            compound_data.get('iupac_name'),
-            compound_data.get('pubchem_cid'),
-            compound_data.get('cas_number'),
-            compound_data.get('synonyms'),
+            _safe_str('inchi'),
+            _safe_str('smiles'),
+            _safe_str('formula'),
+            _safe_str('classes'),
+            _safe_str('pathways'),
+            _safe_str('tags'),
+            _safe_float('mono_isotopic_molecular_weight'),
+            _safe_str('iupac_name'),
+            _safe_str('pubchem_cid'),
+            _safe_str('cas_number'),
+            _safe_str('synonyms'),
             prov["analyst"],
-            prov["timestamp"]
+            prov["timestamp"],
+            _safe_str('isomeric_smiles'),
+            _safe_float('molecular_weight'),
+            _safe_float('xlogp'),
+            _safe_float('tpsa'),
+            _safe_float('complexity'),
+            _safe_int('charge'),
+            _safe_int('heavy_atom_count'),
+            _safe_int('hbd_count'),
+            _safe_int('hba_count'),
+            _safe_int('rotatable_bond_count'),
+            _safe_str('chebi_id'),
+            _safe_str('chembl_id'),
+            _safe_str('hmdb_id'),
+            _safe_str('kegg_id'),
+            _safe_str('drugbank_id'),
+            _safe_str('metabolights_id'),
+            _safe_str('metabolomics_workbench_id'),
+            _safe_str('wikipedia_url'),
+            _safe_str('description'),
+            _safe_str('pubchem_retrieval_date'),
+            _safe_str('pubchem_compound_url'),
+            _safe_str('modelseed_id'),
+            _safe_str('metacyc_id'),
         )
     except Exception as e:
         logger.error(f"Error preparing compound record: {e}")
@@ -867,9 +929,7 @@ def save_lcmsruns_to_db(
 ) -> int:
     with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
         prov = get_provenance()
-        
-        # Simplified check: try to count rows; if table doesn't exist, it will fail or return 0
-        # Note: For SQLite, use 'sqlite_master'. For others, information_schema is fine.
+
         try:
             has_rows = conn.execute("SELECT COUNT(*) FROM lcmsruns").fetchone()[0] > 0
         except Exception:
@@ -882,8 +942,6 @@ def save_lcmsruns_to_db(
             logger.info(f"Overwriting existing runs for {project_name}.")
             conn.execute("DELETE FROM lcmsruns")
 
-        # EFFICIENT: Bulk insertion using executemany
-        # Prepare data as a list of tuples
         data_to_insert = [
             (
                 run["file_path"], run["filename"], run["file_format"], run["file_type"],
@@ -1014,7 +1072,12 @@ def batch_save_compounds(
         if compound_records:
             logger.info(f"Creating {len(compound_records)} new compounds...")
             conn.executemany("""
-                INSERT INTO compounds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO compounds VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                )
             """, compound_records)
 
     # Log summary
@@ -1023,7 +1086,6 @@ def batch_save_compounds(
     logger.info(f"  Compounds skipped (already exist): {compounds_skipped_existing}")
 
     return compounds_created
-
 
 def _create_database_tables(conn, db_type: str = "main"):
     """
@@ -1048,9 +1110,8 @@ def _create_database_tables(conn, db_type: str = "main"):
             atlas_description  TEXT,
             chromatography     TEXT,
             polarity           TEXT,
-            analysis_type      TEXT,
-            analysis_name      TEXT,
-            atlas_type         TEXT,
+            atlas_category     TEXT,
+            atlas_stage        TEXT,
             source_atlas_uid   TEXT,
             rt_alignment_number INTEGER,
             analysis_number    INTEGER,
@@ -1116,7 +1177,30 @@ def _create_database_tables(conn, db_type: str = "main"):
                 cas_number                     TEXT,
                 synonyms                       TEXT,
                 created_by                     TEXT,
-                created_date                   TEXT
+                created_date                   TEXT,
+                isomeric_smiles                TEXT,
+                molecular_weight               REAL,
+                xlogp                          REAL,
+                tpsa                           REAL,
+                complexity                     REAL,
+                charge                         INTEGER,
+                heavy_atom_count               INTEGER,
+                hbd_count                      INTEGER,
+                hba_count                      INTEGER,
+                rotatable_bond_count           INTEGER,
+                chebi_id                       TEXT,
+                chembl_id                      TEXT,
+                hmdb_id                        TEXT,
+                kegg_id                        TEXT,
+                drugbank_id                    TEXT,
+                metabolights_id                TEXT,
+                metabolomics_workbench_id      TEXT,
+                wikipedia_url                  TEXT,
+                description                    TEXT,
+                pubchem_retrieval_date         TEXT,
+                pubchem_compound_url           TEXT,
+                modelseed_id                   TEXT,
+                metacyc_id                     TEXT
             )
         """)
 
@@ -1131,7 +1215,7 @@ def _create_database_tables(conn, db_type: str = "main"):
         """)
 
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS reference_fragmentation_data (
+            CREATE TABLE IF NOT EXISTS msms_refs (
                 ref_uid                        TEXT PRIMARY KEY,
                 database                       TEXT,
                 ref_id                         TEXT,
@@ -1156,15 +1240,15 @@ def _create_database_tables(conn, db_type: str = "main"):
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_rfd_inchi_key
-                ON reference_fragmentation_data (inchi_key)
+                ON msms_refs (inchi_key)
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_rfd_polarity
-                ON reference_fragmentation_data (polarity)
+                ON msms_refs (polarity)
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_rfd_database
-                ON reference_fragmentation_data (database)
+                ON msms_refs (database)
         """)
 
     # Project-database-only tables
@@ -1210,8 +1294,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 analysis_number      INTEGER,
                 chromatography       TEXT NOT NULL,
                 polarity             TEXT NOT NULL,
-                analysis_type        TEXT NOT NULL,
-                analysis_name        TEXT NOT NULL,
+                atlas_category       TEXT NOT NULL,
+                atlas_name           TEXT NOT NULL,
                 stage                TEXT NOT NULL,
                 atlas_uid            TEXT NOT NULL,
                 source_atlas_uid     TEXT,
@@ -1246,8 +1330,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 in_feature          BOOLEAN[],
                 rt_alignment_number INTEGER,
                 analysis_number     INTEGER,
-                analysis_type       VARCHAR,
-                analysis_name       VARCHAR,
+                atlas_category      VARCHAR,
+                atlas_name          VARCHAR,
                 created_by          VARCHAR,
                 created_date        VARCHAR,
                 PRIMARY KEY (mz_rt_uid, filename, rt_alignment_number, analysis_number)
@@ -1270,8 +1354,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 hits                VARCHAR,
                 rt_alignment_number INTEGER,
                 analysis_number     INTEGER,
-                analysis_type       VARCHAR,
-                analysis_name       VARCHAR,
+                atlas_category      VARCHAR,
+                atlas_name          VARCHAR,
                 created_by          VARCHAR,
                 created_date        VARCHAR,
                 PRIMARY KEY (mz_rt_uid, filename, scan_rt, rt_alignment_number, analysis_number)
@@ -1322,8 +1406,8 @@ def _create_database_tables(conn, db_type: str = "main"):
                 iupac_name              VARCHAR,
                 rt_alignment_number     INTEGER,
                 analysis_number         INTEGER,
-                analysis_type           VARCHAR,
-                analysis_name           VARCHAR,
+                atlas_category          VARCHAR,
+                atlas_name              VARCHAR,
                 created_by              VARCHAR,
                 created_date            VARCHAR,
                 PRIMARY KEY (mz_rt_uid, rt_alignment_number, analysis_number)
@@ -1335,7 +1419,7 @@ def batch_save_msms_refs(
     records: list[dict],
     batch_size: int = 5000,
 ) -> int:
-    """Bulk-insert MSMS reference spectra into ``reference_fragmentation_data``.
+    """Bulk-insert MSMS reference spectra into ``msms_refs``.
 
     Every call always inserts **new** rows — duplicates are intentional and
     allowed by design.  Each row receives a freshly generated ``ref_uid`` so
@@ -1386,7 +1470,7 @@ def batch_save_msms_refs(
             ))
             if len(batch) >= batch_size:
                 conn.executemany("""
-                    INSERT INTO reference_fragmentation_data VALUES (
+                    INSERT INTO msms_refs VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                 """, batch)
@@ -1395,13 +1479,13 @@ def batch_save_msms_refs(
 
         if batch:
             conn.executemany("""
-                INSERT INTO reference_fragmentation_data VALUES (
+                INSERT INTO msms_refs VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
             """, batch)
             total_inserted += len(batch)
 
-    logger.info(f"Inserted {total_inserted} MSMS reference spectra into reference_fragmentation_data.")
+    #logger.info(f"Inserted {total_inserted} MSMS reference spectra into msms_refs.")
     return total_inserted
 
 
@@ -1411,7 +1495,7 @@ def query_msms_refs(
     database_filter: str | None = None,
     polarity: str | None = None,
 ) -> list[dict]:
-    """Query ``reference_fragmentation_data`` and return matching rows as dicts.
+    """Query ``msms_refs`` and return matching rows as dicts.
 
     All filter arguments are optional.  When provided they are applied as exact
     equality matches (``=``).  Pass multiple InChI keys via *inchi_keys* to
@@ -1431,7 +1515,7 @@ def query_msms_refs(
 
     Returns:
         List of dicts, one per matching row, with all columns from
-        ``reference_fragmentation_data``.  Returns an empty list when no rows
+        ``msms_refs``.  Returns an empty list when no rows
         match.
     """
     conditions: list[str] = []
@@ -1460,7 +1544,7 @@ def query_msms_refs(
                collision_energy, instrument, instrument_type,
                formula, mono_isotopic_molecular_weight, inchi, smiles,
                mz, intensities, created_by, created_date
-        FROM reference_fragmentation_data
+        FROM msms_refs
         {where_clause}
         ORDER BY inchi_key, ref_uid
     """
@@ -1485,7 +1569,7 @@ def query_msms_refs(
         result.append(rec)
 
     logger.info(
-        "query_msms_refs: %d row(s) returned from reference_fragmentation_data "
+        "query_msms_refs: %d row(s) returned from msms_refs "
         "(database_filter=%r, polarity=%r, inchi_keys=%s)",
         len(result),
         database_filter,
@@ -1695,10 +1779,11 @@ def register_workflow_run(
     from metatlas2.workflow_objects import AtlasStage
     prov = get_provenance()
     run_uid = _generate_uid("workflow_stage_run")
-    chromatography = atlas_obj.chromatography.lower() if atlas_obj.chromatography else atlas_obj.chromatography
-    polarity = atlas_obj.polarity.lower() if atlas_obj.polarity else atlas_obj.polarity
-    analysis_type = atlas_obj.analysis_type.lower() if atlas_obj.analysis_type else atlas_obj.analysis_type
-    analysis_name = atlas_obj.analysis_name.lower() if atlas_obj.analysis_name else atlas_obj.analysis_name
+    from metatlas2.workflow_objects import AtlasCategory
+    chromatography = atlas_obj.chromatography
+    polarity = atlas_obj.polarity
+    cat_val = atlas_obj.atlas_category.value if isinstance(atlas_obj.atlas_category, AtlasCategory) else str(atlas_obj.atlas_category)
+    atlas_name = atlas_obj.atlas_name
     with get_db_connection(obj.paths["project_db_path"], max_retries=10, initial_retry_delay=0.5) as conn:
         conn.execute("""
             INSERT INTO workflow_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1708,8 +1793,8 @@ def register_workflow_run(
             obj.analysis_number if stage != AtlasStage.RT_ALIGNED else None,
             chromatography,
             polarity,
-            analysis_type,
-            analysis_name,
+            cat_val,
+            atlas_name,
             stage,
             atlas_obj.atlas_uid,
             atlas_obj.source_atlas_uid,
@@ -1721,7 +1806,7 @@ def register_workflow_run(
         f"Registered workflow run {run_uid}: stage={stage}, "
         f"RTA={obj.rt_alignment_number}, TGA={obj.analysis_number}, "
         f"atlas_uid={atlas_obj.atlas_uid} "
-        f"({atlas_obj.chromatography}-{atlas_obj.polarity}-{atlas_obj.analysis_type}-{atlas_obj.analysis_name})"
+        f"({atlas_obj.chromatography}-{atlas_obj.polarity}-{getattr(atlas_obj.atlas_category, 'value', atlas_obj.atlas_category)}-{atlas_obj.atlas_name})"
     )
 
 
@@ -1748,32 +1833,37 @@ def count_workflow_runs(
         return 0
 
 def _atlas_matches_subset(atlas_to_autoid: dict, analysis_subset: list) -> bool:
+    a_chrom = fpf.normalize_chromatography(atlas_to_autoid['chromatography'])
+    a_pol   = atlas_to_autoid['polarity'].lower()
+    a_cat   = atlas_to_autoid['atlas_category'].lower()
+    a_name  = atlas_to_autoid['atlas_name'].lower()
+
     for subset in analysis_subset:
         parts = subset.split('-', 3)
         if len(parts) != 4:
             raise ValueError(
                 f"Invalid analysis_subset entry '{subset}'. "
-                "Must be in 'CHROM-POL-TYPE-NAME' format (e.g. 'HILIC-POS-EMA-DEFAULT')."
+                "Must be in 'CHROM-POL-CATEGORY-NAME' format (e.g. 'HILIC-POS-REF-EMA')."
             )
-        s_chrom, s_pol, s_type, s_name = parts
+        s_chrom, s_pol, s_cat, s_name = parts
         s_chrom = fpf.normalize_chromatography(s_chrom)
-        s_pol = s_pol.lower()
-        s_type = s_type.lower()
-        s_name = s_name.lower()
-        if (atlas_to_autoid['chromatography'] == s_chrom
-                and atlas_to_autoid['polarity'] == s_pol
-                and atlas_to_autoid['analysis_type'] == s_type
-                and atlas_to_autoid['analysis_name'] == s_name):
+        s_pol   = s_pol.lower()
+        s_cat   = s_cat.lower()
+        s_name  = s_name.lower()
+        if (a_chrom == s_chrom
+                and a_pol == s_pol
+                and a_cat == s_cat
+                and a_name == s_name):
             logger.info(
                 f"Atlas {atlas_to_autoid['atlas_uid']} "
-                f"({atlas_to_autoid['chromatography']}-{atlas_to_autoid['polarity']}-{atlas_to_autoid['analysis_type']}-{atlas_to_autoid['analysis_name']}) "
+                f"({atlas_to_autoid['chromatography']}-{atlas_to_autoid['polarity']}-{atlas_to_autoid['atlas_category']}-{atlas_to_autoid['atlas_name']}) "
                 f"matches the analysis subset: {analysis_subset}. Starting auto ID."
             )
             return True
 
     logger.info(
         f"Skipping auto ID for atlas {atlas_to_autoid['atlas_uid']} "
-        f"({atlas_to_autoid['chromatography']}-{atlas_to_autoid['polarity']}-{atlas_to_autoid['analysis_type']}-{atlas_to_autoid['analysis_name']}) "
+        f"({atlas_to_autoid['chromatography']}-{atlas_to_autoid['polarity']}-{atlas_to_autoid['atlas_category']}-{atlas_to_autoid['atlas_name']}) "
         f"since it's not in the specified analysis subset: {analysis_subset}"
     )
     return False
@@ -1800,16 +1890,16 @@ def get_auto_ided_atlases_for_summary(
     analysis_number:
         Targeted-analysis number (TGA index).
     analysis_subset:
-        Optional list of ``"CHROM-POL-TYPE-NAME"`` strings.  When provided,
-        only atlases whose ``(chromatography, polarity, analysis_type,
-        analysis_name)`` tuple matches one of the entries are returned.
+        Optional list of ``"CHROM-POL-CATEGORY-NAME"`` strings.  When provided,
+        only atlases whose ``(chromatography, polarity, atlas_category,
+        atlas_name)`` tuple matches one of the entries are returned.
         When ``None`` (default), all AUTO_IDED atlases are returned.
 
     Returns
     -------
     pd.DataFrame
         Columns: ``atlas_uid``, ``chromatography``, ``polarity``,
-        ``analysis_type``, ``analysis_name``.  Empty when no matching atlases
+        ``atlas_category``, ``atlas_name``.  Empty when no matching atlases
         are found.
 
     Raises
@@ -1820,7 +1910,7 @@ def get_auto_ided_atlases_for_summary(
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute("""
-                SELECT atlas_uid, chromatography, polarity, analysis_type, analysis_name
+                SELECT atlas_uid, chromatography, polarity, atlas_category, atlas_name
                 FROM workflow_runs
                 WHERE rt_alignment_number = ?
                   AND analysis_number IS NOT DISTINCT FROM ?
@@ -1878,14 +1968,16 @@ def get_atlas_uid_from_stage(
     logger.info(f"Querying workflow_runs to get Atlas UID...")
     try:
         analysis_number = obj.analysis_number if stage != AtlasStage.RT_ALIGNED else None
+        from metatlas2.workflow_objects import AtlasCategory
         chrom_lc = obj.ta.chromatography.lower() if obj.ta.chromatography else obj.ta.chromatography
         polarity_lc = obj.ta.polarity.lower() if obj.ta.polarity else obj.ta.polarity
-        analysis_type_lc = obj.ta.analysis_type.lower() if obj.ta.analysis_type else obj.ta.analysis_type
-        analysis_name_lc = obj.ta.analysis_name.lower() if obj.ta.analysis_name else obj.ta.analysis_name
+        cat_val = obj.ta.atlas_category.value if isinstance(obj.ta.atlas_category, AtlasCategory) else str(obj.ta.atlas_category)
+        cat_lc = cat_val.lower() if cat_val else cat_val
+        atlas_name_lc = obj.ta.atlas_name.lower() if obj.ta.atlas_name else obj.ta.atlas_name
         with get_db_connection(obj.paths['project_db_path'], read_only=True) as conn:
             df = conn.execute("""
                 SELECT atlas_uid, chromatography, polarity,
-                       analysis_type, analysis_name,
+                       atlas_category, atlas_name,
                        rt_alignment_number, analysis_number
                 FROM workflow_runs
                 WHERE rt_alignment_number = ?
@@ -1893,10 +1985,10 @@ def get_atlas_uid_from_stage(
                   AND stage = ?
                   AND LOWER(chromatography) = ?
                   AND LOWER(polarity) = ?
-                  AND LOWER(analysis_type) = ?
-                  AND LOWER(analysis_name) = ?
+                  AND LOWER(atlas_category) = ?
+                  AND LOWER(atlas_name) = ?
                 ORDER BY created_date
-            """, [obj.rt_alignment_number, analysis_number, stage, chrom_lc, polarity_lc, analysis_type_lc, analysis_name_lc]).df()
+            """, [obj.rt_alignment_number, analysis_number, stage, chrom_lc, polarity_lc, cat_lc, atlas_name_lc]).df()
     except Exception as e:
         raise RuntimeError(
             f"Error loading atlases from stage {stage} from database: {e}. "
@@ -1906,7 +1998,7 @@ def get_atlas_uid_from_stage(
             f"No workflow_runs entries found from stage={stage}, "
             f"RTA={obj.rt_alignment_number}, TGA={obj.analysis_number}, "
             f"chromatography={obj.ta.chromatography}, polarity={obj.ta.polarity}, "
-            f"analysis_type={obj.ta.analysis_type}, analysis_name={obj.ta.analysis_name}. "
+            f"atlas_category={getattr(obj.ta.atlas_category, 'value', obj.ta.atlas_category)}, atlas_name={obj.ta.atlas_name}. "
         )
         return {}
     if len(df) > 1:
@@ -1914,14 +2006,14 @@ def get_atlas_uid_from_stage(
             f"Expected exactly one workflow_runs row from stage={stage}, "
             f"rt_alignment_number={obj.rt_alignment_number}, analysis_number={obj.analysis_number}, "
             f"chromatography={obj.ta.chromatography}, polarity={obj.ta.polarity}, "
-            f"analysis_type={obj.ta.analysis_type}, analysis_name={obj.ta.analysis_name}, "
+            f"atlas_category={getattr(obj.ta.atlas_category, 'value', obj.ta.atlas_category)}, atlas_name={obj.ta.atlas_name}, "
             f"but found {len(df)} rows."
         )
     logger.info(
         f"Found 1 workflow_runs entry from stage={stage}, "
         f"rt_alignment_number={obj.rt_alignment_number}, analysis_number={obj.analysis_number}, "
         f"chromatography={obj.ta.chromatography}, polarity={obj.ta.polarity}, "
-        f"analysis_type={obj.ta.analysis_type}, analysis_name={obj.ta.analysis_name}"
+        f"atlas_category={getattr(obj.ta.atlas_category, 'value', obj.ta.atlas_category)}, atlas_name={obj.ta.atlas_name}"
     )
 
     atlas_info = df.iloc[0].to_dict()
@@ -1970,8 +2062,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
             )
 
     with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
-        # Check if this atlas already exists in the project DB (e.g. the same reference
-        # atlas UID being re-used across multiple RTA runs with --skip-rt-align).
+
         atlas_already_exists = conn.execute(
             "SELECT atlas_uid FROM atlases WHERE atlas_uid = ?",
             [atlas_obj.atlas_uid]
@@ -1985,17 +2076,21 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
             mzrts_created = 0
             mzrts_reused = len(atlas_obj.compound_mzrts)
         else:
+            from metatlas2.workflow_objects import AtlasCategory
+            cat_val = atlas_obj.atlas_category.value if isinstance(atlas_obj.atlas_category, AtlasCategory) else str(atlas_obj.atlas_category)
+            from metatlas2.workflow_objects import AtlasStage
+            _stage = getattr(atlas_obj, 'atlas_stage', AtlasStage.INPUT)
+            stage_val = _stage.value if isinstance(_stage, AtlasStage) else str(_stage)
             conn.execute("""
-                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO atlases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 atlas_obj.atlas_uid,
                 atlas_obj.atlas_name,
                 atlas_obj.atlas_description,
                 atlas_obj.chromatography,
                 atlas_obj.polarity,
-                atlas_obj.analysis_type,
-                atlas_obj.analysis_name,
-                atlas_obj.atlas_type,
+                cat_val,
+                stage_val,
                 getattr(atlas_obj, 'source_atlas_uid', None),
                 getattr(atlas_obj, 'rt_alignment_number', None),
                 getattr(atlas_obj, 'analysis_number', None),
@@ -2060,10 +2155,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                 ))
                 association_order += 1
 
-    logger.info(
-        f"Saved atlas {atlas_obj.atlas_name} (UID {atlas_obj.atlas_uid}) — "
-        f"{atlas_obj.chromatography}/{atlas_obj.polarity}/{atlas_obj.analysis_type}"
-    )
+    logger.info(f"Saved atlas {atlas_obj.atlas_uid}")
     logger.info(f"  compound_mzrt rows created: {mzrts_created}, reused: {mzrts_reused}")
     if not atlas_already_exists:
         logger.info(f"  atlas_compound_associations created: {association_order}")
@@ -2109,8 +2201,78 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
             return {}
         return {row[0]: row[1] for row in rows}
 
+def get_compound_metadata(
+    db_path: str,
+    inchi_keys: list[str],
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Return compound metadata from the ``compounds`` table for a list of InChIKeys.
+
+    This is the single entrypoint used by output functions (LFC CSVs, metabomap,
+    CompoundAtlas CSVs) to enrich their rows with all compound-level metadata
+    stored in the main database.
+
+    Args:
+        db_path:    Path to the main metatlas DuckDB file.
+        inchi_keys: List of InChIKey strings to look up.
+        columns:    Optional list of column names to return.  When ``None``
+                    (default) all columns from the ``compounds`` table are
+                    returned.  ``inchi_key`` is always included.
+
+    Returns:
+        A :class:`pandas.DataFrame` with one row per matching InChIKey.
+        Returns an empty DataFrame when no matches are found or on error.
+    """
+    if not inchi_keys or not db_path:
+        return pd.DataFrame()
+
+    # Deduplicate while preserving order
+    unique_keys = list(dict.fromkeys(inchi_keys))
+
+    try:
+        with get_db_connection(db_path, read_only=True) as conn:
+            # Discover available columns so we can validate the requested subset
+            available = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info('compounds')").fetchall()
+            }
+
+            if columns is None:
+                select_cols = "*"
+            else:
+                # Always include inchi_key; filter to columns that actually exist
+                requested = list(dict.fromkeys(["inchi_key"] + list(columns)))
+                valid = [c for c in requested if c in available]
+                missing = [c for c in requested if c not in available]
+                if missing:
+                    logger.warning(
+                        "get_compound_metadata: requested columns not in compounds table "
+                        "and will be skipped: %s", missing
+                    )
+                if not valid:
+                    logger.error("get_compound_metadata: no valid columns to select.")
+                    return pd.DataFrame()
+                select_cols = ", ".join(valid)
+
+            placeholders = ", ".join(["?"] * len(unique_keys))
+            df = conn.execute(
+                f"SELECT {select_cols} FROM compounds WHERE inchi_key IN ({placeholders})",
+                unique_keys,
+            ).df()
+
+    except Exception as exc:
+        logger.error("get_compound_metadata: query failed: %s", exc)
+        return pd.DataFrame()
+
+    logger.debug(
+        "get_compound_metadata: returned %d rows for %d requested InChIKeys.",
+        len(df), len(unique_keys),
+    )
+    return df
+
+
 def clone_atlas(
-    obj: "RTAlign" | "AutoID" | "ManualCuration",
+    obj: "RTAlign" | "AutoIdentification" | "AnalysisSummary",
     stage: str,
     ta: "TargetedAnalysis",
 ) -> "Atlas":
@@ -2146,23 +2308,26 @@ def clone_atlas(
         new_compound_mzrts[new_cmzrt_uid] = new_cmzrt
 
     # Create new atlas
+    from metatlas2.workflow_objects import AtlasCategory
+    _src_cat = source_atlas.atlas_category
+    _src_cat_val = _src_cat.value if isinstance(_src_cat, AtlasCategory) else str(_src_cat)
+    prov = get_provenance()
     new_atlas_uid = _generate_uid(
         atlas_cat,
-        decorator=f"{source_atlas.chromatography.lower()}-{source_atlas.polarity.lower()}-{source_atlas.analysis_type.lower()}-{source_atlas.analysis_name.lower()}"
+        decorator=f"{source_atlas.chromatography.lower()}-{source_atlas.polarity.lower()}-{_src_cat_val.lower()}-{source_atlas.atlas_name.lower()}-{prov['analyst'].lower()}-{prov['timestamp'][:10].replace('-', '')}"
     )
     new_atlas = copy.copy(source_atlas)
     new_atlas.atlas_uid = new_atlas_uid
     new_atlas.compound_mzrts = new_compound_mzrts
     new_atlas.source_atlas_uid = source_atlas.atlas_uid
-    new_atlas.atlas_name = source_atlas.atlas_name + atlas_name_suffix
     new_atlas.atlas_description = source_atlas.atlas_description + atlas_name_suffix
-    new_atlas.atlas_type = stage
-    new_atlas.created_by = get_provenance()["analyst"]
-    new_atlas.created_date = get_provenance()["timestamp"]
+    new_atlas.atlas_stage = stage
+    new_atlas.created_by = prov["analyst"]
+    new_atlas.created_date = prov["timestamp"]
     new_atlas.chromatography = ta.chromatography
     new_atlas.polarity = ta.polarity
-    new_atlas.analysis_name = ta.analysis_name
-    new_atlas.analysis_type = ta.analysis_type
+    new_atlas.atlas_name = ta.atlas_name
+    new_atlas.atlas_category = ta.atlas_category
     new_atlas.rt_alignment_number = obj.rt_alignment_number
     new_atlas.analysis_number = obj.analysis_number
 
@@ -2170,7 +2335,7 @@ def clone_atlas(
 
     return new_atlas
 
-def check_require_evaluated(obj: "ManualCuration"):
+def check_require_evaluated(obj: "AnalysisSummary"):
 
     for _, mc_row in obj.experimental_data.curation_df.iterrows():
         if mc_row is None:
@@ -2189,7 +2354,7 @@ def check_require_evaluated(obj: "ManualCuration"):
             )
 
 def update_compound_mzrt_for_atlas(
-    obj: "RTAlign" | "AutoID" | "ManualCuration",
+    obj: "RTAlign" | "AutoIdentification" | "AnalysisSummary",
     mz_rt_update_df: pd.DataFrame, 
     stage: str,
 ) -> "Atlas":
@@ -2232,7 +2397,7 @@ def update_compound_mzrt_for_atlas(
     save_atlas_to_db_and_disk(obj, atlas_to_update, stage)
 
 def save_atlas_to_db_and_disk(
-    obj: "RTAlign" | "AutoID" | "ManualCuration",
+    obj: "RTAlign" | "AutoIdentification" | "AnalysisSummary",
     atlas_to_update: "Atlas",
     stage: str,
 ) -> None:
@@ -2257,16 +2422,20 @@ def save_atlas_to_db_and_disk(
         obj=obj,
         stage=stage,
     )
-    logger.info("Saving curated Atlas data to TSV...")
+    logger.info("Saving curated Atlas data to CSV...")
     if stage == AtlasStage.RT_ALIGNED:
-        ldt.save_atlas_data_to_tsv(
+        ldt.save_atlas_data_to_csv(
             atlas_obj=atlas_to_update,
-            output_path=obj.paths['rt_alignment_results_dir']
+            output_path=obj.paths['rt_alignment_results_dir'],
+            project_name=obj.project_name,
+            main_db_path=obj.paths.get('main_db_path'),
         )
     else:
-        ldt.save_atlas_data_to_tsv(
+        ldt.save_atlas_data_to_csv(
             atlas_obj=atlas_to_update,
-            output_path=obj.paths['analysis_results_output_dir']
+            output_path=obj.paths['analysis_results_output_dir'],
+            project_name=obj.project_name,
+            main_db_path=obj.paths.get('main_db_path'),
         )
     return
 
@@ -2415,11 +2584,14 @@ def save_auto_identification_results_to_db(auto_id_obj):
     ms1_df = dataset.ms1_df
     ms2_df = dataset.ms2_df
 
+    from metatlas2.workflow_objects import AtlasCategory
+    _atlas_cat = auto_id_obj.auto_ided_atlas_obj.atlas_category
+    _cat_val = _atlas_cat.value if isinstance(_atlas_cat, AtlasCategory) else str(_atlas_cat)
     constants = {
         'rt_alignment_number': auto_id_obj.rt_alignment_number,
         'analysis_number': auto_id_obj.analysis_number,
-        'analysis_type': auto_id_obj.auto_ided_atlas_obj.analysis_type,
-        'analysis_name': auto_id_obj.auto_ided_atlas_obj.analysis_name,
+        'atlas_category': _cat_val,
+        'atlas_name': auto_id_obj.auto_ided_atlas_obj.atlas_name,
         'created_by': get_provenance()["analyst"],
         'created_date': get_provenance()["timestamp"],
     }
@@ -2441,14 +2613,14 @@ def save_auto_identification_results_to_db(auto_id_obj):
         "max_eic_rt", "max_eic_intensity", "isomers", "suggested_rt_min",
         "suggested_rt_max", "suggested_rt_peak", "rt_suggestion_confidence",
         "formula", "smiles", "inchi", "pubchem_cid", "mono_isotopic_molecular_weight", "iupac_name",
-        "rt_alignment_number", "analysis_number", "analysis_type", "analysis_name",
+        "rt_alignment_number", "analysis_number", "atlas_category", "atlas_name",
         "created_by", "created_date",
     ]
 
     ms1_data_columns = [
         "mz_rt_uid", "filename", "inchi_key", "adduct",
         "spec_rts", "spec_ints", "spec_mzs", "in_feature",
-        "rt_alignment_number", "analysis_number", "analysis_type", "analysis_name",
+        "rt_alignment_number", "analysis_number", "atlas_category", "atlas_name",
         "created_by", "created_date",
     ]
 
@@ -2456,7 +2628,7 @@ def save_auto_identification_results_to_db(auto_id_obj):
         "mz_rt_uid", "filename", "inchi_key", "adduct",
         "scan_rt", "frag_mzs", "frag_ints", "precursor_MZ", "precursor_intensity",
         "collision_energy", "in_feature", "hits",
-        "rt_alignment_number", "analysis_number", "analysis_type", "analysis_name",
+        "rt_alignment_number", "analysis_number", "atlas_category", "atlas_name",
         "created_by", "created_date",
     ]
 
@@ -2517,7 +2689,7 @@ def get_istd_curation_for_polarity(
                        rt_peak, rt_min, rt_max,
                        ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes
                 FROM manual_curation
-                WHERE analysis_type = 'ISTD'
+                WHERE atlas_category = 'ISTD'
                   AND polarity = ?
                   AND rt_alignment_number = ?
                   AND analysis_number = ?
@@ -2537,7 +2709,7 @@ def _get_opposite_polarity_curation(
 ) -> pd.DataFrame:
     """
     Retrieve manual_curation entries for the *opposite* polarity that have been
-    manually curated (passed_curation = 1), matching the same analysis_type,
+    manually curated (passed_curation = 1), matching the same atlas_category,
     rt_alignment_number, and analysis_number.
 
     Matching across polarities is done on (compound_name, inchi_key, atlas_rt_peak)
@@ -2551,9 +2723,11 @@ def _get_opposite_polarity_curation(
     project_db_path = obj.paths['project_db_path']
     rt_alignment_number = obj.rt_alignment_number
     analysis_number = obj.analysis_number
+    from metatlas2.workflow_objects import AtlasCategory
     chromatography = obj.ta.chromatography
-    analysis_type = obj.ta.analysis_type
-    analysis_name = obj.ta.analysis_name
+    _cat = obj.ta.atlas_category
+    atlas_category = _cat.value if isinstance(_cat, AtlasCategory) else str(_cat)
+    atlas_name = obj.ta.atlas_name
 
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
@@ -2565,11 +2739,11 @@ def _get_opposite_polarity_curation(
                 WHERE rt_alignment_number = ?
                   AND analysis_number = ?
                   AND chromatography = ?
-                  AND analysis_type = ?
-                  AND analysis_name = ?
+                  AND atlas_category = ?
+                  AND atlas_name = ?
                   AND polarity = ?
                   AND passed_curation = 1
-            """, [rt_alignment_number, analysis_number, chromatography, analysis_type, analysis_name, opposite_polarity]).df()
+            """, [rt_alignment_number, analysis_number, chromatography, atlas_category, atlas_name, opposite_polarity]).df()
     except Exception as e:
         logger.warning(f"Could not retrieve opposite-polarity curation entries: {e}")
         df = pd.DataFrame()
@@ -2577,13 +2751,13 @@ def _get_opposite_polarity_curation(
         logger.info(
             f"No curated {opposite_polarity}-polarity entries found for "
             f"RTA{rt_alignment_number} and TGA{analysis_number} with attributes "
-            f"{chromatography}-{opposite_polarity}-{analysis_type}-{analysis_name}."
+            f"{chromatography}-{opposite_polarity}-{atlas_category}-{atlas_name}."
         )
     else:
         logger.info(
             f"Found {len(df)} curated {opposite_polarity}-polarity entries for "
             f"RTA{rt_alignment_number} and TGA{analysis_number} with attributes "
-            f"{chromatography}-{opposite_polarity}-{analysis_type}-{analysis_name}."
+            f"{chromatography}-{opposite_polarity}-{atlas_category}-{atlas_name}."
         )
     return df
 
@@ -2607,8 +2781,7 @@ def _apply_cross_polarity_curation(
     if opposite_polarity_df.empty:
         return 0
 
-    # Build lookup keyed on (compound_name, inchi_key) ######, atlas_rt_peak).
-    # Adducts differ across polarities so they are excluded from the key.
+    # Build lookup keyed on (compound_name, inchi_key), not adduct or mz_rt_uid
     opp_lookup = {}
     for _, row in opposite_polarity_df.iterrows():
         name = row.get("compound_name", row.get("label"))
@@ -2659,33 +2832,35 @@ def _apply_cross_polarity_curation(
 def _transfer_istd_curation(
     obj: "AnalysisGUI"
 ):
+    from metatlas2.workflow_objects import AtlasCategory
+    # Only applies to REF-category atlases
+    obj_cat = obj.ta.atlas_category if hasattr(obj.ta, 'atlas_category') else None
+    if obj_cat != AtlasCategory.REF:
+        return
 
-    if obj.analysis_type != "EMA":
-        return        
-
-    apply_istd_override = obj.ta.params.get("apply_istd_curation_to_ema", True)
-    if obj.override_parameters.get("apply_istd_curation_to_ema", None) is not None:
-        apply_istd_override = obj.override_parameters.get("apply_istd_curation_to_ema", False)
+    apply_istd_override = obj.ta.params.get("apply_istd_curation_to_ref", True)
+    if obj.override_parameters.get("apply_istd_curation_to_ref", None) is not None:
+        apply_istd_override = obj.override_parameters.get("apply_istd_curation_to_ref", False)
 
     if apply_istd_override:
         logger.info("Applying ISTD transfer...")
     else:
         return
 
-    logger.info("Finding ISTD curation entries to transfer to EMA...")
+    logger.info("Finding ISTD curation entries to transfer to REF atlas...")
     with get_db_connection(obj.paths["project_db_path"], read_only=True) as conn:
         istd_df = conn.execute("""
-            SELECT mz_rt_uid, inchi_key, adduct, rt_peak, rt_min, rt_max, 
+            SELECT mz_rt_uid, inchi_key, adduct, rt_peak, rt_min, rt_max,
                    passed_curation, ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes
-            FROM manual_curation 
-            WHERE analysis_type = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND passed_curation = 1
+            FROM manual_curation
+            WHERE atlas_category = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND passed_curation = 1
         """, [obj.polarity, obj.rt_alignment_number, obj.analysis_number]).df()
 
-    if istd_df.empty: 
-        logger.info("No ISTD curation entries found to transfer to EMA.")
+    if istd_df.empty:
+        logger.info("No ISTD curation entries found to transfer to REF atlas.")
         return
 
-    logger.info(f"Merging ISTD curation with EMA for {len(istd_df)} compounds...")
+    logger.info(f"Merging ISTD curation with REF atlas for {len(istd_df)} compounds...")
     merged = obj.experimental_data.curation_df.merge(istd_df, on='mz_rt_uid', how='left', suffixes=('', '_istd'))
     
     for col in ['rt_peak', 'rt_min', 'rt_max', 'ms1_notes', 'ms2_notes', 'analyst_notes','identification_notes', 'other_notes']:
@@ -2717,8 +2892,8 @@ def validate_override_parameters(override_parameters):
         raise ValueError("override_parameters['ms2_min_matching_frags'] must be an integer or None")
     if not isinstance(override_parameters.get("remove_unided_compounds"), (type(None), bool)):
         raise ValueError("override_parameters['remove_unided_compounds'] must be a boolean or None")
-    if not isinstance(override_parameters.get("apply_istd_curation_to_ema"), (type(None), bool)):
-        raise ValueError("override_parameters['apply_istd_curation_to_ema'] must be a boolean or None")
+    if not isinstance(override_parameters.get("apply_istd_curation_to_ref"), (type(None), bool)):
+        raise ValueError("override_parameters['apply_istd_curation_to_ref'] must be a boolean or None")
     if not isinstance(override_parameters.get("apply_cross_polarity_curation"), (type(None), bool)):
         raise ValueError("override_parameters['apply_cross_polarity_curation'] must be a boolean or None")
     if not isinstance(override_parameters.get("remove_flagged_compounds"), (type(None), bool)):
@@ -2759,7 +2934,7 @@ def get_manual_curation_entries(
     remove_unidentified_compounds: bool = True,
     remove_flagged_compounds: bool = True,
     atlas_compounds: pd.DataFrame = None,
-    analysis_type: str = None,
+    atlas_category: str = None,
 ) -> pd.DataFrame:
     """
     Get all manual_curation entries for the given RT alignment and analysis number.
@@ -2768,8 +2943,8 @@ def get_manual_curation_entries(
     provided the query is restricted to those pairs and the result is returned in
     atlas order.  Otherwise rows are ordered by ascending RT peak with unlabeled
     compounds placed after their non-unlabeled counterparts.
-    
-    If ``analysis_type`` is provided, only records matching that analysis_type are returned.
+
+    If ``atlas_category`` is provided, only records matching that atlas_category are returned.
     """
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
@@ -2779,9 +2954,9 @@ def get_manual_curation_entries(
                 WHERE rt_alignment_number = ? AND analysis_number = ?
             """
             params = [rt_alignment_number, analysis_number]
-            if analysis_type is not None:
-                query += " AND analysis_type = ?"
-                params.append(analysis_type)
+            if atlas_category is not None:
+                query += " AND atlas_category = ?"
+                params.append(atlas_category)
             if remove_unidentified_compounds:
                 query += " AND passed_autoid = TRUE"
             if remove_flagged_compounds:
@@ -2829,14 +3004,14 @@ def get_ms1_data_for_compound(
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
-    analysis_type: str = None,
+    atlas_category: str = None,
 ) -> pd.DataFrame:
     """
     Get all MS1 data for a compound (inchi_key+adduct) for plotting EIC.
     If inchi_key or adduct is None, do not filter on that field.
     If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
     only rows matching those pairs are returned.
-    If analysis_type is provided, only rows matching that analysis_type are returned.
+    If atlas_category is provided, only rows matching that atlas_category are returned.
     """
     query = """
         SELECT *
@@ -2851,9 +3026,9 @@ def get_ms1_data_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
-        if analysis_type is not None:
-            query += " AND analysis_type = ?"
-            params.append(analysis_type)
+        if atlas_category is not None:
+            query += " AND atlas_category = ?"
+            params.append(atlas_category)
         if atlas_compounds is not None and not atlas_compounds.empty:
             mz_rt_uids = list(atlas_compounds["mz_rt_uid"].drop_duplicates())
             placeholders = ", ".join(["?"] * len(mz_rt_uids))
@@ -2875,14 +3050,14 @@ def get_ms2_data_for_compound(
     rt_alignment_number: int = None,
     analysis_number: int = None,
     atlas_compounds: pd.DataFrame = None,
-    analysis_type: str = None,
+    atlas_category: str = None,
 ) -> pd.DataFrame:
     """
     Get all MS2 data for a compound (inchi_key+adduct) for plotting query spectrum if no hits.
     If inchi_key or adduct is None, do not filter on that field.
     If atlas_compounds (DataFrame with 'inchi_key' and 'adduct' cols) is provided,
     only rows matching those pairs are returned.
-    If analysis_type is provided, only rows matching that analysis_type are returned.
+    If atlas_category is provided, only rows matching that atlas_category are returned.
     """
     query = """
         SELECT *
@@ -2897,9 +3072,9 @@ def get_ms2_data_for_compound(
         if analysis_number is not None:
             query += " AND analysis_number = ?"
             params.append(analysis_number)
-        if analysis_type is not None:
-            query += " AND analysis_type = ?"
-            params.append(analysis_type)
+        if atlas_category is not None:
+            query += " AND atlas_category = ?"
+            params.append(atlas_category)
         if atlas_compounds is not None and not atlas_compounds.empty:
             mz_rt_uids = list(atlas_compounds["mz_rt_uid"].drop_duplicates())
             placeholders = ", ".join(["?"] * len(mz_rt_uids))
@@ -2989,15 +3164,11 @@ def _get_max_frags(hits_data):
 def _update_infeature_tag(
     obj: "AnalysisSummary"
 ):
-    # Create RT bounds lookup for efficient access — use vectorised Series.map
-    # rather than iterrows so we don't iterate the curation DataFrame in Python.
+
     curation_df = obj.experimental_data.curation_df
     uid_to_rt_min = curation_df.set_index('mz_rt_uid')['rt_min']
     uid_to_rt_max = curation_df.set_index('mz_rt_uid')['rt_max']
 
-    # Update in_feature for MS1 data.
-    # Previous approach: explode → long frame → groupby(list) — O(N_rows × N_rts) RAM.
-    # New approach: iterate rows with numpy arrays — O(max_rts_per_row) extra RAM.
     logger.info("Updating in_feature for MS1 data based on manual curation RT bounds...")
     ms1_df = obj.experimental_data.ms1_df
     if not ms1_df.empty:
@@ -3011,12 +3182,11 @@ def _update_infeature_tag(
             )
         rt_mins = rt_min_map.to_numpy(dtype=np.float64)
         rt_maxs = rt_max_map.to_numpy(dtype=np.float64)
-        # Compute new in_feature lists row-by-row using numpy — no explode needed.
+        # Compute new in_feature lists row-by-row
         new_in_feature = [
             (np.asarray(rts, dtype=np.float64) >= lo) & (np.asarray(rts, dtype=np.float64) <= hi)
             for rts, lo, hi in zip(ms1_df['spec_rts'], rt_mins, rt_maxs)
         ]
-        # Assign directly — no full-frame copy required.
         obj.experimental_data.ms1_df = ms1_df.assign(in_feature=new_in_feature)
 
     # Update in_feature for MS2 data
@@ -3059,8 +3229,6 @@ def _save_updated_infeature_tag_to_db(
             # Delete old entries and insert updated ones for MS2
             if not obj.experimental_data.ms2_df.empty:
                 logger.info("  Saving MS2 data entries to database...")
-                # Re-serialize hits for database storage — use assign to avoid a
-                # full deep copy of all list-valued columns.
                 ms2_df_to_save = obj.experimental_data.ms2_df.assign(
                     hits=obj.experimental_data.ms2_df["hits"].apply(_serialize_hits_value)
                 )
@@ -3407,6 +3575,22 @@ def _compute_row_metrics(
     return peak_height, peak_area, rt_peak, rt_centroid, mz_peak, mz_centroid
 
 
+def _file_group_from_filename(filename: str) -> str:
+    """Return the file-group label for a single LCMS filename.
+    """
+    try:
+        fields = fpf.parse_file_name(
+            # parse_file_name expects a bare filename; strip any directory prefix.
+            str(filename).replace("\\", "/").rsplit("/", 1)[-1]
+        )
+        file_type = lrt._classify_file_type(fields)
+        if file_type == "experimental":
+            return fields.get("sample_name", "")
+        return file_type.upper()
+    except Exception:
+        return ""
+
+
 def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     """Compute per-compound, per-file summary metrics from the wide-format ms1_df.
 
@@ -3456,7 +3640,7 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
             rt_centroids[i], mz_peaks[i], mz_centroids[i],
         ) = _compute_row_metrics(spec_rts_col[i], spec_ints_col[i], spec_mzs_col[i])
         try:
-            file_groups[i] = fpf.get_file_parts(filenames[i], "sample_name")
+            file_groups[i] = _file_group_from_filename(filenames[i])
         except Exception:
             file_groups[i] = ""
 
@@ -3541,7 +3725,7 @@ def _transfer_cross_polarity_curation(
     if apply_cross_polarity:
         atlas_obj = obj.auto_ided_atlas_obj
         logger.info(
-            f"Checking for curated opposite-polarity {atlas_obj.analysis_type} entries "
+            f"Checking for curated opposite-polarity {getattr(atlas_obj.atlas_category, 'value', atlas_obj.atlas_category)} entries "
             f"to pre-populate RT bounds..."
         )
         opp_polarity_df = _get_opposite_polarity_curation(
@@ -3611,9 +3795,6 @@ def _load_data_from_db(
             base_params,
         ).df()
 
-    # Coerce DuckDB REAL[] array columns to plain Python lists on read-back.
-    # Mutate the columns directly — no full-frame copy needed because DuckDB
-    # already returned fresh DataFrames from .df().
     if not ms2_df.empty and "hits" in ms2_df.columns:
         ms2_df["hits"] = ms2_df["hits"].apply(_deserialize_hits_value)
 
@@ -3641,3 +3822,74 @@ def _load_data_from_db(
     obj.experimental_data.ms2_df = ms2_df
 
     return atlas_uids
+
+
+def build_tic_df(ms1_df: "pd.DataFrame") -> "pd.DataFrame":
+    """Build a per-file Total Ion Chromatogram (TIC) DataFrame from MS1 data.
+
+    The TIC for each file is computed by summing all intensities across every
+    ``mz_rt_uid`` at each unique RT point.  Because different compounds may
+    have been extracted at slightly different RT grids, the function merges all
+    RT/intensity pairs for a file, sorts by RT, and sums intensities that share
+    the same RT value.
+
+    Parameters
+    ----------
+    ms1_df:
+        The ``experimental_data.ms1_df`` (or ``ms1_df_full_range``) DataFrame
+        with columns ``filename``, ``spec_rts`` (list), ``spec_ints`` (list).
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per unique filename with columns:
+        ``filename``, ``tic_rts`` (list[float]), ``tic_ints`` (list[float]).
+        Rows are sorted by filename.  Returns an empty DataFrame when the
+        input is empty or lacks the required columns.
+    """
+    if ms1_df is None or ms1_df.empty:
+        return pd.DataFrame(columns=["filename", "tic_rts", "tic_ints"])
+
+    required = {"filename", "spec_rts", "spec_ints"}
+    if not required.issubset(ms1_df.columns):
+        logger.warning(
+            "build_tic_df: ms1_df is missing required columns %s — returning empty TIC.",
+            required - set(ms1_df.columns),
+        )
+        return pd.DataFrame(columns=["filename", "tic_rts", "tic_ints"])
+
+    records: list[dict] = []
+    for filename, grp in ms1_df.groupby("filename", sort=True):
+        # Collect all (rt, intensity) pairs across all compounds for this file
+        rt_list: list[float] = []
+        int_list: list[float] = []
+        for _, row in grp.iterrows():
+            rts  = as_list(row.get("spec_rts",  []))
+            ints = as_list(row.get("spec_ints", []))
+            if rts and ints and len(rts) == len(ints):
+                rt_list.extend(float(v) for v in rts  if v is not None and not np.isnan(float(v)))
+                int_list.extend(float(v) for v in ints if v is not None and not np.isnan(float(v)))
+
+        if not rt_list:
+            records.append({"filename": filename, "tic_rts": [], "tic_ints": []})
+            continue
+
+        # Sort by RT and sum intensities at identical RT values
+        rt_arr  = np.array(rt_list,  dtype=np.float64)
+        int_arr = np.array(int_list, dtype=np.float64)
+        order   = np.argsort(rt_arr, kind="stable")
+        rt_arr  = rt_arr[order]
+        int_arr = int_arr[order]
+
+        # Group by unique RT (exact match) and sum
+        unique_rts, inverse = np.unique(rt_arr, return_inverse=True)
+        summed_ints = np.zeros(len(unique_rts), dtype=np.float64)
+        np.add.at(summed_ints, inverse, int_arr)
+
+        records.append({
+            "filename": filename,
+            "tic_rts":  unique_rts.tolist(),
+            "tic_ints": summed_ints.tolist(),
+        })
+
+    return pd.DataFrame(records, columns=["filename", "tic_rts", "tic_ints"])

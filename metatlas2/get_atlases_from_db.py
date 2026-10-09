@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import argparse
-import sys
 import pandas as pd
 import logging
 
@@ -18,9 +16,7 @@ _QUERY_DISPLAY_COLUMNS = [
     "atlas_name",
     "chromatography",
     "polarity",
-    "analysis_type",
-    "analysis_name",
-    "atlas_type",
+    "atlas_category",
     "created_by",
     "created_date",
 ]
@@ -88,8 +84,8 @@ def query_atlases(
     database_path: str | None = None,
     chromatography: str | None = None,
     polarity: str | None = None,
-    analysis_type: str | None = None,
-    analysis_name: str | None = None,
+    atlas_category: str | None = None,
+    atlas_name: str | None = None,
     created_by: str | None = None,
 ) -> None:
     """Print atlas metadata rows matching the supplied filter criteria."""
@@ -102,8 +98,8 @@ def query_atlases(
             database_path=db,
             chromatography=chromatography,
             polarity=polarity,
-            analysis_type=analysis_type,
-            analysis_name=analysis_name,
+            atlas_category=atlas_category,
+            atlas_name=atlas_name,
             created_by=created_by,
         )
 
@@ -126,116 +122,3 @@ def query_atlases(
 
         print(f"\n{len(df)} atlas(es) found.")
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="get_atlases_from_db",
-        description=(
-            "Interact with atlas records in the metatlas2 database.\n\n"
-            "Use the 'query' sub-command to discover atlas UIDs by filtering on\n"
-            "metadata attributes, then use the 'fetch' sub-command to export the\n"
-            "full compound table for one or more atlases to CSV."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument(
-        "--database_path",
-        type=str,
-        default=None,
-        help="Path to the database file. Defaults to main_db_path from METATLAS_DATA_DIR.",
-    )
-
-    subparsers = parser.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")
-    subparsers.required = True
-
-    fetch_parser = subparsers.add_parser(
-        "fetch",
-        parents=[common],
-        help="Fetch atlas(es) by UID and fetch compound tables to CSV.",
-        description="Fetch one or more atlases by UID and write each compound table to a CSV file.",
-    )
-    fetch_parser.add_argument(
-        "--atlas_uids",
-        required=True,
-        type=str,
-        help="Comma-separated atlas UID list (e.g. uid1,uid2,uid3).",
-    )
-    fetch_parser.add_argument(
-        "--output_path",
-        type=str,
-        default=None,
-        help=(
-            "Optional output location. Defaults to $HOME/<uid>.csv for each UID. "
-            "Accepts a directory path, a single .csv path (single UID only), or "
-            "comma-separated output file paths matching the number of UIDs."
-        ),
-    )
-
-    query_parser = subparsers.add_parser(
-        "query",
-        parents=[common],
-        help="List atlas metadata matching filter criteria.",
-        description=(
-            "Filter the atlases table by one or more metadata attributes and print\n"
-            "a summary table.  All filters are optional; omitting all filters returns\n"
-            "every atlas in the database.  Matching is case-insensitive and partial\n"
-            "(substring match), so '--chromatography C18' matches 'HILIC-C18' etc."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    query_parser.add_argument(
-        "--chromatography",
-        type=str,
-        default=None,
-        help="Filter by chromatography method (partial, case-insensitive).",
-    )
-    query_parser.add_argument(
-        "--polarity",
-        type=str,
-        default=None,
-        help="Filter by polarity (partial, case-insensitive).",
-    )
-    query_parser.add_argument(
-        "--analysis_type",
-        type=str,
-        default=None,
-        help="Filter by analysis type (partial, case-insensitive).",
-    )
-    query_parser.add_argument(
-        "--analysis_name",
-        type=str,
-        default=None,
-        help="Filter by analysis name (partial, case-insensitive).",
-    )
-    query_parser.add_argument(
-        "--created_by",
-        type=str,
-        default=None,
-        help="Filter by creator username (partial, case-insensitive).",
-    )
-
-    return parser
-
-if __name__ == "__main__":
-    parser = _build_parser()
-    args = parser.parse_args()
-
-    if args.subcommand == "fetch":
-        get_atlases(
-            atlas_uids=_parse_csv_values(args.atlas_uids),
-            output_path=args.output_path,
-            database_path=args.database_path,
-        )
-    elif args.subcommand == "query":
-        query_atlases(
-            database_path=args.database_path,
-            chromatography=args.chromatography,
-            polarity=args.polarity,
-            analysis_type=args.analysis_type,
-            analysis_name=args.analysis_name,
-            created_by=args.created_by,
-        )
-    else:
-        parser.print_help()
-        sys.exit(1)

@@ -68,17 +68,15 @@ _PARTITION_SCHEMA = pa.schema([
     ("project_name", pa.string()),
     ("chromatography", pa.string()),
     ("polarity", pa.string()),
-    ("analysis_type", pa.string()),
-    ("analysis_name", pa.string()),
+    ("atlas_name", pa.string()),
 ])
 
 _PARTITIONING = ds.partitioning(_PARTITION_SCHEMA, flavor="hive")
 
 _PARTITION_COLS_DESC = [
     {"column_name": "chromatography", "dtype": "string"},
-    {"column_name": "polarity",       "dtype": "string"},
-    {"column_name": "analysis_type",  "dtype": "string"},
-    {"column_name": "analysis_name",  "dtype": "string"},
+    {"column_name": "polarity", "dtype": "string"},
+    {"column_name": "atlas_name", "dtype": "string"},
 ]
 
 _GRAIN_SUBDIR = {
@@ -132,8 +130,7 @@ def _with_partition_columns(table: pa.Table, summary_obj: "AnalysisSummary") -> 
         "project_name": summary_obj.project_name,
         "chromatography": summary_obj.chromatography,
         "polarity": summary_obj.polarity,
-        "analysis_type": summary_obj.analysis_type,
-        "analysis_name": summary_obj.analysis_name,
+        "atlas_name": summary_obj.ta.atlas_name if summary_obj.ta else '',
     }
     collisions = [c for c in partition_values if c in table.column_names]
     if collisions:
@@ -147,13 +144,13 @@ def _with_partition_columns(table: pa.Table, summary_obj: "AnalysisSummary") -> 
 
 
 def _partition_leaf_dir(root: Path, summary_obj: "AnalysisSummary") -> Path:
+    _aname = summary_obj.ta.atlas_name if summary_obj.ta else ''
     return (
         root
         / f"project_name={summary_obj.project_name}"
         / f"chromatography={summary_obj.chromatography}"
         / f"polarity={summary_obj.polarity}"
-        / f"analysis_type={summary_obj.analysis_type}"
-        / f"analysis_name={summary_obj.analysis_name}"
+        / f"atlas_name={_aname}"
     )
 
 
@@ -404,19 +401,32 @@ def _build_compound_per_file_table(
 
     quality_df = pd.DataFrame(quality_rows)
 
-    # Load control_filter from peak_height_filtered.csv if available
+    # Load control_filter from peak_height_filter_summary.tsv (keyed by compound_id).
+    # The summary TSV is written by make_peak_height_filtered_csv alongside the filtered CSV.
     out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
     ctrl_filter_map: dict[str, str] = {}
-    filtered_csv = out_dir / "peak_height_filtered.csv"
-    if filtered_csv.exists():
+    filter_summary_tsv = out_dir / "peak_height_filter_summary.tsv"
+    if filter_summary_tsv.exists():
         try:
-            fdf = pd.read_csv(filtered_csv, usecols=lambda c: c in {"inchi_key", "control_filter"})
-            if "inchi_key" in fdf.columns and "control_filter" in fdf.columns:
-                ctrl_filter_map = dict(zip(fdf["inchi_key"], fdf["control_filter"]))
+            fdf = pd.read_csv(filter_summary_tsv, sep="\t", usecols=lambda c: c in {"compound_id", "extraction_control_filter"})
+            if "compound_id" in fdf.columns and "extraction_control_filter" in fdf.columns:
+                ctrl_filter_map = dict(zip(fdf["compound_id"], fdf["extraction_control_filter"]))
         except Exception as exc:
-            logger.warning(f"Could not read control_filter from {filtered_csv}: {exc}")
+            logger.warning(f"Could not read control_filter from {filter_summary_tsv}: {exc}")
 
-    quality_df["control_filter"] = quality_df["inchi_key"].map(ctrl_filter_map).fillna("")
+    # Build compound_id for each row in quality_df using the same safe-stem logic as make_data_sheets.
+    quality_df["_compound_id"] = quality_df.apply(
+        lambda r: asm._make_compound_safe_stem(
+            int(r["compound_index"]),
+            r["compound_name"],
+            r["adduct"],
+            r["atlas_mz"] if not (isinstance(r["atlas_mz"], float) and np.isnan(r["atlas_mz"])) else None,
+            r["atlas_rt_peak"] if not (isinstance(r["atlas_rt_peak"], float) and np.isnan(r["atlas_rt_peak"])) else None,
+        ),
+        axis=1,
+    )
+    quality_df["control_filter"] = quality_df["_compound_id"].map(ctrl_filter_map).fillna("")
+    quality_df.drop(columns=["_compound_id"], inplace=True)
 
     # Merge per_file_df with quality metadata
     merged = per_file_df.merge(quality_df, on="mz_rt_uid", how="left")
@@ -536,7 +546,7 @@ def _build_compound_lfc_table(
 ) -> pa.Table:
     """Build a PyArrow Table with one row per compound x condition-pair (long format).
 
-    Reads ``log_fold_changes.csv`` (produced by :func:`make_log_fold_changes_csv`)
+    Reads ``group_mean_log_fold_changes.csv`` (produced by :func:`make_log_fold_changes_csv`)
     and melts the wide pairwise LFC columns into long format so that
     ``condition_1`` and ``condition_2`` are filterable data columns.
 
@@ -551,11 +561,11 @@ def _build_compound_lfc_table(
         source CSV does not exist.
     """
     out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
-    lfc_csv = out_dir / "log_fold_changes.csv"
+    lfc_csv = out_dir / "group_mean_log_fold_changes.csv"
 
     if not lfc_csv.exists():
         logger.warning(
-            "log_fold_changes.csv not found at %s — compound_lfc table will be empty. "
+            "group_mean_log_fold_changes.csv not found at %s — compound_lfc table will be empty. "
             "Run make_log_fold_changes_csv first.",
             lfc_csv,
         )
@@ -563,9 +573,8 @@ def _build_compound_lfc_table(
 
     lfc_df = pd.read_csv(lfc_csv)
 
-    # Identify identity columns vs LFC columns
     _ID_COLS = {
-        "compound_index", "mz_rt_uid", "inchi_key", "compound_name", "adduct",
+        "compound_id", "compound_index", "mz_rt_uid", "inchi_key", "compound_name", "adduct",
         "control_filter", "chosen_adduct", "chosen_polarity",
     }
     id_cols  = [c for c in lfc_df.columns if c in _ID_COLS]
@@ -602,12 +611,33 @@ def _build_compound_lfc_table(
             "identification_notes", "analyst_notes", "other_notes", "msi_level",
         ]
         mc_slim_cols = [c for c in mc_slim_cols if c in mc.columns]
-        mc_slim = mc.reset_index(drop=True)[mc_slim_cols].drop_duplicates(subset=[c for c in ["mz_rt_uid", "inchi_key", "adduct"] if c in mc_slim_cols])
+        mc_reset = mc.reset_index(drop=True)
+        mc_slim = mc_reset[mc_slim_cols].drop_duplicates(
+            subset=[c for c in ["mz_rt_uid", "inchi_key", "adduct"] if c in mc_slim_cols]
+        )
 
-        if "mz_rt_uid" in long_df.columns and "mz_rt_uid" in mc_slim.columns:
+        if "compound_id" in long_df.columns and "mz_rt_uid" in mc_slim.columns:
+            cid_to_uid: dict[str, str] = {}
+            for pos, (_, mc_row) in enumerate(mc_reset.iterrows()):
+                cid = asm._make_compound_safe_stem(
+                    pos + 1,
+                    mc_row.get("compound_name", ""),
+                    mc_row.get("adduct", ""),
+                    mc_row.get("atlas_mz") if not (isinstance(mc_row.get("atlas_mz"), float) and np.isnan(mc_row.get("atlas_mz"))) else None,
+                    mc_row.get("atlas_rt_peak") if not (isinstance(mc_row.get("atlas_rt_peak"), float) and np.isnan(mc_row.get("atlas_rt_peak"))) else None,
+                )
+                cid_to_uid[cid] = str(mc_row.get("mz_rt_uid", ""))
+            long_df["mz_rt_uid"] = long_df["compound_id"].map(cid_to_uid)
             long_df = long_df.merge(mc_slim, on="mz_rt_uid", how="left", suffixes=("", "_mc"))
-        else:
+        elif "mz_rt_uid" in long_df.columns and "mz_rt_uid" in mc_slim.columns:
+            long_df = long_df.merge(mc_slim, on="mz_rt_uid", how="left", suffixes=("", "_mc"))
+        elif "inchi_key" in long_df.columns and "inchi_key" in mc_slim.columns:
             long_df = long_df.merge(mc_slim, on="inchi_key", how="left", suffixes=("", "_mc"))
+        else:
+            logger.warning(
+                "compound_lfc: could not find a join key (compound_id, mz_rt_uid, or inchi_key) "
+                "in both long_df and mc_slim — skipping curation metadata join."
+            )
 
         # Fill core identity columns from curation metadata when missing.
         for col in ("compound_name", "adduct"):
@@ -616,13 +646,25 @@ def _build_compound_lfc_table(
                 long_df[col] = long_df[col].where(long_df[col].notna() & (long_df[col].astype(str) != ""), long_df[mc_col])
                 long_df.drop(columns=[mc_col], inplace=True, errors="ignore")
 
+        def _numeric_col(df, col):
+            """Return a numeric Series for *col*, or an all-NaN Series when the column is absent."""
+            if col in df.columns:
+                return pd.to_numeric(df[col], errors="coerce")
+            return pd.Series(np.nan, index=df.index, dtype="float64")
+
+        def _str_col(df, col, default=""):
+            """Return a string Series for *col*, or a Series of *default* when the column is absent."""
+            if col in df.columns:
+                return df[col]
+            return pd.Series(default, index=df.index, dtype="object")
+
         # Best-MS2 payload and errors.
         best_ms2_df = _build_best_ms2_summary_df(summary_obj)
         if not best_ms2_df.empty and "mz_rt_uid" in long_df.columns:
             long_df = long_df.merge(best_ms2_df, on="mz_rt_uid", how="left")
 
-        atlas_mz_num = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
-        best_ms2_mz_num = pd.to_numeric(long_df.get("best_ms2_mz"), errors="coerce")
+        atlas_mz_num = _numeric_col(long_df, "atlas_mz")
+        best_ms2_mz_num = _numeric_col(long_df, "best_ms2_mz")
         valid_mz = atlas_mz_num.notna() & (atlas_mz_num != 0) & best_ms2_mz_num.notna()
         long_df["best_ms2_mz_ppm_error"] = np.where(
             valid_mz,
@@ -634,18 +676,18 @@ def _build_compound_lfc_table(
             np.abs(best_ms2_mz_num - atlas_mz_num),
             np.nan,
         )
-        long_df["best_ms2_rt_error"] = pd.to_numeric(long_df.get("best_ms2_rt"), errors="coerce") - pd.to_numeric(long_df.get("atlas_rt_peak"), errors="coerce")
+        long_df["best_ms2_rt_error"] = _numeric_col(long_df, "best_ms2_rt") - _numeric_col(long_df, "atlas_rt_peak")
 
-        long_df["msms_file"] = long_df.get("best_ms2_file", "")
-        long_df["msms_rt"] = pd.to_numeric(long_df.get("best_ms2_rt"), errors="coerce")
-        long_df["msms_score"] = pd.to_numeric(long_df.get("best_ms2_score"), errors="coerce")
-        long_df["msms_numberofions"] = long_df.get("best_ms2_num_ions", "")
-        long_df["msms_matchingions"] = long_df.get("best_ms2_matching_ions", "")
-        long_df["mz_theoretical"] = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
+        long_df["msms_file"] = _str_col(long_df, "best_ms2_file")
+        long_df["msms_rt"] = _numeric_col(long_df, "best_ms2_rt")
+        long_df["msms_score"] = _numeric_col(long_df, "best_ms2_score")
+        long_df["msms_numberofions"] = _str_col(long_df, "best_ms2_num_ions")
+        long_df["msms_matchingions"] = _str_col(long_df, "best_ms2_matching_ions")
+        long_df["mz_theoretical"] = _numeric_col(long_df, "atlas_mz")
 
         # MS1-based mz_measured / rt_error — consistent with compound_per_file table
-        lfc_top3_mz = pd.to_numeric(long_df.get("top3_mz_centroid_avg"), errors="coerce")
-        lfc_atlas_mz = pd.to_numeric(long_df.get("atlas_mz"), errors="coerce")
+        lfc_top3_mz = _numeric_col(long_df, "top3_mz_centroid_avg")
+        lfc_atlas_mz = _numeric_col(long_df, "atlas_mz")
         long_df["mz_measured"] = lfc_top3_mz
         lfc_valid_mz = lfc_top3_mz.notna() & lfc_atlas_mz.notna() & (lfc_atlas_mz != 0)
         long_df["mz_error"] = np.where(
@@ -658,11 +700,6 @@ def _build_compound_lfc_table(
             np.abs(lfc_top3_mz - lfc_atlas_mz) / lfc_atlas_mz * 1e6,
             np.nan,
         )
-
-        def _numeric_col(df, col):
-            if col in df.columns:
-                return pd.to_numeric(df[col], errors="coerce")
-            return pd.Series(np.nan, index=df.index, dtype="float64")
 
         lfc_top3_rt = _numeric_col(long_df, "top3_rt")
         lfc_atlas_rt = _numeric_col(long_df, "atlas_rt_peak")
