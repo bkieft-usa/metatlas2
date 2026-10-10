@@ -1,0 +1,8 @@
+COMPOUNDS:
+    HILICZ:
+      POS:
+        PATHS:
+          - /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/HILICz150-NLDMrun_ExometabTimeSeries_20220204_QE119_TPL_NLDMv9_POS_MdR.tsv
+      NEG:
+        PATHS:
+         - /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/HILICz150-NLDMrun_ExometabTimeSeries_20220204_QE119_TPL_NLDMv9_NEG_MdR.tsv

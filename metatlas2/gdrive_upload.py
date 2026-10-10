@@ -220,7 +220,7 @@ def copy_outputs_to_google_drive(
         rt_results_dir = Path(obj.paths.get("rt_alignment_results_dir"))
         if rt_results_dir.is_dir():
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            rt_dest = base_dest / f"rt_alignment_results_{timestamp}"
+            rt_dest = base_dest / f"RT_Alignment_{timestamp}"
             logger.info(f"Uploading RT alignment results: {rt_results_dir} -> {drive}:{rt_dest}")
             _rclone_copy(rt_results_dir, drive, rt_dest, overwrite=overwrite)
         else:
@@ -229,7 +229,7 @@ def copy_outputs_to_google_drive(
         tga_results_dir = Path(obj.paths.get("analysis_output_dir"))
         if tga_results_dir.is_dir():
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            tga_dest = base_dest / f"targeted_analysis_results_{timestamp}"
+            tga_dest = base_dest / f"Targeted_Analysis_{timestamp}"
             logger.info(f"Uploading targeted analysis results: {tga_results_dir} -> {drive}:{tga_dest}")
             _rclone_copy(tga_results_dir, drive, tga_dest, overwrite=overwrite)
             url = _drive_path_to_url(drive, tga_dest)

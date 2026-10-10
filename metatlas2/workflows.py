@@ -120,14 +120,14 @@ def run_rt_alignment(
 
         if not ta.params.get('apply_alignment', True):
             logger.info(
-                f"apply_alignment=false for {ta.chromatography}-{ta.polarity}-{ta.analysis_type}-{ta.analysis_name}. "
+                f"apply_alignment=false for {ta.chromatography}-{ta.polarity}-{ta.atlas_category.value}-{ta.atlas_name}. "
                 f"Registering reference atlas {ta.atlas_uid} as RT_ALIGNED without applying model..."
             )
             rt_align_obj.aligned_atlas_obj = rt_align_obj.unaligned_atlas_obj
             rt_align_obj.aligned_atlas_obj.chromatography = ta.chromatography
             rt_align_obj.aligned_atlas_obj.polarity = ta.polarity
-            rt_align_obj.aligned_atlas_obj.analysis_type = ta.analysis_type
-            rt_align_obj.aligned_atlas_obj.analysis_name = ta.analysis_name
+            rt_align_obj.aligned_atlas_obj.atlas_category = ta.atlas_category
+            rt_align_obj.aligned_atlas_obj.atlas_name = ta.atlas_name
             rt_align_obj.aligned_atlas_obj.rt_alignment_number = rt_align_obj.rt_alignment_number
             rt_align_obj.aligned_atlas_obj.analysis_number = None
             dbi.save_atlas_to_db_and_disk(
@@ -199,7 +199,7 @@ def run_auto_identification(
         if existing_autoid:
             logger.info(
                 f"AutoID results already exist for "
-                f"{ta.chromatography}-{ta.polarity}-{ta.analysis_type}-{ta.analysis_name} "
+                f"{ta.chromatography}-{ta.polarity}-{ta.atlas_category.value}-{ta.atlas_name} "
                 f"(RTA{auto_id_obj.rt_alignment_number}, TGA{auto_id_obj.analysis_number}). "
                 f"Skipping. To re-run, increment analysis_number."
             )
@@ -361,7 +361,7 @@ def run_analysis_summary(
     run_parameters:
         Dict with keys: ``project_name``, ``rt_alignment_number``,
         ``analysis_number``, ``chromatography``, ``polarity``,
-        ``analysis_type``, ``analysis_name``, ``input_atlas_uid``.
+        ``atlas_category``, ``atlas_name``, ``input_atlas_uid``.
     override_parameters:
         Optional dict of parameter overrides (same as the notebook GUI cell).
     overwrite:

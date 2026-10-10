@@ -1,0 +1,24 @@
+ATLASES:
+  HILICZ:
+    POS:
+      REF:
+        NLDM:
+          path: /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/HILICz150-NLDMrun_ExometabTimeSeries_20220204_QE119_TPL_NLDMv9_POS_MdR.csv
+          desc: Default positive polarity experimental compounds for Northen Lab
+        # EMAnoNLDM:
+        #   path: /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/MSMLS_HILICz150mm_Annotation20190824_Template_EMA_minusNLDMv1_Unlabeled_Positive.csv
+        #   desc: POS EMA atlas for EGSB without NLDM compounds or ISTDs
+        # EMANLDMLabUnlab:
+        #   path: /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/MSMLS_HILICz150mm_Annotation20190824_Template_EMA_NLDM_Lab_Unlab_v1_Positive.csv
+        #   desc: POS EMA atlas for EGSB with NLDM compounds and lab/unlab ISTDs
+    NEG:
+      REF:
+        NLDM:
+          path: /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/HILICz150-NLDMrun_ExometabTimeSeries_20220204_QE119_TPL_NLDMv9_NEG_MdR.csv
+          desc: Default negative polarity experimental compounds for Northen Lab
+        # EMAnoNLDM:
+        #   path: /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/MSMLS_HILICz150mm_Annotation20190824_Template_EMA_minusNLDMv1_Unlabeled_Negative.csv
+        #   desc: NEG EMA atlas for EGSB without NLDM compounds or ISTDs
+        # EMANLDMLabUnlab:
+        #   path: /global/cfs/cdirs/metatlas/projects/1_TemplateAtlases/MSMLS_HILICz150mm_Annotation20190824_Template_EMA_NLDM_Lab_Unlab_v1_Negative.csv
+        #   desc: NEG EMA atlas for EGSB with NLDM compounds and lab/unlab ISTDs

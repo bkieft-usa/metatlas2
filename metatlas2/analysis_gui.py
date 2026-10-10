@@ -42,8 +42,10 @@ def build_dash_app(
     project_shortname = analysis_gui_obj.project_name.split("_")[4]
     chrom = analysis_gui_obj.chromatography.upper()
     pol = analysis_gui_obj.polarity.upper()
-    analysis_type = analysis_gui_obj.analysis_type.upper()
-    analysis_name = analysis_gui_obj.analysis_name.upper()
+    _ta = analysis_gui_obj.ta
+    _cat = _ta.atlas_category if _ta else None
+    atlas_category = (_cat.value if hasattr(_cat, 'value') else str(_cat or '')).upper()
+    atlas_name = (_ta.atlas_name if _ta else '').upper()
     rta = analysis_gui_obj.rt_alignment_number
     tga = analysis_gui_obj.analysis_number
 
@@ -65,7 +67,7 @@ def build_dash_app(
             requests_pathname_prefix=requests_prefix,
             suppress_callback_exceptions=True,
         )
-        app.title = f"{project_shortname} | {chrom} | {pol} | {analysis_type}-{analysis_name} | RTA{rta} | TGA{tga}"
+        app.title = f"{project_shortname} | {chrom} | {pol} | {atlas_category}-{atlas_name} | RTA{rta} | TGA{tga}"
         logger.debug("App built successfully")
         app.config.prevent_initial_callbacks = "initial_duplicate"
     except Exception as e:
@@ -458,7 +460,7 @@ def build_dash_app(
                     dbc.Col(
                         [
                             html.Div(
-                                f"{project_shortname}  |  {chrom}  |  {pol}  |  {analysis_type}  |  RTA{rta}  |  TGA{tga}",
+                                f"{project_shortname}  |  {chrom}  |  {pol}  |  {atlas_category}  |  RTA{rta}  |  TGA{tga}",
                                 style={"fontSize": _fs(1.0), "fontWeight": "bold", "marginBottom": "0.5rem", "color": "#333"}
                             ),
                             dbc.Row(

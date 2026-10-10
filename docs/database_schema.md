@@ -13,7 +13,7 @@ This document describes the metatlas2 database schema, table structure, and how 
   - [atlases Table](#atlases-table)
   - [atlas_compound_associations Table](#atlas_compound_associations-table)
   - [projects Table](#projects-table)
-  - [reference_fragmentation_data Table](#reference_fragmentation_data-table)
+  - [msms_refs Table](#msms_refs-table)
 - [Project Database Schema](#project-database-schema)
   - [lcmsruns Table](#lcmsruns-table)
   - [atlases Table (Project)](#atlases-table-project)
@@ -46,7 +46,7 @@ Metatlas2 uses lightweight **DuckDB** for data storage. The system maintains two
   - Reference RT/MZ data (`compound_mzrt` entries, added when atlases are created)
   - Reference atlases (curated sets of compounds)
   - Compound-atlas associations (one compound can belong to many atlases)
-  - MS/MS reference spectra (`reference_fragmentation_data`)
+  - MS/MS reference spectra (`msms_refs`)
   - Project registry (tracks all projects for meta-analysis)
 
 ### 2. **Project Database** (Experimental Results)
@@ -146,7 +146,7 @@ Defines collections of compounds for targeted analysis. Atlases organize compoun
 | `polarity` | TEXT | Ionization polarity (`positive` or `negative`) |
 | `analysis_type` | TEXT | Analysis category (e.g., `qc`, `istd`, `ema`) |
 | `analysis_name` | TEXT | Named variant within the analysis type (e.g., `main`, `default`) |
-| `atlas_type` | TEXT | Atlas lifecycle stage (see below) |
+| `atlas_stage` | TEXT | Atlas lifecycle stage (see below) |
 | `source_atlas_uid` | TEXT | UID of parent atlas (if derived) |
 | `rt_alignment_number` | INTEGER | RT alignment iteration (project DB only) |
 | `analysis_number` | INTEGER | Analysis iteration (project DB only) |
@@ -154,8 +154,8 @@ Defines collections of compounds for targeted analysis. Atlases organize compoun
 | `created_date` | TEXT | ISO timestamp of creation |
 | `source` | TEXT | File path or origin reference |
 
-**Atlas Types** (values of `atlas_type`):
-- `REFERENCE`: Original reference atlas from main database
+**Atlas Stages** (values of `atlas_stage`):
+- `INPUT`: Original reference atlas loaded as input to a targeted analysis
 - `RT_ALIGNED`: RT-adjusted atlas for a specific project
 - `AUTO_IDED`: Auto-identified atlas from experimental data
 - `MANUALLY_CURATED`: Manually curated/refined atlas
@@ -202,7 +202,7 @@ Tracks all projects created with metatlas2 for meta-analysis and project discove
 - Enables discovery of all project databases for cross-project meta-analysis
 - Each project is registered once; duplicate entries are prevented
 
-### reference_fragmentation_data Table
+### msms_refs Table
 
 Stores MS/MS reference spectra for compound identification. Populated via `metatlas2.sh add-msms-refs`.
 
@@ -477,7 +477,7 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 | **AnalysisSummary** | `manual_curation`, `atlases`, `workflow_runs` | Summary — Reads all tables, writes curated atlas and summary outputs |
 | **NewCompoundsConfig** | `compounds` | Config — Orchestrates bulk insert of compounds |
 | **NewAtlasesConfig** | `atlases`, `compound_mzrt`, `atlas_compound_associations` | Config — Orchestrates atlas creation |
-| **NewMsmsRefsConfig** | `reference_fragmentation_data` | Config — Orchestrates bulk insert of MS/MS reference spectra |
+| **NewMsmsRefsConfig** | `msms_refs` | Config — Orchestrates bulk insert of MS/MS reference spectra |
 
 ---
 
@@ -551,13 +551,13 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │    polarity          │
 │    analysis_type     │
 │    analysis_name     │
-│    atlas_type        │
+│    atlas_stage       │
 │    source_atlas_uid  │
 │    ...               │
 └──────────────────────┘
 
 ┌──────────────────────────────────────────┐
-│   reference_fragmentation_data           │
+│   msms_refs           │
 ├──────────────────────────────────────────┤
 │ PK ref_uid                               │
 │    database / ref_id / name              │
@@ -654,7 +654,7 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 - `compounds` → `compound_mzrt`: One-to-many (one compound can have multiple adducts/methods)
 - `atlases` ↔ `compounds`: Many-to-many via `atlas_compound_associations`
 - `atlases` ↔ `compound_mzrt`: Many-to-many via `atlas_compound_associations`
-- `reference_fragmentation_data`: Independent table, matched to compounds by `inchi_key` at query time
+- `msms_refs`: Independent table, matched to compounds by `inchi_key` at query time
 
 **Project Database:**
 - `lcmsruns` → `rt_alignment`: QC files used to build RT correction model
@@ -662,7 +662,7 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 - `workflow_runs`: Tracks which atlas UID corresponds to each stage (RT_ALIGNED, AUTO_IDED, MANUALLY_CURATED)
 - `atlases` → `compound_mzrt`: Atlas defines which compounds to extract
 - `compound_mzrt` → `ms1_data`, `ms2_data`: Extraction targets for spectral data (matched by `mz_rt_uid`)
-- `ms2_data.hits` → MS2 library matching results (embedded JSON, sourced from `reference_fragmentation_data`)
+- `ms2_data.hits` → MS2 library matching results (embedded JSON, sourced from `msms_refs`)
 - `ms1_data`, `ms2_data` → `manual_curation`: Synthesized curation decisions
 
 **Cross-Database:**

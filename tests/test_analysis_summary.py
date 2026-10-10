@@ -37,7 +37,7 @@ from metatlas2.analysis_summary import (
     rt_quality,
     total_score_and_msi,
 )
-from metatlas2.database_interact import _apply_remove_flagged_compounds
+from metatlas2.database_interact import _apply_remove_flagged_compounds, _file_group_from_filename
 
 
 # ===========================================================================
@@ -663,3 +663,105 @@ class TestApplyRemoveFlaggedCompounds:
         obj = _make_summary_obj([], remove_flagged=True)
         _apply_remove_flagged_compounds(obj)  # should not raise
         assert obj.experimental_data.curation_df.empty
+
+
+# ===========================================================================
+# _file_group_from_filename
+# ===========================================================================
+
+# Canonical HILICZ filename template (17 underscore-separated fields before ext):
+# date_owner_pi_project_shortname_experiment_instrument_chromatography_run_id_
+# polarity_ms_level_sample_number_sample_name_replicate_run_metadata_run_number.ext
+
+_HILICZ_PREFIX = "20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_USHXG03401_FPS_MS1"
+
+
+def _make_fname(sample_number: str, sample_name: str, replicate: str,
+                run_metadata: str, run_number: str, ext: str = "mzML") -> str:
+    """Build a syntactically valid HILICZ filename for testing."""
+    return (
+        f"{_HILICZ_PREFIX}_{sample_number}_{sample_name}_{replicate}"
+        f"_{run_metadata}_{run_number}.{ext}"
+    )
+
+
+class TestFileGroupFromFilename:
+    """Tests for _file_group_from_filename() in database_interact."""
+
+    # --- ISTD files: ISTD token in run_metadata → group = "ISTD" ---
+
+    def test_istd_run_metadata_experimental_sample_name_returns_ISTD(self):
+        """WT-P1-S sample with ISTD in run_metadata → 'ISTD'."""
+        fname = _make_fname("1", "WT-P1-S", "1",
+                            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40")
+        assert _file_group_from_filename(fname) == "ISTD"
+
+    def test_istd_run_metadata_exctrl_sample_name_returns_ISTD(self):
+        """ExCtrl sample_name but ISTD in run_metadata → Phase 1 wins → 'ISTD'."""
+        fname = _make_fname("36", "ExCtrl", "4",
+                            "Rg70to1050-CE205060norm-ExCtrl-ISTD", "Run114")
+        assert _file_group_from_filename(fname) == "ISTD"
+
+    def test_istd_run_metadata_leaf_sample_returns_ISTD(self):
+        fname = _make_fname("18", "WT-P1-L", "2",
+                            "Rg70to1050-CE102040norm-Leaf-ISTD", "Run68")
+        assert _file_group_from_filename(fname) == "ISTD"
+
+    # --- InjBl files: InjBL token in run_metadata → group = "INJBL" ---
+
+    def test_injbl_run_metadata_exctrl_sample_name_returns_INJBL(self):
+        """ExCtrl sample_name but InjBL in run_metadata → Phase 1 wins → 'INJBL'."""
+        fname = _make_fname("33", "ExCtrl", "1",
+                            "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH", "Run16")
+        assert _file_group_from_filename(fname) == "INJBL"
+
+    def test_injbl_run_metadata_second_replicate_returns_INJBL(self):
+        fname = _make_fname("34", "ExCtrl", "2",
+                            "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH", "Run52")
+        assert _file_group_from_filename(fname) == "INJBL"
+
+    # --- ExCtrl files: ExCtrl in sample_name, no high-priority run_metadata → "EXCTRL" ---
+
+    def test_exctrl_sample_name_s1_run_metadata_returns_EXCTRL(self):
+        """ExCtrl in sample_name, run_metadata has no ISTD/InjBL → 'EXCTRL'."""
+        fname = _make_fname("33", "ExCtrl", "1",
+                            "Rg70to1050-CE102040norm-ExCtrl-S1", "Run14")
+        assert _file_group_from_filename(fname) == "EXCTRL"
+
+    # --- Experimental files: no control token → group = sample_name ---
+
+    def test_experimental_wt_p1_s_returns_sample_name(self):
+        """Experimental file: no control token → sample_name 'WT-P1-S'."""
+        fname = _make_fname("3", "WT-P1-S", "3",
+                            "Rg70to1050-CE102040norm-Stem-EXP", "Run77")
+        assert _file_group_from_filename(fname) == "WT-P1-S"
+
+    def test_experimental_1120_sample_returns_sample_name(self):
+        fname = _make_fname("11", "1120-005a-P3-S", "3",
+                            "Rg70to1050-CE102040norm-Stem-EXP", "Run95")
+        assert _file_group_from_filename(fname) == "1120-005a-P3-S"
+
+    # --- h5 extension ---
+
+    def test_h5_extension_parsed_correctly(self):
+        fname = _make_fname("1", "WT-P1-S", "1",
+                            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40",
+                            ext="h5")
+        assert _file_group_from_filename(fname) == "ISTD"
+
+    # --- Full path (directory prefix) ---
+
+    def test_full_path_prefix_stripped(self):
+        fname = "/some/long/path/" + _make_fname(
+            "1", "WT-P1-S", "1",
+            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40"
+        )
+        assert _file_group_from_filename(fname) == "ISTD"
+
+    # --- Unparseable filename → empty string ---
+
+    def test_unparseable_filename_returns_empty_string(self):
+        assert _file_group_from_filename("not_a_valid_filename.h5") == ""
+
+    def test_empty_string_returns_empty_string(self):
+        assert _file_group_from_filename("") == ""

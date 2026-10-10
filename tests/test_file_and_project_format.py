@@ -5,6 +5,7 @@ All functions are pure (regex matching + string manipulation, no I/O).
 Tested functions
 ----------------
 * :func:`normalize_chromatography`
+* :func:`canonical_chromatography`
 * :func:`parse_file_name`
 * :func:`parse_project_name`
 * :func:`get_project_chromatography`
@@ -19,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from metatlas2.file_and_project_format import (
+    canonical_chromatography,
     get_file_parts,
     get_project_chromatography,
     normalize_chromatography,
@@ -55,6 +57,7 @@ _C18_PROJECT = "20260805_EB_MdR_109570-002_WaveStab6_20260724-20260731_EXP120A_C
 # ===========================================================================
 
 class TestNormalizeChromatography:
+    """normalize_chromatography always returns lowercase — used for matching keys."""
 
     def test_hilicz_normalized_to_hilic(self):
         assert normalize_chromatography("HILICZ") == "hilic"
@@ -91,6 +94,43 @@ class TestNormalizeChromatography:
         assert normalize_chromatography("hilic") == "hilic"
 
 
+class TestCanonicalChromatography:
+    """canonical_chromatography preserves input case while applying alias substitutions."""
+
+    def test_uppercase_hilicz_to_uppercase_hilic(self):
+        assert canonical_chromatography("HILICZ") == "HILIC"
+
+    def test_lowercase_hilicz_to_lowercase_hilic(self):
+        assert canonical_chromatography("hilicz") == "hilic"
+
+    def test_uppercase_hilic_unchanged(self):
+        assert canonical_chromatography("HILIC") == "HILIC"
+
+    def test_lowercase_hilic_unchanged(self):
+        assert canonical_chromatography("hilic") == "hilic"
+
+    def test_uppercase_c18ep_to_uppercase_c18(self):
+        assert canonical_chromatography("C18EP") == "C18"
+
+    def test_lowercase_c18ep_to_lowercase_c18(self):
+        assert canonical_chromatography("c18ep") == "c18"
+
+    def test_uppercase_c18_ep_dash_to_uppercase_c18(self):
+        assert canonical_chromatography("C18-EP") == "C18"
+
+    def test_uppercase_rplc_unchanged(self):
+        assert canonical_chromatography("RPLC") == "RPLC"
+
+    def test_lowercase_rplc_unchanged(self):
+        assert canonical_chromatography("rplc") == "rplc"
+
+    def test_empty_string_returned_unchanged(self):
+        assert canonical_chromatography("") == ""
+
+    def test_none_like_falsy_returned_unchanged(self):
+        assert canonical_chromatography(None) is None
+
+
 # ===========================================================================
 # parse_file_name
 # ===========================================================================
@@ -101,7 +141,8 @@ class TestParseFileName:
         fields = parse_file_name(_HILICZ_POS_FILE)
         assert fields["polarity"] == "POS"
         assert fields["ms_level"] == "MS2"
-        assert fields["chromatography"] == "hilic"   # normalized from HILICZ
+        # HILICZ in the filename → alias-substituted to "HILIC" (case preserved)
+        assert fields["chromatography"] == "HILIC"
         assert fields["ext"] == "h5"
 
     def test_hilicz_neg_file_parsed(self):
@@ -141,10 +182,13 @@ class TestParseFileName:
                     "replicate", "run_metadata", "run_number", "ext"):
             assert key in fields, f"Missing key: {key}"
 
-    def test_chromatography_normalized_in_output(self):
-        # HILICZ in the filename → "hilic" in the parsed dict
+    def test_chromatography_alias_substituted_case_preserved(self):
+        # HILICZ in the filename → "HILIC" (alias applied, uppercase preserved)
         fields = parse_file_name(_HILICZ_POS_FILE)
-        assert fields["chromatography"] == "hilic"
+        assert fields["chromatography"] == "HILIC"
+        # normalize_chromatography still returns lowercase for matching
+        from metatlas2.file_and_project_format import normalize_chromatography
+        assert normalize_chromatography(fields["chromatography"]) == "hilic"
 
     def test_mzml_extension_accepted(self):
         fname = _HILICZ_POS_FILE.replace(".h5", ".mzML")
@@ -196,21 +240,25 @@ class TestParseProjectName:
 
 class TestGetProjectChromatography:
 
-    def test_hilicz_project_returns_hilic(self):
+    def test_hilicz_project_returns_hilic_uppercase(self):
+        # Project name has "HILICZ" → alias-substituted to "HILIC" (case preserved)
         result = get_project_chromatography(_STANDALONE_PROJECT)
-        assert result == "hilic"
+        assert result == "HILIC"
 
-    def test_c18_ep_project_returns_c18(self):
+    def test_c18_ep_project_returns_c18_uppercase(self):
+        # Project name has "C18-EP" → alias-substituted to "C18" (case preserved)
         result = get_project_chromatography(_C18_PROJECT)
-        assert result == "c18"
+        assert result == "C18"
 
     def test_invalid_project_raises_value_error(self):
         with pytest.raises(ValueError, match="does not match"):
             get_project_chromatography("bad_project_name")
 
-    def test_returns_lowercase_string(self):
+    def test_normalize_of_result_is_lowercase(self):
+        # normalize_chromatography on the result still gives lowercase for matching
         result = get_project_chromatography(_STANDALONE_PROJECT)
-        assert result == result.lower()
+        from metatlas2.file_and_project_format import normalize_chromatography
+        assert normalize_chromatography(result) == "hilic"
 
 
 # ===========================================================================
@@ -228,9 +276,9 @@ class TestGetFileParts:
     def test_ms_level_extracted(self):
         assert get_file_parts(_HILICZ_POS_FILE, "ms_level") == "MS2"
 
-    def test_chromatography_normalized(self):
-        # HILICZ in filename → "hilic" returned
-        assert get_file_parts(_HILICZ_POS_FILE, "chromatography") == "hilic"
+    def test_chromatography_alias_substituted_case_preserved(self):
+        # HILICZ in filename → "HILIC" (alias applied, uppercase preserved)
+        assert get_file_parts(_HILICZ_POS_FILE, "chromatography") == "HILIC"
 
     def test_run_number_extracted(self):
         assert get_file_parts(_HILICZ_POS_FILE, "run_number") == "Run158"

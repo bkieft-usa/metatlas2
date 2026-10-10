@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import io
 import itertools
 import shutil
 from pathlib import Path
@@ -9,7 +8,6 @@ import json
 import os
 import re
 import sys
-import requests
 import statistics
 import textwrap
 import warnings
@@ -28,6 +26,7 @@ from matplotlib.patches import Rectangle
 import metatlas2.database_interact as dbi
 import metatlas2.file_and_project_format as fpf
 import metatlas2.gdrive_upload as gdu
+import metatlas2.lcmsruns_tools as lrt
 import metatlas2.logging_config as lcf
 import metatlas2.parquet_interact as pqi
 from metatlas2.note_options import (
@@ -73,6 +72,14 @@ def run_all_summaries(
         logger.info("Making EIC thumbnails...")
         make_eic_thumbnails(summary_obj, overwrite=overwrite, max_workers=4)
 
+    if "tic_thumbnails" not in (skip_outputs or []):
+        logger.info("Making TIC thumbnails...")
+        make_tic_thumbnails(summary_obj, overwrite=overwrite)
+
+    if "compound_metric_plots" not in (skip_outputs or []):
+        logger.info("Making compound peak height and RT peak plots...")
+        make_compound_metric_plots(summary_obj, overwrite=overwrite)
+
     if "boxplots" not in (skip_outputs or []):
         logger.info("Making Boxplots...")
         make_boxplots(summary_obj, overwrite=overwrite, max_workers=4)
@@ -80,10 +87,6 @@ def run_all_summaries(
     if "data_sheets" not in (skip_outputs or []):
         logger.info("Making quantitative data sheets...")
         make_data_sheets(summary_obj, overwrite=overwrite)
-
-    # if "manual_curation_csv" not in (skip_outputs or []):
-    #     logger.info("Making Manual curation CSV...")
-    #     make_manual_curation_csv(summary_obj, overwrite=overwrite)
 
     if "best_ms2_hits_csv" not in (skip_outputs or []):
         logger.info("Making best MS2 hit fragment ions CSV...")
@@ -95,7 +98,7 @@ def run_all_summaries(
 
     if "log_fold_changes_csv" not in (skip_outputs or []):
         logger.info("Making log fold changes CSV from filtered peak heights...")
-        make_log_fold_changes_csv(summary_obj, overwrite=overwrite, use_filter=True)
+        make_log_fold_changes_csv(summary_obj, overwrite=overwrite)
 
     if "metabomap" not in (skip_outputs or []):
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
@@ -104,6 +107,10 @@ def run_all_summaries(
     if "analysis_parquet" not in (skip_outputs or []):
         logger.info("Making unified analysis Parquet files...")
         pqi.make_analysis_parquet(summary_obj, overwrite=overwrite)
+
+    if "targeted_analysis_readme" not in (skip_outputs or []):
+        logger.info("Making targeted analysis README...")
+        make_targeted_analysis_readme(summary_obj, overwrite=overwrite)
 
     gdrive_upload = False
     if summary_obj.override_parameters.get("upload_to_gdrive") is not None:
@@ -168,6 +175,63 @@ def apply_auto_curation_defaults(curation_df: "pd.DataFrame") -> "pd.DataFrame":
 def _strip_non_chars(text: str) -> str:
     """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
     return "".join(c for c in text if ord(c) not in range(0xFDD0, 0xFDF0) and ord(c) & 0xFFFF not in (0xFFFE, 0xFFFF))
+
+def _make_compound_safe_stem(
+    cmp_idx_display: int,
+    compound_name: str,
+    adduct: str,
+    atlas_mz: float | None,
+    atlas_rt: float | None,
+) -> str:
+    """Build a filesystem-safe stem for per-compound output files.
+
+    Format: ``{idx:04d}_{name}_{adduct}_{mz}_{rt}``
+
+    * Decimal points in mz/rt are replaced with ``p`` (e.g. ``153p1124``).
+    * Special characters (brackets, spaces, slashes, commas, etc.) are stripped
+      or replaced with underscores so the result is safe on all filesystems.
+    * Consecutive underscores are collapsed to one.
+    """
+    def _fmt_num(val: float | None, decimals: int) -> str:
+        if val is None or (isinstance(val, float) and (val != val)):  # NaN check
+            return "NA"
+        return f"{val:.{decimals}f}".replace(".", "p")
+
+    # Strip special chars from compound name: keep alphanumeric, spaces→_, hyphens
+    name_clean = re.sub(r"[^A-Za-z0-9\-]", "_", _strip_non_chars(str(compound_name)))
+    # Strip adduct brackets and special chars: keep alphanumeric, +, -, letters
+    adduct_clean = re.sub(r"[^A-Za-z0-9+\-]", "", str(adduct))
+    mz_str = _fmt_num(atlas_mz, 4)
+    rt_str = _fmt_num(atlas_rt, 2)
+    stem = f"{cmp_idx_display:04d}_{name_clean}_{adduct_clean}_{mz_str}_{rt_str}"
+    # Collapse consecutive underscores
+    stem = re.sub(r"_+", "_", stem).strip("_")
+    return stem
+
+def _eic_subplot_label(filename: str) -> str:
+    """Return a compact subplot label from a filename using fpf field names.
+
+    Format: ``{polarity}_{chromatography}_{sample_number}_{sample_name}_{replicate}_{run_number}``
+
+    Falls back gracefully when the filename does not match the expected pattern.
+    """
+    if not filename:
+        return "no data"
+    basename = os.path.basename(filename)
+    try:
+        fields = fpf.parse_file_name(basename)
+        parts = [
+            fields.get("polarity", ""),
+            fields.get("chromatography", ""),
+            fields.get("sample_number", ""),
+            fields.get("sample_name", ""),
+            fields.get("replicate", ""),
+            fields.get("run_number", ""),
+        ]
+        return "_".join(p for p in parts if p)
+    except Exception:
+        # Fall back to the old abbreviated label
+        return _short_fname(filename)
 
 def _display_compound_idx(compound_idx: int) -> int:
     """Convert internal zero-based index to user-facing one-based index."""
@@ -250,7 +314,7 @@ def make_identification_figure(
     overwrite: bool = True,
     max_workers: int | None = None,
 ) -> None:
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "identification_figures"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / f"identification_figures_with_msms_mirror_plots"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -295,11 +359,10 @@ def make_identification_figure(
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
+        atlas_mz = safe_float(mc_row.get("atlas_mz"))
+        atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
-        safe_name = (
-            f"{cmp_idx_display:04d}_{compound_name}_{adduct}"
-            .replace("/", "-").replace(" ", "_")
-        )
+        safe_name = _make_compound_safe_stem(cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt)
         fig_path = output_dir / f"{safe_name}.pdf"
 
         tasks.append({
@@ -309,6 +372,7 @@ def make_identification_figure(
             "inchi_key":     inchi_key,
             "compound_idx":  cmp_idx,
             "fig_path":      str(fig_path),
+            "safe_stem":     safe_name,
             "color_map":     color_map,
             "ms1_df":        ms1_groups.get(mz_rt_uid, empty_df),
             "ms2_df":        ms2_groups.get(mz_rt_uid, empty_df),
@@ -355,18 +419,23 @@ def _identification_figure_worker(kwargs: dict) -> str:
     compound_name = kwargs["compound_name"]
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
+    safe_stem = kwargs.get("safe_stem", f"{cmp_idx_display:04d}_{compound_name}_{adduct}")
     color_map = kwargs["color_map"]
     ms1_df = kwargs["ms1_df"]
     ms2_df = kwargs["ms2_df"]
 
     top3: list["MS2Hit"] = []
     if not ms2_df.empty:
-        best_score = -np.inf
+        # Collect the best hit from each scan across all files, then take the
+        # top 3 by score so the three mirror panels can show hits from
+        # different scans / files rather than all coming from the same scan.
+        per_scan_best: list["MS2Hit"] = []
         for _, scan_row in ms2_df.iterrows():
             hits = MS2Hit.list_from_scan_row(scan_row)
-            if hits and hits[0].has_score and hits[0].score > best_score:
-                best_score = hits[0].score
-                top3 = hits[:3]
+            if hits and hits[0].has_score:
+                per_scan_best.append(hits[0])
+        per_scan_best.sort(key=lambda h: h.score, reverse=True)
+        top3 = per_scan_best[:3]
 
     fig = plt.figure(figsize=(25, 15))
     gs = fig.add_gridspec(
@@ -403,7 +472,8 @@ def _identification_figure_worker(kwargs: dict) -> str:
     logger.debug("Plotting structure")
     _plot_structure(
         fig.add_subplot(gs[0, 3]),
-        mc_row.get("smiles"), mc_row.get("inchi"), inchi_key, size=500,
+        mc_row.get("smiles"), mc_row.get("inchi"), inchi_key,
+        compound_name=compound_name, size=500,
     )
 
     logger.debug("Plotting EIC")
@@ -420,10 +490,21 @@ def _identification_figure_worker(kwargs: dict) -> str:
     _plot_compound_info_table(fig.add_subplot(gs[1, 2:4]), mc_row)
     _plot_hit_info_table(fig.add_subplot(gs[2, 0:4]), top3, mc_row, ms2_df)
 
+    # Smart-wrap the suptitle so it fits within the figure width
+    try:
+        renderer = fig.canvas.get_renderer()
+        sample_t = fig.text(0, 0, "A" * 60, fontsize=16)
+        bb = sample_t.get_window_extent(renderer=renderer)
+        sample_t.remove()
+        avg_char_w = bb.width / 60
+        fig_w_px = fig.get_window_extent(renderer=renderer).width
+        chars_per_line = max(20, int(fig_w_px / avg_char_w * 0.90))
+    except Exception:
+        chars_per_line = 80
+    wrapped_suptitle = textwrap.fill(safe_stem, width=chars_per_line, break_long_words=True)
     fig.suptitle(
-        f"[{cmp_idx_display:04d}] |  {_strip_non_chars(adduct)}  |  {inchi_key}\n"
-        f"{_strip_non_chars(compound_name)}\n",
-        fontsize=20, weight="bold", y=0.97,
+        wrapped_suptitle,
+        fontsize=16, weight="bold", y=0.97,
     )
     for y_line in [0.61, 0.345]:
         fig.add_artist(plt.Line2D(
@@ -464,6 +545,57 @@ def _plot_ms2(ax, panel_idx: int, top3: list["MS2Hit"], ms2_df: pd.DataFrame) ->
         )
     else:
         _plot_empty_ms2(ax, title=title)
+
+def _smart_wrap(text: str, ax, fontsize: float, fig=None) -> str:
+    """Wrap *text* so each line fits within the axes width in display units.
+
+    Uses the renderer to measure character width when available; falls back to
+    an approximate character-count heuristic otherwise.
+
+    Parameters
+    ----------
+    text:
+        The string to wrap.
+    ax:
+        The matplotlib Axes whose width constrains the text.
+    fontsize:
+        Font size in points used for the text.
+    fig:
+        The Figure containing *ax* (used to get the renderer).  When *None*
+        the current figure is used.
+    """
+    if fig is None:
+        fig = ax.get_figure()
+
+    try:
+        renderer = fig.canvas.get_renderer()
+        # Estimate average character width in display units using a sample string
+        sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        t_tmp = ax.text(0, 0, sample, fontsize=fontsize, transform=ax.transAxes)
+        bb = t_tmp.get_window_extent(renderer=renderer)
+        t_tmp.remove()
+        avg_char_w = bb.width / len(sample)  # pixels per character
+
+        # Axes width in display (pixel) units
+        ax_bb = ax.get_window_extent(renderer=renderer)
+        ax_w = ax_bb.width
+
+        if avg_char_w > 0 and ax_w > 0:
+            chars_per_line = max(10, int(ax_w / avg_char_w))
+        else:
+            chars_per_line = 40
+    except Exception:
+        # Fallback: rough heuristic — axes width in inches * ~8 chars/pt
+        try:
+            fig_w_in = fig.get_figwidth()
+            n_axes_cols = max(1, round(1.0 / ax.get_position().width))
+            ax_w_in = fig_w_in / n_axes_cols
+            chars_per_line = max(10, int(ax_w_in * fontsize * 0.55))
+        except Exception:
+            chars_per_line = 40
+
+    return textwrap.fill(text, width=chars_per_line, break_long_words=True)
+
 
 def _plot_mirror(
     ax,
@@ -532,7 +664,20 @@ def _plot_mirror(
             ax.margins(y=0.20)
 
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
-    ax.set_ylabel(f"Intensity (Ref x{scale:.2f})", fontsize=14, weight="bold")
+    ax.set_ylabel(
+        f"Intensity",
+        fontsize=14, weight="bold",
+    )
+    # "Ref Scaled xN" label: bottom-left corner, vertical, size 10
+    ax.text(
+        0.02, 0.04,
+        f"Ref Scaled x{scale:.4f}",
+        fontsize=10, weight="normal",
+        ha="left", va="bottom",
+        rotation=90,
+        transform=ax.transAxes,
+        color="dimgray",
+    )
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     ax.tick_params(labelsize=14)
 
@@ -605,11 +750,11 @@ def _plot_eic(
                 i_vals, 
                 color=color, 
                 linewidth=1.0, 
-                alpha=0.7,
+                alpha=0.25,
                 )
 
     if not safe_isnan(rt_min) and not safe_isnan(rt_max):
-        ax.set_xlim([safe_float(rt_min) - 2.0, safe_float(rt_max) + 2.0])
+        ax.set_xlim([safe_float(rt_min) - 1.0, safe_float(rt_max) + 1.0])
     ax.set_xlabel("Retention Time (min)", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity (log₁₀)" if log_scale else "Intensity", fontsize=14, weight="bold")
     ax.tick_params(labelsize=14)
@@ -655,25 +800,31 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
     rt_delta_abs = abs(atlas_rt - rt_meas) if not (safe_isnan(atlas_rt) or safe_isnan(rt_meas)) else float("nan")
 
     best_intensity = safe_float(mc_row.get("best_ms1_intensity"))
+    polarity = mc_row.get("polarity")
+    if polarity == "neg":
+        polarity = "negative"
+    elif polarity == "pos":
+        polarity = "positive"
 
     rows = [
         ("Compound", _fmt(mc_row.get("compound_name", "Undefined"))),
+        ("InChIKey", _fmt(mc_row.get("inchi_key", ""))),
         ("Formula", _fmt(mc_row.get("formula"))),
         ("Adduct", _fmt(mc_row.get("adduct"))),
-        ("Polarity", _fmt(mc_row.get("polarity"))),
+        ("Polarity", _fmt(polarity)),
         ("Chromatography", _fmt(mc_row.get("chromatography"))),
-        ("Atlas m/z", _fmt(atlas_mz, "{:.4f}")),
+        ("Theoretical m/z", _fmt(atlas_mz, "{:.4f}")),
         ("Measured m/z", _fmt(mz_meas, "{:.4f}")),
-        ("m/z ppm Δ", _fmt(mz_ppm_abs, "{:.1f} ppm")),
-        ("Atlas RT range", f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
+        ("m/z ppm difference", _fmt(mz_ppm_abs, "{:.1f} ppm")),
+        ("Theoretical RT range", f"{_fmt(mc_row.get('atlas_rt_min'), '{:.3f}')} - {_fmt(mc_row.get('atlas_rt_max'), '{:.3f}')} min"),
         ("Measured RT range", f"{_fmt(mc_row.get('rt_min'), '{:.3f}')} - {_fmt(mc_row.get('rt_max'), '{:.3f}')} min"),
-        ("Atlas RT", _fmt(atlas_rt, "{:.3f} min")),
+        ("Theoretical RT", _fmt(atlas_rt, "{:.3f} min")),
         ("Measured RT", _fmt(rt_meas, "{:.3f} min")),
-        ("RT Δ", _fmt(rt_delta_abs, "{:.3f}")),
+        ("RT difference", _fmt(rt_delta_abs, "{:.3f}")),
         ("Max Intensity", _fmt(best_intensity, "{:.3e}") if not safe_isnan(best_intensity) else "N/A"),
     ]
 
-    y_pos = 1.03
+    y_pos = 1.065
     y_step = 0.09
     for label, value in rows:
         ax.text(0.02, y_pos, f"{label}:", fontsize=12, weight="bold", va="center", transform=ax.transAxes)
@@ -727,7 +878,7 @@ def _plot_hit_info_table(
             return "N/A"
         return fmt.format(val)
 
-    score_str = f"{score:.4f}\n({num_matches}/{ref_frags})" if not safe_isnan(score) else "N/A"
+    score_str = f"{score:.3f}\n({num_matches}/{ref_frags})" if not safe_isnan(score) else "N/A"
 
     FRAG_WRAP_WIDTH = 80
     frag_lines = textwrap.wrap(frag_str, width=FRAG_WRAP_WIDTH) if frag_str != "N/A" else ["N/A"]
@@ -846,6 +997,7 @@ def _plot_structure(
     smiles: str | None,
     inchi: str | None,
     inchi_key: str,
+    compound_name: str = "",
     size: int = 500,
 ) -> None:
     """Draw molecular structure using RDKit's MolToImage (requires libXrender, available in container)."""
@@ -861,6 +1013,21 @@ def _plot_structure(
         if not text or text.lower() in {"nan", "none", "null", "na"}:
             return None
         return text
+
+    def _wrap_text(text: str, font_size: int, max_width: int) -> list[str]:
+        """Word-wrap *text* so each line fits within *max_width* pixels."""
+        avg_char_width = font_size / 2
+        lines, current_line = [], ""
+        for char in text:
+            test_line = current_line + char
+            if len(test_line) * avg_char_width > max_width - 20:
+                lines.append(current_line)
+                current_line = char
+            else:
+                current_line = test_line
+        if current_line:
+            lines.append(current_line)
+        return lines
 
     try:
         from rdkit import Chem
@@ -880,44 +1047,39 @@ def _plot_structure(
             # Generate structure image directly (requires libXrender)
             img = Draw.MolToImage(mol, size=(size, size), kekulize=True)
 
-            # Add InChIKey annotation below the structure
-            if inchi_key:
-                font_size = 25
-                line_height = int(font_size * 1.2)
-                avg_char_width = font_size / 2
-                lines, current_line = [], ""
-                
-                # Word-wrap the InChIKey
-                for char in inchi_key:
-                    test_line = current_line + char
-                    if len(test_line) * avg_char_width > size - 20:
-                        lines.append(current_line)
-                        current_line = char
-                    else:
-                        current_line = test_line
-                if current_line:
-                    lines.append(current_line)
+            # Build annotation lines: compound name + InChIKey below the structure
+            font_size = 22
+            line_height = int(font_size * 1.3)
 
-                # Create new image with space for text
-                text_height = len(lines) * line_height + 20
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+                font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+            except Exception:
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", font_size)
+                    font_bold = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf", font_size)
+                except Exception:
+                    font = ImageFont.load_default()
+                    font_bold = font
+
+            # Collect (text, font) pairs for each annotation line
+            annotation_segments: list[tuple[str, object]] = []
+            if compound_name:
+                for line in _wrap_text(_strip_non_chars(compound_name), font_size, size):
+                    annotation_segments.append((line, font_bold))
+            if inchi_key:
+                for line in _wrap_text(inchi_key, font_size, size):
+                    annotation_segments.append((line, font))
+
+            if annotation_segments:
+                text_height = len(annotation_segments) * line_height + 20
                 new_img = Image.new("RGB", (size, size + text_height), "white")
                 new_img.paste(img, (0, 0))
-                
-                # Draw text
                 draw_obj = ImageDraw.Draw(new_img)
-                try:
-                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
-                except Exception:
-                    try:
-                        font = ImageFont.truetype("/usr/share/fonts/dejavu/DejaVuSans.ttf", font_size)
-                    except Exception:
-                        font = ImageFont.load_default()
-                
                 y_position = size + 10
-                for line in lines:
-                    draw_obj.text((10, y_position), line, fill="black", font=font)
+                for line_text, line_font in annotation_segments:
+                    draw_obj.text((10, y_position), line_text, fill="black", font=line_font)
                     y_position += line_height
-                
                 img = new_img
 
             ax.imshow(img, aspect="equal")
@@ -926,7 +1088,7 @@ def _plot_structure(
     except Exception as exc:
         logger.warning(f"Could not draw structure for {inchi_key}: {exc}")
 
-    ax.text(0.5, 0.5, f"InChIKey:\n{inchi_key}", transform=ax.transAxes,
+    ax.text(0.5, 0.5, f"{_strip_non_chars(compound_name)}\n{inchi_key}", transform=ax.transAxes,
             ha="center", va="center", fontsize=12, weight="bold", color="gray")
 
 ###############################################
@@ -935,24 +1097,20 @@ def _plot_structure(
 
 def make_final_id_sheet(
     summary_obj: "AnalysisSummary",
-    output_filename: str = "Final_Identifications.xlsx",
     overwrite: bool = True,
 ) -> None:
 
     from metatlas2.workflow_objects import MS2Hit
 
-    output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
-    chromatography = summary_obj.chromatography
-    analysis_info = (
+    final_id_filename_part = (
         f"{summary_obj.chromatography}"
         f"-{summary_obj.polarity}"
-        f"-{summary_obj.analysis_type}"
+        f"-{summary_obj.ta.atlas_name}"
+        f"-RTA{summary_obj.rt_alignment_number}"
+        f"-TGA{summary_obj.analysis_number}"
     )
-    run_info = f"RTA{summary_obj.rt_alignment_number}-TGA{summary_obj.analysis_number}"
-    output_filename = f"{summary_obj.project_name}_{analysis_info}-{run_info}_{output_filename}"
-    if not output_filename.endswith(".xlsx"):
-        output_filename += ".xlsx"
-    excel_path = output_loc / output_filename
+    output_filename = f"FinalIdentifications__{final_id_filename_part}__{summary_obj.project_name}.xlsx"
+    excel_path = Path(summary_obj.paths['analysis_results_output_dir']) / output_filename
     if not overwrite and excel_path.exists():
         logger.info(f"Overwriting disabled: existing file {excel_path} will be used.")
         return
@@ -977,8 +1135,7 @@ def make_final_id_sheet(
         except (TypeError, ValueError):
             mass_map[ik] = None
 
-    # --- Build MS2 lookup map (best hit per compound for MSMS columns only) ---
-    ms2_best: dict[str, dict] = {}       # mz_rt_uid -> best hit dict + scan metadata
+    ms2_best: dict[str, dict] = {}
 
     ms2_df = summary_obj.experimental_data.ms2_df
     if not ms2_df.empty:
@@ -995,7 +1152,7 @@ def make_final_id_sheet(
             if best_hit is not None:
                 ms2_best[uid] = best_hit
 
-    is_c18 = "c18" in chromatography.lower() and "lipid" not in chromatography.lower()
+    is_c18 = "c18" in summary_obj.chromatography.lower() and "lipid" not in summary_obj.chromatography.lower()
 
     logger.info(f"Processing {len(manual_curation_df)} compounds...")
 
@@ -1014,6 +1171,12 @@ def make_final_id_sheet(
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
         polarity = mc_row.get("polarity", "")
+        if polarity.lower() == "pos":
+            polarity_long = "positive"
+        elif polarity.lower() == "neg":
+            polarity_long = "negative"
+        else:
+            raise ValueError(f"Unknown polarity when long-ifying polarity string {polarity}")
 
         formula, smiles, inchi, pubchem_cid = compound_info_map.get(inchi_key, (None, None, None, None))
         exact_mass = mass_map.get(inchi_key)
@@ -1026,8 +1189,6 @@ def make_final_id_sheet(
         rt_theoretical = float(mc_row.get("atlas_rt_peak", np.nan))
 
         # --- MS1 metrics ---
-        # mz_measured: top3_mz_centroid_avg — mean mz_centroid of top-3 files by peak_height
-        # rt_measured: curation_df.rt_peak  — mean of per-file peak RTs from analyze_ms1()
         mz_measured = float(mc_row.get("top3_mz_centroid_avg", np.nan))
         rt_measured  = float(mc_row.get("rt_peak", np.nan))
         best_ms1_rt = float(mc_row.get("best_ms1_rt", np.nan))
@@ -1051,7 +1212,6 @@ def make_final_id_sheet(
         msms_file = ""
         msms_rt = np.nan
         msms_score = np.nan
-        msms_num_ions = ""
         msms_matching_ions = ""
 
         best_hit = ms2_best.get(mz_rt_uid)
@@ -1062,7 +1222,6 @@ def make_final_id_sheet(
 
             num_matches = best_hit.num_matches
             ref_frags = best_hit.ref_frags
-            msms_num_ions = f"{num_matches}/{ref_frags}" if ref_frags > 0 else str(num_matches)
 
             matched_frags = best_hit.matched_fragments
             msms_matching_ions = (
@@ -1087,7 +1246,7 @@ def make_final_id_sheet(
 
         # Quality scores — all MS1-based (absolute errors)
         mz_q = mz_quality(ppm_error_ms1, mz_error_da)
-        rt_q = rt_quality(rt_error, chromatography)
+        rt_q = rt_quality(rt_error, summary_obj.chromatography)
 
         try:
             msms_q = float(str(ms2_notes).split(",")[0])
@@ -1107,7 +1266,7 @@ def make_final_id_sheet(
             "overlapping_compound":   overlapping_compound,
             "overlapping_inchi_keys": overlapping_mz_rt_uids,
             "formula":                formula,
-            "polarity":               polarity,
+            "polarity":               polarity_long,
             "exact_mass":             _safe_round(exact_mass, 7) if exact_mass is not None else np.nan,
             "inchi_key":              inchi_key,
             # COMPOUND IDENTIFICATION SCORES
@@ -1129,7 +1288,6 @@ def make_final_id_sheet(
             # MSMS INFORMATION
             "msms_file":              Path(msms_file).name if msms_file else "",
             "msms_rt":                _safe_round(msms_rt, 2),
-            "msms_numberofions":      msms_num_ions,
             "msms_matchingions":      msms_matching_ions,
             # MSMS EVALUATION
             "msms_score":             _safe_round(msms_score, 4),
@@ -1167,7 +1325,6 @@ def make_final_id_sheet(
         "Retention time of max intensity MS1 peak",
         # MSMS INFORMATION
         "File with highest MSMS match score", "RT of highest matched MSMS scan",
-        "Number of ion matches in msms spectra to EMA reference spectra",
         "List of ion matches in msms spectra to EMA reference spectra",
         # MSMS EVALUATION
         "MSMS score (highest across all samples)",
@@ -1209,7 +1366,6 @@ def make_final_id_sheet(
         # MSMS INFORMATION
         "",
         "",
-        "mean # of fragment ions matching between compound in sample and reference compound / standard; may include parent and isotope ions and very low intensity background ions (these do not contribute to score)",
         "",
         # MSMS EVALUATION
         "MSMS score (highest across all samples), scale of 0 to 1 based on an algorithm. 0 = no match, 1 = perfect match. If no score, then no MSMS was acquired for that compound (@ m/z & RT window).",
@@ -1236,7 +1392,7 @@ def make_final_id_sheet(
         "isomer_details", "identification_notes", "analyst_notes", "other_notes",
         "ms1_notes", "ms2_notes",
         "max_intensity", "max_intensity_file", "ms1_rt_peak",
-        "msms_file", "msms_rt", "msms_numberofions", "msms_matchingions",
+        "msms_file", "msms_rt", "msms_matchingions",
         "msms_score",
         "mz_adduct", "mz_theoretical", "mz_measured",
         "mz_error", "mz_ppmerror",
@@ -1247,12 +1403,12 @@ def make_final_id_sheet(
         (0,  8,  "COMPOUND ANNOTATION"),
         (9,  19, "COMPOUND IDENTIFICATION SCORES"),
         (20, 22, "MS1 INTENSITY INFORMATION"),
-        (23, 26, "MSMS INFORMATION"),
-        (27, 27, "MSMS EVALUATION"),
-        (28, 30, "ION INFORMATION"),
-        (31, 32, "M/Z EVALUATION"),
-        (33, 36, "CHROMATOGRAPHIC PEAK INFORMATION"),
-        (37, 37, "RT EVALUATION"),
+        (23, 25, "MSMS INFORMATION"),
+        (26, 26, "MSMS EVALUATION"),
+        (27, 29, "ION INFORMATION"),
+        (30, 31, "M/Z EVALUATION"),
+        (32, 35, "CHROMATOGRAPHIC PEAK INFORMATION"),
+        (36, 36, "RT EVALUATION"),
     ]
 
     _SECTION_COLORS = {
@@ -1301,7 +1457,7 @@ def make_final_id_sheet(
         }
         f_scientific = workbook.add_format({"num_format": "0.00E+00"})
 
-        # Build one header format and one data format per section colour
+        # Build one header format and one data format per section color
         section_header_fmts: dict[str, object] = {}
         section_data_fmts: dict[str, object] = {}
         for label, color in _SECTION_COLORS.items():
@@ -1311,27 +1467,27 @@ def make_final_id_sheet(
         # ---- Row heights ----
         worksheet.set_row(0, 30)    # section headers
         worksheet.set_row(1, 80)    # column display names
-        worksheet.set_row(2, 120)   # descriptions
-        worksheet.set_row(3, 40)    # internal field names
+        worksheet.set_row(2, 80)   # descriptions
+        worksheet.set_row(3, 30)    # internal field names
 
         # ---- Column widths ----
         # Default width for all columns; override specifics below
         worksheet.set_column(0,  0,  10)   # index
-        worksheet.set_column(1,  4,  30)   # compound name columns + overlapping
-        worksheet.set_column(5,  8,  15)   # formula, polarity, exact_mass, inchi_key
-        worksheet.set_column(8,  8,  28)   # inchi_key wider
-        worksheet.set_column(9,  19, 12)   # scores + notes
-        worksheet.set_column(20, 20, 15, f_scientific)  # max_intensity in sci notation
-        worksheet.set_column(21, 21, 35)   # max intensity filename
-        worksheet.set_column(22, 22, 15)   # ms1 rt peak
-        worksheet.set_column(23, 23, 35)   # msms filename
-        worksheet.set_column(24, 24, 15)   # msms rt
-        worksheet.set_column(25, 25, 25)   # msms num ions
-        worksheet.set_column(26, 26, 20)   # msms matching ions
-        worksheet.set_column(27, 27, 15)   # msms score
-        worksheet.set_column(28, 30, 14)   # ion info
-        worksheet.set_column(31, 32, 14)   # mz eval
-        worksheet.set_column(33, 37, 14)   # rt cols
+        worksheet.set_column(1,  4,  10)   # compound name columns + overlapping
+        worksheet.set_column(5,  8,  10)   # formula, polarity, exact_mass, inchi_key
+        worksheet.set_column(8,  8,  10)   # inchi_key wider
+        worksheet.set_column(9,  19, 10)   # scores + notes
+        worksheet.set_column(20, 20, 10, f_scientific)  # max_intensity in sci notation
+        worksheet.set_column(21, 21, 10)   # max intensity filename
+        worksheet.set_column(22, 22, 10)   # ms1 rt peak
+        worksheet.set_column(23, 23, 10)   # msms filename
+        worksheet.set_column(24, 24, 10)   # msms rt
+        worksheet.set_column(25, 25, 10)   # msms num ions
+        worksheet.set_column(26, 26, 10)   # msms matching ions
+        worksheet.set_column(27, 27, 10)   # msms score
+        worksheet.set_column(28, 30, 10)   # ion info
+        worksheet.set_column(31, 32, 10)   # mz eval
+        worksheet.set_column(33, 37, 10)   # rt cols
 
         # ---- Row 0: section header merges ----
         for start_idx, end_idx, label in _SECTION_SPANS:
@@ -1352,7 +1508,7 @@ def make_final_id_sheet(
             worksheet.write(2, col_idx, desc, fmt)
             worksheet.write(3, col_idx, field, fmt)
 
-        # ---- Conditional background colours for data rows ----
+        # ---- Conditional background colors for data rows ----
         for start_idx, end_idx, label in _SECTION_SPANS:
             fmt = section_data_fmts[label]
             start_letter = _col_letter(start_idx)
@@ -1487,9 +1643,9 @@ def make_eic_thumbnails(
 
     output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
     base_dir = Path(output_loc)
-    shared_base_dir = base_dir / "eics"
-    dir_shared = shared_base_dir / "eic_thumbnails_shared_y"
-    dir_indep = shared_base_dir / "eic_thumbnails_independent_y"
+    additional_info_dir = base_dir / "additional_info"
+    dir_shared = additional_info_dir / f"compound_EIC_chromatograms_sharedY"
+    dir_indep = additional_info_dir / f"compound_EIC_chromatograms_independentY"
     for d in (dir_shared, dir_indep):
         if overwrite and d.exists():
             logger.info(f"Overwriting enabled: clearing existing contents of {d}")
@@ -1532,13 +1688,11 @@ def make_eic_thumbnails(
         compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
+        atlas_mz = safe_float(mc_row.get("atlas_mz"))
+        atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
-        safe_stem = (
-            f"{cmp_idx_display:04d}_{compound_name}_{adduct}_{inchi_key}"
-            .replace("/", "-")
-            .replace(" ", "_")
-        )
+        safe_stem = _make_compound_safe_stem(cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt)
         path_shared = dir_shared / f"{safe_stem}.pdf"
         path_indep = dir_indep / f"{safe_stem}.pdf"
 
@@ -1560,7 +1714,7 @@ def make_eic_thumbnails(
                     "filename": f_path,
                     "spec_rts": rts,
                     "spec_ints": ints,
-                    "group_name": fpf.get_file_parts(f_path, "sample_name"),
+                    "group_name": dbi._file_group_from_filename(f_path),
                 })
 
             def _alphanum_key(text: str) -> list:
@@ -1580,6 +1734,7 @@ def make_eic_thumbnails(
             "mc_row_dict": mc_row.to_dict(),
             "compound_name": compound_name,
             "adduct": adduct,
+            "safe_stem": safe_stem,
             "rt_alignment_num": rt_alignment_num,
             "analysis_num": analysis_num,
             "compound_idx": cmp_idx,
@@ -1636,6 +1791,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     file_items = kwargs["file_items"]
     compound_name = kwargs["compound_name"]
     adduct = kwargs["adduct"]
+    safe_stem = kwargs.get("safe_stem", f"{_display_compound_idx(kwargs['compound_idx']):04d}_{compound_name}_{adduct}")
     rt_alignment_num = kwargs["rt_alignment_num"]
     analysis_num = kwargs["analysis_num"]
     compound_idx = kwargs["compound_idx"]
@@ -1654,12 +1810,19 @@ def _compound_pdf_worker(kwargs: dict) -> str:
 
     total_files = len(file_items)
     total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
-    title_base = (
-        f"[{_display_compound_idx(compound_idx):04d}] {_strip_non_chars(compound_name)} | "
-        f"{_strip_non_chars(adduct)}  (RT alignment {rt_alignment_num}, analysis {analysis_num})"
-    )
+    title_base = safe_stem
 
-    group_bg_palette = ["#F3F8FF", "#EEFCF1", "#FFF8EA", "#FFF1F1", "#F5F0FF"]
+    group_bg_palette = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#17becf",
+    ]
+
     group_to_color: dict[str, str] = {}
     for item in file_items:
         group_name = item.get("group_name")
@@ -1678,14 +1841,14 @@ def _compound_pdf_worker(kwargs: dict) -> str:
 
             fig, axes = plt.subplots(_GRID_ROWS, _GRID_COLS, figsize=(20, 16))
             fig.subplots_adjust(
-                left=0.05, right=0.98, top=0.92, bottom=0.06, hspace=0.45, wspace=0.3
+                left=0.07, right=0.98, top=0.92, bottom=0.08, hspace=0.45, wspace=0.3
             )
             axes_flat = axes.flatten()
 
             active_axes = []
             for slot_idx, item in enumerate(page_items):
                 ax = axes_flat[slot_idx]
-                fname_s = _strip_non_chars(_short_fname(item["filename"]))
+                fname_s = _strip_non_chars(_eic_subplot_label(item["filename"]))
                 spec_ints = as_list(item.get("spec_ints"))
                 valid_ints = [v for v in spec_ints if v is not None and not np.isnan(v)]
                 y_max_indep = float(max(valid_ints)) if valid_ints else None
@@ -1707,6 +1870,8 @@ def _compound_pdf_worker(kwargs: dict) -> str:
                 axes_flat[slot_idx].set_visible(False)
 
             fig.suptitle(f"{title_base}  {page_label}\n", fontsize=12, y=1.005)
+            fig.text(0.5, 0.01, "RT (min)", ha="center", va="bottom", fontsize=11)
+            fig.text(0.01, 0.5, "Intensity", ha="left", va="center", fontsize=11, rotation=90)
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
@@ -1764,9 +1929,10 @@ def _render_eic_thumbnail(
 
     if bg_color:
         ax.set_facecolor(bg_color)
+        ax.patch.set_alpha(0.2)
 
     if spec_rts and spec_ints:
-        ax.plot(spec_rts, spec_ints, color="steelblue", linewidth=0.8)
+        ax.plot(spec_rts, spec_ints, color="black", linewidth=0.8)
     else:
         ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=10, color="gray")
@@ -1794,14 +1960,452 @@ def _render_eic_thumbnail(
     ax.xaxis.label.set_visible(False)
     ax.yaxis.label.set_visible(False)
     
-    ax.set_title(fname_short, fontsize=10, pad=2.5, loc="center")
+    # Smart-wrap the subplot title to fit within the axes width
+    wrapped_title = _smart_wrap(fname_short, ax, fontsize=10)
+    ax.set_title(wrapped_title + "\n", fontsize=10, pad=2.5, loc="center")
 
     for spine in ax.spines.values():
         spine.set_linewidth(0.5)
 
 ###############################################
+#### Sample TIC Chromatograms
+###############################################
+
+def make_tic_thumbnails(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = True,
+    max_workers: int | None = None,
+) -> None:
+    """Generate per-sample Total Ion Chromatogram (TIC) thumbnail PDFs.
+
+    Produces two files in ``additional_info/``:
+
+    * ``sample_TIC_total_chromatograms_independentY.pdf`` — each subplot
+      auto-scales its y-axis independently.
+    * ``sample_TIC_total_chromatograms_sharedY.pdf`` — all subplots share
+      the same y-axis maximum (the global maximum across all files).
+
+    Subplot titles use the same ``_eic_subplot_label()`` format as the EIC
+    thumbnails (``polarity_chrom_sample#_groupname_replicate#_Run###``).
+
+    The TIC is built from ``experimental_data.ms1_df_full_range`` when
+    available, falling back to ``experimental_data.ms1_df``.
+    """
+    output_loc = Path(summary_obj.paths["analysis_results_output_dir"])
+    additional_info_dir = output_loc / "additional_info"
+    path_indep  = additional_info_dir / "sample_TIC_total_chromatograms_independentY.pdf"
+    path_shared = additional_info_dir / "sample_TIC_total_chromatograms_sharedY.pdf"
+
+    if not overwrite and path_indep.exists() and path_shared.exists():
+        logger.info("Overwriting disabled: existing TIC PDFs will be used.")
+        return
+
+    additional_info_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use full-range MS1 data when available (wider RT window)
+    ms1_df = summary_obj.experimental_data.ms1_df_full_range
+    if ms1_df is None or ms1_df.empty:
+        ms1_df = summary_obj.experimental_data.ms1_df
+
+    if ms1_df is None or ms1_df.empty:
+        logger.warning("No MS1 data available — TIC thumbnails not generated.")
+        return
+
+    logger.info("Building TIC traces from MS1 data...")
+    tic_df = dbi.build_tic_df(ms1_df)
+
+    if tic_df.empty:
+        logger.warning("TIC DataFrame is empty — TIC thumbnails not generated.")
+        return
+
+    logger.info(f"Generating TIC thumbnails for {len(tic_df)} files...")
+
+    _GRID_COLS = 5
+    _GRID_ROWS = 5
+    _PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
+
+    # Sort files using the same alphanum logic as EIC thumbnails
+    def _alphanum_key(text: str) -> list:
+        return [
+            int(tok) if tok.isdigit() else tok.lower()
+            for tok in re.split(r"(\d+)", text or "")
+        ]
+
+    tic_df = tic_df.sort_values(
+        "filename",
+        key=lambda s: s.map(lambda f: _alphanum_key(Path(f).stem)),
+    ).reset_index(drop=True)
+
+    # Build group → color map (same palette as EIC thumbnails)
+    _TIC_BG_PALETTE = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+        "#9467bd", "#8c564b", "#e377c2", "#17becf",
+    ]
+    tic_group_to_color: dict[str, str] = {}
+    for fn in tic_df["filename"]:
+        grp = dbi._file_group_from_filename(str(fn))
+        if grp not in tic_group_to_color:
+            tic_group_to_color[grp] = _TIC_BG_PALETTE[len(tic_group_to_color) % len(_TIC_BG_PALETTE)]
+
+    # Global y-max for shared-scale mode
+    all_ints = [v for row in tic_df["tic_ints"] for v in (row or []) if v is not None and not np.isnan(v)]
+    y_max_global = float(max(all_ints)) if all_ints else None
+
+    total_files = len(tic_df)
+    total_pages = max(1, (total_files + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
+
+    pdf_indep  = PdfPages(path_indep)
+    pdf_shared = PdfPages(path_shared)
+    try:
+        for page_idx in range(total_pages):
+            start = page_idx * _PLOTS_PER_PAGE
+            end   = min(start + _PLOTS_PER_PAGE, total_files)
+            page_rows = tic_df.iloc[start:end]
+            n_on_page = len(page_rows)
+            page_label = f"({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
+
+            fig, axes = plt.subplots(_GRID_ROWS, _GRID_COLS, figsize=(20, 16))
+            fig.subplots_adjust(
+                left=0.07, right=0.98, top=0.92, bottom=0.08, hspace=0.45, wspace=0.3
+            )
+            axes_flat = axes.flatten()
+
+            active_axes = []
+            for slot_idx, (_, row) in enumerate(page_rows.iterrows()):
+                ax = axes_flat[slot_idx]
+                filename  = row["filename"]
+                tic_rts   = as_list(row.get("tic_rts",  []))
+                tic_ints  = as_list(row.get("tic_ints", []))
+                fname_s   = _strip_non_chars(_eic_subplot_label(filename))
+
+                # Background color by file group (same as EIC thumbnails)
+                grp = dbi._file_group_from_filename(str(filename))
+                bg_color = tic_group_to_color.get(grp)
+                if bg_color:
+                    ax.set_facecolor(bg_color)
+                    ax.patch.set_alpha(0.2)
+
+                if tic_rts and tic_ints:
+                    ax.plot(tic_rts, tic_ints, color="black", linewidth=0.8)
+                else:
+                    ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
+                            ha="center", va="center", fontsize=10, color="gray")
+
+                fmt = ScalarFormatter(useMathText=True)
+                fmt.set_scientific(True)
+                fmt.set_powerlimits((0, 0))
+                ax.yaxis.set_major_formatter(fmt)
+                ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
+                ax.tick_params(axis="both", labelsize=10, length=2, pad=1)
+                ax.xaxis.label.set_visible(False)
+                ax.yaxis.label.set_visible(False)
+                # Smart-wrap the TIC subplot title to fit within the axes width
+                wrapped_tic_title = _smart_wrap(fname_s, ax, fontsize=10)
+                ax.set_title(wrapped_tic_title + "\n", fontsize=10, pad=2.5, loc="center")
+                for spine in ax.spines.values():
+                    spine.set_linewidth(0.5)
+
+                active_axes.append(ax)
+
+            for slot_idx in range(n_on_page, _PLOTS_PER_PAGE):
+                axes_flat[slot_idx].set_visible(False)
+
+            fig.suptitle(f"Sample TIC Chromatograms  {page_label}\n", fontsize=12, y=1.005)
+            fig.text(0.5, 0.01, "RT (min)", ha="center", va="bottom", fontsize=11)
+            fig.text(0.01, 0.5, "Intensity", ha="left", va="center", fontsize=11, rotation=90)
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Glyph \d+ .* missing from font",
+                    category=UserWarning,
+                )
+                pdf_indep.savefig(fig, bbox_inches="tight")
+                if y_max_global is not None and y_max_global > 0:
+                    for ax in active_axes:
+                        ax.set_ylim(bottom=0, top=y_max_global * 1.05)
+                pdf_shared.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+    finally:
+        pdf_indep.close()
+        pdf_shared.close()
+
+    logger.info(f"TIC thumbnails written to {additional_info_dir}")
+
+###############################################
+#### Compound Peak Height / RT Peak Grid Plots
+###############################################
+
+def _run_number_sort_key(filename: str) -> int:
+    """Return the numeric run number from a filename for sorting, or sys.maxsize on failure."""
+    try:
+        rn = fpf.get_file_parts(filename, "run_number")
+        # run_number may be "Run95" or "95"
+        return int(re.sub(r"[^0-9]", "", rn))
+    except Exception:
+        return sys.maxsize
+
+
+def _make_compound_subplot(
+    ax,
+    filenames: list[str],
+    values: list[float],
+    compound_title: str,
+    ylabel: str,
+    atlas_ref: float | None = None,
+) -> None:
+    """Draw one compound subplot: x = file (ordered by run#), y = metric value.
+
+    Parameters
+    ----------
+    filenames:
+        Ordered list of file basenames (stems) for x-axis labels.
+    values:
+        Corresponding metric values (NaN for missing).
+    compound_title:
+        Subplot title (safe_stem format).
+    ylabel:
+        Y-axis label string.
+    atlas_ref:
+        When provided, draw a horizontal red line at this value (theoretical RT).
+    """
+    x_pos = list(range(len(filenames)))
+    vals  = np.array(values, dtype=float)
+
+    # Scatter dots; NaN values are simply not plotted
+    valid = np.isfinite(vals)
+    if valid.any():
+        ax.scatter(
+            np.array(x_pos)[valid], vals[valid],
+            s=20, color="black", alpha=0.85, zorder=3,
+        )
+
+    if atlas_ref is not None and not np.isnan(atlas_ref):
+        ax.axhline(atlas_ref, color="red", linewidth=1.0, linestyle="--", alpha=0.8)
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(filenames, rotation=90, ha="center", va="top", fontsize=7)
+    ax.tick_params(axis="x", pad=2, length=2)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    # Smart-wrap the title to fit within the subplot width
+    wrapped_title = _smart_wrap(compound_title, ax, fontsize=8)
+    ax.set_title(wrapped_title, fontsize=8, pad=2, loc="center", fontweight="bold")
+
+    sci_fmt = ScalarFormatter(useMathText=True)
+    sci_fmt.set_scientific(True)
+    sci_fmt.set_powerlimits((-3, 4))
+    ax.yaxis.set_major_formatter(sci_fmt)
+
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.5)
+
+
+def make_compound_metric_plots(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = True,
+) -> None:
+    """Generate two multi-compound grid PDFs in ``additional_info/``.
+
+    * ``compound_peak_heights.pdf`` — one subplot per compound, x = file
+      (ordered by run number, vertical label), y = peak height.
+    * ``compound_rt_peaks.pdf`` — same layout, y = RT peak, with a red
+      dashed horizontal line at the theoretical (atlas) RT.
+
+    Each subplot title uses the same safe-stem format as the ID figures
+    (``{idx:04d}_{name}_{adduct}_{mz}_{rt}``).
+
+    Compounds are laid out in a 5x5 grid per page.  Files are sorted by
+    their ``run_number`` field (parsed from the filename).
+    """
+    output_loc = Path(summary_obj.paths["analysis_results_output_dir"])
+    additional_info_dir = output_loc / "additional_info"
+    path_ph = additional_info_dir / "compound_peak_heights.pdf"
+    path_rt = additional_info_dir / "compound_rt_peaks.pdf"
+
+    if not overwrite and path_ph.exists() and path_rt.exists():
+        logger.info("Overwriting disabled: existing compound metric PDFs will be used.")
+        return
+
+    additional_info_dir.mkdir(parents=True, exist_ok=True)
+
+    manual_curation_df = summary_obj.experimental_data.curation_df
+    per_file_df = summary_obj.per_file_metrics_df
+
+    if manual_curation_df is None or manual_curation_df.empty:
+        logger.warning("No curation data — compound metric plots not generated.")
+        return
+    if per_file_df is None or per_file_df.empty:
+        logger.warning("No per-file metrics — compound metric plots not generated.")
+        return
+
+    # Build ordered list of all files sorted by run number
+    all_files_sorted: list[str] = sorted(
+        per_file_df["filename"].dropna().unique().tolist(),
+        key=_run_number_sort_key,
+    )
+
+    _DEFINED_FILE_GROUPS: frozenset[str] = frozenset({"EXCTRL", "INJBL", "ISTD", "QC", "REFSTD"})
+
+    def _run_label(filename: str) -> str:
+        try:
+            run_num = fpf.get_file_parts(filename, "run_number")
+        except Exception:
+            run_num = os.path.basename(filename)
+        file_group = dbi._file_group_from_filename(filename)
+        if file_group in _DEFINED_FILE_GROUPS:
+            sample_group = file_group
+        else:
+            try:
+                sample_group = fpf.get_file_parts(filename, "sample_name")
+            except Exception:
+                sample_group = file_group
+        return f"{sample_group}_{run_num}"
+
+    x_labels = [_run_label(f) for f in all_files_sorted]
+    file_to_idx = {f: i for i, f in enumerate(all_files_sorted)}
+
+    # Build per-compound data
+    mc_reset = manual_curation_df.reset_index(drop=True)
+    compounds: list[dict] = []
+    for cmp_idx, mc_row in mc_reset.iterrows():
+        cmp_idx_display = _display_compound_idx(cmp_idx)
+        compound_name = mc_row.get("compound_name", "Undefined")
+        adduct        = mc_row.get("adduct", "")
+        atlas_mz      = safe_float(mc_row.get("atlas_mz"))
+        atlas_rt      = safe_float(mc_row.get("atlas_rt_peak"))
+        mz_rt_uid     = mc_row.get("mz_rt_uid", "")
+
+        title = _make_compound_safe_stem(cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt)
+
+        # Gather per-file values for this compound
+        cmp_rows = per_file_df[per_file_df["mz_rt_uid"] == mz_rt_uid]
+        ph_vals = [np.nan] * len(all_files_sorted)
+        rt_vals = [np.nan] * len(all_files_sorted)
+        for _, row in cmp_rows.iterrows():
+            fn = row.get("filename", "")
+            idx = file_to_idx.get(fn)
+            if idx is not None:
+                ph_vals[idx] = float(row.get("peak_height", np.nan))
+                rt_vals[idx] = float(row.get("rt_peak",     np.nan))
+
+        compounds.append({
+            "title":    title,
+            "ph_vals":  ph_vals,
+            "rt_vals":  rt_vals,
+            "atlas_rt": atlas_rt,
+        })
+
+    if not compounds:
+        logger.warning("No compounds to plot — compound metric plots not generated.")
+        return
+
+    _GRID_COLS = 5
+    _GRID_ROWS = 5
+    _PLOTS_PER_PAGE = _GRID_COLS * _GRID_ROWS
+    n_compounds  = len(compounds)
+    total_pages  = max(1, (n_compounds + _PLOTS_PER_PAGE - 1) // _PLOTS_PER_PAGE)
+
+    # Figure width scales with number of files so x-axis labels stay readable
+    n_files    = len(all_files_sorted)
+    subplot_w  = max(2.5, min(8.0, n_files * 0.18))
+    fig_width  = subplot_w * _GRID_COLS
+    fig_height = 4.5 * _GRID_ROWS
+
+    logger.info(
+        f"Generating compound metric plots: {n_compounds} compounds x {n_files} files, "
+        f"{total_pages} page(s)..."
+    )
+
+    pdf_ph = PdfPages(path_ph)
+    pdf_rt = PdfPages(path_rt)
+    try:
+        for page_idx in range(total_pages):
+            start = page_idx * _PLOTS_PER_PAGE
+            end   = min(start + _PLOTS_PER_PAGE, n_compounds)
+            page_compounds = compounds[start:end]
+            n_on_page = len(page_compounds)
+            page_label = f"({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
+
+            for pdf_obj, metric_key, ylabel, use_atlas_rt in [
+                (pdf_ph, "ph_vals", "Peak Height",   False),
+                (pdf_rt, "rt_vals", "RT Peak (min)", True),
+            ]:
+                fig, axes = plt.subplots(
+                    _GRID_ROWS, _GRID_COLS,
+                    figsize=(fig_width, fig_height),
+                )
+                fig.subplots_adjust(
+                    left=0.06, right=0.98, top=0.90, bottom=0.12,
+                    hspace=0.90, wspace=0.35,
+                )
+                axes_flat = axes.flatten()
+
+                for slot_idx, cmp in enumerate(page_compounds):
+                    ax = axes_flat[slot_idx]
+                    atlas_ref = cmp["atlas_rt"] if use_atlas_rt else None
+                    _make_compound_subplot(
+                        ax,
+                        x_labels,
+                        cmp[metric_key],
+                        cmp["title"],
+                        ylabel,
+                        atlas_ref=atlas_ref,
+                    )
+
+                for slot_idx in range(n_on_page, _PLOTS_PER_PAGE):
+                    axes_flat[slot_idx].set_visible(False)
+
+                title_str = (
+                    "Compound Peak Heights" if metric_key == "ph_vals"
+                    else "Compound RT Peaks"
+                )
+                fig.suptitle(f"{title_str}  {page_label}\n", fontsize=13, y=1.0)
+
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"Glyph \d+ .* missing from font",
+                        category=UserWarning,
+                    )
+                    pdf_obj.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+    finally:
+        pdf_ph.close()
+        pdf_rt.close()
+
+    logger.info(
+        f"Compound metric plots written to {additional_info_dir}: "
+        f"compound_peak_heights.pdf and compound_rt_peaks.pdf"
+    )
+
+###############################################
 #### Compound Boxplots
 ###############################################
+
+def _sort_boxplot_groups(groups: list[str]) -> list[str]:
+    _CONTROL_GROUPS_FIRST: frozenset[str] = frozenset({"EXCTRL", "INJBL", "ISTD", "QC"})
+    _CONTROL_GROUPS_LAST:  frozenset[str] = frozenset({"REFSTD"})
+
+    first  = sorted(g for g in groups if g in _CONTROL_GROUPS_FIRST)
+    last   = sorted(g for g in groups if g in _CONTROL_GROUPS_LAST)
+    middle = sorted(g for g in groups if g not in _CONTROL_GROUPS_FIRST and g not in _CONTROL_GROUPS_LAST)
+    return first + middle + last
+
+def _build_group_color_map(groups: list[str]) -> dict[str, str]:
+    
+    _BOXPLOT_DOT_COLORS: list[str] = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#17becf",
+    ]    
+
+    return {g: _BOXPLOT_DOT_COLORS[i % len(_BOXPLOT_DOT_COLORS)] for i, g in enumerate(groups)}
 
 def _plot_compound_boxplot(
     ax,
@@ -1814,6 +2418,8 @@ def _plot_compound_boxplot(
     ylabel: str,
     compound_idx: int = 0,
     all_groups: list[str] | None = None,
+    group_color_map: dict[str, str] | None = None,
+    compound_safe_stem: str | None = None,
 ) -> None:
     """Draw a grouped boxplot for one compound onto *ax*.
 
@@ -1833,17 +2439,24 @@ def _plot_compound_boxplot(
     ylabel:
         Y-axis label string.
     all_groups:
-        The complete sorted list of file_group labels across all files in the
-        analysis.  When provided every group always appears on the x-axis;
-        groups with no data for this compound are shown as blank columns.
-        When *None* only groups that have data are shown (legacy behaviour).
+        The complete ordered list of file_group labels across all files in the
+        analysis (control groups first, RefStd last).  When provided every group
+        always appears on the x-axis; groups with no data are shown as blank
+        columns.  When *None* only groups that have data are shown.
+    group_color_map:
+        Mapping of group label → dot color.  When *None* all dots are gray.
+    compound_safe_stem:
+        When provided, used as the subplot title instead of the default
+        ``{idx}  {compound_name}  {adduct}`` format.
     """
     rng = np.random.default_rng(seed=42)
 
     if all_groups is not None:
         groups = all_groups
     elif not compound_metrics.empty:
-        groups = sorted(compound_metrics["file_group"].dropna().unique())
+        groups = _sort_boxplot_groups(
+            compound_metrics["file_group"].dropna().unique().tolist()
+        )
     else:
         groups = []
 
@@ -1861,44 +2474,49 @@ def _plot_compound_boxplot(
             real_vals_all.extend(vals)
         data_per_group.append(vals)
 
-    def _make_title() -> str:
-        title_top = f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
-        if metric == "mz_centroid":
-            mz_val = atlas_ref if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-            return f"{title_top}\nAtlas m/z: {mz_val}"
-        if metric == "rt_peak":
-            rt_val = f"{atlas_ref:.3f} min" if atlas_ref is not None and not np.isnan(atlas_ref) else 'N/A'
-            return f"{title_top}\nAtlas RT: {rt_val}"
+    def _make_title(wrapped: bool = False) -> str:
+        title_top = compound_safe_stem if compound_safe_stem else f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
+        if wrapped:
+            title_top = _smart_wrap(title_top, ax, fontsize=13)
+        if metric in ("mz_centroid",):
+            mz_val = f"{atlas_ref:.4f}" if (atlas_ref is not None and not np.isnan(atlas_ref)) else 'N/A'
+            return f"{title_top}\nTheoretical m/z: {mz_val}"
+        if metric in ("rt_peak",):
+            rt_val = f"{atlas_ref:.3f} min" if (atlas_ref is not None and not np.isnan(atlas_ref)) else 'N/A'
+            return f"{title_top}\nTheoretical RT: {rt_val}"
         return title_top
 
     if not groups:
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
                 ha="center", va="center", fontsize=8, color="gray")
-        ax.set_title(_make_title(), fontsize=13, pad=2, loc="center", fontweight="bold")
+        ax.set_title(_make_title(wrapped=True), fontsize=13, pad=2, loc="center", fontweight="bold")
         return
 
     positions = list(range(len(groups)))
     boxplot_data = [vals if vals else [np.nan] for vals in data_per_group]
+
+    # Box fill is white, lines are gray — color comes from the scatter dots only.
     ax.boxplot(
         boxplot_data,
         positions=positions,
         widths=0.5,
         patch_artist=True,
-        boxprops=dict(facecolor="#AED6F1", alpha=0.7),
-        medianprops=dict(color="navy", linewidth=1.5),
-        whiskerprops=dict(linewidth=0.8),
-        capprops=dict(linewidth=0.8),
+        boxprops=dict(facecolor="white", edgecolor="#888888", linewidth=0.8),
+        medianprops=dict(color="#444444", linewidth=1.5),
+        whiskerprops=dict(color="#888888", linewidth=0.8),
+        capprops=dict(color="#888888", linewidth=0.8),
         showfliers=False,
     )
 
-    for pos, vals in zip(positions, data_per_group):
+    for pos, g, vals in zip(positions, groups, data_per_group):
         if not vals:
             continue  # no real data for this group — leave the slot blank
+        dot_color = (group_color_map or {}).get(g, "#888888")
         jitter = rng.uniform(-0.15, 0.15, size=len(vals))
         ax.scatter(
             np.array([pos] * len(vals), dtype=float) + jitter,
             vals,
-            s=8, color="steelblue", alpha=0.65, zorder=3,
+            s=18, color=dot_color, alpha=0.75, zorder=3,
         )
 
     # Fit y-axis tightly to the actual data values only (excludes placeholder NaNs)
@@ -1908,16 +2526,75 @@ def _plot_compound_boxplot(
         data_range = data_max - data_min if data_max != data_min else abs(data_max) * 0.1 or 1.0
         ax.set_ylim(data_min - data_range * 0.1, data_max + data_range * 0.15)
 
+    # Axis formatting
     ax.set_xticks(positions)
-    ax.set_xticklabels(groups, rotation=45, ha="right", fontsize=10)
+    ax.set_xticklabels(groups, rotation=90, ha="center", va="top", fontsize=10)
+    ax.tick_params(axis="x", pad=4)
     ax.tick_params(axis="y", labelsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_title(_make_title(wrapped=True), fontsize=13, pad=2, loc="center", fontweight="bold")
 
-    ax.set_title(_make_title(), fontsize=13, pad=2, loc="center", fontweight="bold")
+    # Smart y-axis formatting: place a "1×10^X" offset label at the top of the
+    # y-axis and show tick labels with enough decimal places to differentiate
+    # adjacent ticks.  This handles cases where the data range is very narrow
+    # (e.g. 1.205–1.209 or 130.0012–130.0013) where a plain ScalarFormatter
+    # would collapse all ticks to the same displayed value.
+    import matplotlib.ticker as mticker
 
-    # For linear scales, remove scientific notation multiplier and offset
-    if not log_scale:
-        ax.ticklabel_format(style="plain", axis="y", useOffset=False)
+    if real_vals_all:
+        finite_vals = [v for v in real_vals_all if np.isfinite(v)]
+        if finite_vals:
+            data_min_v = min(finite_vals)
+            data_max_v = max(finite_vals)
+            data_range_v = data_max_v - data_min_v
+
+            abs_max_v = max(abs(v) for v in finite_vals)
+
+            if abs_max_v > 0:
+                # Exponent for the offset label (based on the magnitude of the values)
+                exp = int(np.floor(np.log10(abs_max_v)))
+                scale = 10 ** exp
+
+                # Determine how many decimal places are needed so adjacent ticks
+                # are distinguishable after dividing by scale.
+                # We aim for at least 2 significant digits in the range.
+                if data_range_v > 0:
+                    # Number of decimals needed to show the range with ~3 sig figs
+                    range_scaled = data_range_v / scale
+                    if range_scaled > 0:
+                        decimals_needed = max(1, -int(np.floor(np.log10(range_scaled))) + 2)
+                    else:
+                        decimals_needed = 4
+                else:
+                    decimals_needed = 4
+                decimals_needed = min(decimals_needed, 8)  # cap at 8 decimal places
+
+                fmt_str = f"{{:.{decimals_needed}f}}"
+                ax.yaxis.set_major_formatter(
+                    mticker.FuncFormatter(lambda v, _, _s=scale, _f=fmt_str: _f.format(v / _s))
+                )
+                # Place "×10^exp" text at the top of the y-axis spine
+                ax.text(
+                    -0.01, 1.01,
+                    f"×10$^{{{exp}}}$",
+                    transform=ax.transAxes,
+                    fontsize=9, ha="right", va="bottom",
+                )
+            else:
+                sci_fmt = ScalarFormatter(useMathText=True)
+                sci_fmt.set_scientific(True)
+                sci_fmt.set_powerlimits((-3, 4))
+                ax.yaxis.set_major_formatter(sci_fmt)
+        else:
+            sci_fmt = ScalarFormatter(useMathText=True)
+            sci_fmt.set_scientific(True)
+            sci_fmt.set_powerlimits((-3, 4))
+            ax.yaxis.set_major_formatter(sci_fmt)
+    else:
+        sci_fmt = ScalarFormatter(useMathText=True)
+        sci_fmt.set_scientific(True)
+        sci_fmt.set_powerlimits((-3, 4))
+        ax.yaxis.set_major_formatter(sci_fmt)
 
     for spine in ax.spines.values():
         spine.set_linewidth(0.5)
@@ -1932,25 +2609,32 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     atlas_ref_dict = kwargs["atlas_ref_dict"]
     metric_configs = kwargs["metric_configs"]
     cmp_metrics = kwargs["cmp_metrics"]
-    all_groups = kwargs.get("all_groups")  # global group list for consistent x-axis
+    all_groups = kwargs.get("all_groups")       # global ordered group list
+    group_color_map = kwargs.get("group_color_map")  # group → dot color
 
-    safe_stem = f"{_display_compound_idx(cmp_idx):04d}_{compound_name}_{adduct}_{inchi_key}".replace("/", "-").replace(" ", "_")
+    atlas_mz = safe_float(atlas_ref_dict.get("atlas_mz"))
+    atlas_rt = safe_float(atlas_ref_dict.get("atlas_rt_peak"))
+    safe_stem = _make_compound_safe_stem(
+        _display_compound_idx(cmp_idx), compound_name, adduct, atlas_mz, atlas_rt
+    )
 
     # Scale figure width with the number of groups so x-axis labels stay readable.
     n_groups = len(all_groups) if all_groups else 1
-    fig_width = max(10, min(80, n_groups * 0.25))
+    fig_width = max(10, min(80, n_groups * 0.35))
 
     for metric, log_scale, ylabel, atlas_attr, metric_dir_str in metric_configs:
         pdf_path = Path(metric_dir_str) / f"{safe_stem}.pdf"
         atlas_ref = atlas_ref_dict.get(atlas_attr) if atlas_attr else None
         fig, ax = plt.subplots(figsize=(fig_width, 6))
-        fig.subplots_adjust(bottom=0.2, left=0.12, right=0.97, top=0.88)
+        fig.subplots_adjust(bottom=0.25, left=0.12, right=0.97, top=0.88)
         try:
             _plot_compound_boxplot(
                 ax, cmp_metrics, metric, log_scale,
                 atlas_ref, compound_name, adduct, ylabel,
                 compound_idx=cmp_idx,
                 all_groups=all_groups,
+                group_color_map=group_color_map,
+                compound_safe_stem=safe_stem,
             )
             with PdfPages(pdf_path) as pdf:
                 pdf.savefig(fig, bbox_inches="tight")
@@ -1965,16 +2649,37 @@ def make_boxplots(
     max_workers: int | None = None,
 ) -> None:
 
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "boxplots"
-    if overwrite and output_dir.exists():
-        logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
-        shutil.rmtree(output_dir)
-    elif not overwrite and output_dir.exists():
-        logger.info(f"Overwriting disabled: existing directory {output_dir} will be used (existing PDFs will be preserved).")
-        return
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    additional_info_dir = base_dir / "additional_info"
 
-    logger.info(f"Exporting boxplot figures to {output_dir}")
+    dir_peak_height = base_dir / f"boxplot_peak_height"
+    dir_peak_height_log = base_dir / f"boxplot_peak_height_log"
+    dir_rt_peak = additional_info_dir / f"boxplot_rt_peak"
+    dir_mz_centroid = additional_info_dir / f"boxplot_mz_centroid"
+    dir_mz_centroid_log = additional_info_dir / f"boxplot_mz_centroid_log"
+    dir_rt_peak_log = additional_info_dir / f"boxplot_rt_peak_log"
+
+    all_metric_dirs = [
+        dir_peak_height, dir_peak_height_log,
+        dir_rt_peak, dir_rt_peak_log,
+        dir_mz_centroid, dir_mz_centroid_log,
+    ]
+
+    if overwrite:
+        for d in all_metric_dirs:
+            if d.exists():
+                logger.info(f"Overwriting enabled: clearing existing contents of {d}")
+                shutil.rmtree(d)
+    else:
+        # If any top-level boxplot dir exists, skip entirely
+        if any(d.exists() for d in all_metric_dirs):
+            logger.info("Overwriting disabled: existing boxplot directories will be used (existing PDFs will be preserved).")
+            return
+
+    for d in all_metric_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Exporting boxplot figures to {base_dir} and {additional_info_dir}")
 
     manual_curation_df = summary_obj.experimental_data.curation_df
 
@@ -1998,15 +2703,15 @@ def make_boxplots(
 
     # Create metric output dirs upfront, store paths as strings
     _METRIC_CONFIGS = [
-        ("peak_height", False, "Peak Height (intensity)", None),
-        ("peak_height", True,  "Peak Height (log₁₀)", None),
-        ("rt_peak", False, "RT Peak (mins)", "atlas_rt_peak"),
-        ("mz_centroid", False, "m/z Centroid", "atlas_mz"),
+        ("peak_height", False, "Peak Height (intensity)", None, dir_peak_height),
+        ("peak_height", True,  "Peak Height (log₁₀)", None, dir_peak_height_log),
+        ("rt_peak", False, "RT Peak (mins)", "atlas_rt_peak", dir_rt_peak),
+        ("rt_peak", True, "RT Peak (log₁₀)", "atlas_rt_peak", dir_rt_peak_log),
+        ("mz_centroid", False, "m/z Centroid", "atlas_mz", dir_mz_centroid),
+        ("mz_centroid", True, "m/z Centroid (log₁₀)", "atlas_mz", dir_mz_centroid_log),
     ]
     metric_configs_with_dirs: list[tuple] = []
-    for metric, log_scale, ylabel, atlas_attr in _METRIC_CONFIGS:
-        metric_dir = output_dir / f"{metric}_{'log' if log_scale else 'linear'}"
-        metric_dir.mkdir(parents=True, exist_ok=True)
+    for metric, log_scale, ylabel, atlas_attr, metric_dir in _METRIC_CONFIGS:
         metric_configs_with_dirs.append((metric, log_scale, ylabel, atlas_attr, str(metric_dir)))
 
     pf_groups: dict = {
@@ -2024,10 +2729,12 @@ def make_boxplots(
             f"Sample curation UIDs: {list(mc_uids)[:3]} | Sample per_file UIDs: {list(pf_uids)[:3]}"
         )
 
-    # Compute the global sorted list of file groups for displaying in the boxplots
-    all_groups: list[str] = sorted(
+    raw_groups: list[str] = (
         per_file_df["file_group"].dropna().unique().tolist()
-    ) if "file_group" in per_file_df.columns else []
+        if "file_group" in per_file_df.columns else []
+    )
+    all_groups: list[str] = _sort_boxplot_groups(raw_groups)
+    group_color_map: dict[str, str] = _build_group_color_map(all_groups)
 
     # One task per compound
     tasks: list[dict] = []
@@ -2047,6 +2754,10 @@ def make_boxplots(
             "metric_configs": metric_configs_with_dirs,
             "cmp_metrics": pf_groups.get(mz_rt_uid, pd.DataFrame()),
             "all_groups": all_groups,
+            "group_color_map": group_color_map,
+            # Pass atlas values so the worker can build the safe_stem filename
+            "atlas_mz":  float(mc_row.get("atlas_mz", np.nan)),
+            "atlas_rt":  float(mc_row.get("atlas_rt_peak", np.nan)),
         })
 
     if not tasks:
@@ -2082,48 +2793,6 @@ def make_boxplots(
 #### Table Exporters
 ###############################################
 
-# def make_manual_curation_csv(
-#     summary_obj: "AnalysisSummary",
-#     output_filename: str = "manually_curated_compound_data.csv",
-#     overwrite: bool = True,
-# ) -> None:
-#     """Write the ``manual_curation`` table to a CSV file (one row per compound).
-
-#     Parameters
-#     ----------
-#     summary_obj:
-#         Configured ``AnalysisSummary`` object (call ``.setup(...)`` first).
-#         ``manual_curation_df`` is loaded automatically if not already cached.
-#     output_filename:
-#         CSV filename (the ``.csv`` extension is appended automatically if absent).
-#     overwrite:
-#         When *False*, skips writing if the output file already exists.
-
-#     Returns
-#     -------
-#     pd.DataFrame
-#         The exported DataFrame (empty on error).
-#     """
-
-#     output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
-#     output_file = output_dir / output_filename
-#     if not overwrite and output_file.exists():
-#         logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
-#         return
-#     output_dir.mkdir(parents=True, exist_ok=True)
-
-#     logger.info(f"Exporting manual curation CSV to {output_file}")
-
-#     manual_curation_df = summary_obj.experimental_data.curation_df
-
-#     if manual_curation_df is None or manual_curation_df.empty:
-#         logger.error("No manual curation entries found - CSV not written.")
-#         return
-
-#     manual_curation_df.to_csv(output_file, index=False)
-#     logger.info("Exported manual curation CSV")
-#     return
-
 def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
     output_filename: str = "best_ms2_hit_fragment_ions.csv",
@@ -2133,7 +2802,7 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     from metatlas2.workflow_objects import MS2Hit
 
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / f"data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
         logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
@@ -2164,10 +2833,12 @@ def make_best_ms2_hit_fragment_ions_csv(
             if best_hit is not None:
                 ms2_best[uid] = best_hit
 
+    mc_reset = manual_curation_df.reset_index(drop=True)
+
     rows: list[dict] = []
     for cmp_idx, mc_row in tqdm(
-        manual_curation_df.reset_index(drop=True).iterrows(),
-        total=len(manual_curation_df),
+        mc_reset.iterrows(),
+        total=len(mc_reset),
         desc="Finding best MS2 hits for compounds",
         disable=should_disable_tqdm(),
     ):
@@ -2175,6 +2846,13 @@ def make_best_ms2_hit_fragment_ions_csv(
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
+        atlas_mz = safe_float(mc_row.get("atlas_mz"))
+        atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
+
+        # Build the same compound_id as make_data_sheets
+        compound_id = _make_compound_safe_stem(
+            cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt
+        )
 
         best_hit = ms2_best.get(mz_rt_uid)
         if best_hit is None:
@@ -2201,16 +2879,21 @@ def make_best_ms2_hit_fragment_ions_csv(
             else:
                 mz_vals, int_vals = [], []
 
+        # Full spectrum JSON (retained for backward compatibility)
         raw_spectrum_output = json.dumps([mz_vals, int_vals])
 
+        # Separate arrays rounded to 4 decimal places
+        mz_4dp  = [round(v, 4) for v in mz_vals]
+        int_4dp = [round(v, 4) for v in int_vals]
+
         rows.append({
-            "compound_index": cmp_idx_display,
-            "compound_name":  compound_name,
-            "adduct":         adduct,
-            "filename":       os.path.basename(str(best_hit.filename)),
-            "rt_peak":        best_hit.scan_rt,
-            "mz_peak":        best_hit.mz_measured,
-            "spectrum":       raw_spectrum_output,
+            "compound_id":     compound_id,
+            "filename":        os.path.basename(str(best_hit.filename)),
+            "rt_peak":         best_hit.scan_rt,
+            "mz_peak":         best_hit.mz_measured,
+            "spectrum":        raw_spectrum_output,
+            "mz_array":        json.dumps(mz_4dp),
+            "intensity_array": json.dumps(int_4dp),
         })
 
     result_df = pd.DataFrame(rows)
@@ -2228,7 +2911,7 @@ def make_data_sheets(
 ) -> None:
     """Export per-compound, per-file quantitative metric tables as wide-format CSVs."""
 
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / "data_sheets"
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / f"data_sheets"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -2260,20 +2943,64 @@ def make_data_sheets(
                                              "rt_centroid", "mz_peak", "mz_centroid"])
 
     mc_reset = manual_curation_df.reset_index(drop=True)
-    mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "adduct"]].copy()
-    mc_slim["compound_index"] = mc_reset.index + 1
+    mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "adduct",
+                         "atlas_mz", "atlas_rt_peak"]].copy()
+    mc_slim["_cmp_idx_display"] = mc_reset.index + 1
     mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
+
+    # Build single compound_id column using the same safe-stem format as ID figures
+    mc_slim["compound_id"] = mc_slim.apply(
+        lambda r: _make_compound_safe_stem(
+            int(r["_cmp_idx_display"]),
+            r["compound_name"],
+            r["adduct"],
+            safe_float(r.get("atlas_mz")),
+            safe_float(r.get("atlas_rt_peak")),
+        ),
+        axis=1,
+    )
 
     per_file_merge = per_file_df.drop(
         columns=[c for c in ["inchi_key", "adduct"] if c in per_file_df.columns]
     )
-    pfm = mc_slim.merge(per_file_merge, on="mz_rt_uid", how="left") # Left join from mc_slim so every compound in curation_df gets a row
+    pfm = mc_slim.merge(per_file_merge, on="mz_rt_uid", how="left")
 
     pfm["_file_col"] = pfm["filename"].apply(
         lambda p: os.path.splitext(os.path.basename(str(p)))[0]
         if (p and not (isinstance(p, float) and np.isnan(p)))
         else None
     )
+
+    # Collect ordered file columns (stems) for header row generation
+    all_file_cols: list[str] = []
+    seen: set[str] = set()
+    for fc in pfm["_file_col"].dropna():
+        if fc not in seen:
+            all_file_cols.append(fc)
+            seen.add(fc)
+
+    # Build the 6 header rows for each file column
+    analyst = getattr(summary_obj, "analyst", "") or ""
+    rta_num = getattr(summary_obj, "rt_alignment_number", None)
+    tga_num = getattr(summary_obj, "analysis_number", None)
+
+    header_rows: dict[str, list] = {
+        "group":            [],
+        "file":             [],
+        "short_groupname":  [],
+        "sample_treatment": [],
+        "short_filename":   [],
+        "short_samplename": [],
+    }
+    for fc in all_file_cols:
+        labels = fpf.get_filename_header_labels(
+            fc,
+            analyst=analyst,
+            rt_alignment_number=rta_num,
+            analysis_number=tga_num,
+        )
+        for key in header_rows:
+            header_rows[key].append(labels[key])
 
     _DATA_SHEET_METRICS = [
         "peak_height",
@@ -2283,14 +3010,7 @@ def make_data_sheets(
         "mz_peak",
         "mz_centroid",
     ]
-    # Ordered metadata columns: compound_index, mz_rt_uid, compound_name, inchi_key, adduct
-    _INDEX_COLS = [
-        "compound_index",
-        "mz_rt_uid",
-        "compound_name",
-        "inchi_key",
-        "adduct",
-    ]
+    _INDEX_COL = "compound_id"
 
     for metric in _DATA_SHEET_METRICS:
         if metric not in pfm.columns:
@@ -2301,12 +3021,11 @@ def make_data_sheets(
 
         csv_path = output_dir / f"{metric}.csv"
 
-        present_idx = [c for c in _INDEX_COLS if c in pfm.columns]
         pfm_with_file = pfm[pfm["_file_col"].notna()]
         wide = (
-            pfm_with_file[present_idx + ["_file_col", metric]]
+            pfm_with_file[[_INDEX_COL, "_file_col", metric]]
             .pivot_table(
-                index=present_idx,
+                index=_INDEX_COL,
                 columns="_file_col",
                 values=metric,
                 aggfunc="first",
@@ -2314,202 +3033,298 @@ def make_data_sheets(
             .reset_index()
         )
         wide.columns.name = None
-        no_data_compounds = mc_slim[~mc_slim["mz_rt_uid"].isin(pfm_with_file["mz_rt_uid"])].copy()
+
+        # Ensure all file columns are present (even if no data for some compounds)
+        for fc in all_file_cols:
+            if fc not in wide.columns:
+                wide[fc] = np.nan
+        # Reorder: compound_id first, then file cols in original order
+        wide = wide[[_INDEX_COL] + [fc for fc in all_file_cols if fc in wide.columns]]
+
+        # Add compounds with no data at all
+        no_data_compounds = mc_slim[~mc_slim["mz_rt_uid"].isin(pfm_with_file["mz_rt_uid"])][
+            [_INDEX_COL]
+        ].copy()
         if not no_data_compounds.empty:
-            # Align columns: add all sample columns as NaN
-            for col in wide.columns:
-                if col not in no_data_compounds.columns:
-                    no_data_compounds[col] = np.nan
-            no_data_compounds = no_data_compounds[[c for c in wide.columns if c in no_data_compounds.columns]]
+            for fc in all_file_cols:
+                no_data_compounds[fc] = np.nan
             wide = pd.concat([wide, no_data_compounds], ignore_index=True)
-            # Re-sort to match original curation_df order
-            order = mc_slim[["mz_rt_uid"]].reset_index(drop=True)
-            order["_sort_order"] = order.index
-            wide = wide.merge(order[["mz_rt_uid", "_sort_order"]], on="mz_rt_uid", how="left")
-            wide = wide.sort_values("_sort_order").drop(columns=["_sort_order"]).reset_index(drop=True)
-        wide.to_csv(csv_path, index=False)
-        logger.info(f"Exported {metric} data sheet ({len(wide)} compounds x {len(wide.columns) - len(present_idx)} files)")
+
+        # Re-sort to match original curation_df order
+        order_map = {row[_INDEX_COL]: i for i, row in mc_slim[[_INDEX_COL]].iterrows()}
+        wide["_sort_order"] = wide[_INDEX_COL].map(order_map).fillna(len(order_map))
+        wide = wide.sort_values("_sort_order").drop(columns=["_sort_order"]).reset_index(drop=True)
+
+        # Write CSV with 6 header rows prepended
+        sample_cols = [c for c in wide.columns if c != _INDEX_COL]
+        header_df = pd.DataFrame(
+            {_INDEX_COL: list(header_rows.keys())}
+            | {fc: header_rows[key][i] for i, fc in enumerate(all_file_cols) for key in []}  # placeholder
+        )
+        # Build header rows properly
+        header_records = []
+        for key in header_rows:
+            row = {_INDEX_COL: key}
+            for i, fc in enumerate(all_file_cols):
+                row[fc] = header_rows[key][i]
+            header_records.append(row)
+        header_df = pd.DataFrame(header_records, columns=[_INDEX_COL] + all_file_cols)
+
+        # Align header_df columns to wide columns
+        for col in wide.columns:
+            if col not in header_df.columns:
+                header_df[col] = ""
+        header_df = header_df[[c for c in wide.columns if c in header_df.columns]]
+
+        combined = pd.concat([header_df, wide], ignore_index=True)
+        combined.to_csv(csv_path, index=False)
+        logger.info(
+            f"Exported {metric} data sheet ({len(wide)} compounds x {len(sample_cols)} files, "
+            f"with 6 header rows)"
+        )
 
     logger.info(f"Data sheets written to {output_dir}")
+
+def _parse_peak_height_csv(
+    csv_path: Path,
+    n_header_rows: int = 6,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read a peak_height-style CSV produced by :func:`make_data_sheets`.
+
+    The on-disk layout is::
+
+        Row 0      : column-name row (compound_id, <file_stem_1>, <file_stem_2>, ...)
+        Row 1      : metadata row 1  (group, <group_1>, <group_2>, ...)
+        Row 2      : metadata row 2  (file, <file_1.h5>, ...)
+        Row 3      : metadata row 3  (short_groupname, ...)
+        Row 4      : metadata row 4  (sample_treatment, ...)
+        Row 5      : metadata row 5  (short_filename, ...)
+        Row 6      : metadata row 6  (short_samplename, ...)
+        Row 7+     : compound data rows
+
+    Parameters
+    ----------
+    csv_path:
+        Path to the CSV file.
+    n_header_rows:
+        Number of metadata rows that follow the column-name row (default 6).
+
+    Returns
+    -------
+    header_df : pd.DataFrame
+        The ``n_header_rows`` metadata rows read with ``header=None``.
+        Column positions (0..N) align with the column-name row positions
+        (position 0 = compound_id column, 1..N = file-stem columns).
+    data_df : pd.DataFrame
+        The compound data rows with the column-name row (row 0) used as the
+        pandas column header.
+    """
+    # Row 0 is the column-name row; rows 1..n_header_rows are metadata.
+    # Read n_header_rows+1 rows total, drop row 0, keep rows 1..n_header_rows.
+    raw = pd.read_csv(csv_path, nrows=n_header_rows + 1, header=None)
+    header_df = raw.iloc[1:].reset_index(drop=True)
+    header_df.columns = range(len(raw.columns))
+
+    # Skip rows 1..n_header_rows (metadata) so row 0 becomes the pandas header.
+    data_df = pd.read_csv(csv_path, skiprows=list(range(1, n_header_rows + 1)))
+
+    return header_df, data_df
+
+
+def _build_col_to_sample_treatment(
+    df: pd.DataFrame,
+    header_df: pd.DataFrame,
+    id_cols: set[str],
+    sample_treatment_row_idx: int = 3,
+) -> dict[str, str]:
+    """Map each sample column name to its ``sample_treatment`` value.
+
+    Parameters
+    ----------
+    df:
+        The data DataFrame whose columns are used for the mapping.
+    header_df:
+        The metadata header DataFrame returned by :func:`_parse_peak_height_csv`.
+        Column positions (integers 0..N) align with ``df.columns`` positions.
+    id_cols:
+        Set of column names that are identifier columns (not sample data).
+    sample_treatment_row_idx:
+        0-based row index within *header_df* for the ``sample_treatment`` row
+        (default 3, which is the 4th metadata row).
+
+    Returns
+    -------
+    dict mapping column name → sample_treatment string (non-empty, non-NaN).
+    """
+    treatment_row = header_df.iloc[sample_treatment_row_idx].tolist()
+    col_names = df.columns.tolist()
+    mapping: dict[str, str] = {}
+    for i, col in enumerate(col_names):
+        if col in id_cols:
+            continue
+        if i < len(treatment_row):
+            val = str(treatment_row[i]).strip()
+            if val and val.lower() not in ("nan", "none", ""):
+                mapping[col] = val
+    return mapping
+
 
 def make_peak_height_filtered_csv(
     obj: "AnalysisSummary",
     overwrite: bool = True,
     control_fold_threshold: float = 3.0,
 ) -> None:
-    """Filter and process the ``peak_height`` data sheet.
+    """Filter and impute the ``peak_height`` data sheet.
 
     Reads ``peak_height.csv`` (produced by :func:`make_data_sheets`) and writes
-    ``peak_height_filtered.csv`` with the following column layout::
+    two output files:
 
-        control_filter, compound_index, mz_rt_uid, compound_name, inchi_key,
-        adduct, <sample_file_1>, <sample_file_2>, ...
+    ``peak_height_filter_summary.tsv``
+        Two-column TSV (``compound_id``, ``extraction_control_filter``) recording whether
+        each compound was kept or removed by the ExCtrl fold-change filter.
+        All compounds appear here regardless of filter outcome.
 
-    Rows with the same ``inchi_key`` and ``compound_name`` (e.g. different
-    adducts) are collapsed to a single row by taking the element-wise maximum
-    across sample columns.  The adduct that produced the highest peak across
-    non-control samples is recorded in the ``adduct`` column.
+    ``peak_height_filtered.csv``
+        Identical format to ``peak_height.csv`` (same 6 prepended metadata
+        header rows, same column layout) but with:
+
+        * "remove" compound rows dropped.
+        * Remaining NaN cells imputed with the global minimum non-NaN value
+          across all sample columns (the "lowest" rule), computed from the
+          full unfiltered matrix so the floor is consistent.
+
+    **Filtering rule** — for each compound row:
+
+    * Identify *ExCtrl* columns via the ``sample_treatment`` metadata header row.
+    * Compute the mean peak height across all ExCtrl columns for that compound.
+    * A compound is **kept** if at least one non-ExCtrl sample column has a
+      value ≥ ``control_fold_threshold x mean_exctrl``.
+    * If no ExCtrl columns are present all compounds are kept.
     """
+    _N_HEADER_ROWS = 6
+    _EXCTRL_TREATMENT = "ExCtrl"
+    _META_COLS: set[str] = {"compound_id"}
 
-    out_dir = Path(obj.paths['analysis_results_output_dir']) / "data_sheets"
+    out_dir = Path(obj.paths["analysis_results_output_dir"]) / "data_sheets"
     source_csv = out_dir / "peak_height.csv"
     output_csv = out_dir / "peak_height_filtered.csv"
+    summary_tsv = out_dir / "peak_height_filter_summary.tsv"
+
     if not source_csv.exists():
         logger.error(
             "peak_height.csv not found at %s — run make_data_sheets first.", source_csv
         )
         return
     if not overwrite and output_csv.exists():
-        logger.info(f"Overwriting disabled: existing file {output_csv} will be used.")
+        logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
         return
 
-    logger.info(f"Creating filtered peak height CSV at {output_csv}")
+    logger.info("Creating filtered peak height CSV at %s", output_csv)
 
-    df = pd.read_csv(source_csv)
+    header_df, df = _parse_peak_height_csv(source_csv, n_header_rows=_N_HEADER_ROWS)
 
-    # Identify metadata vs sample columns
-    _META_COLS = {"compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
-    data_cols = [c for c in df.columns if c not in _META_COLS]
+    # Coerce all sample columns to numeric
+    sample_cols = [c for c in df.columns if c not in _META_COLS]
+    for col in sample_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Control-signal filter
-    _CTRL_PATTERNS = ("ExCtrl", "InjBL")
-    ctrl_cols     = [c for c in data_cols if any(p in c for p in _CTRL_PATTERNS)]
-    non_ctrl_cols = [c for c in data_cols if c not in ctrl_cols]
+    # Identify ExCtrl vs non-ExCtrl columns via sample_treatment header row
+    col_to_treatment = _build_col_to_sample_treatment(df, header_df, _META_COLS)
+    exctrl_cols = [
+        c for c in sample_cols
+        if col_to_treatment.get(c, "").strip() == _EXCTRL_TREATMENT
+    ]
+    non_exctrl_cols = [c for c in sample_cols if c not in exctrl_cols]
 
     logger.info(
-        "Control filter: %d control columns, %d non-control columns.",
-        len(ctrl_cols), len(non_ctrl_cols),
+        "Control filter: %d ExCtrl columns, %d non-ExCtrl columns.",
+        len(exctrl_cols), len(non_exctrl_cols),
     )
 
-    if not ctrl_cols:
-        logger.info("No control columns found — marking all rows as 'keep'.")
-        df["control_filter"] = "keep"
+    # Apply filter: keep compound if any non-ExCtrl value >= threshold * mean(ExCtrl)
+    if not exctrl_cols:
+        logger.info("No ExCtrl columns found — all compounds marked 'keep'.")
+        keep_mask = pd.Series(True, index=df.index)
     else:
-        max_ctrl     = df[ctrl_cols].max(axis=1)
-        max_non_ctrl = df[non_ctrl_cols].max(axis=1) if non_ctrl_cols else pd.Series(
-            np.nan, index=df.index
-        )
-        keep_mask = (
-            max_non_ctrl.notna()
-            & (max_ctrl.isna() | (max_non_ctrl >= control_fold_threshold * max_ctrl.fillna(0)))
-        )
-        df["control_filter"] = keep_mask.map({True: "keep", False: "remove"})
+        mean_exctrl = df[exctrl_cols].mean(axis=1)  # per-compound mean of ExCtrl values
+        if non_exctrl_cols:
+            max_non_exctrl = df[non_exctrl_cols].max(axis=1)
+            keep_mask = (
+                max_non_exctrl.notna()
+                & (mean_exctrl.isna() | (max_non_exctrl >= control_fold_threshold * mean_exctrl.fillna(0)))
+            )
+        else:
+            keep_mask = pd.Series(False, index=df.index)
 
-    n_keep = (df["control_filter"] == "keep").sum()
+    n_keep = int(keep_mask.sum())
     logger.info(
-        "Control filter: %d keep, %d remove (of %d total).",
+        "Control filter result: %d keep, %d remove (of %d total compounds).",
         n_keep, len(df) - n_keep, len(df),
     )
 
+    # Write filter summary TSV (all compounds, keep/remove label)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "compound_id":    df["compound_id"],
+        "extraction_control_filter": keep_mask.map({True: "keep", False: "remove"}),
+    }).to_csv(summary_tsv, sep="\t", index=False)
+    logger.info("Wrote filter summary TSV to %s", summary_tsv)
+
     if df.empty:
-        logger.warning("No compounds found — no output written.")
+        logger.warning("No compounds found — peak_height_filtered.csv not written.")
         return
 
-    # Collapse duplicate (inchi_key, compound_name) rows and keep the adduct that
-    # produced the highest peak across non-control sample columns.
-    selector_cols = non_ctrl_cols if non_ctrl_cols else data_cols
-    group_keys    = ["inchi_key", "compound_name", "control_filter"]
+    # Keep only 'keep' rows
+    df_keep = df[keep_mask].reset_index(drop=True)
 
-    # Determine the best adduct per (inchi_key, compound_name, control_filter)
-    chosen_adduct_map: dict[tuple, str] = {}
-    if "adduct" in df.columns and selector_cols:
-        sel_score = df[selector_cols].max(axis=1, skipna=True).fillna(-np.inf)
-        tmp = df[group_keys + ["adduct"]].copy()
-        tmp["_score"] = sel_score.values
-        tmp["_order"] = np.arange(len(tmp))
-        tmp = tmp.sort_values(["_score", "_order"], ascending=[False, True])
-        best = tmp.drop_duplicates(subset=group_keys, keep="first")
-        for _, row in best.iterrows():
-            key = (row["inchi_key"], row["compound_name"], row["control_filter"])
-            chosen_adduct_map[key] = row["adduct"]
-
-    # Preserve compound_index and mz_rt_uid for the best-scoring row per group
-    chosen_index_map: dict[tuple, int] = {}
-    chosen_uid_map:   dict[tuple, str] = {}
-    if selector_cols:
-        sel_score = df[selector_cols].max(axis=1, skipna=True).fillna(-np.inf)
-        tmp2 = df[group_keys].copy()
-        if "compound_index" in df.columns:
-            tmp2["compound_index"] = df["compound_index"].values
-        if "mz_rt_uid" in df.columns:
-            tmp2["mz_rt_uid"] = df["mz_rt_uid"].values
-        tmp2["_score"] = sel_score.values
-        tmp2["_order"] = np.arange(len(tmp2))
-        tmp2 = tmp2.sort_values(["_score", "_order"], ascending=[False, True])
-        best2 = tmp2.drop_duplicates(subset=group_keys, keep="first")
-        for _, row in best2.iterrows():
-            key = (row["inchi_key"], row["compound_name"], row["control_filter"])
-            if "compound_index" in best2.columns:
-                chosen_index_map[key] = row["compound_index"]
-            if "mz_rt_uid" in best2.columns:
-                chosen_uid_map[key] = row["mz_rt_uid"]
-
-    # Drop per-row metadata before groupby-max so only numeric data is aggregated
-    drop_before_agg = [c for c in ("compound_index", "mz_rt_uid", "adduct") if c in df.columns]
-    df_agg = df.drop(columns=drop_before_agg)
-
-    n_before = len(df_agg)
-    df_agg = df_agg.groupby(group_keys, sort=False).max().reset_index()
-
-    # Re-attach chosen metadata columns
-    def _lookup(row, mapping, default=""):
-        return mapping.get((row["inchi_key"], row["compound_name"], row["control_filter"]), default)
-
-    df_agg["adduct"]         = df_agg.apply(lambda r: _lookup(r, chosen_adduct_map), axis=1)
-    df_agg["compound_index"] = df_agg.apply(lambda r: _lookup(r, chosen_index_map, np.nan), axis=1)
-    df_agg["mz_rt_uid"]      = df_agg.apply(lambda r: _lookup(r, chosen_uid_map), axis=1)
-
-    # Impute NaN sample cells with the global matrix minimum
-    _META_FIXED = {"control_filter", "compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
-    data_cols_final = [c for c in df_agg.columns if c not in _META_FIXED]
-    global_min = float(df_agg[data_cols_final].min().min()) if data_cols_final else np.nan
-    if not np.isnan(global_min):
-        n_nan = int(df_agg[data_cols_final].isna().sum().sum())
-        df_agg[data_cols_final] = df_agg[data_cols_final].fillna(global_min)
-        logger.info(f"Imputed {n_nan} NaN cells with global minimum: {global_min:g}")
+    global_min_val = float(df[sample_cols].min().min()) if sample_cols else np.nan
+    if not np.isnan(global_min_val):
+        n_nan = int(df_keep[sample_cols].isna().sum().sum())
+        df_keep[sample_cols] = df_keep[sample_cols].fillna(global_min_val)
+        logger.info("Imputed %d NaN cells with global minimum: %g", n_nan, global_min_val)
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
-    # Reorder columns
-    ordered_meta = ["control_filter", "compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"]
-    ordered_meta = [c for c in ordered_meta if c in df_agg.columns]
-    other_cols   = [c for c in df_agg.columns if c not in set(ordered_meta)]
-    df_agg = df_agg[ordered_meta + other_cols]
+    with open(output_csv, "w", newline="") as fh:
+        fh.write(",".join(str(c) for c in df_keep.columns) + "\n")
+        header_df.to_csv(fh, index=False, header=False)
+        df_keep.to_csv(fh, index=False, header=False)
 
-    # Export
-    df_agg.to_csv(output_csv, index=False)
-    logger.info(f"Exported filtered peak height ({len(df_agg)} compounds x {len(df_agg.columns) - len(ordered_meta)} files)")
+    logger.info(
+        "Exported filtered peak height CSV (%d compounds x %d sample columns).",
+        len(df_keep), len(sample_cols),
+    )
 
 
 def make_log_fold_changes_csv(
     summary_obj: "AnalysisSummary",
     overwrite: bool = True,
-    use_filter: bool = True,
 ) -> None:
-    """Create group-level log2 fold-change CSV from peak_height_filtered.csv.
+    """Create group-level log₂ fold-change CSV from ``peak_height_filtered.csv``.
 
-    Sample columns are grouped by the 13th underscore-separated field of the
-    column name (index 12), which corresponds to the ``sample_name`` field
-    defined in :data:`metatlas2.file_and_project_format.FILE_PATTERN`.
-    Within each group the mean of all replicate values is computed, and
-    pairwise log2 fold-changes are then calculated between every pair of
-    groups.
+    ``peak_height_filtered.csv`` has the same format as ``peak_height.csv``
+    (6 prepended metadata header rows, ``compound_id`` as the first data
+    column, no ``extraction_control_filter`` column) — it contains only the compounds
+    that passed the ExCtrl filter.
+
+    Sample columns are grouped by their ``sample_treatment`` value (read from
+    the 4th metadata header row, 0-based index 3).  ExCtrl columns are
+    **excluded** from all fold-change comparisons.  Within each remaining group
+    the mean of replicate values is computed, and pairwise log₂ fold-changes
+    are calculated between every pair of groups.
 
     Output column layout::
 
-        compound_index, mz_rt_uid, compound_name, inchi_key, adduct,
-        <GroupA>_vs_<GroupB>, ...
+        compound_id, <GroupA>_vs_<GroupB>, ...
 
-    When *use_filter* is ``True`` (default), only rows where
-    ``control_filter == 'keep'`` are included (the column itself is not
-    written to the output).
-
-    This output is independent of metabomap and does not require both
-    polarities to be present.
     """
+    _N_HEADER_ROWS = 6
+    _EXCTRL_TREATMENT = "ExCtrl"
+    _ID_COLS: set[str] = {"compound_id"}
+
     out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
     source_csv = out_dir / "peak_height_filtered.csv"
-    output_csv = out_dir / "log_fold_changes.csv"
+    output_csv = out_dir / "group_mean_log_fold_changes.csv"
 
     if not source_csv.exists():
         logger.error(
@@ -2518,173 +3333,124 @@ def make_log_fold_changes_csv(
         )
         return
     if not overwrite and output_csv.exists():
-        logger.info(f"Overwriting disabled: existing file {output_csv} will be used.")
+        logger.info("Overwriting disabled: existing file %s will be used.", output_csv)
         return
 
-    logger.info(f"Creating group-level log fold changes CSV at {output_csv}")
-    df = pd.read_csv(source_csv)
-    if use_filter and "control_filter" in df.columns:
-        df = df[df["control_filter"] == "keep"].reset_index(drop=True)
+    logger.info("Creating group-level log fold changes CSV at %s", output_csv)
 
-    _ID_COL_NAMES = {"compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"}
-    _ID_COL_ORDER = ["compound_index", "mz_rt_uid", "compound_name", "inchi_key", "adduct"]
-    id_cols   = [c for c in _ID_COL_ORDER if c in df.columns]
-    data_cols = [c for c in df.columns if c not in _ID_COL_NAMES and c != "control_filter"]
+    header_df, df = _parse_peak_height_csv(source_csv, n_header_rows=_N_HEADER_ROWS)
 
-    if not data_cols:
-        logger.warning(f"No numeric sample columns found in {source_csv}; writing identifiers only.")
-        df[id_cols].to_csv(output_csv, sep=",", index=False)
+    id_cols = [c for c in ["compound_id"] if c in df.columns]
+    sample_cols = [c for c in df.columns if c not in _ID_COLS]
+
+    if not sample_cols:
+        logger.warning("No sample columns found in %s; writing identifiers only.", source_csv)
+        df[id_cols].to_csv(output_csv, index=False)
         return
 
-    data_num = df[data_cols].apply(pd.to_numeric, errors="coerce")
+    data_num = df[sample_cols].apply(pd.to_numeric, errors="coerce")
 
-    # Group replicate columns by sample_name (13th underscore-split field)
+    # Map each sample column to its sample_treatment group; exclude ExCtrl
+    col_to_treatment = _build_col_to_sample_treatment(df, header_df, _ID_COLS)
     group_to_cols: dict[str, list[str]] = {}
-    ungrouped_cols: list[str] = []
+    skipped: list[str] = []
     for col in data_num.columns:
-        grp = fpf.get_file_parts(col, "sample_name")
-        if grp is not None:
-            group_to_cols.setdefault(grp, []).append(col)
+        treatment = col_to_treatment.get(col)
+        if treatment is None:
+            skipped.append(col)
+        elif treatment == _EXCTRL_TREATMENT:
+            pass  # exclude ExCtrl from LFC comparisons
         else:
-            ungrouped_cols.append(col)
+            group_to_cols.setdefault(treatment, []).append(col)
 
-    if ungrouped_cols:
+    if skipped:
         logger.warning(
-            "%d sample column(s) could not be assigned to a group (fewer than 13 "
-            "underscore-separated parts) and will be skipped: %s",
-            len(ungrouped_cols),
-            ungrouped_cols[:10],
+            "%d sample column(s) had no sample_treatment assignment and will be skipped: %s",
+            len(skipped), skipped[:10],
         )
+
+    exctrl_excluded = sum(
+        1 for col in data_num.columns
+        if col_to_treatment.get(col) == _EXCTRL_TREATMENT
+    )
+    if exctrl_excluded:
+        logger.info("Excluded %d ExCtrl column(s) from LFC comparisons.", exctrl_excluded)
 
     if len(group_to_cols) < 2:
         logger.warning(
-            "Fewer than 2 sample groups identified in %s "
-            "(groups found: %s) — no fold-change comparisons possible.",
-            source_csv,
-            list(group_to_cols.keys()),
+            "Fewer than 2 non-ExCtrl sample groups found in %s "
+            "(groups: %s) — no fold-change comparisons possible.",
+            source_csv, list(group_to_cols.keys()),
         )
-        df[id_cols].to_csv(output_csv, sep=",", index=False)
+        df[id_cols].to_csv(output_csv, index=False)
         return
 
-    # Compute per-group mean across replicates
-    group_means: dict[str, np.ndarray] = {}
-    for grp, cols in group_to_cols.items():
-        group_means[grp] = data_num[cols].mean(axis=1).to_numpy(dtype=float)
+    logger.info(
+        "Computing pairwise log2 fold changes for %d groups: %s",
+        len(group_to_cols), list(group_to_cols.keys()),
+    )
 
-    # Build output: id columns + pairwise LFC columns
+    # Per-group mean across replicates
+    group_means: dict[str, np.ndarray] = {
+        grp: data_num[cols].mean(axis=1).to_numpy(dtype=float)
+        for grp, cols in group_to_cols.items()
+    }
+
+    # Build output DataFrame: compound_id + pairwise LFC columns
     lfc_records: dict[str, object] = {col: df[col].to_numpy() for col in id_cols}
-
     n_comparisons = 0
     for g1, g2 in itertools.combinations(group_means.keys(), 2):
-        m1 = group_means[g1]
-        m2 = group_means[g2]
+        m1, m2 = group_means[g1], group_means[g2]
         valid = (m1 > 0) & (m2 > 0) & np.isfinite(m1) & np.isfinite(m2)
         res = np.full(len(m1), np.nan)
         res[valid] = np.log2(m1[valid] / m2[valid])
         lfc_records[f"{g1}_vs_{g2}"] = res
         n_comparisons += 1
 
-    pd.DataFrame(lfc_records).to_csv(output_csv, sep=",", index=False)
-    logger.info(f"Exported group-level log fold changes ({len(df)} compounds x {n_comparisons} group comparisons)")
+    lfc_df = pd.DataFrame(lfc_records)
 
-def _get_modelseed_compounds(cache_path: Path) -> pd.DataFrame:
-    """Load the ModelSEED compounds table, fetching and caching it if needed.
+    # # Prepend compound metadata columns (inchi_key + all DB fields) before LFC columns
+    # main_db_path = getattr(summary_obj, "paths", {}).get("main_db_path")
+    # if main_db_path:
+    #     # Build inchi_key lookup from curation_df (compound_id → inchi_key)
+    #     curation_df = summary_obj.experimental_data.curation_df
+    #     if curation_df is not None and not curation_df.empty:
+    #         mc_slim = mc_reset = curation_df.reset_index(drop=True)
+    #         mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "adduct",
+    #                              "atlas_mz", "atlas_rt_peak"]].copy()
+    #         mc_slim["_cmp_idx_display"] = mc_reset.index + 1
+    #         mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
+    #         mc_slim["compound_id"] = mc_slim.apply(
+    #             lambda r: _make_compound_safe_stem(
+    #                 int(r["_cmp_idx_display"]),
+    #                 r["compound_name"],
+    #                 r["adduct"],
+    #                 safe_float(r.get("atlas_mz")),
+    #                 safe_float(r.get("atlas_rt_peak")),
+    #             ),
+    #             axis=1,
+    #         )
+    #         cid_to_inchikey = mc_slim.set_index("compound_id")["inchi_key"].to_dict()
+    #         lfc_df["inchi_key"] = lfc_df["compound_id"].map(cid_to_inchikey).fillna("")
+    #         inchi_keys = lfc_df["inchi_key"].dropna().unique().tolist()
+    #         meta_df = dbi.get_compound_metadata(main_db_path, inchi_keys)
+    #         if not meta_df.empty:
+    #             lfc_df = lfc_df.merge(meta_df, on="inchi_key", how="left")
+    #             # Reorder: compound_id first, then all metadata cols, then LFC cols
+    #             lfc_cols = [c for c in lfc_df.columns if "_vs_" in c]
+    #             meta_cols = [c for c in meta_df.columns if c != "inchi_key"]
+    #             ordered_cols = (
+    #                 ["compound_id", "inchi_key"]
+    #                 + meta_cols
+    #                 + lfc_cols
+    #             )
+    #             lfc_df = lfc_df[[c for c in ordered_cols if c in lfc_df.columns]]
 
-    Compounds are sourced from the ModelSEED ``dev`` branch, which contains
-    the most up-to-date data.  On that branch the table is split into an
-    arbitrary number of shards named ``compounds_NN.tsv``.  The GitHub
-    Contents API is used to discover all matching shard filenames so that
-    the function remains correct even if the number of shards changes in the
-    future.  All shards are downloaded, concatenated, and written to
-    ``cache_path`` as a single TSV on the first call; subsequent calls load
-    directly from the local cache.
-
-    Parameters
-    ----------
-    cache_path:
-        Permanent local path to store/load the merged TSV.
-    """
-
-    _MODELSEED_API_URL = (
-        "https://api.github.com/repos/ModelSEED/ModelSEEDDatabase/"
-        "contents/Biochemistry?ref=dev"
+    lfc_df.to_csv(output_csv, index=False)
+    logger.info(
+        "Exported log fold changes CSV (%d compounds x %d group comparisons).",
+        len(df), n_comparisons,
     )
-    _MODELSEED_RAW_BASE = (
-        "https://raw.githubusercontent.com/ModelSEED/ModelSEEDDatabase/"
-        "dev/Biochemistry/"
-    )
-    _SHARD_PATTERN = re.compile(r"^compounds_\d+\.tsv$")
-
-    if cache_path.exists():
-        logger.info(f"Loading ModelSEED compounds from local cache: {cache_path}")
-    else:
-        logger.info(f"Querying GitHub Contents API for ModelSEED compound shards: {_MODELSEED_API_URL}")
-        api_resp = requests.get(
-            _MODELSEED_API_URL,
-            timeout=30,
-            headers={"Accept": "application/vnd.github+json"},
-        )
-        api_resp.raise_for_status()
-        shard_names = sorted(
-            entry["name"]
-            for entry in api_resp.json()
-            if _SHARD_PATTERN.match(entry.get("name", ""))
-        )
-        if not shard_names:
-            raise ValueError(
-                f"No compound shard files matching 'compounds_NN.tsv' found via "
-                f"GitHub Contents API at {_MODELSEED_API_URL}"
-            )
-        logger.info(f"Found {len(shard_names)} ModelSEED compound shards: {shard_names[0]} … {shard_names[-1]}")
-
-        frames: list[pd.DataFrame] = []
-        for name in shard_names:
-            url = _MODELSEED_RAW_BASE + name
-            logger.info(f"Fetching ModelSEED shard: {url}")
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            frames.append(pd.read_csv(io.StringIO(resp.text), sep="\t", low_memory=False))
-
-        merged = pd.concat(frames, ignore_index=True)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_csv(cache_path, sep="\t", index=False)
-        logger.info(f"Saved merged ModelSEED compounds cache ({len(merged)} rows) to {cache_path}")
-
-    return pd.read_csv(cache_path, sep="\t", low_memory=False)
-
-
-def _build_inchikey_to_cpd(cache_path: Path) -> dict[str, str]:
-    """Return a mapping of InChIKey to semicolon-joined ModelSEED CPD IDs.
-
-    Rows with no InChIKey are dropped immediately to reduce memory usage.
-    When multiple CPD IDs share the same InChIKey, all are retained and
-    joined with ';' (e.g. ``'cpd00001;cpd99999'``).
-
-    Parameters
-    ----------
-    cache_path:
-        Passed through to :func:`_get_modelseed_compounds`.
-    """
-    df = _get_modelseed_compounds(cache_path)
-
-    if "inchikey" not in df.columns or "id" not in df.columns:
-        logger.error(
-            "ModelSEED compounds TSV does not contain expected columns "
-            "'id' / 'inchikey'. Available: %s", list(df.columns)
-        )
-        return {}
-
-    df = df[["id", "inchikey"]].dropna(subset=["inchikey"])
-    df = df[df["inchikey"].str.strip() != ""]
-
-    mapping = (
-        df.groupby("inchikey")["id"]
-        .agg(lambda ids: ";".join(ids))
-        .to_dict()
-    )
-
-    n_multi = sum(1 for v in mapping.values() if ";" in v)
-    return mapping
 
 def make_metabomap(
     summary_obj: "AnalysisSummary",
@@ -2693,40 +3459,48 @@ def make_metabomap(
     """Merge POS and NEG ``peak_height_filtered.csv`` files into a single
     metabomap table and compute group-level log2 fold-changes.
 
-    For each unique ``(inchi_key, compound_name)`` pair the row with the
-    highest peak height across non-control sample columns is selected,
-    regardless of polarity or adduct.  The chosen adduct and polarity are
-    recorded as ``chosen_adduct`` and ``chosen_polarity`` columns.
+    For each unique ``compound_id`` the row with the highest peak height
+    across non-control sample columns is selected, regardless of polarity.
+    The chosen polarity is recorded as a ``chosen_polarity`` column.
 
-    Sample columns are then grouped by the 13th underscore-separated field
-    (``sample_name``, index 12) and the mean of each group's replicates is
-    used to compute pairwise log2 fold-changes.
+    Sample columns are then grouped by the ``sample_name`` field parsed from
+    the column header and the mean of each group's replicates is used to
+    compute pairwise log2 fold-changes.
+
+    The input CSVs have 6 prepended header rows which are skipped before
+    reading.
 
     Outputs
     -------
     ``<analysis_output_dir>/../metabomap/merged_peak_heights.tsv``
-        One row per ``(inchi_key, compound_name)`` with columns:
-        ``inchi_key, cpd_id, compound_name, chosen_adduct, chosen_polarity,
-        <sample_file_1>, ...``
+        One row per ``compound_id`` with columns:
+        ``compound_id, chosen_polarity, <sample_file_1>, ...``
 
-    ``<analysis_output_dir>/../metabomap/log_fold_changes.tsv``
-        One row per ``(inchi_key, compound_name)`` with columns:
-        ``inchi_key, cpd_id, compound_name, <GroupA>_vs_<GroupB>, ...``
+    ``<analysis_output_dir>/../metabomap/group_mean_log_fold_changes.tsv``
+        One row per ``compound_id`` with columns:
+        ``compound_id, <GroupA>_vs_<GroupB>, ...``
     """
-    # Setup paths
     analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
-    curr_pol = fpf.normalize_polarity(summary_obj.polarity)   # "pos" or "neg"
-    sib_pol  = "neg" if curr_pol == "pos" else "pos"
+    curr_pol_lc = fpf.normalize_polarity(summary_obj.polarity)   # "pos" or "neg"
+    sib_pol_lc  = "neg" if curr_pol_lc == "pos" else "pos"
+    curr_pol_display = summary_obj.polarity
+    sib_pol_display  = fpf.canonical_polarity(sib_pol_lc)
+    if curr_pol_display.isupper():
+        sib_pol_display = sib_pol_lc.upper()
+    elif curr_pol_display.islower():
+        sib_pol_display = sib_pol_lc
+    else:
+        sib_pol_display = sib_pol_lc.title()
 
-    current_csv = analysis_output_dir / "data_sheets" / "peak_height_filtered.csv"
+    current_csv = analysis_output_dir / f"data_sheets" / "peak_height_filtered.csv"
     sibling_csv = (
-        Path(str(analysis_output_dir).replace(f"-{curr_pol}-", f"-{sib_pol}-"))
+        Path(str(analysis_output_dir).replace(f"-{curr_pol_display}-", f"-{sib_pol_display}-"))
         / "data_sheets" / "peak_height_filtered.csv"
     )
 
     metabomaps_dir = analysis_output_dir / "../metabomap"
     merged_tsv = metabomaps_dir / "merged_peak_heights.tsv"
-    lfc_tsv    = metabomaps_dir / "log_fold_changes.tsv"
+    lfc_tsv    = metabomaps_dir / "group_mean_log_fold_changes.tsv"
 
     if not overwrite and merged_tsv.exists() and lfc_tsv.exists():
         return
@@ -2737,21 +3511,17 @@ def make_metabomap(
 
     metabomaps_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load both polarity CSVs
-    _META_COLS = {"control_filter", "compound_index", "mz_rt_uid",
-                  "compound_name", "inchi_key", "adduct"}
-    _EXCLUDE_GROUPS = ("QC", "ISTD")
+    _N_HEADER_ROWS = 6
+    _META_COLS = {"compound_id"}
+    _EXCLUDE_GROUPS = ("QC", "ISTD", "ISTDsEtc")
 
     def _load_filtered(path: Path, polarity_label: str) -> pd.DataFrame:
-        """Load one peak_height_filtered.csv, tag with polarity, keep 'keep' rows."""
-        raw = pd.read_csv(path)
-        if "control_filter" in raw.columns:
-            raw = raw[raw["control_filter"] == "keep"].reset_index(drop=True)
+        _, raw = _parse_peak_height_csv(path, n_header_rows=_N_HEADER_ROWS)
         raw["_polarity"] = polarity_label
         return raw
 
-    cur_df = _load_filtered(current_csv, curr_pol)
-    sib_df = _load_filtered(sibling_csv, sib_pol)
+    cur_df = _load_filtered(current_csv, curr_pol_lc)
+    sib_df = _load_filtered(sibling_csv, sib_pol_lc)
 
     # Stack both polarities
     combined = pd.concat([cur_df, sib_df], axis=0, ignore_index=True)
@@ -2762,11 +3532,11 @@ def make_metabomap(
         if c not in _META_COLS and c != "_polarity"
     ]
 
-    # Select best row per (inchi_key, compound_name)
-    _CTRL_PATTERNS = ("ExCtrl", "InjBL")
+    # Select best row per compound_id (highest non-control peak)
+    _CTRL_TYPES = {"ExCtrl", "InjBl", "QC", "ISTD", "ISTDsEtc"}
     non_ctrl_sample_cols = [
         c for c in all_sample_cols
-        if not any(p in c for p in _CTRL_PATTERNS)
+        if not any(t in c for t in _CTRL_TYPES)
     ]
     score_cols = non_ctrl_sample_cols if non_ctrl_sample_cols else all_sample_cols
 
@@ -2782,48 +3552,38 @@ def make_metabomap(
         ["_score", "_order"], ascending=[False, True]
     )
     best = combined_sorted.drop_duplicates(
-        subset=["inchi_key", "compound_name"], keep="first"
+        subset=["compound_id"], keep="first"
     ).reset_index(drop=True)
 
     logger.info(
-        "Metabomap: selected best row for %d unique (inchi_key, compound_name) pairs "
+        "Metabomap: selected best row for %d unique compound_id values "
         "from %d combined rows (%s + %s).",
-        len(best), len(combined), curr_pol, sib_pol,
+        len(best), len(combined), curr_pol_display, sib_pol_display,
     )
 
-    # Record chosen adduct and polarity
-    best["chosen_adduct"]   = best["adduct"]   if "adduct"    in best.columns else ""
     best["chosen_polarity"] = best["_polarity"]
 
     # Build the merged peak-heights table
-    # Keep only sample columns that are actually present in the best-row selection
     present_sample_cols = [c for c in all_sample_cols if c in best.columns]
-
     merged_data_df = best[
-        ["inchi_key", "compound_name", "chosen_adduct", "chosen_polarity"]
-        + present_sample_cols
+        ["compound_id", "chosen_polarity"] + present_sample_cols
     ].copy()
 
-    # Attach ModelSEED CPD IDs
-    ms_path = Path(summary_obj.paths["modelseed_table_path"])
-    try:
-        inchikey_to_cpd = _build_inchikey_to_cpd(ms_path)
-    except Exception:
-        inchikey_to_cpd = {}
-
-    merged_data_df.insert(1, "cpd_id", merged_data_df["inchi_key"].map(inchikey_to_cpd))
     merged_data_df.to_csv(merged_tsv, sep="\t", index=False)
     logger.info(f"Wrote merged_peak_heights.tsv ({len(merged_data_df)} compounds x {len(present_sample_cols)} sample columns)")
 
-    # Group sample columns by sample_name (index 12) and compute LFC
-    _LFC_META = {"inchi_key", "cpd_id", "compound_name", "chosen_adduct", "chosen_polarity"}
+    # Group sample columns by sample_name field and compute LFC
+    _LFC_META = {"compound_id", "chosen_polarity"}
     sample_data_cols = [c for c in merged_data_df.columns if c not in _LFC_META]
 
     group_to_cols: dict[str, list[str]] = {}
     for col in sample_data_cols:
-        grp = fpf.get_file_parts(col, "sample_name")
-        if grp is not None and not any(ex in grp for ex in _EXCLUDE_GROUPS):
-            group_to_cols.setdefault(grp, []).append(col)
+        try:
+            grp = fpf.get_file_parts(col, "sample_name")
+            if grp is not None and not any(ex in grp for ex in _EXCLUDE_GROUPS):
+                group_to_cols.setdefault(grp, []).append(col)
+        except Exception:
+            pass
 
     if len(group_to_cols) < 2:
         logger.warning(
@@ -2845,8 +3605,7 @@ def make_metabomap(
     }
 
     lfc_records: dict[str, object] = {
-        col: merged_data_df[col].to_numpy()
-        for col in ["inchi_key", "cpd_id", "compound_name"]
+        "compound_id": merged_data_df["compound_id"].to_numpy(),
     }
 
     n_comparisons = 0
@@ -2858,5 +3617,298 @@ def make_metabomap(
         lfc_records[f"{g1}_vs_{g2}"] = res
         n_comparisons += 1
 
-    pd.DataFrame(lfc_records).to_csv(lfc_tsv, sep="\t", index=False)
-    logger.info(f"Wrote log_fold_changes.tsv ({len(merged_data_df)} compounds x {n_comparisons} group comparisons)")
+    lfc_df = pd.DataFrame(lfc_records)
+
+    # Prepend compound metadata columns before LFC columns
+    main_db_path = getattr(summary_obj, "paths", {}).get("main_db_path")
+    if main_db_path and "inchi_key" in merged_data_df.columns:
+        inchi_keys = merged_data_df["inchi_key"].dropna().unique().tolist()
+        meta_df = dbi.get_compound_metadata(main_db_path, inchi_keys)
+        if not meta_df.empty:
+            lfc_df = lfc_df.merge(
+                merged_data_df[["compound_id", "inchi_key"]].drop_duplicates(),
+                on="compound_id", how="left",
+            )
+            meta_df_sub = meta_df[['compound_id', 'inchi_key', 'modelseed_id']]
+            meta_df_sub['modelseed_id'] = meta_df_sub['modelseed_id'].apply(lambda x: x.split(';')[0] if pd.notna(x) else x) #select only first modelseed_id
+            lfc_df = lfc_df.merge(meta_df_sub, on="inchi_key", how="left")
+            lfc_cols = [c for c in lfc_df.columns if "_vs_" in c]
+            meta_cols = [c for c in meta_df_sub.columns if c != "inchi_key"]
+            ordered_cols = (
+                ["compound_id", "inchi_key"]
+                + meta_cols
+                + lfc_cols
+            )
+            lfc_df = lfc_df[[c for c in ordered_cols if c in lfc_df.columns]]
+
+    lfc_df.to_csv(lfc_tsv, sep="\t", index=False)
+    logger.info(f"Wrote group_mean_log_fold_changes.tsv ({len(merged_data_df)} compounds x {n_comparisons} group comparisons)")
+
+
+###############################################
+#### Targeted Analysis README
+###############################################
+
+_README_TEXT = """\
+==============================================================================
+  JOINT GENOME INSTITUTE
+  TARGETED LC-MS/MS ANALYSIS - RESULTS GUIDE
+==============================================================================
+
+  This README describes every file and folder generated for a JGI targeted
+  metabolomics analysis run. Outputs are organized into the folders listed
+  below.
+
+  DIRECTORY LAYOUT
+      <analysis_results>/
+      |-- FinalIdentifications__*.xlsx
+      |-- CompoundAtlas__*.xlsx
+      |-- identification_figures_with_msms_mirror_plots/
+      |-- boxplot_peak_height/
+      |-- boxplot_peak_height_log/
+      |-- data_sheets/
+      `-- additional_info/
+
+  Abbreviations are used throughout this guide:
+
+    ExCtrl  = extraction control
+    InjBl   = injection blank
+    ISTD    = internal standard
+    QC      = quality control
+    RefStd  = reference standard
+    EIC     = extracted ion chromatogram
+    TIC     = total ion chromatogram
+
+==============================================================================
+  1. Summary files
+==============================================================================
+
+  FinalIdentifications__*.xlsx
+      The primary deliverable for each analysis. One row per compound
+      searched in the targeted atlas. Used as the source of truth for
+      compounds identified in samples and for their quality/quantity.
+      The final identifications spreadsheet is curated and reviewed by
+      both an analyst and by the metabolomics team lead.
+
+  CompoundAtlas__*.xlsx
+      Compound atlas(es) created during various stages of the targeted
+      analysis. Typically this includes:
+        - an "AUTOID" atlas (results from automated peak-finding against
+          all JGI reference standards), and
+        - a "CURATED" atlas (results after the analyst has manually curated 
+          peak boundaries and scored each identified compound).
+      Each atlas has one row per compound ID, with columns for metadata and
+      analyst identification results.
+
+
+==============================================================================
+  2. identification_figures_with_msms_mirror_plots/
+==============================================================================
+
+  One PDF per compound, containing chemical and identification summary information 
+  for that compound. Each figure contains:
+
+    - MS/MS mirror plots of top database hits for extracted MS2 data
+      per compound (up to three: best, 2nd-best and 3rd-best database
+      match). Experimental fragment ions are shown above the y-axis midpoint
+      and reference ions are below. Reference fragment intensities are scaled by
+      the factor shown to provide easier visualization. Fragment m/z labels are 
+      shown for the top-5 most intense ions. Cosine similarity score of the
+      fragments and the MS2 scan RT are annotated above each panel.
+
+    - Molecular structure rendered from the compound SMILES.
+
+    - Compound metadata table (formula, adduct, theoretical/measured m/z and
+      RT, ppm error, max intensity, etc.).
+
+    - Best-hit summary table listing matched fragment m/z values, mass
+      accuracy, RT accuracy, and MS/MS score.
+
+    - EIC on linear and log10 intensity scales for all files. Red vertical dashed 
+      lines mark the curated RT min/max bounds and a black dotted line marks the 
+      theoretical RT peak.
+
+{color_legend_placeholder}
+
+==============================================================================
+  3. boxplot_peak_height/  and  boxplot_peak_height_log/
+==============================================================================
+
+  One PDF per compound. Grouped boxplots of measured peak heights across all
+  sample groups (linear scale and log10 scale, respectively).
+
+    - Individual replicate samples are overlaid as jittered scatter dots,
+      with color coding simply to differentiate groups (no mapping).
+    - JGI sample types (ExCtrl, InjBl, ISTD, QC) are placed first on the
+      x-axis; RefStd is placed last.
+
+  These plots are the primary tool for quickly viewing compound abundance
+  across experimental conditions.
+
+
+==============================================================================
+  4. data_sheets/
+==============================================================================
+
+  Wide-format CSV tables: one row per compound, one column per sample file.
+
+  The first six rows of each CSV are metadata header rows:
+      group, file, short_groupname, sample_treatment, short_filename,
+      short_samplename (metadata splits of the full sample name)
+  Data rows begin on row 7.
+
+  peak_height.csv
+      Raw MS1 peak height (maximum intensity) within the curated RT window
+      for every compound x file combination.
+
+  peak_area.csv
+      Integrated area under the EIC curve within the curated RT window
+      for every compound x file combination.
+
+  rt_peak.csv
+      Retention time (minutes) of the highest-intensity point within the
+      curated RT window for every compound x file combination.
+
+  rt_centroid.csv
+      Intensity-weighted centroid retention time within the curated RT
+      window for every compound x file combination.
+
+  mz_peak.csv
+      m/z value at the highest-intensity scan within the curated RT window 
+      for every compound x file combination.
+
+  mz_centroid.csv
+      Intensity-weighted centroid m/z within the curated RT window for
+      every compound x file combination.
+
+  peak_height_filtered.csv
+      Subset of peak_height.csv after applying an extraction-control
+      (ExCtrl) fold-change filter:
+        - A compound is retained only if at least one non-ExCtrl sample has
+          a peak height >= 3x the mean ExCtrl peak height.
+        - NaN values (no peak measured) are imputed with the global minimum
+          observed peak height across all samples.
+
+  peak_height_filter_summary.tsv
+      Two-column TSV (compound_id, extraction_control_filter) recording
+      "keep" or "remove" for every compound based on the ExCtrl filter above.
+
+  group_mean_log_fold_changes.csv
+      Pairwise log2 fold-changes (LFC) between every pair of experimental
+      conditions (mean of replicates within sample groups), based on the
+      filtered peak heights (peak_height_filtered.csv). LFC is calculated
+      by subtracting the log2 of the mean peak height of replicates within
+      one group from the same value of replicates in the comparison group.
+        - One column per group pair (e.g. GroupA_vs_GroupB).
+        - One row per compound.
+        - NaN where either group mean is zero or missing.
+
+  best_ms2_hit_fragment_ions.csv
+      For each compound, the fragment ion spectrum (with m/z and intensity
+      arrays as JSON) from the single file with the highest MS/MS database
+      match score. Only fragment ions above 1x10^4 intensity are included.
+
+
+==============================================================================
+  5. additional_info/
+==============================================================================
+
+  sample_TIC_total_chromatograms_independentY.pdf
+  sample_TIC_total_chromatograms_sharedY.pdf
+      TIC for every sample file, arranged in a 5x5 grid per page. The TIC
+      is the sum of all MS1 signal across the full chromatographic run; it 
+      represents the total machine signal extracted from the raw data file.
+        - Subplot backgrounds are color-coded by sample group to help
+          differentiate, but do not map to actual values.
+
+  compound_peak_heights.pdf
+      One subplot per compound (5x5 grid per page).
+        X-axis = run number (ordered by injection sequence)
+        Y-axis = peak height
+
+  compound_rt_peaks.pdf
+      Same layout as compound_peak_heights.pdf, but Y-axis = measured RT
+      peak (minutes). A red dashed horizontal line marks the theoretical RT
+      for each compound.
+
+  compound_EIC_chromatograms_sharedY/
+  compound_EIC_chromatograms_independentY/
+      One PDF per compound containing a 5x5 grid of EIC thumbnails, one
+      subplot per sample file.
+        - Red dashed vertical lines mark the curated RT min/max window.
+        - A black dotted vertical line marks the theoretical RT peak.
+        - Subplot backgrounds are color-coded by sample group to help
+          differentiate, but do not map to actual values.
+
+  boxplot_rt_peak/
+  boxplot_rt_peak_log/
+      Per-compound grouped boxplots of measured RT peak (linear and log10
+      scale).
+
+  boxplot_mz_centroid/
+  boxplot_mz_centroid_log/
+      Per-compound grouped boxplots of measured m/z centroid (linear and
+      log10 scale).
+"""
+
+def _build_color_legend(color_map: dict) -> str:
+    """Return the color legend section, formatted like the other README sections."""
+    lines = [
+        "",
+        "      - Samples (lines) in the identification figures EIC plots are color-coded"
+        "        using the mapping below to differentiate JGI internal samples from"
+        "        experimental samples (gray).",
+        "",
+        f"        {'LINE COLOR':<14}SAMPLE TYPE",
+        f"        {'-' * 12:<14}{'-' * 12}",
+    ]
+    for key, color in color_map.items():
+        lines.append(f"        {str(color):<14}{key}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def make_targeted_analysis_readme(
+    summary_obj: "AnalysisSummary",
+    overwrite: bool = True,
+    filename: str = "targeted_analysis_readme.txt",
+) -> None:
+    """Write a plain-text README describing all Google Drive outputs.
+
+    The file is placed in the main analysis results output directory alongside
+    the Final Identifications Excel sheet.  When a ``gui_lcmsruns_colors`` color
+    map is configured, a file-color legend section is appended to the README.
+
+    Parameters
+    ----------
+    summary_obj:
+        The :class:`AnalysisSummary` instance for the current analysis.
+    overwrite:
+        When *False* and the file already exists, skip writing.
+    filename:
+        Output filename (default ``targeted_analysis_readme.txt``).
+    """
+    output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
+    readme_path = output_dir / filename
+
+    if not overwrite and readme_path.exists():
+        logger.info("Overwriting disabled: existing README %s will be used.", readme_path)
+        return
+
+    # Resolve color map (same priority as make_identification_figure)
+    color_map = None
+    if hasattr(summary_obj, "override_parameters") and summary_obj.override_parameters.get("gui_lcmsruns_colors"):
+        color_map = summary_obj.override_parameters["gui_lcmsruns_colors"]
+    elif hasattr(summary_obj, "config") and summary_obj.config and summary_obj.config.gui_config.get("gui_lcmsruns_colors"):
+        color_map = summary_obj.config.gui_config["gui_lcmsruns_colors"]
+
+    if color_map:
+        readme_text = _README_TEXT.replace(
+            "{color_legend_placeholder}", _build_color_legend(color_map)
+        )
+    else:
+        readme_text = _README_TEXT.replace("{color_legend_placeholder}" + "\n\n", "")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    readme_path.write_text(readme_text, encoding="utf-8")
+    logger.info("Wrote targeted analysis README to %s", readme_path)

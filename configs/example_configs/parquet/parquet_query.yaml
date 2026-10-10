@@ -6,7 +6,7 @@
 #    or pass query_name=... explicitly to run_parquet_query().
 # 2. grain: "compound_file" (per-file MS1/MS2 hits) or "compound_lfc" (LFC table)
 # 3. Partition columns: project_name, chromatography, polarity,
-#    analysis_type, analysis_name — omit to search across all values.
+#    atlas_category, atlas_name — omit to search across all values.
 #    Add "_in" for a list (e.g., chromatography_in: ["HILIC", "C18"]).
 # 4. Float columns: _min (>=), _max (<=), _abs_gt/_abs_lt (exclusive abs).
 # 5. String columns: plain name = equality, _in = membership in a list.
@@ -30,7 +30,7 @@ queries:
   # expected standard rather than a coincidental isobaric hit.
   istd_ms2_confidence_check:
     grain: "compound_file"
-    analysis_type: "EMA"
+    atlas_category: "REF"
     best_ms2_score_min: 0.7
     best_ms2_mz_ppm_error_max: 5.0
 
@@ -54,7 +54,7 @@ queries:
   high_confidence_core_hits:
     grain: "compound_file"
     chromatography: "HILICZ"
-    analysis_type: "EMA"
+    atlas_category: "REF"
     polarity: "NEG"
     #adduct: "[M+Cl]-"
     total_score_min: 1.5

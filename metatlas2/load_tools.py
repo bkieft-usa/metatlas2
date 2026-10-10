@@ -34,10 +34,11 @@ DEFAULT_EXCLUDE_LCMSRUNS = {
 }
 
 DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = [
-    'EXPERIMENTAL', 
-    'ISTD', 
-    'EXCTRL', 
-    'REFSTD', 
+    'EXPERIMENTAL',
+    'ISTD',
+    'ISTDsEtc',
+    'EXCTRL',
+    'REFSTD',
     'INJBLK'
     ]
 
@@ -187,7 +188,7 @@ def load_msms_refs_from_db(
     polarity: str | None = None,
     inchi_keys: list[str] | None = None,
 ) -> dict[str, list[Spectrum]]:
-    """Load MSMS reference spectra from the ``reference_fragmentation_data`` table
+    """Load MSMS reference spectra from the ``msms_refs`` table
     in the main metatlas DuckDB and return a dict mapping inchi_key ->
     list of matchms Spectrum objects.
 
@@ -248,7 +249,7 @@ def load_msms_refs_from_db(
         if len(inchi_keys) == 0:
             # Empty list → nothing can match; raise immediately
             raise ValueError(
-                f"No spectra remained after filtering in reference_fragmentation_data at {db_path}. "
+                f"No spectra remained after filtering in msms_refs at {db_path}. "
                 "inchi_keys filter was an empty list — no spectra can match. "
                 "Pass None to load all spectra, or provide at least one InChI key."
             )
@@ -260,7 +261,7 @@ def load_msms_refs_from_db(
     query = f"""
         SELECT ref_uid, database, ref_id, name, inchi_key,
                precursor_mz, mz, intensities
-        FROM reference_fragmentation_data
+        FROM msms_refs
         {where_clause}
     """
 
@@ -323,7 +324,7 @@ def load_msms_refs_from_db(
             parts.append(f"polarity={polarity!r} (normalized to {polarity_norm!r})")
         detail = "; ".join(parts) if parts else "table may be empty or all records were unparseable"
         raise ValueError(
-            f"No spectra remained after filtering in reference_fragmentation_data at {db_path}. "
+            f"No spectra remained after filtering in msms_refs at {db_path}. "
             f"{detail}. "
             "Check filter values and the 'database'/'polarity' fields in the table."
         )
@@ -411,7 +412,7 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
     params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
     params['only_keep_data_in_feature'] = bool(params.get('only_keep_data_in_feature', False))
-    params['apply_istd_curation_to_ema'] = bool(params.get('apply_istd_curation_to_ema', True))
+    params['apply_istd_curation_to_ref'] = bool(params.get('apply_istd_curation_to_ref', True))
     params['apply_cross_polarity_curation'] = bool(params.get('apply_cross_polarity_curation', True))
     params['suggested_min_conf'] = float(params.get('suggested_min_conf', 0.75))
     params['atlas_extra_time'] = float(params.get('atlas_extra_time', 0.5))
@@ -442,7 +443,7 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
 
     rt_alignment_config: dict[str, Any] = {}
     for chrom_key, chrom_cfg in raw['RT_ALIGNMENT'].items():
-        chromatography = fpf.normalize_chromatography(chrom_key)
+        chromatography = fpf.canonical_chromatography(chrom_key)
         location = f"RT_ALIGNMENT {chromatography}"
         if 'ATLAS' not in chrom_cfg:
             raise ValueError(f"{location} missing ATLAS section")
@@ -455,21 +456,29 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
         )
         rt_alignment_config[chromatography] = chrom_cfg
 
+    from metatlas2.workflow_objects import AtlasCategory
+    valid_categories = {c.value for c in AtlasCategory}
     targeted_analyses: list = []
     for chrom_key, chrom_cfg in raw['TARGETED_ANALYSES'].items():
-        chromatography = fpf.normalize_chromatography(chrom_key)
+        chromatography = fpf.canonical_chromatography(chrom_key)
         for polarity_key, pol_cfg in chrom_cfg.items():
-            polarity = fpf.normalize_polarity(polarity_key)
-            for analysis_type_key, named_entries in pol_cfg.items():
-                analysis_type = analysis_type_key.lower()
+            polarity = fpf.canonical_polarity(polarity_key)
+            for cat_key, named_entries in pol_cfg.items():
+                cat_upper = str(cat_key).upper()
+                if cat_upper not in valid_categories:
+                    raise ValueError(
+                        f"TARGETED_ANALYSES {chromatography}/{polarity}: invalid atlas_category '{cat_key}'. "
+                        f"Must be one of: {sorted(valid_categories)}"
+                    )
+                atlas_category = AtlasCategory(cat_upper)
                 if not isinstance(named_entries, dict):
                     raise ValueError(
-                        f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_type} "
-                        f"must be a dict mapping analysis name -> {{ATLAS, PARAMS}}"
+                        f"TARGETED_ANALYSES {chromatography}/{polarity}/{cat_upper} "
+                        f"must be a dict mapping atlas_name -> {{ATLAS, PARAMS}}"
                     )
                 for name_key, entry in named_entries.items():
-                    name = str(name_key).lower()
-                    location = f"TARGETED_ANALYSES {chromatography}/{polarity}/{analysis_type}/{name}"
+                    atlas_name = str(name_key)
+                    location = f"TARGETED_ANALYSES {chromatography}/{polarity}/{cat_upper}/{atlas_name}"
                     if not isinstance(entry, dict):
                         raise ValueError(f"{location} must be a dict with ATLAS and PARAMS keys")
                     if 'ATLAS' not in entry:
@@ -484,14 +493,13 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
                     targeted_analyses.append(TargetedAnalysis(
                         chromatography=chromatography,
                         polarity=polarity,
-                        analysis_type=analysis_type,
-                        analysis_name=name,
+                        atlas_category=atlas_category,
+                        atlas_name=atlas_name,
                         atlas_uid=atlas_uid,
                         params=params,
-                        chromatography_label=chrom_key,
-                        polarity_label=polarity_key,
-                        analysis_type_label=analysis_type_key,
-                        analysis_name_label=str(name_key),
+                        chromatography_label=chromatography,
+                        polarity_label=polarity,
+                        atlas_category_label=cat_upper,
                     ))
 
     _general_raw = raw.get('GENERAL') or {}
@@ -624,10 +632,57 @@ def save_atlas_metadata_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
             writer.writeheader()
         writer.writerow(atlas_info)
 
-def save_atlas_data_to_tsv(atlas_obj: "Atlas", output_path: str) -> None:
+def save_atlas_data_to_csv(
+    atlas_obj: "Atlas",
+    output_path: str,
+    project_name: str,
+    main_db_path: str | None = None,
+) -> None:
+    """Save atlas compound data to a CSV file, optionally enriched with all
+    compound metadata from the main database.
+
+    When *main_db_path* is provided, all columns from the ``compounds`` table
+    (including cross-reference identifiers, computed descriptors, ModelSEED ID,
+    description, and retrieval metadata) are joined onto the atlas DataFrame via
+    ``inchi_key`` before writing.  Columns that already exist in the atlas
+    DataFrame (e.g. ``inchi_key``) are not duplicated.
+
+    Args:
+        atlas_obj:     Atlas object whose compound_mzrts are serialised.
+        output_path:   Directory path where the CSV will be written.
+        project_name:  Project name used in the output filename.
+        main_db_path:  Optional path to the main metatlas DuckDB file.  When
+                       provided, compound metadata is joined from the
+                       ``compounds`` table.
+    """
+    import metatlas2.database_interact as dbi
+
     atlas_df = atlas_obj.to_dataframe()
-    output_file = f"{atlas_obj.atlas_uid}.tsv"
-    atlas_df.to_csv(f"{output_path}/{output_file}", index=False, sep='\t')
+
+    # Enrich with all compound metadata from the main DB when available
+    if main_db_path and "inchi_key" in atlas_df.columns:
+        inchi_keys = atlas_df["inchi_key"].dropna().unique().tolist()
+        meta_df = dbi.get_compound_metadata(main_db_path, inchi_keys)
+        if not meta_df.empty:
+            # Drop columns already present in atlas_df (except inchi_key join key)
+            overlap = [c for c in meta_df.columns if c in atlas_df.columns and c != "inchi_key"]
+            meta_df = meta_df.drop(columns=overlap, errors="ignore")
+            atlas_df = atlas_df.merge(meta_df, on="inchi_key", how="left")
+            logger.debug(
+                "save_atlas_data_to_csv: joined %d compound metadata columns for %d rows.",
+                len(meta_df.columns) - 1, len(atlas_df),
+            )
+
+    atlas_filename_part = (
+        f"{(atlas_obj.chromatography or '')}"
+        f"-{(atlas_obj.polarity or '')}"
+        f"-{(atlas_obj.atlas_name or '')}"
+        f"-RTA{(atlas_obj.rt_alignment_number or '')}"
+        f"-TGA{(atlas_obj.analysis_number or '')}"
+        f"-{(atlas_obj.atlas_stage.value or '')}"
+    )
+    output_file = f"CompoundAtlas__{atlas_filename_part}__{project_name}.csv"
+    atlas_df.to_csv(f"{output_path}/{output_file}", index=False)
     logger.info(f"Saved Atlas data to {output_path}/{output_file}")
 
 def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
@@ -677,14 +732,14 @@ def log_filter_table(steps, starting_entries, starting_compounds, entries_label=
     rows.append(sep)
     logger.info(f"{title}:\n{chr(10).join(rows)}")
 
-def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, analysis_type: str, analysis_name: str) -> dict:
+def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, atlas_category: str, atlas_name: str) -> dict:
 
     chrom_lc = chromatography.lower()
     pol_lc = polarity.lower()
-    type_lc = analysis_type.lower()
-    name_lc = analysis_name.lower()
+    cat_lc = atlas_category.lower()
+    name_lc = atlas_name.lower()
 
-    uid_prefix = f"atl-ref-{chrom_lc}-{pol_lc}-{type_lc}-{name_lc}-"
+    uid_prefix = f"atl-ref-{chrom_lc}-{pol_lc}-{cat_lc}-{name_lc}-"
 
     uid_pattern = re.compile(r'\(UID:\s*(atl-[^\)]+)\)')
 

@@ -181,4 +181,4 @@ Copy these UIDs into your analysis YAML configuration file under the correspondi
 - Only atlases with a non-empty `path` are processed; entries with null paths are silently skipped. This allows the config template to remain the same and accommodate all atlas inputs.
 - If an atlas file is listed in the config but the file cannot be found, an error is raised immediately during config validation (before any database writes occur).
 - By design, re-running the script with the same config will create new atlases with new UIDs. There is no deduplication of atlases — only compounds are deduplicated.
-- All atlases created by this script are assigned `atlas_type = "REFERENCE"` and `analysis_name = "MAIN"` in the database.
+- All atlases created by this script are assigned `atlas_stage = "INPUT"` and `analysis_name = "MAIN"` in the database.

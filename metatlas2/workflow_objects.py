@@ -6,6 +6,9 @@ from typing import Any, NamedTuple, TypedDict
 from enum import Enum
 from pathlib import Path
 import json
+import numpy as np
+import csv
+import ast
 import math
 import pandas as pd
 import os
@@ -22,15 +25,27 @@ import metatlas2.run_targeted_analysis as rtg
 import metatlas2.note_options as gno
 import metatlas2.file_and_project_format as fpf
 import metatlas2.parquet_interact as pqi
-from metatlas2.utils import should_disable_tqdm, as_list
+from metatlas2.utils import should_disable_tqdm, as_list, get_provenance
 logger = lcf.get_logger('workflow_objects')
 
 class AtlasStage(str, Enum):
     """Defined stages of an atlas in the workflow, used to
     keep track of the progress of an atlas through the workflow."""
+    INPUT = "INPUT"
     RT_ALIGNED = "RT_ALIGNED"
     AUTO_IDED = "AUTO_IDED"
     MANUALLY_CURATED = "MANUALLY_CURATED"
+
+class AtlasCategory(str, Enum):
+    """Categorical (semantic) role of an atlas in the workflow.
+
+    QC   — retention-time alignment compounds (quality control).
+    ISTD — internal standard compounds.
+    REF  — reference / target compound sets to search for in raw data.
+    """
+    QC   = "QC"
+    ISTD = "ISTD"
+    REF  = "REF"
 
 @dataclass
 class AlignedSpectrumPair:
@@ -151,7 +166,7 @@ class MS2Hit:
 class PathsConfig(TypedDict, total=False):
     """Dictionary type for the paths on disk for a given run.
 
-    Note: MSMS reference spectra are now stored in the ``reference_fragmentation_data``
+    Note: MSMS reference spectra are now stored in the ``msms_refs``
     table of the main DuckDB (``main_db_path``).  The ``msms_refs_path`` field has been
     removed.  To override with a custom ``.jsonl`` file, set ``PATHS.msms_refs_path``
     in the analysis YAML config — it is read at runtime from
@@ -179,23 +194,20 @@ class TargetedAnalysis:
 
     chromatography: str
     polarity: str
-    analysis_type: str
-    analysis_name: str
+    atlas_category: AtlasCategory
+    atlas_name: str
     atlas_uid: str
     params: dict[str, Any] = field(default_factory=dict)
     chromatography_label: str = field(default="")
     polarity_label: str = field(default="")
-    analysis_type_label: str = field(default="")
-    analysis_name_label: str = field(default="")
+    atlas_category_label: str = field(default="")
 
     @property
     def label(self) -> str:
-        """Human-readable folder label built from raw YAML keys."""
-        chrom = self.chromatography_label or self.chromatography
-        pol   = self.polarity_label       or self.polarity
-        atype = self.analysis_type_label  or self.analysis_type
-        aname = self.analysis_name_label  or self.analysis_name
-        return f"{chrom}-{pol}-{atype}-{aname}"
+        chrom = self.chromatography
+        pol   = self.polarity
+        aname = self.atlas_name
+        return f"{chrom}-{pol}-{aname}"
 
 @dataclass
 class Metatlas2Config:
@@ -209,23 +221,24 @@ class Metatlas2Config:
         self,
         chromatography: str,
         polarity: str,
-        analysis_type: str,
-        analysis_name: str,
+        atlas_category: "AtlasCategory | str",
+        atlas_name: str,
     ) -> "TargetedAnalysis":
-        chromatography = fpf.normalize_chromatography(chromatography)
-        polarity = polarity.lower()
-        analysis_type = analysis_type.lower()
-        analysis_name = analysis_name.lower()
+        chrom_lc = fpf.normalize_chromatography(chromatography)
+        pol_lc   = polarity.lower()
+        cat_lc   = (atlas_category.value if isinstance(atlas_category, AtlasCategory) else str(atlas_category)).lower()
+        aname_lc = atlas_name.lower()
         for ta in self.targeted_analyses:
+            ta_cat = ta.atlas_category.value if isinstance(ta.atlas_category, AtlasCategory) else str(ta.atlas_category)
             if (
-                ta.chromatography == chromatography
-                and ta.polarity == polarity
-                and ta.analysis_type == analysis_type
-                and ta.analysis_name == analysis_name
+                ta.chromatography.lower() == chrom_lc
+                and ta.polarity.lower() == pol_lc
+                and ta_cat.lower() == cat_lc
+                and ta.atlas_name.lower() == aname_lc
             ):
                 return ta
         raise KeyError(
-            f"No targeted analysis found for {chromatography}/{polarity}/{analysis_type}/{analysis_name}. "
+            f"No targeted analysis found for {chromatography}/{polarity}/{atlas_category}/{atlas_name}. "
         )
 
     @property
@@ -268,14 +281,13 @@ class Metatlas2Config:
             targeted_analyses.append(TargetedAnalysis(
                 chromatography=ta["chromatography"],
                 polarity=ta["polarity"],
-                analysis_type=ta["analysis_type"],
-                analysis_name=ta["analysis_name"],
+                atlas_category=AtlasCategory(ta["atlas_category"]),
+                atlas_name=ta["atlas_name"],
                 atlas_uid=ta["atlas_uid"],
                 params=dict(ta.get("params") or {}),
                 chromatography_label=ta.get("chromatography_label", ""),
                 polarity_label=ta.get("polarity_label", ""),
-                analysis_type_label=ta.get("analysis_type_label", ""),
-                analysis_name_label=ta.get("analysis_name_label", ""),
+                atlas_category_label=ta.get("atlas_category_label", ""),
             ))
 
         return cls(
@@ -292,12 +304,12 @@ class Metatlas2Config:
 class AtlasEntry:
 
     path: str | None
-    name: str | None
     desc: str | None
+    atlas_category: "AtlasCategory"
+    atlas_name: str  # short free-text key from YAML (e.g. "QCv7", "EMA")
 
     def __post_init__(self):
         self.path = str(self.path) if self.path else None
-        self.name = str(self.name) if self.name else None
         self.desc = str(self.desc) if self.desc else None
         if self.path and not Path(self.path).exists():
             raise FileNotFoundError(f"Atlas file not found: {self.path}")
@@ -312,10 +324,17 @@ class NewAtlasesConfig:
     """Configuration for the ``metatlas2.sh add-atlases`` command.
 
     Parsed from a YAML file with an ``ATLASES`` top-level key.
+    The YAML structure is four levels deep:
+      ATLASES -> chromatography -> polarity -> atlas_category -> atlas_name -> {path, desc}
+
+    ``atlas_category`` must be one of the :class:`AtlasCategory` enum values
+    (``QC``, ``ISTD``, or ``REF``).  ``atlas_name`` is a free-text short
+    identifier (e.g. ``QCv7``, ``ISTDsEtcV7``, ``EMA``).
+
     Call :meth:`execute` to create all atlases in the database.
     """
 
-    atlases: dict[str, dict[str, dict[str, list[AtlasEntry]]]]
+    atlases: dict[str, dict[str, dict[str, dict[str, AtlasEntry]]]]
 
     @classmethod
     def from_yaml(cls, path: str) -> "NewAtlasesConfig":
@@ -325,7 +344,8 @@ class NewAtlasesConfig:
         if 'ATLASES' not in raw:
             raise ValueError(f"Missing required top-level key 'ATLASES' in {path}")
 
-        atlases: dict[str, dict[str, dict[str, list[AtlasEntry]]]] = {}
+        valid_categories = {c.value for c in AtlasCategory}
+        atlases: dict[str, dict[str, dict[str, dict[str, AtlasEntry]]]] = {}
         for chrom, chrom_cfg in raw['ATLASES'].items():
             if not isinstance(chrom_cfg, dict):
                 raise ValueError(f"Expected a dict under ATLASES.{chrom}")
@@ -334,37 +354,42 @@ class NewAtlasesConfig:
                 if not isinstance(pol_cfg, dict):
                     raise ValueError(f"Expected a dict under ATLASES.{chrom}.{pol}")
                 atlases[chrom][pol] = {}
-                for analysis_type, entries_raw in pol_cfg.items():
-                    if isinstance(entries_raw, dict):
-                        entries_raw = [entries_raw]
-                    elif not isinstance(entries_raw, list):
+                for cat_key, cat_cfg in pol_cfg.items():
+                    cat_upper = str(cat_key).upper()
+                    if cat_upper not in valid_categories:
                         raise ValueError(
-                            f"Expected a dict or list under ATLASES.{chrom}.{pol}.{analysis_type}"
+                            f"Invalid atlas_category '{cat_key}' under ATLASES.{chrom}.{pol}. "
+                            f"Must be one of: {sorted(valid_categories)}"
                         )
-                    entries = []
-                    for e in entries_raw:
-                        if not isinstance(e, dict):
-                            raise ValueError(
-                                f"Expected a dict entry under ATLASES.{chrom}.{pol}.{analysis_type}"
-                            )
-                        for required in ('path', 'name', 'desc'):
-                            if required not in e:
-                                raise ValueError(
-                                    f"Missing required field '{required}' in "
-                                    f"ATLASES.{chrom}.{pol}.{analysis_type}"
-                                )
-                        entries.append(AtlasEntry(path=e['path'], name=e['name'], desc=e['desc']))
-                    atlases[chrom][pol][analysis_type] = entries
+                    atlas_category = AtlasCategory(cat_upper)
+                    if not isinstance(cat_cfg, dict):
+                        raise ValueError(
+                            f"Expected a dict of atlas_name -> {{path, desc}} under "
+                            f"ATLASES.{chrom}.{pol}.{cat_key}"
+                        )
+                    atlases[chrom][pol][cat_upper] = {}
+                    for atlas_name, entry_raw in cat_cfg.items():
+                        location = f"ATLASES.{chrom}.{pol}.{cat_key}.{atlas_name}"
+                        if not isinstance(entry_raw, dict):
+                            raise ValueError(f"Expected a dict under {location}")
+                        if 'path' not in entry_raw:
+                            raise ValueError(f"Missing required field 'path' in {location}")
+                        atlases[chrom][pol][cat_upper][str(atlas_name)] = AtlasEntry(
+                            path=entry_raw.get('path'),
+                            desc=entry_raw.get('desc', ''),
+                            atlas_category=atlas_category,
+                            atlas_name=str(atlas_name),
+                        )
 
         logger.info(f"Loaded atlas configuration from {path}")
         return cls(atlases=atlases)
 
     def iter_entries(self):
         for chrom, pol_dict in self.atlases.items():
-            for pol, type_dict in pol_dict.items():
-                for analysis_type, entries in type_dict.items():
-                    for entry in entries:
-                        yield chrom, pol, analysis_type, entry
+            for pol, cat_dict in pol_dict.items():
+                for cat_key, name_dict in cat_dict.items():
+                    for atlas_name, entry in name_dict.items():
+                        yield chrom, pol, cat_key, atlas_name, entry
 
     def execute(self) -> None:
         """Create all atlases defined in this config and save them to the main database.
@@ -380,29 +405,28 @@ class NewAtlasesConfig:
         summary = []
 
         atlas_jobs = [
-            (chrom, pol, analysis_type, entry)
-            for chrom, pol, analysis_type, entry in self.iter_entries()
+            (chrom, pol, cat_key, atlas_name, entry)
+            for chrom, pol, cat_key, atlas_name, entry in self.iter_entries()
         ]
 
-        for chrom, pol, analysis_type, entry in tqdm(atlas_jobs, desc="Creating atlases from config"):
+        for chrom, pol, cat_key, atlas_name, entry in tqdm(atlas_jobs, desc="Creating atlases from config"):
             if entry.is_empty:
-                logger.debug(f"Skipping atlas with no path for {analysis_type}/{chrom}/{pol}")
+                logger.debug(f"Skipping atlas with no path for {cat_key}/{atlas_name}/{chrom}/{pol}")
                 continue
             try:
                 atlas_compounds_df = ldt.load_atlas_input(entry.path)
                 atlas_obj = dbi.create_new_atlas_from_dataframe(
                     atlas_df=atlas_compounds_df,
-                    atlas_name=entry.name,
                     atlas_description=entry.desc,
-                    analysis_type=analysis_type,
-                    analysis_name="MAIN",
+                    atlas_category=entry.atlas_category,
+                    atlas_name=atlas_name,
                     chromatography=chrom,
                     polarity=pol,
                     atlas_file_path=entry.path,
                     main_db_path=main_db_path
                 )
                 dbi.save_atlas_to_database(atlas_obj, main_db_path)
-                logger.info(f"Successfully created atlas: {atlas_obj.atlas_name}")
+                logger.info(f"Successfully created atlas: {atlas_obj.atlas_uid}")
                 atlases.append(atlas_obj)
                 summary.append({
                     'atlas_uid': atlas_obj.atlas_uid,
@@ -410,27 +434,22 @@ class NewAtlasesConfig:
                     'compound_count': len(atlas_obj.compound_mzrts)
                 })
             except Exception as e:
-                logger.error(f"Failed to create Atlas for {analysis_type}/{chrom}/{pol}: {e}")
+                logger.error(f"Failed to create Atlas for {cat_key}/{atlas_name}/{chrom}/{pol}: {e}")
 
         logger.info("Summary of new atlases.")
-        logger.info("**Make sure to add these to your analysis config to use as project reference atlases:**")
+        logger.info("**Make sure to add these to your analysis config to use as project input atlases:**")
         for info in summary:
             logger.info(f"Created new atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
-
-@dataclass
-class CompoundParams:
-    use_pubchem_cache: bool = True
-    update_pubchem_cache: bool = False
 
 @dataclass
 class NewCompoundsConfig:
     """Configuration for the ``metatlas2.sh add-compounds`` command.
 
-    Parsed from a YAML file with ``PARAMS`` and ``COMPOUNDS`` top-level keys.
+    Parsed from a YAML file with a ``COMPOUNDS`` top-level key (and an
+    optional ``PARAMS`` key whose contents are currently ignored).
     Call :meth:`execute` to load all compounds into the main database.
     """
 
-    params: CompoundParams
     compounds: dict[str, dict[str, list[str]]]
 
     @classmethod
@@ -438,17 +457,11 @@ class NewCompoundsConfig:
         with open(path, 'r') as f:
             raw = yaml.safe_load(f)
 
-        for required in ('PARAMS', 'COMPOUNDS'):
-            if required not in raw:
-                raise ValueError(f"Missing required top-level key '{required}' in {path}")
-
-        p = raw['PARAMS']
-        params = CompoundParams(
-            use_pubchem_cache=bool(p.get('use_pubchem_cache', True)),
-            update_pubchem_cache=bool(p.get('update_pubchem_cache', False)),
-        )
+        if 'COMPOUNDS' not in raw:
+            raise ValueError(f"Missing required top-level key 'COMPOUNDS' in {path}")
 
         compounds: dict[str, dict[str, list[str]]] = {}
+        # PARAMS key is accepted but ignored — all caching is always enabled
         for chrom, chrom_cfg in raw['COMPOUNDS'].items():
             if not isinstance(chrom_cfg, dict):
                 raise ValueError(f"Expected a dict under COMPOUNDS.{chrom}")
@@ -473,7 +486,7 @@ class NewCompoundsConfig:
                 compounds[chrom][pol] = validated
 
         logger.info(f"Loaded compound configuration from {path}")
-        return cls(params=params, compounds=compounds)
+        return cls(compounds=compounds)
 
     def iter_paths(self):
         for chrom, pol_dict in self.compounds.items():
@@ -488,9 +501,14 @@ class NewCompoundsConfig:
         the old ``Compound.create_from_config()`` classmethod, keeping pipeline
         orchestration on the config object rather than on the domain object.
         """
+        import metatlas2.modelseed_retrieval as msr
+        import metatlas2.chebi_retrieval as chr
+
         paths = rtg.set_up_paths(config=self)
         main_db_path = paths.get("main_db_path", None)
         pubchem_cache_path = paths.get("pubchem_cache_path", None)
+        modelseed_cache_path = paths.get("modelseed_table_path", None)
+        chebi_cache_path = paths.get("chebi_cache_path", None)
 
         compounds: list[Compound] = []
         dbi.create_metatlas_database(main_db_path, overwrite=overwrite_db)
@@ -501,8 +519,14 @@ class NewCompoundsConfig:
             compounds_df = pcr.retrieve_pubchem_info(
                 compounds=compounds_df,
                 pubchem_cache_path=pubchem_cache_path,
-                use_pubchem_cache=self.params.use_pubchem_cache,
-                update_pubchem_cache=self.params.update_pubchem_cache,
+            )
+            compounds_df = msr.retrieve_modelseed_info(
+                compounds=compounds_df,
+                modelseed_cache_path=modelseed_cache_path,
+            )
+            compounds_df = chr.retrieve_metacyc_info(
+                compounds=compounds_df,
+                chebi_cache_path=chebi_cache_path,
             )
             for _, row in tqdm(compounds_df.iterrows(), total=len(compounds_df), desc="Processing compounds", disable=should_disable_tqdm()):
                 try:
@@ -519,7 +543,23 @@ class NewMsmsRefsConfig:
     """Configuration for the ``metatlas2.sh add-msms-refs`` command.
 
     Parsed from a YAML file with an ``MSMS_REFS`` top-level key that lists
-    one or more source ``.jsonl`` files to import.
+    one or more source ``.tab`` files to import.
+
+    Expected TSV/tab format (metatlas ``.tab`` export)::
+
+        database  id  name  spectrum  decimal  precursor_mz  polarity  adduct
+        fragmentation_method  collision_energy  instrument  instrument_type
+        formula  exact_mass  inchi_key  inchi  smiles
+
+    The ``spectrum`` column must contain a Python list-of-lists literal with
+    mz values in the first list and intensities in the second::
+
+        [[59.01, 71.01, 87.01], [1000.0, 2000.0, 3000.0]]
+
+    Column mapping: ``id`` → ``ref_id``,
+    ``exact_mass`` → ``mono_isotopic_molecular_weight``.
+
+    Missing / NULL values should be represented as an empty string or ``\\N``.
     """
 
     entries: list[dict]
@@ -550,19 +590,59 @@ class NewMsmsRefsConfig:
         logger.info(f"Loaded MSMS refs configuration from {path}: {len(entries)} source file(s)")
         return cls(entries=entries)
 
-    def execute(self) -> None:
-        """Stream each source ``.jsonl`` file and bulk-insert spectra into the main DB.
+    @staticmethod
+    def _parse_float_or_none(value: str) -> float | None:
+        """Return a float from *value*, or ``None`` for empty / NULL strings."""
+        v = value.strip()
+        if not v or v in ('\\N', 'NULL', 'None', 'nan', 'NaN'):
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
 
-        This is the entry-point for ``metatlas2.sh add-msms-refs``.
+    @staticmethod
+    def _parse_spectrum_column(value: str) -> tuple[list[float], list[float]]:
+        """Parse a ``spectrum`` column containing a Python list-of-lists literal.
+
+        The expected format is ``[[mz1, mz2, ...], [int1, int2, ...]]`` as
+        produced by the metatlas ``.tab`` export format.  Returns a
+        ``(mz_list, intensity_list)`` tuple, or ``([], [])`` on failure.
         """
-        import json as _json
-        import numpy as _np
+        v = value.strip()
+        if not v or v in ('\\N', 'NULL', 'None'):
+            return [], []
+        try:
+            parsed = ast.literal_eval(v)
+            if (
+                    isinstance(parsed, list)
+                    and len(parsed) == 2
+                    and isinstance(parsed[0], list)
+                    and isinstance(parsed[1], list)
+                    and len(parsed[0]) == len(parsed[1])
+                ):
+                return [float(x) for x in parsed[0]], [float(x) for x in parsed[1]]
+        except Exception:
+            pass
+        return [], []
+
+    @staticmethod
+    def _str_or_none(value: str) -> str | None:
+        """Return *value* stripped, or ``None`` for empty / NULL strings."""
+        v = value.strip()
+        if not v or v in ('\\N', 'NULL', 'None'):
+            return None
+        return v
+
+    def execute(self) -> None:
+        """Read each source ``.tab`` file and bulk-insert spectra into the main DB."""
 
         paths = rtg.set_up_paths(config=self)
         main_db_path = paths.get("main_db_path")
 
         total_inserted = 0
         total_skipped = 0
+        batch_size = 10000  # Control memory usage
 
         for entry in self.entries:
             source_path = Path(entry['path'])
@@ -578,74 +658,93 @@ class NewMsmsRefsConfig:
                 + "..."
             )
 
+            # 1. Pre-calculate total lines for an accurate tqdm progress bar
+            with source_path.open('r') as f:
+                total_rows = sum(1 for _ in f) - 1
+
             records: list[dict] = []
             n_skipped = 0
+            file_inserted = 0
 
-            with source_path.open('r') as fh:
-                for line_num, line in enumerate(fh, start=1):
-                    line = line.strip()
-                    if not line:
-                        continue
+            with source_path.open('r', newline='') as fh:
+                reader = csv.DictReader(fh, delimiter='\t')
+                
+                # 2. Wrap the iterator in tqdm for automatic progress tracking
+                for row_num, row in tqdm(
+                    enumerate(reader, start=2), 
+                    total=total_rows, 
+                    desc=f"Importing {source_path.name}"
+                ):
                     try:
-                        rec = _json.loads(line)
-                    except _json.JSONDecodeError as e:
-                        logger.warning(f"  Line {line_num}: JSON parse error — {e}")
+                        # Optional database filter
+                        if db_filter and row.get('database') != db_filter:
+                            continue
+
+                        mz_list, int_list = self._parse_spectrum_column(
+                            row.get('spectrum', '')
+                        )
+
+                        if not mz_list or not int_list or len(mz_list) != len(int_list):
+                            n_skipped += 1
+                            continue
+
+                        mz = np.array(mz_list, dtype=np.float32)
+                        intensities = np.array(int_list, dtype=np.float32)
+
+                        # Apply the same precursor_mz + 2.5 truncation used at query time
+                        precursor_mz = self._parse_float_or_none(row.get('precursor_mz', ''))
+                        if precursor_mz is not None and not np.isnan(precursor_mz):
+                            mask = mz < precursor_mz + 2.5
+                            mz = mz[mask]
+                            intensities = intensities[mask]
+
+                        if len(mz) == 0:
+                            n_skipped += 1
+                            continue
+
+                        records.append({
+                            'database': self._str_or_none(row.get('database', '')),
+                            'ref_id': self._str_or_none(row.get('id', '')),
+                            'name': self._str_or_none(row.get('name', '')),
+                            'inchi_key': row.get('inchi_key', '').strip(),
+                            'precursor_mz': precursor_mz,
+                            'polarity': self._str_or_none(row.get('polarity', '')),
+                            'adduct': self._str_or_none(row.get('adduct', '')),
+                            'fragmentation_method': self._str_or_none(row.get('fragmentation_method', '')),
+                            'collision_energy': self._parse_float_or_none(row.get('collision_energy', '')),
+                            'instrument': self._str_or_none(row.get('instrument', '')),
+                            'instrument_type': self._str_or_none(row.get('instrument_type', '')),
+                            'formula': self._str_or_none(row.get('formula', '')),
+                            'mono_isotopic_molecular_weight': self._parse_float_or_none(
+                                row.get('exact_mass', '')
+                            ),
+                            'inchi': self._str_or_none(row.get('inchi', '')),
+                            'smiles': self._str_or_none(row.get('smiles', '')),
+                            'mz': mz.tolist(),
+                            'intensities': intensities.tolist(),
+                        })
+
+                        # 3. Chunking: If buffer reaches batch_size, save to DB and clear
+                        if len(records) >= batch_size:
+                            inserted = dbi.batch_save_msms_refs(main_db_path, records)
+                            file_inserted += inserted
+                            total_inserted += inserted
+                            records = []
+
+                    except Exception as e:
+                        logger.warning(f"  Row {row_num}: parse error — {e}")
                         n_skipped += 1
                         continue
 
-                    # Optional database filter
-                    if db_filter and rec.get('database') != db_filter:
-                        continue
+            # 4. Final Flush: Save any remaining records left in the buffer
+            if records:
+                inserted = dbi.batch_save_msms_refs(main_db_path, records)
+                file_inserted += inserted
+                total_inserted += inserted
 
-                    mz_list = rec.get('mz')
-                    int_list = rec.get('intensities')
-                    if not mz_list or not int_list or len(mz_list) != len(int_list):
-                        n_skipped += 1
-                        continue
-
-                    mz = _np.array(mz_list, dtype=_np.float32)
-                    intensities = _np.array(int_list, dtype=_np.float32)
-
-                    # Apply the same precursor_mz + 2.5 truncation used at query time
-                    precursor_mz = rec.get('precursor_mz')
-                    try:
-                        precursor_mz = float(precursor_mz) if precursor_mz is not None else None
-                    except (TypeError, ValueError):
-                        precursor_mz = None
-                    if precursor_mz is not None and not _np.isnan(precursor_mz):
-                        mask = mz < precursor_mz + 2.5
-                        mz = mz[mask]
-                        intensities = intensities[mask]
-
-                    if len(mz) == 0:
-                        n_skipped += 1
-                        continue
-
-                    records.append({
-                        'database': rec.get('database'),
-                        'ref_id': rec.get('id'),
-                        'name': rec.get('name'),
-                        'inchi_key': rec.get('inchi_key', ''),
-                        'precursor_mz': precursor_mz,
-                        'polarity': rec.get('polarity'),
-                        'adduct': rec.get('adduct'),
-                        'fragmentation_method': rec.get('fragmentation_method'),
-                        'collision_energy': rec.get('collision_energy'),
-                        'instrument': rec.get('instrument'),
-                        'instrument_type': rec.get('instrument_type'),
-                        'formula': rec.get('formula'),
-                        'mono_isotopic_molecular_weight': rec.get('mono_isotopic_molecular_weight'),
-                        'inchi': rec.get('inchi'),
-                        'smiles': rec.get('smiles'),
-                        'mz': mz.tolist(),
-                        'intensities': intensities.tolist(),
-                    })
-
-            inserted = dbi.batch_save_msms_refs(main_db_path, records)
-            total_inserted += inserted
             total_skipped += n_skipped
             logger.info(
-                f"  {source_path.name}: inserted {inserted} spectra"
+                f"  {source_path.name}: inserted {file_inserted} spectra"
                 + (f", skipped {n_skipped}" if n_skipped else "")
             )
 
@@ -656,7 +755,9 @@ class NewMsmsRefsConfig:
 
 @dataclass
 class Compound:
-    
+    """A chemical compound record stored in the main metatlas database.
+    """
+
     compound_uid: str
     compound_name: str
     inchi_key: str
@@ -673,29 +774,108 @@ class Compound:
     synonyms: str = ""
     created_by: str = ""
     created_date: str = ""
-    
+    isomeric_smiles: str = ""
+    molecular_weight: float | None = None
+    xlogp: float | None = None
+    tpsa: float | None = None
+    complexity: float | None = None
+    charge: int | None = None
+    heavy_atom_count: int | None = None
+    hbd_count: int | None = None
+    hba_count: int | None = None
+    rotatable_bond_count: int | None = None
+    chebi_id: str = ""
+    chembl_id: str = ""
+    hmdb_id: str = ""
+    kegg_id: str = ""
+    drugbank_id: str = ""
+    metabolights_id: str = ""
+    metabolomics_workbench_id: str = ""
+    wikipedia_url: str = ""
+    description: str = ""
+    pubchem_retrieval_date: str = ""
+    pubchem_compound_url: str = ""
+    modelseed_id: str = ""
+    metacyc_id: str = ""
+
     @classmethod
     def from_atlas_row(cls, row: pd.Series) -> 'Compound':
-        """Create from atlas DataFrame row."""
+        """Create from atlas DataFrame row.
+        """
+
+        def _str(key: str, default: str = '') -> str:
+            val = row.get(key, default)
+            if val is None:
+                return default
+            try:
+                if math.isnan(float(val)):
+                    return default
+            except (TypeError, ValueError):
+                pass
+            return str(val) if val != '' else default
+
+        def _float(key: str) -> float | None:
+            val = row.get(key, None)
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return None if math.isnan(f) else f
+            except (TypeError, ValueError):
+                return None
+
+        def _int(key: str) -> int | None:
+            val = row.get(key, None)
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return None if math.isnan(f) else int(f)
+            except (TypeError, ValueError):
+                return None
+
         return cls(
-            compound_uid=row.get('compound_uid', ''),
-            compound_name=row.get('compound_name', ''),
-            inchi_key=row.get('inchi_key', ''),
-            inchi=row.get('inchi', ''),
-            smiles=row.get('smiles', ''),
-            formula=row.get('formula', ''),
-            classes=row.get('classes', ''),
-            pathways=row.get('pathways', ''),
-            tags=row.get('tags', ''),
-            mono_isotopic_molecular_weight=row.get('mono_isotopic_molecular_weight', 0.0),
-            iupac_name=row.get('iupac_name', ''),
-            pubchem_cid=row.get('pubchem_cid', ''),
-            cas_number=row.get('cas_number', ''),
-            synonyms=row.get('synonyms', ''),
-            created_by=row.get('created_by', ''),
-            created_date=row.get('created_date', '')
+            compound_uid=_str('compound_uid'),
+            compound_name=_str('compound_name'),
+            inchi_key=_str('inchi_key'),
+            inchi=_str('inchi'),
+            smiles=_str('smiles'),
+            formula=_str('formula'),
+            classes=_str('classes'),
+            pathways=_str('pathways'),
+            tags=_str('tags'),
+            mono_isotopic_molecular_weight=_float('mono_isotopic_molecular_weight') or 0.0,
+            iupac_name=_str('iupac_name'),
+            pubchem_cid=_str('pubchem_cid'),
+            cas_number=_str('cas_number'),
+            synonyms=_str('synonyms'),
+            created_by=_str('created_by'),
+            created_date=_str('created_date'),
+            isomeric_smiles=_str('isomeric_smiles'),
+            molecular_weight=_float('molecular_weight'),
+            xlogp=_float('xlogp'),
+            tpsa=_float('tpsa'),
+            complexity=_float('complexity'),
+            charge=_int('charge'),
+            heavy_atom_count=_int('heavy_atom_count'),
+            hbd_count=_int('hbd_count'),
+            hba_count=_int('hba_count'),
+            rotatable_bond_count=_int('rotatable_bond_count'),
+            chebi_id=_str('chebi_id'),
+            chembl_id=_str('chembl_id'),
+            hmdb_id=_str('hmdb_id'),
+            kegg_id=_str('kegg_id'),
+            drugbank_id=_str('drugbank_id'),
+            metabolights_id=_str('metabolights_id'),
+            metabolomics_workbench_id=_str('metabolomics_workbench_id'),
+            wikipedia_url=_str('wikipedia_url'),
+            description=_str('description'),
+            pubchem_retrieval_date=_str('pubchem_retrieval_date'),
+            pubchem_compound_url=_str('pubchem_compound_url'),
+            modelseed_id=_str('modelseed_id'),
+            metacyc_id=_str('metacyc_id'),
         )
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for database serialization."""
         return {
@@ -714,7 +894,30 @@ class Compound:
             'cas_number': self.cas_number,
             'synonyms': self.synonyms,
             'created_by': self.created_by,
-            'created_date': self.created_date
+            'created_date': self.created_date,
+            'isomeric_smiles': self.isomeric_smiles,
+            'molecular_weight': self.molecular_weight,
+            'xlogp': self.xlogp,
+            'tpsa': self.tpsa,
+            'complexity': self.complexity,
+            'charge': self.charge,
+            'heavy_atom_count': self.heavy_atom_count,
+            'hbd_count': self.hbd_count,
+            'hba_count': self.hba_count,
+            'rotatable_bond_count': self.rotatable_bond_count,
+            'chebi_id': self.chebi_id,
+            'chembl_id': self.chembl_id,
+            'hmdb_id': self.hmdb_id,
+            'kegg_id': self.kegg_id,
+            'drugbank_id': self.drugbank_id,
+            'metabolights_id': self.metabolights_id,
+            'metabolomics_workbench_id': self.metabolomics_workbench_id,
+            'wikipedia_url': self.wikipedia_url,
+            'description': self.description,
+            'pubchem_retrieval_date': self.pubchem_retrieval_date,
+            'pubchem_compound_url': self.pubchem_compound_url,
+            'modelseed_id': self.modelseed_id,
+            'metacyc_id': self.metacyc_id,
         }
 
 @dataclass
@@ -791,14 +994,13 @@ class CompoundMZRT:
 class Atlas:
     
     atlas_uid: str
-    atlas_name: str
+    atlas_name: str  # short free-text key from YAML (e.g. "QCv7", "EMA")
     atlas_description: str
     chromatography: str
     polarity: str
-    analysis_type: str
-    atlas_type: str = "REFERENCE"
-    analysis_name: str = "MAIN"
-    compound_mzrts: dict[str, CompoundMZRT] = field(default_factory=dict)
+    atlas_category: "AtlasCategory"
+    atlas_stage: "AtlasStage" = field(default_factory=lambda: AtlasStage.INPUT)
+    compound_mzrts: dict[str, "CompoundMZRT"] = field(default_factory=dict)
     rt_alignment_number: int | None = None
     analysis_number: int | None = None
     created_by: str = ""
@@ -845,6 +1047,8 @@ class Atlas:
 
     def to_dataframe(self) -> pd.DataFrame:
 
+        cat_val = self.atlas_category.value if isinstance(self.atlas_category, AtlasCategory) else str(self.atlas_category)
+        stage_val = self.atlas_stage.value if isinstance(self.atlas_stage, AtlasStage) else str(self.atlas_stage)
         rows = []
         for compound_mzrt in self.compound_mzrts.values():
             compound_dict = asdict(compound_mzrt)
@@ -854,13 +1058,12 @@ class Atlas:
                 'atlas_description': self.atlas_description,
                 'chromatography': self.chromatography,
                 'polarity': self.polarity,
-                'analysis_type': self.analysis_type,
-                'atlas_type': self.atlas_type,
+                'atlas_category': cat_val,
+                'atlas_stage': stage_val,
                 'created_by': self.created_by,
                 'created_date': self.created_date,
                 'source': self.source,
                 'source_atlas_uid': self.source_atlas_uid,
-                'analysis_name': self.analysis_name,
             })
             rows.append(compound_dict)
         return pd.DataFrame(rows)
@@ -876,20 +1079,19 @@ class Atlas:
         preserves every field.
         """
         meta = atlas_df.iloc[0] if not atlas_df.empty else {}
-        atlas_uid         = meta.get('atlas_uid', '')
-        atlas_name        = meta.get('atlas_name', '')
+        atlas_uid = meta.get('atlas_uid', '')
+        atlas_name = meta.get('atlas_name', '')
         atlas_description = meta.get('atlas_description', '')
-        chromatography    = meta.get('chromatography', '')
-        polarity          = meta.get('polarity', '')
-        analysis_type     = meta.get('analysis_type', '')
-        atlas_type        = meta.get('atlas_type', 'REFERENCE')
-        analysis_name     = meta.get('analysis_name', 'MAIN')
-        created_by        = meta.get('created_by', '')
-        created_date      = meta.get('created_date', '')
-        source            = meta.get('source', '')
-        source_atlas_uid  = meta.get('source_atlas_uid', None)
+        chromatography = meta.get('chromatography', '')
+        polarity = meta.get('polarity', '')
+        atlas_category = AtlasCategory(meta.get('atlas_category', 'REF'))
+        atlas_stage = AtlasStage(meta.get('atlas_stage', 'INPUT'))
+        created_by = meta.get('created_by', '')
+        created_date = meta.get('created_date', '')
+        source = meta.get('source', '')
+        source_atlas_uid = meta.get('source_atlas_uid', None)
         rt_alignment_number = meta.get('rt_alignment_number', None)
-        analysis_number     = meta.get('analysis_number', None)
+        analysis_number = meta.get('analysis_number', None)
 
         compound_mzrts = {}
         for _, row in atlas_df.iterrows():
@@ -905,14 +1107,13 @@ class Atlas:
             atlas_description=atlas_description,
             chromatography=chromatography,
             polarity=polarity,
-            analysis_type=analysis_type,
-            atlas_type=atlas_type,
+            atlas_category=atlas_category,
+            atlas_stage=atlas_stage,
             compound_mzrts=compound_mzrts,
             created_by=created_by,
             created_date=created_date,
             source=source,
             source_atlas_uid=source_atlas_uid,
-            analysis_name=analysis_name,
             rt_alignment_number=rt_alignment_number,
             analysis_number=analysis_number,
         )
@@ -929,19 +1130,20 @@ class Atlas:
         Used by :func:`metatlas2.load_tools.save_atlas_metadata_to_csv` to
         write one CSV row per atlas without expanding compound_mzrts.
         """
+        cat_val = self.atlas_category.value if isinstance(self.atlas_category, AtlasCategory) else str(self.atlas_category)
+        stage_val = self.atlas_stage.value if isinstance(self.atlas_stage, AtlasStage) else str(self.atlas_stage)
         return {
             'atlas_uid': self.atlas_uid,
             'atlas_name': self.atlas_name,
             'atlas_description': self.atlas_description,
             'chromatography': self.chromatography,
             'polarity': self.polarity,
-            'analysis_type': self.analysis_type,
-            'atlas_type': self.atlas_type,
+            'atlas_category': cat_val,
+            'atlas_stage': stage_val,
             'created_by': self.created_by,
             'created_date': self.created_date,
             'source': self.source,
             'source_atlas_uid': self.source_atlas_uid,
-            'analysis_name': self.analysis_name,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -953,15 +1155,16 @@ class Atlas:
         tripping through ``Atlas.from_dataframe(pd.DataFrame(atlas.to_dict()['compound_mzrts'].values()))``
         reconstructs the original object.
         """
+        cat_val = self.atlas_category.value if isinstance(self.atlas_category, AtlasCategory) else str(self.atlas_category)
+        stage_val = self.atlas_stage.value if isinstance(self.atlas_stage, AtlasStage) else str(self.atlas_stage)
         return {
             'atlas_uid': self.atlas_uid,
             'atlas_name': self.atlas_name,
             'atlas_description': self.atlas_description,
             'chromatography': self.chromatography,
             'polarity': self.polarity,
-            'analysis_type': self.analysis_type,
-            'atlas_type': self.atlas_type,
-            'analysis_name': self.analysis_name,
+            'atlas_category': cat_val,
+            'atlas_stage': stage_val,
             'created_by': self.created_by,
             'created_date': self.created_date,
             'source': self.source,
@@ -1106,8 +1309,8 @@ class RTAlign:
             )
             self.aligned_atlas_obj.chromatography = ta.chromatography
             self.aligned_atlas_obj.polarity = ta.polarity
-            self.aligned_atlas_obj.analysis_type = ta.analysis_type
-            self.aligned_atlas_obj.analysis_name = ta.analysis_name
+            self.aligned_atlas_obj.atlas_category = ta.atlas_category
+            self.aligned_atlas_obj.atlas_name = ta.atlas_name
             self.aligned_atlas_obj.rt_alignment_number = self.rt_alignment_number
             self.aligned_atlas_obj.analysis_number = None
 
@@ -1217,8 +1420,6 @@ class CurationStageBase(ABC):
     analysis_number: int | None
     chromatography: str | None
     polarity: str | None
-    analysis_type: str | None
-    analysis_name: str | None
     owner: str | None
     ta: TargetedAnalysis | None
     notes: dict[str, Any]
@@ -1241,10 +1442,8 @@ class CurationStageBase(ABC):
         """
         self.rt_alignment_number = run_parameters['rt_alignment_number']
         self.analysis_number = run_parameters['analysis_number']
-        self.chromatography = fpf.normalize_chromatography(run_parameters['chromatography'])
-        self.polarity = fpf.normalize_polarity(run_parameters['polarity'])
-        self.analysis_type = run_parameters['analysis_type']
-        self.analysis_name = run_parameters['analysis_name']
+        self.chromatography = fpf.canonical_chromatography(run_parameters['chromatography'])
+        self.polarity = fpf.canonical_polarity(run_parameters['polarity'])
         self.project_name = run_parameters['project_name']
         self.project_db_path = rtg.get_project_db_path(self.project_name)
 
@@ -1284,7 +1483,7 @@ class CurationStageBase(ABC):
         self._populate_note_options()
 
         self.ta = self.config.get_targeted_analysis(
-            self.chromatography, self.polarity, self.analysis_type, self.analysis_name
+            self.chromatography, self.polarity, run_parameters.get('atlas_category'), run_parameters.get('atlas_name')
         )
 
     def _populate_note_options(self) -> None:
@@ -1326,8 +1525,6 @@ class AnalysisGUI(CurationStageBase):
     analysis_number: int | None = field(default=None)
     chromatography: str | None = field(default=None)
     polarity: str | None = field(default=None)
-    analysis_type: str | None = field(default=None)
-    analysis_name: str | None = field(default=None)
     owner: str | None = field(default=None)
     ta: TargetedAnalysis | None = field(default=None)
     auto_ided_atlas_obj: Atlas | None = field(default=None)
@@ -1359,8 +1556,6 @@ class AnalysisSummary(CurationStageBase):
     analysis_number: int | None = field(default=None)
     chromatography: str | None = field(default=None)
     polarity: str | None = field(default=None)
-    analysis_type: str | None = field(default=None)
-    analysis_name: str | None = field(default=None)
     owner: str | None = field(default=None)
     ta: TargetedAnalysis | None = field(default=None)
     auto_ided_atlas_obj: Atlas | None = field(default=None)

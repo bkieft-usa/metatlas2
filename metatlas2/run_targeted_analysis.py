@@ -190,6 +190,7 @@ def set_up_paths(
     pubchem_cache_path = f"{data_dir}/databases/pubchem_cache/pubchem_global_cache.json"
     project_output_path = f"{data_dir}/projects/targeted_outputs/"
     modelseed_table_path = f"{data_dir}/databases/modelseed_db/modelseed.tsv"
+    chebi_cache_path = f"{data_dir}/databases/chebi_cache/chebi_global_cache.json"
     parquet_output_path = f"{data_dir}/projects/parquet_outputs/"
 
     if project_name is None: # This is for converting files and adding compounds and atlases to main db
@@ -198,6 +199,7 @@ def set_up_paths(
             "main_db_path": str(main_db_path),
             "pubchem_cache_path": str(pubchem_cache_path),
             "modelseed_table_path": str(modelseed_table_path),
+            "chebi_cache_path": str(chebi_cache_path),
         }
 
     owner = config.owner
@@ -223,6 +225,7 @@ def set_up_paths(
         "main_db_path": str(main_db_path),
         "pubchem_cache_path": str(pubchem_cache_path),
         "modelseed_table_path": str(modelseed_table_path),
+        "chebi_cache_path": str(chebi_cache_path),
         "parquet_output_dir": str(parquet_output_dir),
         "rt_alignment_output_dir": str(rta_dir),
         "rt_alignment_results_dir": str(rta_dir / "rt_alignment_results"),
@@ -336,13 +339,13 @@ def main():
             for _, row in auto_ided_df.iterrows():
                 chrom = row["chromatography"]
                 pol = row["polarity"]
-                atype = row["analysis_type"]
-                aname = row["analysis_name"]
+                acat = row["atlas_category"]
+                aname = row["atlas_name"]
                 atlas_uid = row["atlas_uid"]
 
                 logger.info(
                     f"Running auto-curated analysis summary for "
-                    f"{chrom}-{pol}-{atype}-{aname} (atlas_uid={atlas_uid})..."
+                    f"{chrom}-{pol}-{acat}-{aname} (atlas_uid={atlas_uid})..."
                 )
 
                 run_params = {
@@ -351,8 +354,8 @@ def main():
                     "analysis_number": args.analysis_num,
                     "chromatography": chrom,
                     "polarity": pol,
-                    "analysis_type": atype,
-                    "analysis_name": aname,
+                    "atlas_category": acat,
+                    "atlas_name": aname,
                     "input_atlas_uid": atlas_uid,
                 }
 
@@ -364,11 +367,11 @@ def main():
                         auto_curate=True,
                     )
                     logger.info(
-                        f"Analysis summary complete for {chrom}-{pol}-{atype}-{aname}."
+                        f"Analysis summary complete for {chrom}-{pol}-{acat}-{aname}."
                     )
                 except Exception as e:
                     logger.error(
-                        f"Analysis summary failed for {chrom}-{pol}-{atype}-{aname}: {e}",
+                        f"Analysis summary failed for {chrom}-{pol}-{acat}-{aname}: {e}",
                         exc_info=True,
                     )
 

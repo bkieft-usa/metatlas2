@@ -22,9 +22,9 @@ GUI:
 RT_ALIGNMENT:
   HILICZ:
     ATLAS:
-      uid: atl-ref-hilicz-pos-qc-main-52a68b124ac445ed9db76b51d0ba1a2a
+      uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261009-7ad681da53cb4e2fb730e01b9f7fd5af
     PARAMS:
-        upload_to_gdrive: false
+        upload_to_gdrive: true
         include_lcmsruns: # 'QC'
         exclude_lcmsruns:
           - NEG
@@ -47,28 +47,28 @@ TARGETED_ANALYSES:
   HILICZ:
     POS:
       ISTD:
-        DEFAULT:
+        ISTDsEtc:
           ATLAS:
-            uid: atl-ref-hilicz-pos-istd-main-27e11c0947234b79995c9a1302720dd2
+            uid: atlas-ipt-hilicz-pos-istd-istdsetc-bkieft-20261009-7c61d50a3faa4391aef8680b30283b0e
           PARAMS:
-            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
               data_extraction:
                 - QC
                 - NEG
-              gui: # INJBL, BLANK
-              id_sheet: # INJBL, BLANK, REFSTD
-              chromatograms: # INJBL, BLANK
-              id_plots: # INJBL, BLANK, REFSTD
-              data_sheets: # INJBL, BLANK
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
             apply_alignment: true
             remove_unided_compounds: false
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: true
-            suggested_min_conf: 0.75
+            suggested_min_conf: 0.5
             atlas_extra_time: 0.5
-            extract_extra_time: 3.0
+            extract_extra_time:
             ms1_min_peak_intensity: 0
             ms1_min_num_points: 0
             ms1_mz_tolerance_ppm: 5.0
@@ -80,32 +80,32 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: false
+            upload_to_gdrive: true
             skip_outputs:
-      EMA:
-        DEFAULT:
+      REF:
+        EMA:
           ATLAS:
-            uid: atl-ref-hilicz-pos-ema-main-d6430bf0f965436ba65622f8e4dd9ecb
+            uid: atlas-ipt-hilicz-pos-ref-ema-bkieft-20261009-92d5823c710546e09040acc8b4fe25d5
           PARAMS:
-            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
               data_extraction:
                 - QC
                 - NEG
-              gui: # INJBL, BLANK
-              id_sheet: # INJBL, BLANK, REFSTD
-              chromatograms: # INJBL, BLANK
-              id_plots: # INJBL, BLANK, REFSTD
-              data_sheets: # INJBL, BLANK
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
             apply_alignment: true
             remove_unided_compounds: true
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: true
-            apply_istd_curation_to_ema: true
+            apply_istd_curation_to_ref: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0
-            extract_extra_time: 3.0
+            extract_extra_time:
             ms1_min_peak_intensity: 5e5
             ms1_min_num_points: 5
             ms1_mz_tolerance_ppm: 5.0
@@ -117,32 +117,32 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: false
+            upload_to_gdrive: true
             skip_outputs:
     NEG:
       ISTD:
-        DEFAULT:
+        ISTDsEtc:
           ATLAS:
-            uid: atl-ref-hilicz-neg-istd-main-811fd15dac6a4268b625d89866e1e40c
+            uid: atlas-ipt-hilicz-neg-istd-istdsetc-bkieft-20261009-64356bae1f8143159b8a46f29a48b6a3
           PARAMS:
-            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
               data_extraction:
                 - QC
                 - POS
-              gui: # INJBL, BLANK
-              id_sheet: # INJBL, BLANK, REFSTD
-              chromatograms: # INJBL, BLANK
-              id_plots: # INJBL, BLANK, REFSTD
-              data_sheets: # INJBL, BLANK
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
             apply_alignment: true
             remove_unided_compounds: false
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: true
-            suggested_min_conf: 0.75
+            suggested_min_conf: 0.5
             atlas_extra_time: 0.5
-            extract_extra_time: 3.0
+            extract_extra_time:
             ms1_min_peak_intensity: 0
             ms1_min_num_points: 0
             ms1_mz_tolerance_ppm: 5.0
@@ -154,32 +154,32 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: false
+            upload_to_gdrive: true
             skip_outputs:
-      EMA:
-        DEFAULT:
+      REF:
+        EMA:
           ATLAS:
-            uid: atl-ref-hilicz-neg-ema-main-cbe0a0eca61844719e34bef031411f0b
+            uid: atlas-ipt-hilicz-neg-ref-ema-bkieft-20261009-35861ce9b4554217893640c760756d9c
           PARAMS:
-            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
+            include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
               data_extraction:
                 - QC
                 - POS
-              gui: # INJBL, BLANK
-              id_sheet: # INJBL, BLANK, REFSTD
-              chromatograms: # INJBL, BLANK
-              id_plots: # INJBL, BLANK, REFSTD
-              data_sheets: # INJBL, BLANK
+              gui: # INJBL
+              id_sheet: # INJBL, REFSTD
+              chromatograms: # INJBL
+              id_plots: # INJBL, REFSTD
+              data_sheets: # INJBL
             apply_alignment: true
             remove_unided_compounds: true
             remove_flagged_compounds: false
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: true
-            apply_istd_curation_to_ema: true
+            apply_istd_curation_to_ref: true
             suggested_min_conf: 0.75
             atlas_extra_time: 0
-            extract_extra_time: 3.0
+            extract_extra_time:
             ms1_min_peak_intensity: 5e5
             ms1_min_num_points: 5
             ms1_mz_tolerance_ppm: 5.0
@@ -191,5 +191,5 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: false
+            upload_to_gdrive: true
             skip_outputs:

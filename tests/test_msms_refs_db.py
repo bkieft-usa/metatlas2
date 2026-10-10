@@ -7,13 +7,13 @@ Covers:
 
 All tests use a temporary DuckDB file created via
 :func:`~metatlas2.database_interact.create_metatlas_database` so the full
-schema (including ``reference_fragmentation_data``) is exercised without
+schema (including ``msms_refs``) is exercised without
 touching any production database.
 """
 
 from __future__ import annotations
 
-import json
+import csv
 import textwrap
 from pathlib import Path
 
@@ -67,43 +67,57 @@ def _sample_records(
     return records
 
 
-def _write_jsonl(path: Path, records: list[dict]) -> None:
-    """Write a list of dicts as a JSONL file."""
-    with path.open("w") as fh:
-        for rec in records:
-            # Convert to the raw jsonl format (mz/intensities as lists)
-            fh.write(json.dumps(rec) + "\n")
+# Column order for the metatlas .tab export format (spectrum column)
+_TAB_COLUMNS = [
+    "database", "id", "name", "spectrum", "decimal", "precursor_mz",
+    "polarity", "adduct", "fragmentation_method", "collision_energy",
+    "instrument", "instrument_type", "formula", "exact_mass",
+    "inchi_key", "inchi", "smiles",
+]
 
 
-def _jsonl_record(
+def _tab_record(
     database: str = "metatlas",
-    polarity: str = "positive",
+    polarity: str = "negative",
     inchi_key: str = "JPIJQSOTBSSVTP-STHAYSLISA-N",
-    ref_id: str = "ref_0000",
+    ref_id: str = "8257da2871be46cfabe10827aaf8d288",
     precursor_mz: float = 135.03,
+    mz: list[float] | None = None,
+    intensities: list[float] | None = None,
 ) -> dict:
-    """Return a single JSONL-format record (as written by the original converter)."""
+    """Return a single .tab-format record dict (spectrum column) for use with _write_tab."""
+    if mz is None:
+        mz = [59.01, 71.01, 87.01, 117.02, 135.03]
+    if intensities is None:
+        intensities = [1000.0, 2000.0, 3000.0, 4000.0, 5000.0]
+    spectrum_str = str([mz, intensities])
     return {
-        "ix": 0,
         "database": database,
         "id": ref_id,
         "name": "L-threonic acid",
-        "decimal": 4.0,
-        "inchi_key": inchi_key,
-        "precursor_mz": precursor_mz,
+        "spectrum": spectrum_str,
+        "decimal": "4.0",
+        "precursor_mz": str(precursor_mz),
         "polarity": polarity,
-        "adduct": None,
+        "adduct": "",
         "fragmentation_method": "cid",
-        "collision_energy": None,
-        "instrument": None,
-        "instrument_type": None,
+        "collision_energy": "",
+        "instrument": "",
+        "instrument_type": "",
         "formula": "C4H8O5",
-        "mono_isotopic_molecular_weight": 136.037,
-        "inchi": None,
-        "smiles": None,
-        "mz": [59.01, 71.01, 87.01, 117.02, 135.03],
-        "intensities": [1000.0, 2000.0, 3000.0, 4000.0, 5000.0],
+        "exact_mass": "136.037",
+        "inchi_key": inchi_key,
+        "inchi": "",
+        "smiles": "",
     }
+
+
+def _write_tab(path: Path, records: list[dict]) -> None:
+    """Write a list of .tab-format record dicts (spectrum column) to *path*."""
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_TAB_COLUMNS, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(records)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +135,7 @@ class TestBatchSaveMsmsRefs:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM reference_fragmentation_data"
+                "SELECT COUNT(*) FROM msms_refs"
             ).fetchone()[0]
         assert count == 3
 
@@ -139,7 +153,7 @@ class TestBatchSaveMsmsRefs:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             row = conn.execute(
-                "SELECT mz, intensities FROM reference_fragmentation_data LIMIT 1"
+                "SELECT mz, intensities FROM msms_refs LIMIT 1"
             ).fetchone()
         mz_out, int_out = row
         assert list(mz_out) == pytest.approx(mz_in, rel=1e-5)
@@ -154,7 +168,7 @@ class TestBatchSaveMsmsRefs:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             rows = conn.execute(
-                "SELECT ref_uid FROM reference_fragmentation_data"
+                "SELECT ref_uid FROM msms_refs"
             ).fetchall()
         uids = [r[0] for r in rows]
         assert len(uids) == 2
@@ -167,7 +181,7 @@ class TestBatchSaveMsmsRefs:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             uid = conn.execute(
-                "SELECT ref_uid FROM reference_fragmentation_data LIMIT 1"
+                "SELECT ref_uid FROM msms_refs LIMIT 1"
             ).fetchone()[0]
         assert uid.startswith("msms-ref-")
 
@@ -186,7 +200,7 @@ class TestBatchSaveMsmsRefs:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM reference_fragmentation_data"
+                "SELECT COUNT(*) FROM msms_refs"
             ).fetchone()[0]
         assert count == 7
 
@@ -316,10 +330,10 @@ class TestLoadMsmsRefsFromDb:
 
 class TestNewMsmsRefsConfig:
 
-    def _write_config(self, tmp_path: Path, jsonl_path: str,
+    def _write_config(self, tmp_path: Path, tsv_path: str,
                       database_filter: str | None = None) -> str:
         """Write a minimal MSMS_REFS YAML config and return its path."""
-        entry = f"  - path: {jsonl_path}"
+        entry = f"  - path: {tsv_path}"
         if database_filter:
             entry += f"\n    database_filter: {database_filter}"
         yaml_text = f"MSMS_REFS:\n{entry}\n"
@@ -329,17 +343,17 @@ class TestNewMsmsRefsConfig:
 
     def test_from_yaml_parses_entries(self, tmp_path):
         """from_yaml correctly parses a single-entry MSMS_REFS config."""
-        jsonl_path = str(tmp_path / "refs.json")
-        config_path = self._write_config(tmp_path, jsonl_path, database_filter="metatlas")
+        tsv_path = str(tmp_path / "refs.tsv")
+        config_path = self._write_config(tmp_path, tsv_path, database_filter="metatlas")
         cfg = NewMsmsRefsConfig.from_yaml(config_path)
         assert len(cfg.entries) == 1
-        assert cfg.entries[0]["path"] == jsonl_path
+        assert cfg.entries[0]["path"] == tsv_path
         assert cfg.entries[0]["database_filter"] == "metatlas"
 
     def test_from_yaml_missing_key_raises(self, tmp_path):
         """from_yaml raises ValueError when MSMS_REFS key is absent."""
         config_path = str(tmp_path / "bad.yaml")
-        Path(config_path).write_text("SOMETHING_ELSE:\n  - path: /tmp/x.json\n")
+        Path(config_path).write_text("SOMETHING_ELSE:\n  - path: /tmp/x.tsv\n")
         with pytest.raises(ValueError, match="MSMS_REFS"):
             NewMsmsRefsConfig.from_yaml(config_path)
 
@@ -351,17 +365,15 @@ class TestNewMsmsRefsConfig:
             NewMsmsRefsConfig.from_yaml(config_path)
 
     def test_execute_inserts_records(self, tmp_path, monkeypatch):
-        """execute() streams the jsonl file and inserts rows into the DB."""
+        """execute() reads the .tab file and inserts all rows into the DB."""
         db_path = _make_db(tmp_path)
 
-        # Write a small JSONL file with 3 records
-        jsonl_path = tmp_path / "refs.json"
-        raw_records = [_jsonl_record(ref_id=f"ref_{i}") for i in range(3)]
-        _write_jsonl(jsonl_path, raw_records)
+        tab_path = tmp_path / "refs.tab"
+        raw_records = [_tab_record(ref_id=f"id_{i}") for i in range(3)]
+        _write_tab(tab_path, raw_records)
 
-        config_path = self._write_config(tmp_path, str(jsonl_path))
+        config_path = self._write_config(tmp_path, str(tab_path))
 
-        # Patch set_up_paths so execute() uses our temp DB
         import metatlas2.run_targeted_analysis as rtg
         monkeypatch.setattr(
             rtg, "set_up_paths",
@@ -372,52 +384,18 @@ class TestNewMsmsRefsConfig:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM reference_fragmentation_data"
+                "SELECT COUNT(*) FROM msms_refs"
             ).fetchone()[0]
         assert count == 3
 
-    def test_execute_database_filter(self, tmp_path, monkeypatch):
-        """execute() with database_filter only imports matching rows."""
+    def test_execute_ref_id_and_mass_mapping(self, tmp_path, monkeypatch):
+        """execute() maps 'id' → ref_id and 'exact_mass' → mono_isotopic_molecular_weight."""
         db_path = _make_db(tmp_path)
 
-        jsonl_path = tmp_path / "refs.json"
-        raw_records = [
-            _jsonl_record(database="metatlas", ref_id="ref_0"),
-            _jsonl_record(database="gnps", ref_id="ref_1"),
-            _jsonl_record(database="metatlas", ref_id="ref_2"),
-        ]
-        _write_jsonl(jsonl_path, raw_records)
+        tab_path = tmp_path / "refs.tab"
+        _write_tab(tab_path, [_tab_record(ref_id="my_ref_id")])
 
-        config_path = self._write_config(
-            tmp_path, str(jsonl_path), database_filter="metatlas"
-        )
-
-        import metatlas2.run_targeted_analysis as rtg
-        monkeypatch.setattr(
-            rtg, "set_up_paths",
-            lambda config, **kw: {"main_db_path": db_path},
-        )
-
-        NewMsmsRefsConfig.from_yaml(config_path).execute()
-
-        with dbi.get_db_connection(db_path, read_only=True) as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM reference_fragmentation_data"
-            ).fetchone()[0]
-        assert count == 2  # only the two "metatlas" rows
-
-    def test_execute_precursor_truncation(self, tmp_path, monkeypatch):
-        """execute() applies precursor_mz + 2.5 truncation before storing arrays."""
-        db_path = _make_db(tmp_path)
-
-        # precursor_mz = 100.0 → fragments above 102.5 should be dropped
-        raw = _jsonl_record(precursor_mz=100.0)
-        raw["mz"] = [50.0, 80.0, 100.0, 103.0, 110.0]  # last two should be dropped
-        raw["intensities"] = [1.0, 2.0, 3.0, 4.0, 5.0]
-
-        jsonl_path = tmp_path / "refs.json"
-        _write_jsonl(jsonl_path, [raw])
-        config_path = self._write_config(tmp_path, str(jsonl_path))
+        config_path = self._write_config(tmp_path, str(tab_path))
 
         import metatlas2.run_targeted_analysis as rtg
         monkeypatch.setattr(
@@ -429,7 +407,92 @@ class TestNewMsmsRefsConfig:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             row = conn.execute(
-                "SELECT mz FROM reference_fragmentation_data LIMIT 1"
+                "SELECT ref_id, mono_isotopic_molecular_weight FROM msms_refs LIMIT 1"
+            ).fetchone()
+        assert row[0] == "my_ref_id"
+        assert row[1] == pytest.approx(136.037, rel=1e-4)
+
+    def test_execute_mz_intensities_round_trip(self, tmp_path, monkeypatch):
+        """execute() correctly parses mz and intensities from the spectrum column."""
+        db_path = _make_db(tmp_path)
+
+        mz_in = [59.01, 71.01, 87.01, 117.02, 135.03]
+        int_in = [1000.0, 2000.0, 3000.0, 4000.0, 5000.0]
+        tab_path = tmp_path / "refs.tab"
+        _write_tab(tab_path, [_tab_record(mz=mz_in, intensities=int_in)])
+
+        config_path = self._write_config(tmp_path, str(tab_path))
+
+        import metatlas2.run_targeted_analysis as rtg
+        monkeypatch.setattr(
+            rtg, "set_up_paths",
+            lambda config, **kw: {"main_db_path": db_path},
+        )
+
+        NewMsmsRefsConfig.from_yaml(config_path).execute()
+
+        with dbi.get_db_connection(db_path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT mz, intensities FROM msms_refs LIMIT 1"
+            ).fetchone()
+        assert list(row[0]) == pytest.approx(mz_in, rel=1e-4)
+        assert list(row[1]) == pytest.approx(int_in, rel=1e-4)
+
+    def test_execute_database_filter(self, tmp_path, monkeypatch):
+        """execute() with database_filter only imports matching rows."""
+        db_path = _make_db(tmp_path)
+
+        tab_path = tmp_path / "refs.tab"
+        raw_records = [
+            _tab_record(database="metatlas", ref_id="id_0"),
+            _tab_record(database="gnps", ref_id="id_1"),
+            _tab_record(database="metatlas", ref_id="id_2"),
+        ]
+        _write_tab(tab_path, raw_records)
+
+        config_path = self._write_config(
+            tmp_path, str(tab_path), database_filter="metatlas"
+        )
+
+        import metatlas2.run_targeted_analysis as rtg
+        monkeypatch.setattr(
+            rtg, "set_up_paths",
+            lambda config, **kw: {"main_db_path": db_path},
+        )
+
+        NewMsmsRefsConfig.from_yaml(config_path).execute()
+
+        with dbi.get_db_connection(db_path, read_only=True) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM msms_refs"
+            ).fetchone()[0]
+        assert count == 2  # only the two "metatlas" rows
+
+    def test_execute_precursor_truncation(self, tmp_path, monkeypatch):
+        """execute() applies precursor_mz + 2.5 truncation before storing arrays."""
+        db_path = _make_db(tmp_path)
+
+        # precursor_mz = 100.0 → fragments >= 102.5 should be dropped
+        tab_path = tmp_path / "refs.tab"
+        _write_tab(tab_path, [_tab_record(
+            precursor_mz=100.0,
+            mz=[50.0, 80.0, 100.0, 103.0, 110.0],
+            intensities=[1.0, 2.0, 3.0, 4.0, 5.0],
+        )])
+
+        config_path = self._write_config(tmp_path, str(tab_path))
+
+        import metatlas2.run_targeted_analysis as rtg
+        monkeypatch.setattr(
+            rtg, "set_up_paths",
+            lambda config, **kw: {"main_db_path": db_path},
+        )
+
+        NewMsmsRefsConfig.from_yaml(config_path).execute()
+
+        with dbi.get_db_connection(db_path, read_only=True) as conn:
+            row = conn.execute(
+                "SELECT mz FROM msms_refs LIMIT 1"
             ).fetchone()
         stored_mz = list(row[0])
         # Only fragments < 100.0 + 2.5 = 102.5 should be stored
@@ -440,7 +503,7 @@ class TestNewMsmsRefsConfig:
         """execute() logs an error and skips a missing source file gracefully."""
         db_path = _make_db(tmp_path)
         config_path = self._write_config(
-            tmp_path, str(tmp_path / "nonexistent.json")
+            tmp_path, str(tmp_path / "nonexistent.tab")
         )
 
         import metatlas2.run_targeted_analysis as rtg
@@ -454,9 +517,28 @@ class TestNewMsmsRefsConfig:
 
         with dbi.get_db_connection(db_path, read_only=True) as conn:
             count = conn.execute(
-                "SELECT COUNT(*) FROM reference_fragmentation_data"
+                "SELECT COUNT(*) FROM msms_refs"
             ).fetchone()[0]
         assert count == 0
+
+    def test_parse_spectrum_column_valid(self):
+        """_parse_spectrum_column correctly parses a well-formed list-of-lists string."""
+        mz, ints = NewMsmsRefsConfig._parse_spectrum_column(
+            "[[59.01, 71.01, 87.01], [1000.0, 2000.0, 3000.0]]"
+        )
+        assert mz == pytest.approx([59.01, 71.01, 87.01])
+        assert ints == pytest.approx([1000.0, 2000.0, 3000.0])
+
+    def test_parse_spectrum_column_null_returns_empty(self):
+        """_parse_spectrum_column returns ([], []) for NULL / empty values."""
+        assert NewMsmsRefsConfig._parse_spectrum_column("") == ([], [])
+        assert NewMsmsRefsConfig._parse_spectrum_column("\\N") == ([], [])
+        assert NewMsmsRefsConfig._parse_spectrum_column("None") == ([], [])
+
+    def test_parse_spectrum_column_malformed_returns_empty(self):
+        """_parse_spectrum_column returns ([], []) for unparseable strings."""
+        assert NewMsmsRefsConfig._parse_spectrum_column("not a list") == ([], [])
+        assert NewMsmsRefsConfig._parse_spectrum_column("[[1,2],[3]]") == ([], [])
 
 
 # ---------------------------------------------------------------------------
@@ -529,155 +611,3 @@ class TestQueryMsmsRefs:
         assert rows == []
 
 
-# ---------------------------------------------------------------------------
-# get_msms_refs_from_db — export functions
-# ---------------------------------------------------------------------------
-
-class TestGetMsmsRefsFromDb:
-
-    def _populate_and_get_rows(self, db_path: str) -> list[dict]:
-        key_a = "JPIJQSOTBSSVTP-STHAYSLISA-N"
-        key_b = "HDYANYHVCAPMJV-LXQIFKJMSA-N"
-        dbi.batch_save_msms_refs(db_path, _sample_records(2, database="metatlas", polarity="positive", inchi_key=key_a))
-        dbi.batch_save_msms_refs(db_path, _sample_records(1, database="gnps", polarity="negative", inchi_key=key_b))
-        return dbi.query_msms_refs(db_path)
-
-    # -- JSONL export --------------------------------------------------------
-
-    def test_jsonl_export_creates_file(self, tmp_path):
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_jsonl
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.json"
-        export_msms_refs_jsonl(rows, out)
-        assert out.exists()
-
-    def test_jsonl_export_line_count(self, tmp_path):
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_jsonl
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.json"
-        export_msms_refs_jsonl(rows, out)
-        lines = [l for l in out.read_text().splitlines() if l.strip()]
-        assert len(lines) == len(rows)
-
-    def test_jsonl_export_valid_json(self, tmp_path):
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_jsonl
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.json"
-        export_msms_refs_jsonl(rows, out)
-        for line in out.read_text().splitlines():
-            if line.strip():
-                rec = json.loads(line)
-                assert "inchi_key" in rec
-                assert isinstance(rec["mz"], list)
-                assert isinstance(rec["intensities"], list)
-
-    def test_jsonl_round_trip_mz(self, tmp_path):
-        """mz values survive JSONL round-trip unchanged."""
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_jsonl
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.json"
-        export_msms_refs_jsonl(rows, out)
-        loaded = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
-        for orig, loaded_rec in zip(rows, loaded):
-            assert orig["mz"] == pytest.approx(loaded_rec["mz"], rel=1e-5)
-
-    # -- TSV export ----------------------------------------------------------
-
-    def test_tsv_export_creates_file(self, tmp_path):
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_tsv
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.tsv"
-        export_msms_refs_tsv(rows, out)
-        assert out.exists()
-
-    def test_tsv_export_row_count(self, tmp_path):
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_tsv
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.tsv"
-        export_msms_refs_tsv(rows, out)
-        lines = out.read_text().splitlines()
-        # header + data rows
-        assert len(lines) == len(rows) + 1
-
-    def test_tsv_export_mz_as_json_array(self, tmp_path):
-        """mz column in TSV is a JSON-serialised array string."""
-        import csv as _csv
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_tsv
-        db_path = _make_db(tmp_path)
-        rows = self._populate_and_get_rows(db_path)
-        out = tmp_path / "out.tsv"
-        export_msms_refs_tsv(rows, out)
-        with out.open() as fh:
-            reader = _csv.DictReader(fh, delimiter="\t")
-            for row in reader:
-                mz_parsed = json.loads(row["mz"])
-                assert isinstance(mz_parsed, list)
-
-    def test_tsv_empty_rows_creates_empty_file(self, tmp_path):
-        from metatlas2.get_msms_refs_from_db import export_msms_refs_tsv
-        out = tmp_path / "empty.tsv"
-        export_msms_refs_tsv([], out)
-        assert out.exists()
-        assert out.read_text() == ""
-
-    # -- get_msms_refs (end-to-end) ------------------------------------------
-
-    def test_get_msms_refs_jsonl(self, tmp_path, monkeypatch):
-        """get_msms_refs() writes a JSONL file with the correct number of lines."""
-        from metatlas2.get_msms_refs_from_db import get_msms_refs
-        db_path = _make_db(tmp_path)
-        self._populate_and_get_rows(db_path)
-        out = str(tmp_path / "export.json")
-        get_msms_refs(output_path=out, database_path=db_path)
-        lines = [l for l in Path(out).read_text().splitlines() if l.strip()]
-        assert len(lines) == 3
-
-    def test_get_msms_refs_tsv(self, tmp_path):
-        """get_msms_refs() with tab_out=True writes a TSV file."""
-        from metatlas2.get_msms_refs_from_db import get_msms_refs
-        db_path = _make_db(tmp_path)
-        self._populate_and_get_rows(db_path)
-        out = str(tmp_path / "export.tsv")
-        get_msms_refs(output_path=out, tab_out=True, database_path=db_path)
-        lines = Path(out).read_text().splitlines()
-        assert len(lines) == 4  # header + 3 data rows
-
-    def test_get_msms_refs_inchikeys_filter(self, tmp_path):
-        """get_msms_refs() with inchikeys restricts output to matching rows."""
-        from metatlas2.get_msms_refs_from_db import get_msms_refs
-        db_path = _make_db(tmp_path)
-        self._populate_and_get_rows(db_path)
-        key_a = "JPIJQSOTBSSVTP-STHAYSLISA-N"
-        out = str(tmp_path / "subset.json")
-        get_msms_refs(output_path=out, inchikeys=[key_a], database_path=db_path)
-        lines = [l for l in Path(out).read_text().splitlines() if l.strip()]
-        assert len(lines) == 2
-        for line in lines:
-            assert json.loads(line)["inchi_key"] == key_a
-
-    def test_get_msms_refs_database_filter(self, tmp_path):
-        """get_msms_refs() with database_filter restricts output."""
-        from metatlas2.get_msms_refs_from_db import get_msms_refs
-        db_path = _make_db(tmp_path)
-        self._populate_and_get_rows(db_path)
-        out = str(tmp_path / "metatlas_only.json")
-        get_msms_refs(output_path=out, database_filter="metatlas", database_path=db_path)
-        lines = [l for l in Path(out).read_text().splitlines() if l.strip()]
-        assert len(lines) == 2
-        for line in lines:
-            assert json.loads(line)["database"] == "metatlas"
-
-    def test_get_msms_refs_no_match_no_file(self, tmp_path):
-        """get_msms_refs() writes nothing when no rows match the filter."""
-        from metatlas2.get_msms_refs_from_db import get_msms_refs
-        db_path = _make_db(tmp_path)
-        self._populate_and_get_rows(db_path)
-        out = str(tmp_path / "nothing.json")
-        get_msms_refs(output_path=out, database_filter="nonexistent", database_path=db_path)
-        assert not Path(out).exists()
