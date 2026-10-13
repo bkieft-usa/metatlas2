@@ -104,6 +104,7 @@ def run_all_summaries(
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
         make_metabomap(summary_obj, overwrite=overwrite)
 
+    ### NEED TO UPDATE FOR MEETING WITH SHARON
     if "analysis_parquet" not in (skip_outputs or []):
         logger.info("Making unified analysis Parquet files...")
         pqi.make_analysis_parquet(summary_obj, overwrite=overwrite)
