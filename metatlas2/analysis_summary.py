@@ -3386,10 +3386,10 @@ def make_log_fold_changes_csv(
         df[id_cols].to_csv(output_csv, index=False)
         return
 
-    logger.info(
-        "Computing pairwise log2 fold changes for %d groups: %s",
-        len(group_to_cols), list(group_to_cols.keys()),
-    )
+    #logger.info(
+    #    "Computing pairwise log2 fold changes for %d groups: %s",
+    #    len(group_to_cols), list(group_to_cols.keys()),
+    #)
 
     # Per-group mean across replicates
     group_means: dict[str, np.ndarray] = {
