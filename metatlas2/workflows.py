@@ -188,10 +188,10 @@ def run_auto_identification(
     for ta in auto_id_obj.config.targeted_analyses:
         
         auto_id_obj.ta = ta
-        auto_id_obj.paths['analysis_results_output_dir'] = Path(auto_id_obj.paths["analysis_output_dir"]) / auto_id_obj.ta.label
-        os.makedirs(auto_id_obj.paths['analysis_results_output_dir'], exist_ok=True)
+        auto_id_obj.paths['analysis_results_output_dir'] = str(
+            Path(auto_id_obj.paths["analysis_output_dir"]) / auto_id_obj.ta.label
+        )
 
-        # chromatography/polarity/type/name combination has already been auto-IDed.
         existing_autoid = dbi.get_atlas_uid_from_stage(
             obj=auto_id_obj,
             stage=AtlasStage.AUTO_IDED,
@@ -210,6 +210,8 @@ def run_auto_identification(
             stage=AtlasStage.RT_ALIGNED
         )
         if not autoid_atlas_info: continue
+
+        os.makedirs(auto_id_obj.paths['analysis_results_output_dir'], exist_ok=True)
 
         auto_id_obj.aligned_atlas_obj = Atlas.from_database(
             database_path=auto_id_obj.paths['project_db_path'],
@@ -441,6 +443,9 @@ def run_analysis_summary(
         run_parameters=run_parameters,
         override_parameters=override_parameters,
     )
+
+    logger.info(f"Creating analysis results output directory: {summary_obj.paths['analysis_results_output_dir']}")
+    os.makedirs(summary_obj.paths['analysis_results_output_dir'], exist_ok=True)
 
     logger.info("Looking up Atlas UID for analysis summary stage from database based on config parameters...")
     summary_atlas_info = dbi.get_atlas_uid_from_stage(

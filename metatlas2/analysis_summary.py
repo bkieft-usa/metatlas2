@@ -60,49 +60,51 @@ def run_all_summaries(
 
     _validate_required_note_selections(summary_obj)
 
+    output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+
     if "final_id_sheet" not in (skip_outputs or []):
         logger.info("Making Final Identification sheet...")
-        make_final_id_sheet(summary_obj, overwrite=overwrite)
+        make_final_id_sheet(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "id_figures" not in (skip_outputs or []):
         logger.info("Making Identification figures...")
-        make_identification_figure(summary_obj, overwrite=overwrite, max_workers=4)
+        make_identification_figure(summary_obj, output_dir=output_dir, overwrite=overwrite, max_workers=4)
 
     if "eic_thumbnails" not in (skip_outputs or []):
         logger.info("Making EIC thumbnails...")
-        make_eic_thumbnails(summary_obj, overwrite=overwrite, max_workers=4)
+        make_eic_thumbnails(summary_obj, output_dir=output_dir, overwrite=overwrite, max_workers=4)
 
     if "tic_thumbnails" not in (skip_outputs or []):
         logger.info("Making TIC thumbnails...")
-        make_tic_thumbnails(summary_obj, overwrite=overwrite)
+        make_tic_thumbnails(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "compound_metric_plots" not in (skip_outputs or []):
         logger.info("Making compound peak height and RT peak plots...")
-        make_compound_metric_plots(summary_obj, overwrite=overwrite)
+        make_compound_metric_plots(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "boxplots" not in (skip_outputs or []):
         logger.info("Making Boxplots...")
-        make_boxplots(summary_obj, overwrite=overwrite, max_workers=4)
+        make_boxplots(summary_obj, output_dir=output_dir, overwrite=overwrite, max_workers=4)
 
     if "data_sheets" not in (skip_outputs or []):
         logger.info("Making quantitative data sheets...")
-        make_data_sheets(summary_obj, overwrite=overwrite)
+        make_data_sheets(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "best_ms2_hits_csv" not in (skip_outputs or []):
         logger.info("Making best MS2 hit fragment ions CSV...")
-        make_best_ms2_hit_fragment_ions_csv(summary_obj, overwrite=overwrite)
+        make_best_ms2_hit_fragment_ions_csv(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "peak_height_filtered_csv" not in (skip_outputs or []):
         logger.info("Making filtered peak height CSV...")
-        make_peak_height_filtered_csv(summary_obj, overwrite=overwrite)
+        make_peak_height_filtered_csv(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "log_fold_changes_csv" not in (skip_outputs or []):
         logger.info("Making log fold changes CSV from filtered peak heights...")
-        make_log_fold_changes_csv(summary_obj, overwrite=overwrite)
+        make_log_fold_changes_csv(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "metabomap" not in (skip_outputs or []):
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
-        make_metabomap(summary_obj, overwrite=overwrite)
+        make_metabomap(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     ### NEED TO UPDATE FOR MEETING WITH SHARON
     if "analysis_parquet" not in (skip_outputs or []):
@@ -111,7 +113,7 @@ def run_all_summaries(
 
     if "targeted_analysis_readme" not in (skip_outputs or []):
         logger.info("Making targeted analysis README...")
-        make_targeted_analysis_readme(summary_obj, overwrite=overwrite)
+        make_targeted_analysis_readme(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     gdrive_upload = False
     if summary_obj.override_parameters.get("upload_to_gdrive") is not None:
@@ -312,10 +314,13 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
 
 def make_identification_figure(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
     max_workers: int | None = None,
 ) -> None:
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / f"identification_figures_with_msms_mirror_plots"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    output_dir = output_dir / "identification_figures_with_msms_mirror_plots"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -1098,10 +1103,14 @@ def _plot_structure(
 
 def make_final_id_sheet(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
 ) -> None:
 
     from metatlas2.workflow_objects import MS2Hit
+
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
 
     final_id_filename_part = (
         f"{summary_obj.chromatography}"
@@ -1111,7 +1120,7 @@ def make_final_id_sheet(
         #f"-TGA{summary_obj.analysis_number}"
     )
     output_filename = f"FinalIdentifications__{final_id_filename_part}__{summary_obj.project_name}.xlsx"
-    excel_path = Path(summary_obj.paths['analysis_results_output_dir']) / output_filename
+    excel_path = output_dir / output_filename
     if not overwrite and excel_path.exists():
         logger.info(f"Overwriting disabled: existing file {excel_path} will be used.")
         return
@@ -1634,6 +1643,7 @@ def _compute_all_overlapping_compounds(
 
 def make_eic_thumbnails(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
     max_workers: int | None = None,
 ) -> None:
@@ -1642,8 +1652,9 @@ def make_eic_thumbnails(
     rt_alignment_num = summary_obj.rt_alignment_number
     analysis_num = summary_obj.analysis_number
 
-    output_loc = Path(summary_obj.paths['analysis_results_output_dir'])
-    base_dir = Path(output_loc)
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    base_dir = output_dir
     additional_info_dir = base_dir / "additional_info"
     dir_shared = additional_info_dir / f"compound_EIC_chromatograms_sharedY"
     dir_indep = additional_info_dir / f"compound_EIC_chromatograms_independentY"
@@ -1974,6 +1985,7 @@ def _render_eic_thumbnail(
 
 def make_tic_thumbnails(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
     max_workers: int | None = None,
 ) -> None:
@@ -1992,8 +2004,9 @@ def make_tic_thumbnails(
     The TIC is built from ``experimental_data.ms1_df_full_range`` when
     available, falling back to ``experimental_data.ms1_df``.
     """
-    output_loc = Path(summary_obj.paths["analysis_results_output_dir"])
-    additional_info_dir = output_loc / "additional_info"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
+    additional_info_dir = output_dir / "additional_info"
     path_indep  = additional_info_dir / "sample_TIC_total_chromatograms_independentY.pdf"
     path_shared = additional_info_dir / "sample_TIC_total_chromatograms_sharedY.pdf"
 
@@ -2204,6 +2217,7 @@ def _make_compound_subplot(
 
 def make_compound_metric_plots(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
 ) -> None:
     """Generate two multi-compound grid PDFs in ``additional_info/``.
@@ -2219,8 +2233,9 @@ def make_compound_metric_plots(
     Compounds are laid out in a 5x5 grid per page.  Files are sorted by
     their ``run_number`` field (parsed from the filename).
     """
-    output_loc = Path(summary_obj.paths["analysis_results_output_dir"])
-    additional_info_dir = output_loc / "additional_info"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
+    additional_info_dir = output_dir / "additional_info"
     path_ph = additional_info_dir / "compound_peak_heights.pdf"
     path_rt = additional_info_dir / "compound_rt_peaks.pdf"
 
@@ -2646,11 +2661,14 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
 
 def make_boxplots(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
     max_workers: int | None = None,
 ) -> None:
 
-    base_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    base_dir = output_dir
     additional_info_dir = base_dir / "additional_info"
 
     dir_peak_height = base_dir / f"boxplot_peak_height"
@@ -2796,6 +2814,7 @@ def make_boxplots(
 
 def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     output_filename: str = "best_ms2_hit_fragment_ions.csv",
     overwrite: bool = True,
     min_fragment_intensity: float | None = 1e4,
@@ -2803,7 +2822,9 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     from metatlas2.workflow_objects import MS2Hit
 
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / f"data_sheets"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    output_dir = output_dir / "data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
         logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
@@ -2908,11 +2929,14 @@ def make_best_ms2_hit_fragment_ions_csv(
 
 def make_data_sheets(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
 ) -> None:
     """Export per-compound, per-file quantitative metric tables as wide-format CSVs."""
 
-    output_dir = Path(summary_obj.paths['analysis_results_output_dir']) / f"data_sheets"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    output_dir = output_dir / "data_sheets"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -3171,7 +3195,8 @@ def _build_col_to_sample_treatment(
 
 
 def make_peak_height_filtered_csv(
-    obj: "AnalysisSummary",
+    summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
     control_fold_threshold: float = 3.0,
 ) -> None:
@@ -3206,7 +3231,9 @@ def make_peak_height_filtered_csv(
     _EXCTRL_TREATMENT = "ExCtrl"
     _META_COLS: set[str] = {"compound_id"}
 
-    out_dir = Path(obj.paths["analysis_results_output_dir"]) / "data_sheets"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
+    out_dir = output_dir / "data_sheets"
     source_csv = out_dir / "peak_height.csv"
     output_csv = out_dir / "peak_height_filtered.csv"
     summary_tsv = out_dir / "peak_height_filter_summary.tsv"
@@ -3233,7 +3260,7 @@ def make_peak_height_filtered_csv(
     col_to_treatment = _build_col_to_sample_treatment(df, header_df, _META_COLS)
     exctrl_cols = [
         c for c in sample_cols
-        if col_to_treatment.get(c, "").strip() == _EXCTRL_TREATMENT
+        if _EXCTRL_TREATMENT.lower() in col_to_treatment.get(c, "").lower()
     ]
     non_exctrl_cols = [c for c in sample_cols if c not in exctrl_cols]
 
@@ -3299,6 +3326,7 @@ def make_peak_height_filtered_csv(
 
 def make_log_fold_changes_csv(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
 ) -> None:
     """Create group-level log₂ fold-change CSV from ``peak_height_filtered.csv``.
@@ -3323,7 +3351,9 @@ def make_log_fold_changes_csv(
     _EXCTRL_TREATMENT = "ExCtrl"
     _ID_COLS: set[str] = {"compound_id"}
 
-    out_dir = Path(summary_obj.paths["analysis_results_output_dir"]) / "data_sheets"
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
+    out_dir = output_dir / "data_sheets"
     source_csv = out_dir / "peak_height_filtered.csv"
     output_csv = out_dir / "group_mean_log_fold_changes.csv"
 
@@ -3455,6 +3485,7 @@ def make_log_fold_changes_csv(
 
 def make_metabomap(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
 ) -> None:
     """Merge POS and NEG ``peak_height_filtered.csv`` files into a single
@@ -3481,7 +3512,9 @@ def make_metabomap(
         One row per ``compound_id`` with columns:
         ``compound_id, <GroupA>_vs_<GroupB>, ...``
     """
-    analysis_output_dir = Path(summary_obj.paths.get("analysis_results_output_dir"))
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    analysis_output_dir = output_dir
     curr_pol_lc = fpf.normalize_polarity(summary_obj.polarity)   # "pos" or "neg"
     sib_pol_lc  = "neg" if curr_pol_lc == "pos" else "pos"
     curr_pol_display = summary_obj.polarity
@@ -3506,8 +3539,11 @@ def make_metabomap(
     if not overwrite and merged_tsv.exists() and lfc_tsv.exists():
         return
 
-    if not current_csv.exists() or not sibling_csv.exists():
-        logger.warning("Missing polarity CSVs; skipping metabomap.")
+    if not current_csv.exists():
+        logger.warning("Missing polarity peak height filtered csv on disk; skipping metabomap.")
+        return
+    if not sibling_csv.exists():
+        logger.warning("Missing opposite polarity peak height filtered csv on disk; skipping metabomap.")
         return
 
     metabomaps_dir.mkdir(parents=True, exist_ok=True)
@@ -3871,6 +3907,7 @@ def _build_color_legend(color_map: dict) -> str:
 
 def make_targeted_analysis_readme(
     summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
     overwrite: bool = True,
     filename: str = "targeted_analysis_readme.txt",
 ) -> None:
@@ -3884,12 +3921,16 @@ def make_targeted_analysis_readme(
     ----------
     summary_obj:
         The :class:`AnalysisSummary` instance for the current analysis.
+    output_dir:
+        Path to the analysis results output directory.  When *None* it is
+        resolved from ``summary_obj.paths['analysis_results_output_dir']``.
     overwrite:
         When *False* and the file already exists, skip writing.
     filename:
         Output filename (default ``targeted_analysis_readme.txt``).
     """
-    output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
     readme_path = output_dir / filename
 
     if not overwrite and readme_path.exists():
