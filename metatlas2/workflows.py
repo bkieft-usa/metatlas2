@@ -266,13 +266,26 @@ def run_auto_identification(
             auto_id_obj=auto_id_obj
         )
 
+    logger.info("Generating query notebook for RTA%s / TGA%s...", auto_id_obj.rt_alignment_number, auto_id_obj.analysis_number)
+    nbg.generate_query_notebook(
+        auto_id_obj=auto_id_obj
+    )
+
     return
 
 def run_analysis_gui(
     run_parameters: dict[str, Any],
     override_parameters: dict[str, Any] = None,
     dash_app_port: int = 8050,
-) -> "CurationApp":
+) -> dict:
+    """Launch the interactive manual-curation Dash GUI.
+
+    Returns
+    -------
+    dict
+        database flush errors, if they exist, to make sure summaries are not generated
+        if the manual curation data wasn't properly saved
+    """
 
     from metatlas2.workflow_objects import Atlas, AnalysisGUI, AtlasStage
 
@@ -346,13 +359,38 @@ def run_analysis_gui(
         service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')
         url = f"{service_prefix}proxy/{dash_app_port}/"
 
-    return display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
+    display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
+
+    t.join()
+    time.sleep(2)
+    database_flush_errors: dict = getattr(dash_app, "database_flush_errors", {})
+
+    if database_flush_errors:
+        logger.warning(
+            "DATABASE FLUSH ERRORS detected for %d compound(s) — their curation "
+            "data may NOT have been saved to the project database!" 
+            "Please go back and re-curate these compounds:\n%s",
+            len(database_flush_errors),
+            "\n".join(f"  • {k}: {v}" for k, v in database_flush_errors.items()),
+        )
+        print(
+            "\nWARNING: The following compounds could NOT be saved to the database "
+            "(the database may have been locked by another process):\n"
+            + "\n".join(f"  • {k}: {v}" for k, v in database_flush_errors.items())
+            + "\n\nDo NOT run the Analysis Summary until these errors are resolved "
+            "and the curation data has been successfully saved.\n"
+        )
+    else:
+        logger.info("All compound curation data flushed to the database successfully.")
+
+    return database_flush_errors
 
 def run_analysis_summary(
     run_parameters: dict[str, Any],
     override_parameters: dict[str, Any] = None,
     overwrite: bool = False,
     auto_curate: bool = False,
+    database_flush_errors: dict = None,
 ) -> None:
     """Run the post-curation analysis summary for one targeted analysis.
 
@@ -371,9 +409,31 @@ def run_analysis_summary(
         ``curation_df`` before generating summary outputs.  This is used
         by the ``--skip-curation`` command-line flag to bypass the manual
         GUI step.  Defaults to ``False`` (normal notebook behaviour).
+    database_flush_errors:
+        Dict returned by ``run_analysis_gui()`` mapping
+        ``"compound_name (adduct)"`` strings to error messages for any
+        compound whose curation data could not be flushed to the project
+        database.  When non-empty (or non-None), this function raises a
+        ``RuntimeError`` immediately rather than generating summary outputs
+        from potentially incomplete curation data.  Pass ``None`` (the
+        default) when calling from automated pipelines that bypass the GUI
+        (e.g. ``auto_curate=True``).
     """
 
     from metatlas2.workflow_objects import Atlas, AnalysisSummary, AtlasStage
+
+    if database_flush_errors:
+        error_lines = "\n".join(
+            f"  • {k}: {v}" for k, v in database_flush_errors.items()
+        )
+        raise RuntimeError(
+            f"Analysis summary aborted: {len(database_flush_errors)} compound(s) "
+            "could not be saved to the project database during the manual curation "
+            "GUI session.  Resolve the database lock / error (e.g., check if another "
+            "analysis is running for this project)and re-run the curation "
+            "GUI before generating the summary.\n\n"
+            f"Affected compounds:\n{error_lines}"
+        )
 
     summary_obj = AnalysisSummary()
     
@@ -458,48 +518,21 @@ def run_analysis_summary(
 
 def run_parquet_query(
     project_root: str,
-    params_path: str,
-    query_name: str
-) -> "ParquetQueryResult":
-    """Run a YAML-configured query against a project's Parquet results.
-
-    Parameters
-    ----------
-    project_root:
-        Path to the directory that *contains* ``parquet_results/`` for a
-        given project — i.e. ``summary_obj.paths["parquet_output_dir"]``.
-        NOT the flat "parquet_outputs" folder used by the old schema.
-    params_path:
-        Path to a YAML file whose top-level ``grain`` key selects
-        ``compound_file`` or ``compound_lfc``, plus any filter params.
-    query_name:
-        The name of the query to execute from the YAML file.
-
-    Returns
-    -------
-    ParquetQueryResult
-        A named tuple with two fields:
-
-        * ``df``  – :class:`pandas.DataFrame` of matching rows.
-        * ``sql`` – ``str`` SQL SELECT statement equivalent to the query.
-
-    Examples
-    --------
-    >>> result = wfs.run_parquet_query(
-    ...     project_root=str(DATA_DIR / "projects" / "parquet_outputs"),
-    ...     params_path=str(DATA_DIR / "tools/metatlas2/configs/example_configs/parquet" / "parquet_query.yaml"),
-    ...     query_name="redox_energy_screen",
-    ... )
-    >>> result.df       # pandas DataFrame of matching rows
-    >>> result.sql      # SQL string equivalent of the query
-    >>> print(result.sql)
-    SELECT *
-    FROM compound_lfc
-    WHERE compound_name IN ('NAD+', 'NADH', 'ATP', 'ADP', 'glutathione', 'glutathione disulfide')
-      AND (ABS(log2_fold_change) > 1.0)
+    params: dict | None = None,
+    rt_alignment_number: int | None = None,
+    analysis_number: int | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """Run a query against a project's Parquet results.
     """
     from metatlas2.workflow_objects import ParquetQueryInterpreter
 
-    return ParquetQueryInterpreter.execute_from_params_file(
-        Path(project_root), Path(params_path), query_name
+    if params is None:
+        raise ValueError("Query params must be provided.")
+
+    grain = params.get("grain", "compound_lfc")
+    engine = ParquetQueryInterpreter(
+        Path(project_root), grain,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number,
     )
+    return engine.execute(params)

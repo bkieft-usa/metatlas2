@@ -1107,8 +1107,8 @@ def make_final_id_sheet(
         f"{summary_obj.chromatography}"
         f"-{summary_obj.polarity}"
         f"-{summary_obj.ta.atlas_name}"
-        f"-RTA{summary_obj.rt_alignment_number}"
-        f"-TGA{summary_obj.analysis_number}"
+        #f"-RTA{summary_obj.rt_alignment_number}"
+        #f"-TGA{summary_obj.analysis_number}"
     )
     output_filename = f"FinalIdentifications__{final_id_filename_part}__{summary_obj.project_name}.xlsx"
     excel_path = Path(summary_obj.paths['analysis_results_output_dir']) / output_filename

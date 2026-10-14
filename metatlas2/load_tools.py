@@ -677,8 +677,6 @@ def save_atlas_data_to_csv(
         f"{(atlas_obj.chromatography or '')}"
         f"-{(atlas_obj.polarity or '')}"
         f"-{(atlas_obj.atlas_name or '')}"
-        f"-RTA{(atlas_obj.rt_alignment_number or '')}"
-        f"-TGA{(atlas_obj.analysis_number or '')}"
         f"-{(atlas_obj.atlas_stage.value or '')}"
     )
     output_file = f"CompoundAtlas__{atlas_filename_part}__{project_name}.csv"

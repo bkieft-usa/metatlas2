@@ -687,7 +687,7 @@ def save_rt_alignment_model_to_db(
     # save RT alignment model metadata to JSON file in RT alignment output directory for easy reference
     rt_alignment_output_dir = Path(rt_align_obj.paths['rt_alignment_results_dir'])
     rt_alignment_output_dir.mkdir(parents=True, exist_ok=True)
-    rt_alignment_metadata_path = rt_alignment_output_dir / f"rt_alignment_model_{rt_alignment_uid}.json"
+    rt_alignment_metadata_path = rt_alignment_output_dir / "RT_Alignment_Model_Info.json"
     with open(rt_alignment_metadata_path, "w") as f:
         json.dump(model_metadata, f, indent=4)
     logger.info(f"RT alignment model metadata saved to {rt_alignment_metadata_path}")
