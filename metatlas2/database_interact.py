@@ -3245,7 +3245,7 @@ def _save_updated_infeature_tag_to_db(
 
 def _build_ms1_full_range_df(
     obj: "AnalysisSummary",
-    rt_padding: float = 2.0,
+    rt_padding: float = 1.0,
 ) -> None:
     """Build a copy of the MS1 DataFrame filtered to ±*rt_padding* min around
     the analyst-selected RT window, for use in identification figures.

@@ -396,8 +396,8 @@ result = wfs.run_parquet_query(
         # add filter keys here …
     },
 )
-print(result.sql)   # human-readable SQL equivalent
-result.df.head(20)  # pandas DataFrame of matching rows
+print(result[0])   # human-readable SQL equivalent
+result[1].head(20)  # pandas DataFrame of matching rows
 ```
 """
     return nbformat.v4.new_markdown_cell(text)
@@ -425,8 +425,8 @@ def _make_significant_compound_screen_cell(run_params: dict) -> nbformat.Noteboo
         "        'log2_fold_change_abs_gt': 1.5,\n"
         "    },\n"
         ")\n"
-        "print(significant_compound_screen.sql)\n"
-        "significant_compound_screen.df.head(20)"
+        "print(significant_compound_screen[0])\n"
+        "significant_compound_screen[1].head(20)"
     )
     return nbformat.v4.new_code_cell(src)
 
@@ -455,8 +455,8 @@ def _make_high_confidence_core_hits_cell(run_params: dict) -> nbformat.NotebookN
         "        'best_ms1_intensity_min': 10_000,\n"
         "    },\n"
         ")\n"
-        "print(high_confidence_core_hits.sql)\n"
-        "high_confidence_core_hits.df.head(20)"
+        "print(high_confidence_core_hits[0])\n"
+        "high_confidence_core_hits[1].head(20)"
     )
     return nbformat.v4.new_code_cell(src)
 

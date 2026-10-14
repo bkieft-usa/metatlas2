@@ -1658,19 +1658,12 @@ class ParquetQueryInterpreter:
 
     @staticmethod
     def _handle_condition_pair(value: list) -> "ds.Expression":
-        """Symmetric match: rows where {condition_1, condition_2} == set(value),
-        regardless of which one was stored first. Pair with log2_fold_change
-        _abs_min / _abs_gt for magnitude-only comparisons, or use plain
-        condition_1/condition_2 keys if you need a specific stored order."""
         c1_val, c2_val = value
         c1, c2 = ds.field("condition_1"), ds.field("condition_2")
         return ((c1 == c1_val) & (c2 == c2_val)) | ((c1 == c2_val) & (c2 == c1_val))
 
     @staticmethod
     def _handle_lfc_directional_min(value: dict) -> "ds.Expression":
-        """Directional threshold: log2_fold_change of `treatment` relative to
-        `control` >= threshold, correctly sign-flipping depending on which
-        order the pair was stored in during the melt."""
         treatment = value["treatment"]
         control = value["control"]
         threshold = value["threshold"]
@@ -1836,8 +1829,5 @@ class ParquetQueryInterpreter:
         )
         sql_query = self._build_sql_string(params)
         if self.rt_alignment_number is not None and self.analysis_number is not None:
-            scope = (
-                f"-- Scoped to: RTA{self.rt_alignment_number} / TGA{self.analysis_number}\n"
-            )
-            sql_query = scope + sql_query
+            sql_query = sql_query
         return results_table, sql_query
