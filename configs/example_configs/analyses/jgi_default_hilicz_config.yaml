@@ -24,7 +24,7 @@ RT_ALIGNMENT:
     ATLAS:
       uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261009-7ad681da53cb4e2fb730e01b9f7fd5af
     PARAMS:
-        upload_to_gdrive: true
+        upload_to_gdrive: false
         include_lcmsruns: # 'QC'
         exclude_lcmsruns:
           - NEG
@@ -80,7 +80,7 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: true
+            upload_to_gdrive: false
             skip_outputs:
       REF:
         EMA:
@@ -117,7 +117,7 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: true
+            upload_to_gdrive: false
             skip_outputs:
     NEG:
       ISTD:
@@ -154,7 +154,7 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: true
+            upload_to_gdrive: false
             skip_outputs:
       REF:
         EMA:
@@ -191,5 +191,5 @@ TARGETED_ANALYSES:
             ms2_frag_mz_tolerance: 0.05
             keep_top_scan_per_compound_file: true
             create_curation_notebooks: true
-            upload_to_gdrive: true
+            upload_to_gdrive: false
             skip_outputs:

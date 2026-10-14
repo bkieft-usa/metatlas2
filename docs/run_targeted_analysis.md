@@ -137,8 +137,8 @@ $METATLAS_DATA_DIR/projects/targeted_outputs/<owner>/<user>/<project_name>/
     ├── rt_alignment_results/             # RT alignment model plots and diagnostics
     └── TGA<analysis_num>/
         ├── auto_ided_atlases.csv         # Atlas UIDs after auto identification
-        ├── pre_curation_<jobid>.log      # Slurm stdout (submit mode only)
-        ├── pre_curation_<jobid>.err      # Slurm stderr (submit mode only)
+        ├── auto_id_slurm_<jobid>.log      # Slurm stdout (submit mode only)
+        ├── auto_id_slurm_<jobid>.err      # Slurm stderr (submit mode only)
         └── <CHROM>-<POL>-<TYPE>-<NAME>/ # One subdirectory per targeted analysis
             ├── curated_atlases.csv       # (written after manual curation)
             └── <notebooks>/              # Generated Jupyter curation notebooks
