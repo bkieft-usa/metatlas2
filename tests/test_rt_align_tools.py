@@ -87,6 +87,8 @@ def _make_rt_align_stub(atlas, ms1_df, params=None):
         rt_alignment_model=None,
         modeling_data=None,
         paths={"rt_alignment_results_dir": ""},  # overridden in tests that write files
+        rt_alignment_number=None,
+        project_name="test_project",
     )
 
 
