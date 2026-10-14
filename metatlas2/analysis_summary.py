@@ -1107,8 +1107,8 @@ def make_final_id_sheet(
         f"{summary_obj.chromatography}"
         f"-{summary_obj.polarity}"
         f"-{summary_obj.ta.atlas_name}"
-        f"-RTA{summary_obj.rt_alignment_number}"
-        f"-TGA{summary_obj.analysis_number}"
+        #f"-RTA{summary_obj.rt_alignment_number}"
+        #f"-TGA{summary_obj.analysis_number}"
     )
     output_filename = f"FinalIdentifications__{final_id_filename_part}__{summary_obj.project_name}.xlsx"
     excel_path = Path(summary_obj.paths['analysis_results_output_dir']) / output_filename
@@ -3386,10 +3386,10 @@ def make_log_fold_changes_csv(
         df[id_cols].to_csv(output_csv, index=False)
         return
 
-    logger.info(
-        "Computing pairwise log2 fold changes for %d groups: %s",
-        len(group_to_cols), list(group_to_cols.keys()),
-    )
+    #logger.info(
+    #    "Computing pairwise log2 fold changes for %d groups: %s",
+    #    len(group_to_cols), list(group_to_cols.keys()),
+    #)
 
     # Per-group mean across replicates
     group_means: dict[str, np.ndarray] = {

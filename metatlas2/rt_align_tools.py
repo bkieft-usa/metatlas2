@@ -274,7 +274,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
         try:
             plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = plot_save_dir / f"summary-for-{rt_alignment_model['rt_alignment_uid']}.pdf"
+            pdf_path = plot_save_dir / "RT_Summary.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
             logger.info(f"Plot saved to {pdf_path}")
             plt.close()
@@ -495,7 +495,14 @@ def calculate_rt_shifts(rt_align_obj: "RTAlign") -> pd.DataFrame:
         })
         new_compound_mzrts[mz_rt_uid] = {"rt_peak": aligned_rt_peak, "rt_min": aligned_rt_min, "rt_max": aligned_rt_max}
 
-    output_fname = f"rt_shifts_for_{rt_align_obj.aligned_atlas_obj.atlas_uid}.json" 
+    atlas_obj = rt_align_obj.aligned_atlas_obj
+    rt_shifts_filename_part = (
+        f"{(atlas_obj.chromatography or '').upper()}"
+        f"-{(atlas_obj.polarity or '').upper()}"
+        f"-{(atlas_obj.atlas_name or '')}"
+        f"-RTA{rt_align_obj.rt_alignment_number or ''}"
+    )
+    output_fname = f"RTShifts__{rt_shifts_filename_part}__{rt_align_obj.project_name}.json"
     _save_rt_aligned_stats_to_json(
         all_rt_shifts=all_rt_shifts,
         per_compound_rt_shifts=per_compound_rt_shifts,

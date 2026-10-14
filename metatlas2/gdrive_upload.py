@@ -219,17 +219,19 @@ def copy_outputs_to_google_drive(
     if stage == "RT_ALIGNMENT":
         rt_results_dir = Path(obj.paths.get("rt_alignment_results_dir"))
         if rt_results_dir.is_dir():
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            rt_dest = base_dest / f"RT_Alignment_{timestamp}"
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            rt_dest = base_dest / "RT_Alignment" / date_str
             logger.info(f"Uploading RT alignment results: {rt_results_dir} -> {drive}:{rt_dest}")
             _rclone_copy(rt_results_dir, drive, rt_dest, overwrite=overwrite)
         else:
             logger.warning(f"rt_alignment_results_dir '{rt_results_dir}' does not exist — skipping RT alignment upload.")
     elif stage == "ANALYSIS_SUMMARY":
-        tga_results_dir = Path(obj.paths.get("analysis_output_dir"))
+        tga_results_dir = Path(obj.paths.get("analysis_results_output_dir"))
         if tga_results_dir.is_dir():
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            tga_dest = base_dest / f"Targeted_Analysis_{timestamp}"
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            analysis_label = Path(tga_results_dir).name
+            dated_label = f"{analysis_label}-{date_str}"
+            tga_dest = base_dest / "Targeted_Analysis" / dated_label
             logger.info(f"Uploading targeted analysis results: {tga_results_dir} -> {drive}:{tga_dest}")
             _rclone_copy(tga_results_dir, drive, tga_dest, overwrite=overwrite)
             url = _drive_path_to_url(drive, tga_dest)
@@ -237,4 +239,4 @@ def copy_outputs_to_google_drive(
                 logger.info(f"Upload complete: {path_string} ({url})")
                 display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
         else:
-            logger.warning(f"analysis_output_dir '{tga_results_dir}' does not exist — skipping targeted analysis upload.")
+            logger.warning(f"analysis_results_output_dir '{tga_results_dir}' does not exist — skipping targeted analysis upload.")

@@ -63,11 +63,11 @@ This comprehensive guide covers:
 | `create_curation_container.py` (`ccc`) | Builds `curation_df` (ManualCuration records) from identification results |
 | `analysis_gui.py` (`agu`) | Builds the interactive Dash curation app |
 | `analysis_summary.py` (`asm`) | Generates final summary files and QC figures |
-| `notebook_generator.py` (`nbg`) | Generates Jupyter notebooks for analyst curation |
+| `notebook_generator.py` (`nbg`) | Generates Jupyter curation notebooks and the per-RTA/TGA `QueryNotebook` for Parquet querying (see [parquet_query.md](parquet_query.md)) |
 | `pubchem_retrieval.py` (`pcr`) | Fetches and caches compound metadata from PubChem |
 | `file_and_project_format.py` (`fpf`) | Filename parsing, polarity/chromatography normalization |
 | `note_options.py` (`gno`) | Defines MS1/MS2/other note options and hotkeys for the GUI |
-| `parquet_interact.py` (`pqi`) | Parquet output query helpers for downstream analysis |
+| `parquet_interact.py` (`pqi`) | Parquet write helpers (schema, partitioning, table builders); query engine lives in `workflow_objects.ParquetQueryInterpreter` (see [parquet_query.md](parquet_query.md)) |
 | `gdrive_upload.py` (`gdu`) | Optional Google Drive upload of output files |
 | `utils.py` | Shared utility helpers (tqdm, worker count, provenance) |
 | `logging_config.py` | Sets up logging to point to scripts where each step takes place for transparency |

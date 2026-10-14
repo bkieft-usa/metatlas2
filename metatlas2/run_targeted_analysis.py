@@ -19,8 +19,8 @@ SLURM_TEMPLATE = """\
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --mem={mem}
 #SBATCH --time={time}
-#SBATCH --output={analysis_output_dir}/pre_curation_%j.log
-#SBATCH --error={analysis_output_dir}/pre_curation_%j.err
+#SBATCH --output={analysis_output_dir}/auto_id_slurm_%j.log
+#SBATCH --error={analysis_output_dir}/auto_id_slurm_%j.err
 
 shifter --module=none \\
     --image=docker:ghcr.io/bkieft-usa/metatlas2:{image_tag} \\
@@ -287,8 +287,8 @@ def main():
 
                 job_id_match = re.search(r"Submitted batch job\s+(\d+)", submission_output)
                 job_id = job_id_match.group(1) if job_id_match else "%j"
-                slurm_stdout = Path(paths["project_directory"]) / f"pre_curation_{job_id}.log"
-                slurm_stderr = Path(paths["project_directory"]) / f"pre_curation_{job_id}.err"
+                slurm_stdout = Path(paths["project_directory"]) / f"auto_id_slurm_{job_id}.log"
+                slurm_stderr = Path(paths["project_directory"]) / f"auto_id_slurm_{job_id}.err"
                 logger.info(f"Expected SLURM stdout: {slurm_stdout}")
                 logger.info(f"Expected SLURM stderr: {slurm_stderr}")
             return

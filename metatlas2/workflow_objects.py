@@ -1587,22 +1587,14 @@ class AnalysisSummary(CurationStageBase):
         )
         os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
 
-class ParquetQueryResult(NamedTuple):
-    """Return type for :meth:`ParquetQueryInterpreter.execute`.
-
-    Attributes
-    ----------
-    df:
-        :class:`pandas.DataFrame` of rows matching the query filters.
-    sql:
-        Human-readable SQL SELECT statement equivalent to the query,
-        suitable for display, logging, or passing to DuckDB directly.
-    """
-    df: pd.DataFrame
-    sql: str
-
 class ParquetQueryInterpreter:
-    def __init__(self, parquet_output_path: Path, grain: str = "compound_lfc"):
+    def __init__(
+        self,
+        parquet_output_path: Path,
+        grain: str = "compound_lfc",
+        rt_alignment_number: int | None = None,
+        analysis_number: int | None = None,
+    ):
         if grain not in pqi._GRAIN_SUBDIR:
             raise ValueError(f"grain must be one of {list(pqi._GRAIN_SUBDIR)}, got {grain!r}")
 
@@ -1611,7 +1603,26 @@ class ParquetQueryInterpreter:
             raise FileNotFoundError(f"No dataset found at {dataset_dir}")
 
         self.grain = grain
-        self.dataset = ds.dataset(dataset_dir, format="parquet", partitioning=pqi._PARTITIONING)
+        self.rt_alignment_number = rt_alignment_number
+        self.analysis_number = analysis_number
+
+        if rt_alignment_number is not None and analysis_number is not None:
+            file_prefix = f"RTA{rt_alignment_number}-TGA{analysis_number}-"
+            matching_files = sorted(
+                str(p) for p in dataset_dir.rglob("*.parquet")
+                if p.name.startswith(file_prefix)
+            )
+            if not matching_files:
+                raise FileNotFoundError(
+                    f"No Parquet files found matching prefix '{file_prefix}' "
+                    f"under {dataset_dir}"
+                )
+            self.dataset = ds.dataset(
+                matching_files, format="parquet", partitioning=pqi._PARTITIONING,
+                filesystem=None,
+            )
+        else:
+            self.dataset = ds.dataset(dataset_dir, format="parquet", partitioning=pqi._PARTITIONING)
 
     _SUFFIX_ORDER = ("_abs_min", "_abs_max", "_abs_gt", "_abs_lt", "_min", "_max", "_in")
 
@@ -1694,7 +1705,7 @@ class ParquetQueryInterpreter:
                     col = self._strip_suffix(param_name)
                     if col not in schema_cols:
                         print(f"Skipping '{param_name}': column '{col}' not present in grain "
-                              f"'{self.grain}'. Check which section of the YAML this belongs to.")
+                              f"'{self.grain}'. Available grains: {list(pqi._GRAIN_SUBDIR)}.")
                         continue
                     expr = self._translate_to_expression(param_name, value)
 
@@ -1807,43 +1818,26 @@ class ParquetQueryInterpreter:
             return f"SELECT *\nFROM {table_name}\nWHERE {where_clause}"
         return f"SELECT *\nFROM {table_name}"
 
-    def execute(self, params: dict) -> "ParquetQueryResult":
+    def execute(self, params: dict) -> tuple[pd.DataFrame, str]:
         """Execute the query and return a named tuple with ``df`` and ``sql``.
 
         Returns
         -------
-        ParquetQueryResult
-            A named tuple with two fields:
+        A  tuple with two fields:
 
-            * ``df``  – :class:`pandas.DataFrame` of matching rows.
-            * ``sql`` – ``str`` SQL SELECT statement equivalent to the query.
+        * ``df``  - :class:`pandas.DataFrame` of matching rows.
+        * ``sql`` - ``str`` SQL SELECT statement equivalent to the query.
         """
         final_filter = self._build_filter(params)
-        table = (
-            self.dataset.to_table(filter=final_filter)
+        results_table = (
+            self.dataset.to_table(filter=final_filter).to_pandas()
             if final_filter is not None
-            else self.dataset.to_table()
+            else self.dataset.to_table().to_pandas()
         )
-        sql = self._build_sql_string(params)
-        return ParquetQueryResult(df=table.to_pandas(), sql=sql)
-
-    @classmethod
-    def execute_from_params_file(
-        cls,
-        parquet_output_path: Path,
-        params_path: Path,
-        query_name: str | None = None,
-    ) -> "ParquetQueryResult":
-        with open(params_path, "r") as f:
-            config = yaml.safe_load(f) or {}
-
-        query_name = query_name
-        if not query_name:
-            raise ValueError("YAML defines multiple 'queries' but no query_name was passed")
-        if query_name not in config["queries"]:
-            raise KeyError(f"Query '{query_name}' not found. Available: {list(config['queries'])}")
-        params = config["queries"][query_name]
-
-        grain = params.get("grain", "compound_lfc")
-        engine = cls(Path(parquet_output_path), grain)
-        return engine.execute(params)
+        sql_query = self._build_sql_string(params)
+        if self.rt_alignment_number is not None and self.analysis_number is not None:
+            scope = (
+                f"-- Scoped to: RTA{self.rt_alignment_number} / TGA{self.analysis_number}\n"
+            )
+            sql_query = scope + sql_query
+        return results_table, sql_query

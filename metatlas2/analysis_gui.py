@@ -37,6 +37,7 @@ def build_dash_app(
     lcmsruns_color_map = _resolved_cfg.get("gui_lcmsruns_colors", {})
     force_eval = _resolved_cfg.get("gui_require_all_evaluated", False)
     async_flush_errors: dict = {}
+    database_flush_errors: dict = {}
 
     # Extract metadata for display
     project_shortname = analysis_gui_obj.project_name.split("_")[4]
@@ -964,6 +965,9 @@ def build_dash_app(
                 logger.error(f"Async flush worker failed: {e}")
                 traceback.print_exc()
                 async_flush_errors[flush_key] = str(e)
+                # if the flush breaks, log it for export
+                compound_label = f"{row.get('compound_name', 'unknown')} ({row.get('adduct', '?')})"
+                database_flush_errors[compound_label] = str(e)
         
         # Launch async worker thread - don't block UI!
         thread = threading.Thread(target=_async_flush_worker, daemon=True)
@@ -2443,5 +2447,7 @@ def build_dash_app(
     logger.debug("Callbacks registered")
 
     logger.debug("App setup complete")
+
+    app.database_flush_errors = database_flush_errors
 
     return app
