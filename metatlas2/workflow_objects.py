@@ -1585,7 +1585,6 @@ class AnalysisSummary(CurationStageBase):
             Path(self.paths["analysis_output_dir"])
             / self.ta.label
         )
-        os.makedirs(self.paths['analysis_results_output_dir'], exist_ok=True)
 
 class ParquetQueryInterpreter:
     def __init__(
