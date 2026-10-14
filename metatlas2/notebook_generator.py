@@ -1,5 +1,6 @@
 import os
 import nbformat
+from pathlib import Path
 
 import metatlas2.logging_config as lcf
 import metatlas2.file_and_project_format as fpf
@@ -64,12 +65,7 @@ def generate_gui_notebooks(
     logger.info("Generating notebook file...")
     fname = (
         "CurationNotebook__"
-        f"{run_params['chromatography']}"
-        f"-{run_params['polarity']}"
-        #f"-{run_params['atlas_category']}"
-        f"-{run_params['atlas_name']}"
-        #f"-RTA{run_params['rt_alignment_number']}"
-        #f"-TGA{run_params['analysis_number']}"
+        f"{auto_id_obj.ta.label}"
         f"__{run_params['project_name']}"
         f".ipynb"
     )
@@ -78,6 +74,13 @@ def generate_gui_notebooks(
         nbformat.write(nb, f)
 
     logger.info(f"Notebook written to {out_path}")
+
+    os.makedirs(
+        str(Path(auto_id_obj.paths["analysis_output_dir"]) / auto_id_obj.ta.label),
+        exist_ok=True,
+    )
+
+    logger.info(f"Analysis output directory created at {auto_id_obj.paths['analysis_output_dir']}/{auto_id_obj.ta.label}")
 
     return out_path
 
