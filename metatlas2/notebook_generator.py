@@ -56,8 +56,7 @@ def generate_gui_notebooks(
     nb.cells = [
         _make_header_cell(run_params),
         _make_imports_cell(),
-        _make_run_params_cell(run_params),
-        _make_override_params_cell(auto_id_obj),
+        _make_params_cell(run_params, auto_id_obj),
         _make_gui_cell(),
         _make_summary_cell(),
     ]
@@ -84,8 +83,13 @@ def generate_gui_notebooks(
 
     return out_path
 
-def _make_run_params_cell(run_params: dict) -> nbformat.NotebookNode:
-    """Cell 3: RUN_PARAMS — fixed identifiers for this analysis run."""
+def _make_params_cell(run_params: dict, auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
+    """Cell 3: RUN_PARAMS and OVERRIDE_PARAMS — fixed identifiers and optional per-run overrides.
+
+    Analysis params come from ta.params; GUI params come from config.gui_config.
+    All OVERRIDE_PARAMS values default to None (meaning: use the config value as-is).
+    """
+    # RUN_PARAMS block
     src = "# Run-specific identifiers.\n"
     src += "RUN_PARAMS = {\n"
     for key in run_params:
@@ -93,16 +97,9 @@ def _make_run_params_cell(run_params: dict) -> nbformat.NotebookNode:
             src += f"    '{key}': '{run_params[key]}',\n"
         else:
             src += f"    '{key}': {run_params[key]},\n"
-    src += "}"
-    return nbformat.v4.new_code_cell(src)
+    src += "}\n\n"
 
-
-def _make_override_params_cell(auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
-    """Cell 4: OVERRIDE_PARAMS — optional per-run overrides for manual curation.
-
-    Analysis params come from ta.params; GUI params come from config.gui_config.
-    All values default to None (meaning: use the config value as-is).
-    """
+    # OVERRIDE_PARAMS block
     ta_params = auto_id_obj.ta.params
     _gui_cfg = auto_id_obj.config.gui_config if auto_id_obj.config else {}
 
@@ -127,7 +124,7 @@ def _make_override_params_cell(auto_id_obj: "AutoIdentification") -> nbformat.No
         "note_options_overrides",
     ]
 
-    src = "# Set a value to override the config default; leave as None to use the config value.\n"
+    src += "# Set a value to override the config default; leave as None to use the config value.\n"
     src += "OVERRIDE_PARAMS = {\n"
     for key in analysis_param_keys:
         current_value = ta_params.get(key, None)
@@ -135,20 +132,13 @@ def _make_override_params_cell(auto_id_obj: "AutoIdentification") -> nbformat.No
     for key in gui_param_keys:
         current_value = _gui_cfg.get(key, None)
         src += f"    '{key}': None,  # current value: {repr(current_value)}\n"
-    src += "}"
+    src += "}\n\n"
+    src += "# Start with fresh database flush error log.\n"
+    src += "DB_ERR = {}"
     return nbformat.v4.new_code_cell(src)
 
 def _make_header_cell(run_params: dict) -> nbformat.NotebookNode:
-    text = (
-        f"# **`{run_params['project_name']}`**  \n"
-        #f"**Input Atlas UID:** {run_params['input_atlas_uid']}  \n"
-        #f"**RT alignment number:** {run_params['rt_alignment_number']}  \n"
-        #f"**Analysis number:** {run_params['analysis_number']}  \n"
-        #f"**Chromatography:** {run_params['chromatography']}  \n"
-        #f"**Polarity:** {run_params['polarity']}  \n"
-        #f"**Atlas category:** {run_params['atlas_category']}  \n"
-        #f"**Atlas name:** {run_params['atlas_name']}  \n"
-    )
+    text = (f"# **`{run_params['project_name']}`**  \n")
     return nbformat.v4.new_markdown_cell(text)
 
 def _make_imports_cell() -> nbformat.NotebookNode:
@@ -165,7 +155,7 @@ def _make_imports_cell() -> nbformat.NotebookNode:
 def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
         "# Manual Curation - Dash application (opens in browser window)\n"
-        "database_flush_errors = wfs.run_analysis_gui(\n"
+        "DB_ERR = wfs.run_analysis_gui(\n"
         f"    run_parameters=RUN_PARAMS,\n"
         f"    override_parameters=OVERRIDE_PARAMS,\n"
         ")"
@@ -179,7 +169,7 @@ def _make_summary_cell() -> nbformat.NotebookNode:
         f"    run_parameters=RUN_PARAMS,\n"
         f"    override_parameters=OVERRIDE_PARAMS,\n"
         f"    overwrite=False,\n"
-        f"    database_flush_errors=database_flush_errors,\n"
+        f"    database_flush_errors=DB_ERR,\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)
