@@ -674,14 +674,16 @@ def save_atlas_data_to_csv(
             )
 
     atlas_filename_part = (
-        f"{(atlas_obj.chromatography or '')}"
-        f"-{(atlas_obj.polarity or '')}"
-        f"-{(atlas_obj.atlas_name or '')}"
-        f"-{(atlas_obj.atlas_stage.value or '')}"
+        f"{atlas_obj.chromatography}"
+        f"-{atlas_obj.polarity}"
+        f"-{atlas_obj.atlas_name}"
+        f"-{atlas_obj.atlas_stage.value}"
     )
+    atlas_filename_part = atlas_filename_part.replace("MANUALLY_CURATED", "CURATED")
+    atlas_filename_part = atlas_filename_part.replace("AUTO_IDED", "AUTOIDED")
+    atlas_filename_part = atlas_filename_part.replace("RT_ALIGNED", "ALIGNED")
     output_file = f"CompoundAtlas__{atlas_filename_part}__{project_name}.csv"
     atlas_df.to_csv(f"{output_path}/{output_file}", index=False)
-    logger.info(f"Saved Atlas data to {output_path}/{output_file}")
 
 def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
     """Load Atlas data from CSV file."""

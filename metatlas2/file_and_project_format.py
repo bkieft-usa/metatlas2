@@ -286,6 +286,12 @@ def get_filename_header_labels(
     proj_short    = fields.get("project_shortname", "")
     experiment    = fields.get("experiment", "")
     instrument    = fields.get("instrument", "")
+    # Use the raw (pre-canonical) chromatography value from the filename for
+    # header labels so that the group/short_filename strings match the original
+    # filename exactly (e.g. "HILICZ" rather than the canonical "HILIC").
+    # parse_file_name() already succeeded above, so FILE_PATTERN.match() is safe.
+    _raw_match = FILE_PATTERN.match(basename_for_parse)
+    chromatography_raw = _raw_match.group("chromatography") if _raw_match else fields.get("chromatography", "")
     chromatography = fields.get("chromatography", "")
     run_id        = fields.get("run_id", "")
     polarity      = fields.get("polarity", "")
@@ -308,12 +314,15 @@ def get_filename_header_labels(
     ft_label = _file_type_label(file_type, sample_name)
 
     # ── 1. group ──────────────────────────────────────────────────────────
-    rta_str = f"RTA{rt_alignment_number}" if rt_alignment_number is not None else "RTA?"
-    tga_str = f"TGA{analysis_number}" if analysis_number is not None else "TGA?"
+    # Format: date_owner_pi_project_id_proj_short_experiment_instrument_
+    #         chromatography(raw)_run_id_polarity_ms_level_rta_tga_ft_label
+    # RTA/TGA are bare numbers (no prefix); analyst is omitted.
+    rta_str = str(rt_alignment_number) if rt_alignment_number is not None else ""
+    tga_str = str(analysis_number) if analysis_number is not None else ""
     group = "_".join(filter(None, [
         date, owner, pi, project_id, proj_short, experiment,
-        instrument, chromatography, run_id, polarity, ms_level,
-        analyst, rta_str, tga_str, ft_label,
+        instrument, chromatography_raw, run_id, polarity, ms_level,
+        rta_str, tga_str, ft_label,
     ]))
 
     # ── 2. file ───────────────────────────────────────────────────────────
@@ -326,11 +335,11 @@ def get_filename_header_labels(
     sample_treatment = sample_name
 
     # ── 5. short_filename ─────────────────────────────────────────────────
-    # Keep: date, pi, proj_short, experiment, chromatography, polarity, run_metadata
+    # Keep: date, pi, proj_short, experiment, chromatography(raw), polarity, run_metadata
     # Remove: owner, project_id, instrument, run_id, ms_level,
     #         sample_number, sample_name, replicate, run_number, ext
     short_filename = "_".join(filter(None, [
-        date, pi, proj_short, experiment, chromatography, polarity, run_metadata,
+        date, pi, proj_short, experiment, chromatography_raw, polarity, run_metadata,
     ]))
 
     # ── 6. short_samplename ───────────────────────────────────────────────
