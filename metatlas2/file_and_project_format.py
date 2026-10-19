@@ -343,12 +343,14 @@ def get_filename_header_labels(
     ]))
 
     # ── 6. short_samplename ───────────────────────────────────────────────
-    # Keep: polarity, sample_name, replicate, run_metadata
+    # Keep: polarity, run_number (numeric only), sample_name, replicate, run_metadata
     # Remove: date, owner, pi, project_id, proj_short, experiment,
     #         instrument, chromatography, run_id, ms_level,
-    #         sample_number, run_number, ext
+    #         sample_number, ext
+    # Strip the "Run" prefix from run_number so only the numeric part is used
+    run_number_short = re.sub(r"^[Rr]un", "", run_number) if run_number else ""
     short_samplename = "_".join(filter(None, [
-        polarity, sample_name, replicate, run_metadata,
+        polarity, run_number_short, sample_name, replicate, run_metadata,
     ]))
 
     return {
