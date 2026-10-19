@@ -40,8 +40,6 @@ def _get_rclone_path() -> str:
 RCLONE_UPLOAD_EXCLUDES = [
     "*.yaml",
     "*.ipynb",
-    "atl-*csv",
-    "manually_curated_compound_data.csv",
     "curated_atlases.csv",
     "auto_ided_atlases.csv",
     ".*",
@@ -169,13 +167,16 @@ def copy_outputs_to_google_drive(
     """
     Recursively copy the analysis output directory to Google Drive using rclone.
 
-    The destination is a 3-level hierarchy under ``Analysis_uploads/``:
+    The destination hierarchy under ``JGI_Metabolomics_Projects/Analysis_Uploads/``:
 
-        Analysis_uploads/
-        └── <project_folder>/                    # first 8 _-delimited tokens of project_name
-            └── <env_user>_<owner>_<chrom>_RTA<n>_<date>/   # run subfolder
-                ├── rt_alignment_<n>/            # RT alignment results
-                └── targeted_analysis_<n>/       # targeted analysis output
+        JGI_Metabolomics_Projects/
+        └── Analysis_Uploads/
+            └── <project_name>/
+                └── <username>_<OWNER>-<CHROMATOGRAPHY>_<rta_number>_<tga_number>/
+                    └── Targeted/
+                        └── <OWNER>-<CHROMATOGRAPHY>_<project_name>/
+                            ├── <analysis_name>-<polarity>_<YYYY-MM-DD-HH-MM>/  (ANALYSIS_SUMMARY)
+                            └── RT-Alignment_<YYYY-MM-DD-HH-MM>/                (RT_ALIGNMENT)
     """
     if stage == "ANALYSIS_SUMMARY":
         if obj.override_parameters.get("upload_to_gdrive", True) is False:
@@ -209,18 +210,21 @@ def copy_outputs_to_google_drive(
     env_user = os.environ.get("USER", "unknown")
     run_folder = (
         f"{env_user}_{obj.owner.upper()}-{obj.chromatography.upper()}"
-        f"_RTA{obj.rt_alignment_number}_TGA{obj.analysis_number}"
+        f"_{obj.rt_alignment_number}_{obj.analysis_number}"
     )
 
-    base_dest = Path("Analysis_uploads") / obj.project_name / run_folder
-    path_string = f"{drive}:{base_dest}"
+    owner_chrom = f"{obj.owner.upper()}-{obj.chromatography.upper()}"
+    targeted_subdir = Path("Analysis_Uploads") / obj.project_name / run_folder / "Targeted" / f"{owner_chrom}_{obj.project_name}"
+
+    path_string = f"{drive}:{targeted_subdir}"
     logger.info(f"Uploading analysis results to Google Drive at {path_string}")
+
+    date_str = datetime.now().strftime("%Y-%m-%d-%H-%M")
 
     if stage == "RT_ALIGNMENT":
         rt_results_dir = Path(obj.paths.get("rt_alignment_results_dir"))
         if rt_results_dir.is_dir():
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            rt_dest = base_dest / "RT_Alignment" / date_str
+            rt_dest = targeted_subdir / f"RT-Alignment_{date_str}"
             logger.info(f"Uploading RT alignment results: {rt_results_dir} -> {drive}:{rt_dest}")
             _rclone_copy(rt_results_dir, drive, rt_dest, overwrite=overwrite)
         else:
@@ -228,10 +232,10 @@ def copy_outputs_to_google_drive(
     elif stage == "ANALYSIS_SUMMARY":
         tga_results_dir = Path(obj.paths.get("analysis_results_output_dir"))
         if tga_results_dir.is_dir():
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            analysis_label = Path(tga_results_dir).name
-            dated_label = f"{analysis_label}-{date_str}"
-            tga_dest = base_dest / "Targeted_Analysis" / dated_label
+            analysis_name = obj.ta.atlas_name if obj.ta else Path(tga_results_dir).name
+            polarity = obj.polarity if obj.polarity else "unknown"
+            dated_label = f"{analysis_name}-{polarity}_{date_str}"
+            tga_dest = targeted_subdir / dated_label
             logger.info(f"Uploading targeted analysis results: {tga_results_dir} -> {drive}:{tga_dest}")
             _rclone_copy(tga_results_dir, drive, tga_dest, overwrite=overwrite)
             url = _drive_path_to_url(drive, tga_dest)

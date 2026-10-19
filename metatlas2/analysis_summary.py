@@ -15,6 +15,7 @@ from tqdm.auto import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
+import glob
 
 import matplotlib
 matplotlib.use('Agg')
@@ -106,7 +107,6 @@ def run_all_summaries(
         logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
         make_metabomap(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
-    ### NEED TO UPDATE FOR MEETING WITH SHARON
     if "analysis_parquet" not in (skip_outputs or []):
         logger.info("Making unified analysis Parquet files...")
         pqi.make_analysis_parquet(summary_obj, overwrite=overwrite)
@@ -114,6 +114,12 @@ def run_all_summaries(
     if "targeted_analysis_readme" not in (skip_outputs or []):
         logger.info("Making targeted analysis README...")
         make_targeted_analysis_readme(summary_obj, output_dir=output_dir, overwrite=overwrite)
+
+    # mv CompoundAtlas__*AUTO*.csv atlas to "additional_info" folder for upload
+    for file in glob.glob(f"{output_dir}/CompoundAtlas__*AUTO*.csv"):
+        dest_dir = Path(output_dir) / "additional_info"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(file, dest_dir / Path(file).name)
 
     gdrive_upload = False
     if summary_obj.override_parameters.get("upload_to_gdrive") is not None:
@@ -182,13 +188,14 @@ def _strip_non_chars(text: str) -> str:
 def _make_compound_safe_stem(
     cmp_idx_display: int,
     compound_name: str,
+    polarity: str,
     adduct: str,
     atlas_mz: float | None,
     atlas_rt: float | None,
 ) -> str:
     """Build a filesystem-safe stem for per-compound output files.
 
-    Format: ``{idx:04d}_{name}_{adduct}_{mz}_{rt}``
+    Format: ``{idx:04d}_{name}_{polarity}_{adduct}_{mz}_{rt}``
 
     * Decimal points in mz/rt are replaced with ``p`` (e.g. ``153p1124``).
     * Special characters (brackets, spaces, slashes, commas, etc.) are stripped
@@ -206,7 +213,7 @@ def _make_compound_safe_stem(
     adduct_clean = re.sub(r"[^A-Za-z0-9+\-]", "", str(adduct))
     mz_str = _fmt_num(atlas_mz, 4)
     rt_str = _fmt_num(atlas_rt, 2)
-    stem = f"{cmp_idx_display:04d}_{name_clean}_{adduct_clean}_{mz_str}_{rt_str}"
+    stem = f"{cmp_idx_display:04d}_{name_clean}_{polarity}_{adduct_clean}_{mz_str}_{rt_str}"
     # Collapse consecutive underscores
     stem = re.sub(r"_+", "_", stem).strip("_")
     return stem
@@ -364,11 +371,12 @@ def make_identification_figure(
         compound_name = mc_row.get("compound_name", "Undefined")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
+        polarity = mc_row.get("polarity", "")
         adduct = mc_row.get("adduct", "")
         atlas_mz = safe_float(mc_row.get("atlas_mz"))
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
-        safe_name = _make_compound_safe_stem(cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt)
+        safe_name = _make_compound_safe_stem(cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt)
         fig_path = output_dir / f"{safe_name}.pdf"
 
         tasks.append({
@@ -423,18 +431,16 @@ def _identification_figure_worker(kwargs: dict) -> str:
     cmp_idx = kwargs["compound_idx"]
     cmp_idx_display = _display_compound_idx(cmp_idx)
     compound_name = kwargs["compound_name"]
+    polarity = mc_row.get("polarity", "")
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
-    safe_stem = kwargs.get("safe_stem", f"{cmp_idx_display:04d}_{compound_name}_{adduct}")
+    safe_stem = kwargs.get("safe_stem", f"{cmp_idx_display:04d}_{compound_name}_{polarity}_{adduct}")
     color_map = kwargs["color_map"]
     ms1_df = kwargs["ms1_df"]
     ms2_df = kwargs["ms2_df"]
 
     top3: list["MS2Hit"] = []
     if not ms2_df.empty:
-        # Collect the best hit from each scan across all files, then take the
-        # top 3 by score so the three mirror panels can show hits from
-        # different scans / files rather than all coming from the same scan.
         per_scan_best: list["MS2Hit"] = []
         for _, scan_row in ms2_df.iterrows():
             hits = MS2Hit.list_from_scan_row(scan_row)
@@ -1699,12 +1705,13 @@ def make_eic_thumbnails(
         cmp_idx_display = _display_compound_idx(cmp_idx)
         compound_name = mc_row.get("compound_name", "Undefined")
         adduct = mc_row.get("adduct", "")
+        polarity = mc_row.get("polarity", "")
         inchi_key = mc_row.get("inchi_key", "")
         atlas_mz = safe_float(mc_row.get("atlas_mz"))
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
-        safe_stem = _make_compound_safe_stem(cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt)
+        safe_stem = _make_compound_safe_stem(cmp_idx_display, compound_name, polarity,adduct, atlas_mz, atlas_rt)
         path_shared = dir_shared / f"{safe_stem}.pdf"
         path_indep = dir_indep / f"{safe_stem}.pdf"
 
@@ -1745,6 +1752,7 @@ def make_eic_thumbnails(
         tasks.append({
             "mc_row_dict": mc_row.to_dict(),
             "compound_name": compound_name,
+            "polarity": polarity,
             "adduct": adduct,
             "safe_stem": safe_stem,
             "rt_alignment_num": rt_alignment_num,
@@ -1802,11 +1810,9 @@ def _compound_pdf_worker(kwargs: dict) -> str:
     mc_row = pd.Series(kwargs["mc_row_dict"])
     file_items = kwargs["file_items"]
     compound_name = kwargs["compound_name"]
+    polarity = kwargs["polarity"]
     adduct = kwargs["adduct"]
-    safe_stem = kwargs.get("safe_stem", f"{_display_compound_idx(kwargs['compound_idx']):04d}_{compound_name}_{adduct}")
-    rt_alignment_num = kwargs["rt_alignment_num"]
-    analysis_num = kwargs["analysis_num"]
-    compound_idx = kwargs["compound_idx"]
+    safe_stem = kwargs.get("safe_stem", f"{_display_compound_idx(kwargs['compound_idx']):04d}_{compound_name}_{polarity}_{adduct}")
 
     rt_min = mc_row.get("rt_min", np.nan)
     rt_max_val = mc_row.get("rt_max", np.nan)
@@ -2228,7 +2234,7 @@ def make_compound_metric_plots(
       dashed horizontal line at the theoretical (atlas) RT.
 
     Each subplot title uses the same safe-stem format as the ID figures
-    (``{idx:04d}_{name}_{adduct}_{mz}_{rt}``).
+    (``{idx:04d}_{name}_{polarity}_{adduct}_{mz}_{rt}``).
 
     Compounds are laid out in a 5x5 grid per page.  Files are sorted by
     their ``run_number`` field (parsed from the filename).
@@ -2288,11 +2294,12 @@ def make_compound_metric_plots(
         cmp_idx_display = _display_compound_idx(cmp_idx)
         compound_name = mc_row.get("compound_name", "Undefined")
         adduct        = mc_row.get("adduct", "")
+        polarity = mc_row.get("polarity", "")
         atlas_mz      = safe_float(mc_row.get("atlas_mz"))
         atlas_rt      = safe_float(mc_row.get("atlas_rt_peak"))
         mz_rt_uid     = mc_row.get("mz_rt_uid", "")
 
-        title = _make_compound_safe_stem(cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt)
+        title = _make_compound_safe_stem(cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt)
 
         # Gather per-file values for this compound
         cmp_rows = per_file_df[per_file_df["mz_rt_uid"] == mz_rt_uid]
@@ -2619,6 +2626,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     """Worker: generate all metric boxplot PDFs for one compound."""
 
     compound_name = kwargs["compound_name"]
+    polarity = kwargs["polarity"]
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
     cmp_idx = kwargs["compound_idx"]
@@ -2631,7 +2639,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     atlas_mz = safe_float(atlas_ref_dict.get("atlas_mz"))
     atlas_rt = safe_float(atlas_ref_dict.get("atlas_rt_peak"))
     safe_stem = _make_compound_safe_stem(
-        _display_compound_idx(cmp_idx), compound_name, adduct, atlas_mz, atlas_rt
+        _display_compound_idx(cmp_idx), compound_name, polarity, adduct, atlas_mz, atlas_rt
     )
 
     # Scale figure width with the number of groups so x-axis labels stay readable.
@@ -2760,12 +2768,14 @@ def make_boxplots(
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
         compound_name = mc_row.get("compound_name", "Undefined")
+        polarity = mc_row.get("polarity", "")
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
 
         tasks.append({
             "compound_name": compound_name,
+            "polarity": polarity,
             "adduct": adduct,
             "inchi_key": inchi_key,
             "compound_idx": cmp_idx,
@@ -2774,7 +2784,6 @@ def make_boxplots(
             "cmp_metrics": pf_groups.get(mz_rt_uid, pd.DataFrame()),
             "all_groups": all_groups,
             "group_color_map": group_color_map,
-            # Pass atlas values so the worker can build the safe_stem filename
             "atlas_mz":  float(mc_row.get("atlas_mz", np.nan)),
             "atlas_rt":  float(mc_row.get("atlas_rt_peak", np.nan)),
         })
@@ -2867,13 +2876,14 @@ def make_best_ms2_hit_fragment_ions_csv(
         cmp_idx_display = _display_compound_idx(cmp_idx)
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         compound_name = mc_row.get("compound_name", "Undefined")
+        polarity = mc_row.get("polarity", "")
         adduct = mc_row.get("adduct", "")
         atlas_mz = safe_float(mc_row.get("atlas_mz"))
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
         # Build the same compound_id as make_data_sheets
         compound_id = _make_compound_safe_stem(
-            cmp_idx_display, compound_name, adduct, atlas_mz, atlas_rt
+            cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt
         )
 
         best_hit = ms2_best.get(mz_rt_uid)
@@ -2963,12 +2973,12 @@ def make_data_sheets(
             "analysis. Data sheets will be written with all compounds present but all metric "
             "values will be NaN (no detected signal)."
         )
-        per_file_df = pd.DataFrame(columns=["mz_rt_uid", "filename", "inchi_key", "adduct",
+        per_file_df = pd.DataFrame(columns=["mz_rt_uid", "filename", "inchi_key", "polarity", "adduct",
                                              "peak_height", "peak_area", "rt_peak",
                                              "rt_centroid", "mz_peak", "mz_centroid"])
 
     mc_reset = manual_curation_df.reset_index(drop=True)
-    mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "adduct",
+    mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "polarity", "adduct",
                          "atlas_mz", "atlas_rt_peak"]].copy()
     mc_slim["_cmp_idx_display"] = mc_reset.index + 1
     mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
@@ -2978,6 +2988,7 @@ def make_data_sheets(
         lambda r: _make_compound_safe_stem(
             int(r["_cmp_idx_display"]),
             r["compound_name"],
+            r["polarity"],
             r["adduct"],
             safe_float(r.get("atlas_mz")),
             safe_float(r.get("atlas_rt_peak")),
@@ -3080,13 +3091,13 @@ def make_data_sheets(
         wide["_sort_order"] = wide[_INDEX_COL].map(order_map).fillna(len(order_map))
         wide = wide.sort_values("_sort_order").drop(columns=["_sort_order"]).reset_index(drop=True)
 
-        # Write CSV with 6 header rows prepended
+        # Write CSV: 6 header rows then data rows.
+        # No column-name row is emitted — the first column of each header row
+        # holds the row label (e.g. "group", "file", …) and the first column
+        # of each data row holds the compound_id value.
         sample_cols = [c for c in wide.columns if c != _INDEX_COL]
-        header_df = pd.DataFrame(
-            {_INDEX_COL: list(header_rows.keys())}
-            | {fc: header_rows[key][i] for i, fc in enumerate(all_file_cols) for key in []}  # placeholder
-        )
-        # Build header rows properly
+
+        # Build header rows: label in col-0, file values in cols 1+
         header_records = []
         for key in header_rows:
             row = {_INDEX_COL: key}
@@ -3095,17 +3106,18 @@ def make_data_sheets(
             header_records.append(row)
         header_df = pd.DataFrame(header_records, columns=[_INDEX_COL] + all_file_cols)
 
-        # Align header_df columns to wide columns
+        # Align header_df columns to wide columns (handles any missing file cols)
         for col in wide.columns:
             if col not in header_df.columns:
                 header_df[col] = ""
         header_df = header_df[[c for c in wide.columns if c in header_df.columns]]
 
         combined = pd.concat([header_df, wide], ignore_index=True)
-        combined.to_csv(csv_path, index=False)
+        # Write without the pandas column-name row (header=False)
+        combined.to_csv(csv_path, index=False, header=False)
         logger.info(
             f"Exported {metric} data sheet ({len(wide)} compounds x {len(sample_cols)} files, "
-            f"with 6 header rows)"
+            f"with 6 header rows, no column-name row)"
         )
 
     logger.info(f"Data sheets written to {output_dir}")
@@ -3118,40 +3130,61 @@ def _parse_peak_height_csv(
 
     The on-disk layout is::
 
-        Row 0      : column-name row (compound_id, <file_stem_1>, <file_stem_2>, ...)
-        Row 1      : metadata row 1  (group, <group_1>, <group_2>, ...)
-        Row 2      : metadata row 2  (file, <file_1.h5>, ...)
-        Row 3      : metadata row 3  (short_groupname, ...)
-        Row 4      : metadata row 4  (sample_treatment, ...)
-        Row 5      : metadata row 5  (short_filename, ...)
-        Row 6      : metadata row 6  (short_samplename, ...)
-        Row 7+     : compound data rows
+        Row 0      : metadata row 1  (group, <group_1>, <group_2>, ...)
+        Row 1      : metadata row 2  (file, <file_1.h5>, <file_2.h5>, ...)
+        Row 2      : metadata row 3  (short_groupname, ...)
+        Row 3      : metadata row 4  (sample_treatment, ...)
+        Row 4      : metadata row 5  (short_filename, ...)
+        Row 5      : metadata row 6  (short_samplename, ...)
+        Row 6+     : compound data rows  (compound_id, <val_1>, <val_2>, ...)
+
+    There is **no** column-name row.  Column names for the data section are
+    derived from the ``file`` metadata row (row index 1): the file stems
+    (basename without extension) of each file become the column names, and
+    the first column is named ``"compound_id"``.
 
     Parameters
     ----------
     csv_path:
         Path to the CSV file.
     n_header_rows:
-        Number of metadata rows that follow the column-name row (default 6).
+        Number of metadata rows before the first data row (default 6).
 
     Returns
     -------
     header_df : pd.DataFrame
         The ``n_header_rows`` metadata rows read with ``header=None``.
-        Column positions (0..N) align with the column-name row positions
+        Column positions (0..N) align with the data column positions
         (position 0 = compound_id column, 1..N = file-stem columns).
     data_df : pd.DataFrame
-        The compound data rows with the column-name row (row 0) used as the
-        pandas column header.
+        The compound data rows.  Column 0 is named ``"compound_id"``; the
+        remaining columns are named by the file stems from the ``file``
+        metadata row.
     """
-    # Row 0 is the column-name row; rows 1..n_header_rows are metadata.
-    # Read n_header_rows+1 rows total, drop row 0, keep rows 1..n_header_rows.
-    raw = pd.read_csv(csv_path, nrows=n_header_rows + 1, header=None)
-    header_df = raw.iloc[1:].reset_index(drop=True)
-    header_df.columns = range(len(raw.columns))
+    import os
 
-    # Skip rows 1..n_header_rows (metadata) so row 0 becomes the pandas header.
-    data_df = pd.read_csv(csv_path, skiprows=list(range(1, n_header_rows + 1)))
+    # Read all header rows (no pandas header row in the file)
+    raw_header = pd.read_csv(csv_path, nrows=n_header_rows, header=None)
+    header_df = raw_header.reset_index(drop=True)
+    header_df.columns = range(len(raw_header.columns))
+
+    # Derive column names from the "file" row (row index 1):
+    # col 0 → "compound_id"; cols 1+ → file stem (basename without extension)
+    file_row = header_df.iloc[1].tolist()  # ["file", "<file1.h5>", "<file2.h5>", ...]
+    col_names = ["compound_id"] + [
+        os.path.splitext(os.path.basename(str(v)))[0]
+        if (i > 0 and v and str(v).lower() not in ("nan", "none", ""))
+        else (f"_col{i}" if i > 0 else "compound_id")
+        for i, v in enumerate(file_row[1:], start=1)
+    ]
+
+    # Read data rows (skip the n_header_rows metadata rows), assign column names
+    data_df = pd.read_csv(
+        csv_path,
+        skiprows=n_header_rows,
+        header=None,
+        names=col_names,
+    )
 
     return header_df, data_df
 
@@ -3175,7 +3208,8 @@ def _build_col_to_sample_treatment(
         Set of column names that are identifier columns (not sample data).
     sample_treatment_row_idx:
         0-based row index within *header_df* for the ``sample_treatment`` row
-        (default 3, which is the 4th metadata row).
+        (default 3: rows are group=0, file=1, short_groupname=2,
+        sample_treatment=3, short_filename=4, short_samplename=5).
 
     Returns
     -------
@@ -3313,8 +3347,9 @@ def make_peak_height_filtered_csv(
     else:
         logger.warning("Global minimum is NaN — no imputation performed.")
 
+    # Write in the same headerless format as make_data_sheets:
+    # 6 metadata rows then data rows, no column-name row.
     with open(output_csv, "w", newline="") as fh:
-        fh.write(",".join(str(c) for c in df_keep.columns) + "\n")
         header_df.to_csv(fh, index=False, header=False)
         df_keep.to_csv(fh, index=False, header=False)
 
@@ -3699,7 +3734,7 @@ _README_TEXT = """\
   DIRECTORY LAYOUT
       <analysis_results>/
       |-- FinalIdentifications__*.xlsx
-      |-- CompoundAtlas__*.xlsx
+      |-- CompoundAtlas__*.csv
       |-- identification_figures_with_msms_mirror_plots/
       |-- boxplot_peak_height/
       |-- boxplot_peak_height_log/
@@ -3727,14 +3762,10 @@ _README_TEXT = """\
       The final identifications spreadsheet is curated and reviewed by
       both an analyst and by the metabolomics team lead.
 
-  CompoundAtlas__*.xlsx
-      Compound atlas(es) created during various stages of the targeted
-      analysis. Typically this includes:
-        - an "AUTOID" atlas (results from automated peak-finding against
-          all JGI reference standards), and
-        - a "CURATED" atlas (results after the analyst has manually curated 
-          peak boundaries and scored each identified compound).
-      Each atlas has one row per compound ID, with columns for metadata and
+  CompoundAtlas__*.csv
+      Compound atlas created after an analyst has manually curated 
+      peak boundaries and scored each identified compound. The atlas
+      has one row per compound ID, with columns for metadata and
       analyst identification results.
 
 
