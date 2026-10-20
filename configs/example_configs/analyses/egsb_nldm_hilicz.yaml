@@ -49,7 +49,7 @@ TARGETED_ANALYSES:
       ISTD:
         ISTDsEtc:
           ATLAS:
-            uid: atatlas-ipt-hilicz-pos-istd-istdsetc-bkieft-20261009-7c61d50a3faa4391aef8680b30283b0e
+            uid: atlas-ipt-hilicz-pos-istd-istdsetc-bkieft-20261009-7c61d50a3faa4391aef8680b30283b0e
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBLK'
             exclude_lcmsruns:
