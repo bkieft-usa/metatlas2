@@ -368,6 +368,7 @@ def _build_compound_per_file_table(
             "inchi":        str(mc_row.get("inchi", "")),
             "pubchem_cid":  str(mc_row.get("pubchem_cid", "")),
             "iupac_name":   str(mc_row.get("iupac_name", "")),
+            "polarity":   str(mc_row.get("polarity", "")),
             "adduct":       str(mc_row.get("adduct", "")),
             "atlas_mz":     mz_theoretical,
             "atlas_rt_peak": float(mc_row.get("atlas_rt_peak", np.nan)),
@@ -419,6 +420,7 @@ def _build_compound_per_file_table(
         lambda r: asm._make_compound_safe_stem(
             int(r["compound_index"]),
             r["compound_name"],
+            r["polarity"],
             r["adduct"],
             r["atlas_mz"] if not (isinstance(r["atlas_mz"], float) and np.isnan(r["atlas_mz"])) else None,
             r["atlas_rt_peak"] if not (isinstance(r["atlas_rt_peak"], float) and np.isnan(r["atlas_rt_peak"])) else None,
@@ -622,6 +624,7 @@ def _build_compound_lfc_table(
                 cid = asm._make_compound_safe_stem(
                     pos + 1,
                     mc_row.get("compound_name", ""),
+                    mc_row.get("polarity", ""),
                     mc_row.get("adduct", ""),
                     mc_row.get("atlas_mz") if not (isinstance(mc_row.get("atlas_mz"), float) and np.isnan(mc_row.get("atlas_mz"))) else None,
                     mc_row.get("atlas_rt_peak") if not (isinstance(mc_row.get("atlas_rt_peak"), float) and np.isnan(mc_row.get("atlas_rt_peak"))) else None,
