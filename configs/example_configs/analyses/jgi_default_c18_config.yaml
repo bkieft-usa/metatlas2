@@ -47,7 +47,7 @@ TARGETED_ANALYSES:
   C18:
     POS:
       ISTD:
-        ISTDsEtcV7:
+        ISTDsEtc:
           ATLAS:
             uid: atlas-ipt-c18-pos-istd-istdsetc-bkieft-20261009-f298f7f8b94e4f26aa32238dcbf53f09
           PARAMS:
@@ -121,7 +121,7 @@ TARGETED_ANALYSES:
             skip_outputs:
     NEG:
       ISTD:
-        ISTDsEtcV7:
+        ISTDsEtc:
           ATLAS:
             uid: atlas-ipt-c18-neg-istd-istdsetc-bkieft-20261009-c5b9ca0172a540e5b9374b1ad3f8f776
           PARAMS:
