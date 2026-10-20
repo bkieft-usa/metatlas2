@@ -115,9 +115,10 @@ def run_all_summaries(
         logger.info("Making targeted analysis README...")
         make_targeted_analysis_readme(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
-    # mv CompoundAtlas__*AUTO*.csv atlas to "additional_info" folder for upload
+    # mv CompoundAtlas__*AUTO*.csv atlas to "{POL}_additional_info" folder for upload
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
     for file in glob.glob(f"{output_dir}/CompoundAtlas__*AUTO*.csv"):
-        dest_dir = Path(output_dir) / "additional_info"
+        dest_dir = Path(output_dir) / f"{_pol_prefix}additional_info"
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(file, dest_dir / Path(file).name)
 
@@ -182,7 +183,6 @@ def apply_auto_curation_defaults(curation_df: "pd.DataFrame") -> "pd.DataFrame":
     return curation_df
 
 def _strip_non_chars(text: str) -> str:
-    """Remove Unicode non-characters (e.g. U+FFFE/FFFF) that DejaVu Sans cannot render."""
     return "".join(c for c in text if ord(c) not in range(0xFDD0, 0xFDF0) and ord(c) & 0xFFFF not in (0xFFFE, 0xFFFF))
 
 def _make_compound_safe_stem(
@@ -207,14 +207,12 @@ def _make_compound_safe_stem(
             return "NA"
         return f"{val:.{decimals}f}".replace(".", "p")
 
-    # Strip special chars from compound name: keep alphanumeric, spaces→_, hyphens
     name_clean = re.sub(r"[^A-Za-z0-9\-]", "_", _strip_non_chars(str(compound_name)))
-    # Strip adduct brackets and special chars: keep alphanumeric, +, -, letters
     adduct_clean = re.sub(r"[^A-Za-z0-9+\-]", "", str(adduct))
+    polarity_clean = "negative" if str(polarity).lower() in ("neg", "negative") else "positive"
     mz_str = _fmt_num(atlas_mz, 4)
     rt_str = _fmt_num(atlas_rt, 2)
-    stem = f"{cmp_idx_display:04d}_{name_clean}_{polarity}_{adduct_clean}_{mz_str}_{rt_str}"
-    # Collapse consecutive underscores
+    stem = f"{cmp_idx_display:04d}_{name_clean}_{polarity_clean}_{adduct_clean}_{mz_str}_{rt_str}"
     stem = re.sub(r"_+", "_", stem).strip("_")
     return stem
 
@@ -327,7 +325,8 @@ def make_identification_figure(
 ) -> None:
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    output_dir = output_dir / "identification_figures_with_msms_mirror_plots"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    output_dir = output_dir / f"{_pol_prefix}identification_figures_with_msms_mirror_plots"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -1660,8 +1659,9 @@ def make_eic_thumbnails(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
     base_dir = output_dir
-    additional_info_dir = base_dir / "additional_info"
+    additional_info_dir = base_dir / f"{_pol_prefix}additional_info"
     dir_shared = additional_info_dir / f"compound_EIC_chromatograms_sharedY"
     dir_indep = additional_info_dir / f"compound_EIC_chromatograms_independentY"
     for d in (dir_shared, dir_indep):
@@ -2012,7 +2012,8 @@ def make_tic_thumbnails(
     """
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    additional_info_dir = output_dir / "additional_info"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    additional_info_dir = output_dir / f"{_pol_prefix}additional_info"
     path_indep  = additional_info_dir / "sample_TIC_total_chromatograms_independentY.pdf"
     path_shared = additional_info_dir / "sample_TIC_total_chromatograms_sharedY.pdf"
 
@@ -2241,7 +2242,8 @@ def make_compound_metric_plots(
     """
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    additional_info_dir = output_dir / "additional_info"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    additional_info_dir = output_dir / f"{_pol_prefix}additional_info"
     path_ph = additional_info_dir / "compound_peak_heights.pdf"
     path_rt = additional_info_dir / "compound_rt_peaks.pdf"
 
@@ -2676,11 +2678,12 @@ def make_boxplots(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
     base_dir = output_dir
-    additional_info_dir = base_dir / "additional_info"
+    additional_info_dir = base_dir / f"{_pol_prefix}additional_info"
 
-    dir_peak_height = base_dir / f"boxplot_peak_height"
-    dir_peak_height_log = base_dir / f"boxplot_peak_height_log"
+    dir_peak_height = base_dir / f"{_pol_prefix}boxplot_peak_height"
+    dir_peak_height_log = base_dir / f"{_pol_prefix}boxplot_peak_height_log"
     dir_rt_peak = additional_info_dir / f"boxplot_rt_peak"
     dir_mz_centroid = additional_info_dir / f"boxplot_mz_centroid"
     dir_mz_centroid_log = additional_info_dir / f"boxplot_mz_centroid_log"
@@ -2833,7 +2836,8 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    output_dir = output_dir / "data_sheets"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    output_dir = output_dir / f"{_pol_prefix}data_sheets"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
         logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
@@ -2946,7 +2950,8 @@ def make_data_sheets(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    output_dir = output_dir / "data_sheets"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    output_dir = output_dir / f"{_pol_prefix}data_sheets"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -3267,7 +3272,8 @@ def make_peak_height_filtered_csv(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    out_dir = output_dir / "data_sheets"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    out_dir = output_dir / f"{_pol_prefix}data_sheets"
     source_csv = out_dir / "peak_height.csv"
     output_csv = out_dir / "peak_height_filtered.csv"
     summary_tsv = out_dir / "peak_height_filter_summary.tsv"
@@ -3388,7 +3394,8 @@ def make_log_fold_changes_csv(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    out_dir = output_dir / "data_sheets"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    out_dir = output_dir / f"{_pol_prefix}data_sheets"
     source_csv = out_dir / "peak_height_filtered.csv"
     output_csv = out_dir / "group_mean_log_fold_changes.csv"
 
@@ -3561,10 +3568,13 @@ def make_metabomap(
     else:
         sib_pol_display = sib_pol_lc.title()
 
-    current_csv = analysis_output_dir / f"data_sheets" / "peak_height_filtered.csv"
+    curr_pol_prefix = curr_pol_lc.upper() + "_"
+    sib_pol_prefix  = sib_pol_lc.upper() + "_"
+
+    current_csv = analysis_output_dir / f"{curr_pol_prefix}data_sheets" / "peak_height_filtered.csv"
     sibling_csv = (
         Path(str(analysis_output_dir).replace(f"-{curr_pol_display}-", f"-{sib_pol_display}-"))
-        / "data_sheets" / "peak_height_filtered.csv"
+        / f"{sib_pol_prefix}data_sheets" / "peak_height_filtered.csv"
     )
 
     metabomaps_dir = analysis_output_dir / "../metabomap"
