@@ -1,40 +1,42 @@
 # Manual Curation and Analysis Summary
 
-After running `run_targeted_analysis.py`, a Jupyter notebook is generated for each targeted analysis (e.g. `MyProject_RTA0_TGA0_HILICZ_POS_EMA_DEFAULT.ipynb`). Opening this notebook and sequentially running the cells launches an interactive curation GUI and — once curation is complete — runs all summary exports of the results.
+After running `run_targeted_analysis.py`, a Jupyter curation notebook is generated for each targeted analysis. Opening this notebook and running the cells sequentially launches an interactive curation GUI and — once curation is complete — runs all summary exports of the results.
 
 ---
 
 ## Step 1: Open the generated notebook
 
-Notebooks are written to the analysis output directory:
+Curation notebooks are written to the `TGA<M>/` directory inside the project output directory:
 
 ```
 $METATLAS_DATA_DIR/projects/targeted_outputs/<owner>/<user>/<project_name>/RTA<N>/TGA<M>/
-    <project_name>_RTA<N>_TGA<M>_HILICZ_POS_EMA_DEFAULT.ipynb
-    <project_name>_RTA<N>_TGA<M>_HILICZ_POS_ISTD_DEFAULT.ipynb
+    CurationNotebook__HILIC-POS-ISTDsEtc__<project_name>.ipynb
+    CurationNotebook__HILIC-NEG-ISTDsEtc__<project_name>.ipynb
+    QueryNotebook__<project_name>.ipynb
     ...
 ```
 
-Open the notebook in NERSC JupyterLab. The kernel is pre-set to **metatlas2 (latest)** in the notebook metadata. If prompted to select a kernel, choose **metatlas2 (latest)**. If it is not listed, run `install_kernels.sh` from a terminal and refresh the page.
+The notebook filename follows the pattern `CurationNotebook__{CHROM}-{POL}-{ATLAS_NAME}__{project_name}.ipynb`, where `ATLAS_NAME` is the 4th-level key from the `TARGETED_ANALYSES` config (e.g., `EMA`). One curation notebook is generated per targeted analysis entry. A single `QueryNotebook__<project_name>.ipynb` is also generated for Parquet-based downstream queries (see [parquet_query.md](parquet_query.md)).
 
-> **Note:** The metatlas2 kernels run inside a Shifter container, not on the NERSC host system. This means all Python packages and system libraries (including libxrender for molecular structure rendering) come from the container image, ensuring a consistent environment across all users. The container automatically mounts NERSC filesystems at the same paths, so your data files are directly accessible. For technical details about the containerized architecture, see [codebase_overview.md](codebase_overview.md#container-based-deployment).
+Open the curation notebook in NERSC JupyterHub. The kernel is pre-set to **metatlas2 (latest)** in the notebook metadata. If prompted to select a kernel, choose **metatlas2 (latest)**. If it is not listed, run `install_kernels.sh` from a NERSC terminal and refresh the JupyterHub page.
+> **Note:** The metatlas2 kernels run inside a Shifter container, not on the NERSC host system. This means all Python packages and system libraries come from the container image, ensuring a consistent environment across all users. The container automatically mounts NERSC filesystems at the same paths, so your data files are directly accessible. For technical details about the containerized architecture, see [codebase_overview.md](codebase_overview.md#container-based-deployment). If you need to use the local repository to define the JupyterLab kernel (e.g., for development or to bypass a bug), select `metatlas2 (local repo)` from the kernel dropdown.
 
-The notebook has six cells:
+
+The notebook has five cells:
 
 | Cell | Type | Purpose |
 |---|---|---|
 | 1 | Markdown | Header — project name |
 | 2 | Code | Imports — loads required libraries and sets up logging |
-| 3 | Code | `RUN_PARAMS` — project name, atlas UID, chromatography, polarity, analysis type/name, and iteration numbers |
-| 4 | Code | `OVERRIDE_PARAMS` — optional parameter overrides for the GUI session |
-| 5 | Code | **GUI cell** — launches the interactive curation app |
-| 6 | Code | **Summary cell** — exports all summary files after curation |
+| 3 | Code | `RUN_PARAMS` and `OVERRIDE_PARAMS` — fixed run identifiers and optional parameter overrides |
+| 4 | Code | **GUI cell** — launches the interactive curation Dash app |
+| 5 | Code | **Summary cell** — exports all summary files after curation |
 
 ---
 
 ## Step 2: (Optional) Override parameters
 
-Cell 4 contains an `OVERRIDE_PARAMS` dictionary. Any parameter set to a non-`None` value will override the corresponding value from the analysis configuration file (e.g., `analysis.yaml`) for this GUI session only. Leave a parameter as `None` to use the config value.
+Cell 3 contains both a `RUN_PARAMS` dictionary (pre-filled at notebook generation time — do not edit) and an `OVERRIDE_PARAMS` dictionary. Any parameter in `OVERRIDE_PARAMS` set to a non-`None` value will override the corresponding value from the analysis configuration file (e.g., `analysis.yaml`) for this GUI session only. Leave a parameter as `None` to use the config value.
 
 The purpose of this cell is to further filter the results or update the GUI interface (e.g., increase `ms2_min_score` to be more strict, change `gui_lcmsruns_colors` to change LCMS run file color displays in MS1 plots) without having to rerun a new targeted analysis.
 
@@ -47,7 +49,7 @@ OVERRIDE_PARAMS = {
     'ms2_min_matching_frags':       None,  # current value: 1
     'remove_unided_compounds':      None,  # current value: True
     'remove_flagged_compounds':     None,  # current value: True
-    'apply_istd_curation_to_ema':   None,  # current value: True
+    'apply_istd_curation_to_ref':   None,  # current value: True
     'apply_cross_polarity_curation': None, # current value: True
     'upload_to_gdrive':             None,  # current value: False
     # GUI parameters
@@ -60,11 +62,22 @@ OVERRIDE_PARAMS = {
 }
 ```
 
+> **Note:** The key `apply_istd_curation_to_ref` controls whether ISTD curation decisions are propagated to reference (EMA) compounds. This corresponds to the `apply_istd_curation_to_ema` concept in the config but uses the internal parameter name.
+
 ---
 
 ## Step 3: Run the GUI cell
 
-Run cell 5. The Dash app launches and a link (localhost URL or JupyterHub proxy URL) is printed in the output. Click or copy the URL to open the curation GUI in a new browser tab.
+Run cell 4. The Dash app launches in a background thread and a clickable link is displayed in the cell output:
+
+```
+▶ Open Dash App ↗
+```
+
+- **On NERSC JupyterHub:** The link is a JupyterHub proxy URL (e.g., `/user/<username>/proxy/8050/`). Click it to open the curation GUI in a new browser tab within your JupyterHub session.
+- **On a local machine (Docker mode):** The link is `http://localhost:8050/`. Click it to open the GUI in your local browser.
+
+The GUI cell blocks until you click **Save and Exit** in the GUI. Do not run the Summary cell (cell 5) until the GUI cell has finished executing.
 
 ---
 
@@ -84,7 +97,7 @@ Run cell 5. The Dash app launches and a link (localhost URL or JupyterHub proxy 
 | **◀ Prev MS2 / Next MS2 ▶** | Cycle through available MS2 scans for this compound (hotkeys `l` or `;`). |
 | **MS2 quality** | Radio — score the MS2 match (see table [below](#ms2-quality-options), various hotkeys). |
 | **Other notes** | Radio — flag additional observations (see table [below](#other-notes-options)). |
-| **Save and Exit** | Flush all outstanding/in-progress changes to the database (for saving progress or ending an analysis). |
+| **Save and Exit** | Flush all outstanding/in-progress changes to the database and shut down the Dash app. |
 
 ### Right panel — plots
 
@@ -160,26 +173,29 @@ Drag the dashed purple vertical RT-min and RT-max lines in the MS1 EIC plot to a
 
 ## Step 4: Save and Exit
 
-Click **Save and Exit** in the bottom-right corner of the GUI when curation is complete. This flushes all unsaved changes to the database and closes the GUI app. The button is disabled after clicking and a confirmation message appears, and you can safely close the browser tab and return to the notebook.
+Click **Save and Exit** in the bottom-right corner of the GUI when curation is complete. This flushes all unsaved changes to the database, shuts down the Dash app server, and unblocks the GUI cell so it finishes executing. The button is disabled after clicking and a confirmation message appears. You can then safely close the browser tab and return to the notebook.
 
-> **Important:** It is recommended but not required to click **Save and Exit** before running the Summary cell. If you do not, make sure there are no unsaved changes by navigating to a new compound (to initiate a database flush) before closing the GUI browser tab. Changes are flushed to the analysis database continuously as you navigate, but the final flush is only guaranteed after clicking this button. If `gui_require_all_evaluated: true` is set in the config, the GUI will warn you if any compounds still have `ms2_notes = "no selection"`.
+> **Important:** Always click **Save and Exit** before running the Summary cell. The GUI cell does not finish executing until **Save and Exit** is clicked — the Summary cell (cell 5) cannot be run while the GUI cell is still blocking. If any compound curation data could not be saved to the database (e.g., due to a database lock), a warning is printed in the cell output and the `DB_ERR` variable will be non-empty. Do **not** run the Summary cell if `DB_ERR` is non-empty — resolve the error first and re-curate the affected compounds. If `gui_require_all_evaluated: true` is set in the config, the GUI will warn you if any compounds still have `ms2_notes = "no selection"`.
 
 ---
 
 ## Step 5: Run the Summary cell
 
-Run cell 6 after closing the GUI. This calls the analysis summarizer, which:
+Run cell 5 after the GUI cell has finished executing. The Summary cell calls `wfs.run_analysis_summary()`, which:
 
-1. Creates a post-curation (`MANUALLY_CURATED`) atlas from the analyst's accepted identifications.
-2. Runs all summary export functions (described below).
-3. Optionally uploads outputs to Google Drive (if `upload_to_gdrive: true` in the config).
-4. Changes group ownership of the project output folder to the shared `metatlas` group.
+1. Checks `DB_ERR` — if any compound curation data failed to save during the GUI session, the summary is aborted immediately with an error message listing the affected compounds.
+2. Creates a post-curation (`MANUALLY_CURATED`) atlas from the analyst's accepted identifications.
+3. Runs all summary export functions (described below).
+4. Optionally uploads outputs to Google Drive (if `upload_to_gdrive: true` in the config).
+5. Changes group ownership of the project output folder to the shared `metatlas` group.
+
+All summary files are written to the analysis results output directory: `TGA<M>/<CHROM>-<POL>-<ATLAS_NAME>/`.
 
 ---
 
 ## Summary outputs
 
-All files are written to the analysis results output directory (`TGA<N>/<CHROM>-<POL>-<TYPE>-<NAME>/`) unless noted otherwise.
+All files are written to the analysis results output directory (`TGA<N>/<CHROM>-<POL>-<ATLAS_NAME>/`) unless noted otherwise.
 
 ### Identification figures
 
@@ -266,7 +282,7 @@ Each box represents one compound; points are coloured by run type (ISTD, QC, EXC
 
 ### Analysis Parquet files
 
-**Parquet output files** written to `$METATLAS_DATA_DIR/projects/parquet_outputs/` — unified compound-level and compound-file-level data in Parquet format for downstream programmatic analysis. These can be queried using `wfs.run_parquet_query()`.
+**Parquet output files** written to `$METATLAS_DATA_DIR/projects/parquet_outputs/` — unified compound-level and compound-file-level data in Parquet format for downstream programmatic analysis. These can be queried using the `QueryNotebook__<project_name>.ipynb` notebook generated in the `TGA<M>/` directory (see [parquet_query.md](parquet_query.md)).
 
 ---
 

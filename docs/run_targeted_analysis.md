@@ -14,9 +14,9 @@ The script can be run directly (`run` subcommand) or submitted as a Slurm batch 
 
 Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this workflow. If you are running **outside NERSC** (local laptop or non-NERSC HPC), see [run_anywhere.md](run_anywhere.md) for the full setup guide. Additionally:
 
-- The main metatlas database contains the compounds and atlases for your project. Run `metatlas2.sh add-compounds` and `metatlas2.sh add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)).
-- LCMS run data files in `.h5` format are present at the expected path under `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/`. See [Raw data file placement](#raw-data-file-placement) below.
-- Atlas UIDs referenced in the input analysis configuration file (e.g., `analysis.yaml`) exist in the main database.
+- The main metatlas database contains the compounds and atlases for your project. Run `metatlas2.sh add-compounds` and `metatlas2.sh add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)). Note: metatlas2 comes with the JGI production atlases and compounds (QC, ISTD, and EMA) pre-built, so if you use those sets then adding compounds or atlases is required.
+- LCMS run data files in `.h5` format are present at the expected path under `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/`. See [Raw data file placement](#raw-data-file-placement) below. Note: you may want to check first that there were no failed file conversions - in the raw data directory for your project, there should be equal numbers of .raw, .h5, and .mzML files and no files with the suffix .failed or .progress.
+- Atlas UIDs referenced in the input analysis configuration file (e.g., `analysis.yaml`) must exist in the main database. The workflow will warn you if the atlas UIDs input in the config are not present in the database.
 
 ---
 
@@ -28,7 +28,7 @@ Raw LCMS data must be in `.h5` (HDF5) format. Place all files for a project dire
 $METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/
 ```
 
-- `<owner>` must match the `GENERAL.owner` field in your analysis config YAML (e.g. `jgi`, `egsb`).
+- `<owner>` must match the `GENERAL.owner` field in your analysis config YAML (e.g. `jgi`, `egsb`). This dictates where the raw files are searched for, and where the results are stored.
 - `<project_name>` must match the `--project` argument passed to `metatlas2.sh run` **exactly**.
 
 ### Project name format
@@ -56,10 +56,10 @@ A minimal valid project name: `20260101_JGI_XX_000000_MYPROJECT`
 
 ```bash
 metatlas2.sh run \
-    --config        /path/to/analysis.yaml \
-    --project       MyProject \
-    [--rt-align-num  0] \
-    [--analysis-num  0] \
+    --config /path/to/analysis.yaml \
+    --project MyProject_Name_Following_Format_Above \
+    --rt-align-num 0 \
+    --analysis-num 0 \
     [--analysis-subset POS-ISTD-default,POS-EMA-default] \
     [--overwrite] \
     [--skip-rt-align] \
@@ -71,22 +71,22 @@ metatlas2.sh run \
 
 ```bash
 metatlas2.sh submit \
-    --config        /path/to/analysis.yaml \
-    --project       MyProject \
-    [--rt-align-num  0] \
-    [--analysis-num  0] \
+    --config /path/to/analysis.yaml \
+    --project MyProject \
+    --rt-align-num 0 \
+    --analysis-num 0 \
     [--analysis-subset POS-ISTD-default,POS-EMA-default] \
     [--overwrite] \
     [--skip-rt-align] \
     [--skip-curation] \
-    [--account    m2650] \
-    [--qos        regular] \
+    [--account m2650] \
+    [--qos regular] \
     [--constraint cpu] \
-    [--cpus       8] \
-    [--mem        128G] \
-    [--time       00:30:00] \
-    [--image      latest] \
-    [--output     /path/to/custom_script.sh]
+    [--cpus 8] \
+    [--mem 128G] \
+    [--time 00:30:00] \
+    [--image latest] \
+    [--output /path/to/custom_script.sh]
 ```
 
 The `submit` subcommand writes a Slurm batch script to the analysis output directory and immediately calls `sbatch` on it. The script path and job ID are printed to stdout.
@@ -101,9 +101,9 @@ The `submit` subcommand writes a Slurm batch script to the analysis output direc
 |---|---|---|---|
 | `--config` | Yes | — | Path to the analysis YAML config file (e.g. `configs/analysis.yaml`). |
 | `--project` | Yes | — | Project name. Must match the name of the raw data subdirectory under `$METATLAS_DATA_DIR/raw_data/<owner>/`. |
-| `--rt-align-num` | No | `0` | RT alignment iteration number. Increment this to run a new alignment attempt while preserving previous results. |
-| `--analysis-num` | No | `0` | Analysis iteration number. Increment to run multiple analysis passes under the same RT alignment. |
-| `--analysis-subset` | No | None | Comma-separated list of `POLARITY-ANALYSIS_TYPE-ANALYSIS_NAME` triples to process (e.g. `POS-ISTD-default,POS-EMA-default`). When omitted, all targeted analyses in the config are processed. |
+| `--rt-align-num` | Yes | `0` | RT alignment iteration number. Increment this to run a new alignment attempt while preserving previous results. |
+| `--analysis-num` | Yes | `0` | Analysis iteration number. Increment to run multiple analysis passes under the same RT alignment. |
+| `--analysis-subset` | No | None | Comma-separated list of `CHROM-POLARITY-ANALYSIS_TYPE-ANALYSIS_NAME` triples to process (e.g. `HILIC-POS-ISTD-ISTDsEtc,HILIC-NEG-ISTD-ISTDsEtc`). When omitted, all targeted analyses in the config are processed. |
 | `--overwrite` | No | `False` | Overwrite the project database if it already exists during setup. |
 | `--skip-rt-align` | No | `False` | Skip the RT Alignment stage. Reference atlases are copied into the project DB as RT-aligned without applying a model. |
 | `--skip-curation` | No | `False` | Skip the manual curation GUI step after auto-identification. Applies automatic curation defaults and runs the analysis summary directly. |
@@ -118,7 +118,7 @@ The `submit` subcommand writes a Slurm batch script to the analysis output direc
 | `--constraint` | `cpu` | Node constraint (e.g., `cpu` for Perlmutter CPU nodes). |
 | `--cpus` | `8` | Number of CPUs to request. |
 | `--mem` | `128G` | Memory to request (e.g. `64G`, `128G`). |
-| `--time` | `00:30:00` | Wall-clock time limit (`HH:MM:SS`). |
+| `--time` | `00:30:00` | Wall-clock time limit (`HH:MM:SS`). If you use the --skip-curation flag, suggested to increase to 03:00:00 |
 | `--image` | `latest` | Container image tag to use for the job (can also be set via `METATLAS2_IMAGE_TAG` env var). |
 | `--output` | auto | Override the output path for the generated `.sh` batch script. Defaults to `<project_directory>/<project_short>.sh`. |
 
@@ -130,19 +130,22 @@ All outputs are written under a versioned directory derived from the project nam
 
 ```
 $METATLAS_DATA_DIR/projects/targeted_outputs/<owner>/<user>/<project_name>/
-├── <project_name>.duckdb                 # Project database
-├── <project_short>_RTA<N>_TGA<M>.log    # Run log
+├── <project_name>.duckdb                          # Project database
+├── <project_short>_RTA<N>_TGA<M>.log             # Run log
 └── RTA<rt_align_num>/
-    ├── rt_aligned_atlases.csv            # Atlas UIDs and metadata after RT alignment
-    ├── rt_alignment_results/             # RT alignment model plots and diagnostics
+    ├── rt_alignment_results/                      # RT alignment model plots and diagnostics
     └── TGA<analysis_num>/
-        ├── auto_ided_atlases.csv         # Atlas UIDs after auto identification
-        ├── auto_id_slurm_<jobid>.log      # Slurm stdout (submit mode only)
-        ├── auto_id_slurm_<jobid>.err      # Slurm stderr (submit mode only)
-        └── <CHROM>-<POL>-<TYPE>-<NAME>/ # One subdirectory per targeted analysis
-            ├── curated_atlases.csv       # (written after manual curation)
-            └── <notebooks>/              # Generated Jupyter curation notebooks
+        ├── auto_ided_atlases.csv                  # Atlas UIDs after auto identification
+        ├── auto_id_slurm_<jobid>.log              # Slurm stdout (submit mode only)
+        ├── auto_id_slurm_<jobid>.err              # Slurm stderr (submit mode only)
+        ├── CurationNotebook__<CHROM>-<POL>-<NAME>__<project>.ipynb  # One per targeted analysis
+        ├── QueryNotebook__<project>.ipynb         # Parquet query notebook (one per RTA/TGA)
+        └── <CHROM>-<POL>-<NAME>/                 # One subdirectory per targeted analysis
+            ├── curated_atlases.csv                # (written after manual curation)
+            └── (summary files, figures, CSVs)     # Written after running the Summary cell
 ```
+
+> **Notebook naming:** Curation notebooks are named `CurationNotebook__{CHROM}-{POL}-{ATLAS_NAME}__{project_name}.ipynb`, where `ATLAS_NAME` is the 4th-level key from the `TARGETED_ANALYSES` config (e.g., `EMA`, `ISTDsEtc`). The `QueryNotebook__{project_name}.ipynb` is a single notebook per RTA/TGA run that spans all targeted analyses and is used for Parquet-based downstream queries (see [parquet_query.md](parquet_query.md)).
 
 Incrementing `--rt-align-num` creates a new `RTA<N>/` branch; incrementing `--analysis-num` creates a new `TGA<N>/` subdirectory within that `RTA` branch.
 
@@ -190,7 +193,7 @@ TARGETED_ANALYSES:
             ...
 ```
 
-> **Note:** The `TARGETED_ANALYSES` section uses a **four-level hierarchy**: chromatography → polarity → analysis type → analysis name. The analysis name (e.g. `DEFAULT`) allows multiple named variants of the same analysis type to coexist (e.g. different filtering parameters for the same atlas). The `--analysis-subset` flag uses the format `POLARITY-ANALYSIS_TYPE-ANALYSIS_NAME` (e.g. `POS-ISTD-DEFAULT`).
+> **Note:** The `TARGETED_ANALYSES` section uses a **four-level hierarchy**: chromatography → polarity → analysis type → analysis name. The analysis name (e.g. `EMA`, `ISTDsEtc`) allows multiple named variants of the same analysis type to coexist (e.g. different filtering parameters for the same atlas, or multiple different reference atlases such as `EMA` and `NLDM`). The `--analysis-subset` flag uses the format `CHROM-POLARITY-ANALYSIS_TYPE-ANALYSIS_NAME` (e.g. `HILIC-POS-ISTD-ISTDsEtc`).
 
 ---
 
@@ -282,7 +285,7 @@ TARGETED_ANALYSES:
   HILICZ:
     POS:
       ISTD:
-        DEFAULT:
+        ISTDsEtc:
           ATLAS:
             uid: atl-ref-istd-hilicz-pos-8b5ff31b79704f728c046a40623ace2b # This comes from running add_atlases_to_db.py
           PARAMS:
@@ -405,7 +408,7 @@ The category names used in `include_lcmsruns` and `exclude_lcmsruns` are case-in
 ### First run for a new project
 
 ```bash
-# 1. Add the compounds you're trying to identify to the database, if necessary
+# 1. Add the compounds you're trying to identify to the database, if necessary (usually not used unless new reference standards are curated)
 metatlas2.sh add-compounds --config_path /path/to/create_compounds.yaml
 
 # 2. Add reference atlases to the database, if necessary
@@ -414,7 +417,7 @@ metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml
 
 # 3. Run the full pre-curation workflow
 metatlas2.sh run \
-    --config  /path/to/analysis.yaml \
+    --config /path/to/analysis.yaml \
     --project MyProject \
     --rt-align-num 0 \
     --analysis-num 0 \
@@ -425,8 +428,8 @@ metatlas2.sh run \
 
 ```bash
 metatlas2.sh run \
-    --config       /path/to/analysis.yaml \
-    --project      MyProject \
+    --config /path/to/analysis.yaml \
+    --project MyProject \
     --rt-align-num 0 \
     --analysis-num 1 \
     --skip-rt-align
@@ -436,17 +439,21 @@ metatlas2.sh run \
 
 ```bash
 metatlas2.sh run \
-    --config          /path/to/analysis.yaml \
-    --project         MyProject \
-    --analysis-subset POS-ISTD-DEFAULT,POS-EMA-DEFAULT
+    --config /path/to/analysis.yaml \
+    --project MyProject \
+    --rt-align-num 0 \
+    --analysis-num 0 \
+    --analysis-subset HILIC-POS-ISTD-EMA,HILIC-POS-EMA-EMA
 ```
 
-### Skipping manual curation (automated pipeline)
+### Skipping manual curation (automated pipeline only, passed directly to analysis summary)
 
 ```bash
 metatlas2.sh run \
-    --config       /path/to/analysis.yaml \
-    --project      MyProject \
+    --config /path/to/analysis.yaml \
+    --project MyProject \
+    --rt-align-num 0 \
+    --analysis-num 0 \
     --skip-curation
 ```
 
@@ -454,13 +461,12 @@ metatlas2.sh run \
 
 ```bash
 metatlas2.sh submit \
-    --config      /path/to/analysis.yaml \
-    --project     MyProject \
-    --account     m2650 \
-    --qos         regular \
-    --cpus        16 \
-    --mem         128G \
-    --time        00:30:00
+    --config /path/to/analysis.yaml \
+    --project MyProject \
+    --qos regular \
+    --cpus 16 \
+    --mem 128G \
+    --time 00:30:00
 ```
 
 ---
@@ -469,7 +475,7 @@ metatlas2.sh submit \
 
 - Increment `--rt-align-num` whenever you want to redo the RT alignment from scratch while keeping previous results intact.
 - Increment `--analysis-num` to run another auto-identification pass under the same RT alignment (e.g., with different MS2 thresholds).
-- The `--analysis-subset` flag accepts polarity, analysis-type, and analysis-name triples separated by hyphens and commas (e.g. `POS-ISTD-DEFAULT,NEG-EMA-DEFAULT`). These must match the `POLARITY`, analysis-type, and analysis-name keys in `TARGETED_ANALYSES` exactly (case-insensitive).
+- The `--analysis-subset` flag accepts polarity, analysis-type, and analysis-name triples separated by hyphens and commas (e.g. `HILIC-POS-REF-EMA,HILIC-NEG-REF-EMA`). These must match the `POLARITY`, analysis-type, and analysis-name keys in `TARGETED_ANALYSES` exactly (case-insensitive).
 - If `use_existing_rt_alignment: true` is set in the config, the RT alignment stage reads the previously generated RT-aligned atlases, even if `--skip-rt-align` is not passed.
 - JupyterLab notebooks are generated in the `TGA<N>/<atlas_label>/` directory for manual curation analysis at the end of this workflow. Open them to manually curate identifications and export final results.
 - The `--skip-curation` flag is useful for automated pipelines where manual review is not required. It applies default curation decisions (keeping all auto-identified compounds) and runs the analysis summary immediately after auto-identification.
