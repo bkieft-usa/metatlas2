@@ -37,12 +37,14 @@ RT_ALIGNMENT:
         ms1_mz_tolerance_ppm: 5.0
         apply_model_to_min_max: true
         model_type: polynomial
-        polynomial_degree: 2
+        rt_peak_source: median
         min_observations_per_compound: 1
         min_compounds_for_modeling: 2
         r2_threshold: 0.5
         exclude_inchikeys:
           - OVRNDRQMDRJTHS-ZEUBEQSHSA-N
+          - UGQMRVRMYYASKQ-SHKQESLVSA-N
+          - FDGQSTZJBFJUBT-NNZQUYKOSA-N
 TARGETED_ANALYSES:
   HILICZ:
     POS:

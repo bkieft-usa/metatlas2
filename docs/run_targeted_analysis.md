@@ -238,7 +238,6 @@ RT_ALIGNMENT:
         - NEG
       use_existing_rt_alignment: false
       model_type: polynomial
-      polynomial_degree: 2
       apply_model_to_min_max: true
       atlas_extra_time: 2.0
       ms1_mz_tolerance_ppm: 5.0
@@ -259,8 +258,7 @@ RT_ALIGNMENT:
 | `include_lcmsruns` | list of strings | `["QC"]` | LCMS run categories to be used for alignment. See category method [below](#lcms-file-categorization). |
 | `exclude_lcmsruns` | list of strings | `[]` | LCMS run categories to be excluded from alignment. See category method [below](#lcms-file-categorization). |
 | `use_existing_rt_alignment` | bool | `false` | Set true to reuse atlases created from a previous alignment (matching RTA number), or false to create a new model and atlases from scratch. |
-| `model_type` | string | `polynomial` | Type of RT correction model. Options: `polynomial`, `linear`, `median_offset`. |
-| `polynomial_degree` | int | `2` | Degree of the polynomial used to model RT drift (only used when `model_type` is `polynomial`). |
+| `model_type` | string | `polynomial` | Type of RT correction model to use for atlas alignment. Options: `polynomial` (2nd-degree), `linear`, `median_offset`. All three models are always built and saved for comparison; this parameter selects which one is applied. |
 | `apply_model_to_min_max` | bool | `true` | Apply the correction to `rt_min` and `rt_max` in addition to `rt_peak`. |
 | `atlas_extra_time` | float | `2.0` | Time (min) added to atlas `rt_min`/`rt_max` for initial peak detection during alignment. |
 | `ms1_mz_tolerance_ppm` | float | `5.0` | m/z tolerance for EIC extraction (ppm). |

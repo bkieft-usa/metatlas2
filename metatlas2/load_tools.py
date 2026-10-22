@@ -339,6 +339,7 @@ def load_msms_refs_from_db(
 
 def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict[str, Any]:
     _VALID_MODEL_TYPES = {"polynomial", "linear", "median_offset"}
+    _VALID_RT_PEAK_SOURCES = {"min", "median", "max"}
     model_type = str(params.get('model_type', 'polynomial')).lower()
     if model_type not in _VALID_MODEL_TYPES:
         raise ValueError(
@@ -346,6 +347,11 @@ def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict
             f"Valid options: {sorted(_VALID_MODEL_TYPES)}"
         )
     params['model_type'] = model_type
+    # rt_peak_source: "min" | "median" | "max" | <filename>
+    # A filename value cannot be validated here (files not yet known), so we
+    # only normalise the three reserved keywords; anything else is kept as-is.
+    rt_peak_source = str(params.get('rt_peak_source', 'median')).strip()
+    params['rt_peak_source'] = rt_peak_source
     params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', False))
     params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT
     params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
@@ -357,7 +363,6 @@ def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict
     params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 0))
     params['ms1_mz_tolerance_ppm'] = float(params.get('ms1_mz_tolerance_ppm', 5.0))
     params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
-    params['polynomial_degree'] = int(params.get('polynomial_degree', 2))
     params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
     params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
     params['r2_threshold'] = float(params.get('r2_threshold', 0.5))

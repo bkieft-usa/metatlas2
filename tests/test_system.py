@@ -250,7 +250,6 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
               ms1_min_num_points: 0
               ms1_mz_tolerance_ppm: 5.0
               apply_model_to_min_max: true
-              polynomial_degree: 2
               min_observations_per_compound: 1
               min_compounds_for_modeling: 2
               r2_threshold: 0.5

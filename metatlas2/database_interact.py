@@ -12,6 +12,7 @@ import copy
 import math
 import shutil
 import time
+import yaml
 from pathlib import Path
 from contextlib import contextmanager
 from tqdm.auto import tqdm
@@ -618,10 +619,40 @@ def create_metatlas_database(db_path: str, overwrite: bool = False) -> None:
 
     logger.info(f"Main metatlas database created at {db_path}")
 
+def _model_to_metadata_dict(model: dict) -> dict:
+    """Serialise a single RT alignment model dict to a JSON-safe metadata dict."""
+    mt = model.get('model_type', 'polynomial')
+    coefficients = model.get('coefficients', np.array([]))
+    coefficients_list = coefficients.tolist() if hasattr(coefficients, 'tolist') else list(coefficients)
+    poly_features = model.get('poly_features')
+    return {
+        "model_type": mt,
+        "r_squared": float(model.get('r2', 0.0)),
+        "rmse": float(model.get('rmse', 0.0)),
+        "equation": model.get('equation', ''),
+        "poly_degree": int(model.get('degree', 0)),
+        "poly_interaction_only": bool(poly_features.interaction_only if poly_features is not None else False),
+        "model_intercept": float(model.get('intercept', 0.0)),
+        "model_coefficients": coefficients_list,
+        "median_offset": float(model['offset']) if mt == 'median_offset' else None,
+    }
+
+
 def save_rt_alignment_model_to_db(
     rt_align_obj: "RTAlign",
 ) -> str:
-    """Save RT alignment model to project database using RTAlign object and LCMSRun list."""
+    """Save RT alignment model to project database using RTAlign object and LCMSRun list.
+
+    In addition to writing the selected model to the database, this function:
+
+    * Writes ``RT_Alignment_Model_Info.json`` — expanded to include all three
+      candidate models (linear, polynomial, median_offset) plus the QC atlas
+      UID and name.
+    * Writes ``RT_Alignment_Config.yaml`` — the ``RT_ALIGNMENT`` section of the
+      config used for this run.
+    * Writes ``RT_Alignment_Model_Comparison.csv`` — per-compound RT predictions
+      from all three models with residuals.
+    """
 
     logger.info("Saving RT alignment model to project database...")
 
@@ -632,6 +663,7 @@ def save_rt_alignment_model_to_db(
     prov = get_provenance()
 
     rt_alignment_model = rt_align_obj.rt_alignment_model
+    all_models = getattr(rt_align_obj, 'all_rt_alignment_models', {})
     modeling_data = (
         rt_align_obj.modeling_data.to_dict('records')
         if hasattr(rt_align_obj.modeling_data, 'to_dict')
@@ -643,12 +675,29 @@ def save_rt_alignment_model_to_db(
     coefficients_list = coefficients.tolist() if hasattr(coefficients, 'tolist') else list(coefficients)
     poly_features = rt_alignment_model.get('poly_features')
 
+    # QC atlas info
+    qc_atlas_uid = getattr(rt_align_obj, 'align_atlas_uid', None) or ''
+    qc_atlas_name = ''
+    if rt_align_obj.align_atlas_obj is not None:
+        qc_atlas_name = getattr(rt_align_obj.align_atlas_obj, 'atlas_name', '') or ''
+
+    # Build per-model metadata sub-dicts for all three models
+    all_models_metadata = {}
+    for mt_key in ('linear', 'polynomial', 'median_offset'):
+        m = all_models.get(mt_key)
+        if m is not None:
+            all_models_metadata[mt_key] = _model_to_metadata_dict(m)
+
     model_metadata = {
+        "qc_atlas_uid": qc_atlas_uid,
+        "qc_atlas_name": qc_atlas_name,
+        "selected_model_type": model_type,
         "qc_files": [os.path.basename(f) for f in qc_files],
         "compounds_used": [d.get('compound_uid', '') for d in modeling_data],
         "alignment_timestamp": prov["timestamp"],
         "alignment_method": f"{model_type}_qc_based",
         "analyst": prov["analyst"],
+        # Selected-model summary (kept at top level for backward compatibility)
         "r_squared": float(rt_alignment_model.get('r2', 0.0)),
         "rmse": float(rt_alignment_model.get('rmse', 0.0)),
         "equation": rt_alignment_model.get('equation', ''),
@@ -657,6 +706,8 @@ def save_rt_alignment_model_to_db(
         "model_intercept": float(rt_alignment_model.get('intercept', 0.0)),
         "model_coefficients": coefficients_list,
         "median_offset": float(rt_alignment_model['offset']) if model_type == 'median_offset' else None,
+        # All three candidate models
+        "all_models": all_models_metadata,
     }
 
     with get_db_connection(project_db_path, max_retries=10, initial_retry_delay=0.5) as conn:
@@ -684,19 +735,43 @@ def save_rt_alignment_model_to_db(
 
     rt_alignment_model['rt_alignment_uid'] = rt_alignment_uid
 
-    # save RT alignment model metadata to JSON file in RT alignment output directory for easy reference
     rt_alignment_output_dir = Path(rt_align_obj.paths['rt_alignment_results_dir'])
     rt_alignment_output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── 1. RT_Alignment_Model_Info.json (expanded) ──────────────────────────
     rt_alignment_metadata_path = rt_alignment_output_dir / "RT_Alignment_Model_Info.json"
     with open(rt_alignment_metadata_path, "w") as f:
         json.dump(model_metadata, f, indent=4)
     logger.info(f"RT alignment model metadata saved to {rt_alignment_metadata_path}")
 
+    # ── 2. RT_Alignment_Config.yaml ─────────────────────────────────────────
+    try:
+        rt_alignment_config_section = getattr(rt_align_obj.config, 'rt_alignment_config', {})
+        rt_alignment_config_yaml_path = rt_alignment_output_dir / "RT_Alignment_Config.yaml"
+        with open(rt_alignment_config_yaml_path, "w") as f:
+            yaml.dump({"RT_ALIGNMENT": rt_alignment_config_section}, f,
+                      default_flow_style=False, sort_keys=False)
+        logger.info(f"RT alignment config section saved to {rt_alignment_config_yaml_path}")
+    except Exception as e:
+        logger.warning(f"Could not write RT_Alignment_Config.yaml: {e}")
+
+    # ── 3. RT_Alignment_Model_Comparison.csv ────────────────────────────────
+    try:
+        _save_rt_alignment_comparison_csv(
+            rt_align_obj=rt_align_obj,
+            all_models=all_models,
+            output_dir=rt_alignment_output_dir,
+        )
+    except Exception as e:
+        logger.warning(f"Could not write RT_Alignment_Model_Comparison.csv: {e}")
+
     # display model metadata in log for easy reference
     logger.info(f"RT Alignment Model Metadata for UID {rt_alignment_uid}:")
+    logger.info(f"  QC atlas UID: {qc_atlas_uid}")
+    logger.info(f"  QC atlas name: {qc_atlas_name}")
     logger.info(f"  Number of QC files used: {len(model_metadata['qc_files'])}")
     logger.info(f"  Number of compounds used (by UID): {len(model_metadata['compounds_used'])}")
-    logger.info(f"  Model type: {model_type}")
+    logger.info(f"  Selected model type: {model_type}")
     logger.info(f"  R²: {model_metadata['r_squared']:.4f}")
     logger.info(f"  RMSE: {model_metadata['rmse']:.4f}")
     if model_type == 'median_offset':
@@ -706,8 +781,98 @@ def save_rt_alignment_model_to_db(
         logger.info(f"  Polynomial interaction_only: {model_metadata['poly_interaction_only']}")
         logger.info(f"  Model intercept: {model_metadata['model_intercept']}")
         logger.info(f"  Model coefficients: {model_metadata['model_coefficients']}")
+    for mt_key, mm in all_models_metadata.items():
+        if mt_key != model_type:
+            logger.info(f"  [{mt_key}] R²={mm['r_squared']:.4f}  RMSE={mm['rmse']:.4f}  Eq: {mm['equation']}")
 
     return rt_alignment_uid
+
+
+def _save_rt_alignment_comparison_csv(
+    rt_align_obj: "RTAlign",
+    all_models: dict,
+    output_dir: "Path",
+) -> None:
+    """Write ``RT_Alignment_Model_Comparison.csv`` to *output_dir*.
+
+    Columns
+    -------
+    Index (compound label)  : ``{zero_padded_idx}_{compound_name}_{adduct}_{rt_peak}``
+    RT Measured             : observed apex RT (RT at max intensity) from the active rt_peak_source
+    RT Reference            : atlas RT peak
+    Relative RT Linear      : predicted RT from linear model
+    Relative RT Polynomial  : predicted RT from 2nd-degree polynomial model
+    Relative RT Offset      : predicted RT from median-offset model
+    RT Diff Linear          : RT Measured − Relative RT Linear
+    RT Diff Polynomial      : RT Measured − Relative RT Polynomial
+    RT Diff Offset          : RT Measured − Relative RT Offset
+    """
+    import metatlas2.rt_align_tools as rat
+
+    modeling_df = rt_align_obj.modeling_data
+    if modeling_df is None or modeling_df.empty:
+        logger.warning("No modeling data available; skipping RT_Alignment_Model_Comparison.csv")
+        return
+
+    df = modeling_df.sort_values('atlas_rt_peak').reset_index(drop=True)
+
+    linear_model   = all_models.get('linear')
+    poly_model     = all_models.get('polynomial')
+    offset_model   = all_models.get('median_offset')
+
+    X_atlas = df['atlas_rt_peak'].values
+
+    pred_linear = (
+        rat._apply_rt_model(X_atlas, linear_model)
+        if linear_model is not None
+        else np.full(len(df), np.nan)
+    )
+    pred_poly = (
+        rat._apply_rt_model(X_atlas, poly_model)
+        if poly_model is not None
+        else np.full(len(df), np.nan)
+    )
+    pred_offset = (
+        rat._apply_rt_model(X_atlas, offset_model)
+        if offset_model is not None
+        else np.full(len(df), np.nan)
+    )
+
+    # modeling_data now stores 'exp_rt_peak' (RT at intensity apex).
+    # Fall back to 'exp_rt_median' for backward compatibility with old saved data.
+    rt_col = 'exp_rt_peak' if 'exp_rt_peak' in df.columns else 'exp_rt_median'
+    rt_measured = df[rt_col].values
+    rt_reference = df['atlas_rt_peak'].values
+
+    # Build compound label index: NNNN_name_adductMZ_RTpeak
+    # e.g. 0000_inosine_U15N_positive_M+H273p0762_1p02
+    def _make_label(idx: int, row: pd.Series) -> str:
+        import re as _re
+        name = str(row.get('compound_name', '')).replace(' ', '_')
+        # Strip brackets from adduct: [M+H]+ -> M+H
+        adduct_raw = str(row.get('adduct', ''))
+        adduct_clean = _re.sub(r'[\[\]]', '', adduct_raw).rstrip('+').rstrip('-').strip()
+        mz_val = row.get('atlas_mz', 0.0)
+        mz_str = f"{mz_val:.4f}".replace('.', 'p')
+        rt_str = f"{row.get('atlas_rt_peak', 0.0):.2f}".replace('.', 'p')
+        return f"{idx:04d}_{name}_{adduct_clean}{mz_str}_{rt_str}"
+
+    labels = [_make_label(i, row) for i, (_, row) in enumerate(df.iterrows())]
+
+    comparison_df = pd.DataFrame({
+        'RT Measured':            rt_measured,
+        'RT Reference':           rt_reference,
+        'Relative RT Linear':     pred_linear,
+        'Relative RT Polynomial': pred_poly,
+        'Relative RT Offset':     pred_offset,
+        'RT Diff Linear':         rt_measured - pred_linear,
+        'RT Diff Polynomial':     rt_measured - pred_poly,
+        'RT Diff Offset':         rt_measured - pred_offset,
+    }, index=labels)
+
+    csv_path = output_dir / "RT_Alignment_Model_Comparison.csv"
+    comparison_df.to_csv(csv_path)
+    logger.info(f"RT alignment model comparison table saved to {csv_path}")
 
 def get_rt_alignment_model_from_db(
     rt_align_obj: "RTAlign"

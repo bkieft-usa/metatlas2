@@ -105,8 +105,13 @@ def run_rt_alignment(
         rt_align_obj=rt_align_obj
     )
     
-    logger.info("Passing RTAlign object to model visualizer...")
+    logger.info("Passing RTAlign object to model visualizer (summary)...")
     rat.visualize_rt_alignment_model(
+        rt_align_obj=rt_align_obj
+    )
+
+    logger.info("Passing RTAlign object to all-files model visualizer...")
+    rat.visualize_rt_alignment_all(
         rt_align_obj=rt_align_obj
     )
     
