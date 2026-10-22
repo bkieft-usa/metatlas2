@@ -56,10 +56,11 @@ from conftest import (
 DEFAULT_RT_PARAMS = {
     "min_observations_per_compound": 1,
     "min_compounds_for_modeling": 2,
-    "polynomial_degree": 2,
     "r2_threshold": 0.5,
     "apply_model_to_min_max": True,
     "exclude_inchikeys": [],
+    "rt_peak_source": "median",
+    "model_type": "polynomial",
 }
 
 
@@ -85,7 +86,12 @@ def _make_rt_align_stub(atlas, ms1_df, params=None):
         experimental_data=exp_data,
         rt_alignment_params=params or DEFAULT_RT_PARAMS,
         rt_alignment_model=None,
+        all_rt_alignment_models={},
         modeling_data=None,
+        per_file_models={},
+        composite_models={},
+        per_file_modeling_data={},
+        composite_modeling_data={},
         paths={"rt_alignment_results_dir": ""},  # overridden in tests that write files
         rt_alignment_number=None,
         project_name="test_project",
@@ -452,6 +458,49 @@ class TestBuildRtAlignmentModel:
         build_rt_alignment_model(rt_align_stub)
         assert "residual" in rt_align_stub.modeling_data.columns
 
+    def test_modeling_data_has_exp_rt_peak(self, rt_align_stub):
+        """modeling_data must use exp_rt_peak (apex RT) not exp_rt_median."""
+        build_rt_alignment_model(rt_align_stub)
+        assert "exp_rt_peak" in rt_align_stub.modeling_data.columns
+
+    def test_exp_rt_peak_is_apex_rt(self, rt_align_stub):
+        """The apex RT should be the RT of the most intense in-feature scan point."""
+        build_rt_alignment_model(rt_align_stub)
+        # Adenine: rts=[-0.05, 0.0, +0.05] relative to atlas+shift, ints=[5e4, 1e5, 5e4]
+        # → apex is at index 1 (intensity 1e5), so exp_rt_peak ≈ ADENINE_RT + 0.2
+        df = rt_align_stub.modeling_data
+        from conftest import ADENINE_RT
+        ade_row = df[df['compound_name'].str.contains('adenine', case=False, na=False)]
+        if not ade_row.empty:
+            assert abs(ade_row.iloc[0]['exp_rt_peak'] - (ADENINE_RT + 0.2)) < 0.01
+
+    def test_all_three_models_built(self, rt_align_stub):
+        build_rt_alignment_model(rt_align_stub)
+        assert set(rt_align_stub.all_rt_alignment_models.keys()) == {"linear", "polynomial", "median_offset"}
+
+    def test_all_models_have_r2(self, rt_align_stub):
+        build_rt_alignment_model(rt_align_stub)
+        for mt, m in rt_align_stub.all_rt_alignment_models.items():
+            assert "r2" in m, f"Model '{mt}' missing 'r2' key"
+
+    def test_per_file_models_populated(self, rt_align_stub):
+        build_rt_alignment_model(rt_align_stub)
+        assert isinstance(rt_align_stub.per_file_models, dict)
+        assert len(rt_align_stub.per_file_models) > 0
+
+    def test_composite_models_populated(self, rt_align_stub):
+        build_rt_alignment_model(rt_align_stub)
+        assert set(rt_align_stub.composite_models.keys()) == {"min", "median", "max"}
+
+    def test_per_file_modeling_data_populated(self, rt_align_stub):
+        build_rt_alignment_model(rt_align_stub)
+        assert isinstance(rt_align_stub.per_file_modeling_data, dict)
+        assert len(rt_align_stub.per_file_modeling_data) > 0
+
+    def test_composite_modeling_data_populated(self, rt_align_stub):
+        build_rt_alignment_model(rt_align_stub)
+        assert set(rt_align_stub.composite_modeling_data.keys()) == {"min", "median", "max"}
+
     def test_raises_when_no_compounds_have_data(self, two_compound_atlas):
         stub = _make_rt_align_stub(two_compound_atlas, pd.DataFrame(
             columns=["mz_rt_uid", "filename", "spec_rts", "spec_ints", "spec_mzs", "in_feature"]
@@ -465,7 +514,7 @@ class TestBuildRtAlignmentModel:
         uid = adenine_compound.mz_rt_uid
         ms1 = _make_ms1_wide_for_uid(uid, [ADENINE_RT], [1e5])
         stub = _make_rt_align_stub(single_atlas, ms1)
-        with pytest.raises(ValueError, match="Insufficient"):
+        with pytest.raises(ValueError, match="No valid model"):
             build_rt_alignment_model(stub)
 
     def test_exclude_inchikeys_skips_compound(self, two_compound_atlas,
@@ -479,8 +528,26 @@ class TestBuildRtAlignmentModel:
         ], ignore_index=True)
         params = {**DEFAULT_RT_PARAMS, "exclude_inchikeys": [adenine_compound.inchi_key]}
         stub = _make_rt_align_stub(two_compound_atlas, ms1, params=params)
-        with pytest.raises(ValueError, match="Insufficient"):
+        with pytest.raises(ValueError, match="No valid model"):
             build_rt_alignment_model(stub)
+
+    def test_rt_peak_source_filename_selects_per_file_model(self, rt_align_stub):
+        """Setting rt_peak_source to the QC filename should use that file's per-file model."""
+        build_rt_alignment_model(rt_align_stub)
+        # The stub uses filename "qc_run.h5"
+        params = {**DEFAULT_RT_PARAMS, "rt_peak_source": "qc_run.h5"}
+        rt_align_stub.rt_alignment_params = params
+        # Re-run with filename source — should not raise
+        build_rt_alignment_model(rt_align_stub)
+        assert rt_align_stub.rt_alignment_model is not None
+
+    def test_rt_peak_source_invalid_filename_raises(self, rt_align_stub):
+        """An unrecognised rt_peak_source that is not a composite key or known filename raises."""
+        build_rt_alignment_model(rt_align_stub)
+        params = {**DEFAULT_RT_PARAMS, "rt_peak_source": "nonexistent_file.h5"}
+        rt_align_stub.rt_alignment_params = params
+        with pytest.raises(ValueError, match="rt_peak_source"):
+            build_rt_alignment_model(rt_align_stub)
 
 
 # ---------------------------------------------------------------------------
