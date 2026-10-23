@@ -116,9 +116,9 @@ def run_all_summaries(
         make_targeted_analysis_readme(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     # mv CompoundAtlas__*AUTO*.csv atlas to "{POL}_additional_info" folder for upload
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
     for file in glob.glob(f"{output_dir}/CompoundAtlas__*AUTO*.csv"):
-        dest_dir = Path(output_dir) / f"{_pol_prefix}additional_info"
+        dest_dir = Path(output_dir) / f"{_pol_prefix}_additional_info"
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(file, dest_dir / Path(file).name)
 
@@ -326,8 +326,8 @@ def make_identification_figure(
 ) -> None:
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    output_dir = output_dir / f"{_pol_prefix}identification_figures_with_msms_mirror_plots"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    output_dir = output_dir / f"{_pol_prefix}_identification_figures_with_msms_mirror_plots"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -1660,11 +1660,11 @@ def make_eic_thumbnails(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
     base_dir = output_dir
-    additional_info_dir = base_dir / f"{_pol_prefix}additional_info"
-    dir_shared = additional_info_dir / f"compound_EIC_chromatograms_sharedY"
-    dir_indep = additional_info_dir / f"compound_EIC_chromatograms_independentY"
+    additional_info_dir = base_dir / f"{_pol_prefix}_additional_info"
+    dir_shared = additional_info_dir / f"{_pol_prefix}_compound_EIC_chromatograms_sharedY"
+    dir_indep = additional_info_dir / f"{_pol_prefix}_compound_EIC_chromatograms_independentY"
     for d in (dir_shared, dir_indep):
         if overwrite and d.exists():
             logger.info(f"Overwriting enabled: clearing existing contents of {d}")
@@ -2013,10 +2013,10 @@ def make_tic_thumbnails(
     """
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    additional_info_dir = output_dir / f"{_pol_prefix}additional_info"
-    path_indep  = additional_info_dir / "sample_TIC_total_chromatograms_independentY.pdf"
-    path_shared = additional_info_dir / "sample_TIC_total_chromatograms_sharedY.pdf"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    additional_info_dir = output_dir / f"{_pol_prefix}_additional_info"
+    path_indep  = additional_info_dir / f"{_pol_prefix}_sample_TIC_total_chromatograms_independentY.pdf"
+    path_shared = additional_info_dir / f"{_pol_prefix}_sample_TIC_total_chromatograms_sharedY.pdf"
 
     if not overwrite and path_indep.exists() and path_shared.exists():
         logger.info("Overwriting disabled: existing TIC PDFs will be used.")
@@ -2243,10 +2243,10 @@ def make_compound_metric_plots(
     """
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    additional_info_dir = output_dir / f"{_pol_prefix}additional_info"
-    path_ph = additional_info_dir / "compound_peak_heights.pdf"
-    path_rt = additional_info_dir / "compound_rt_peaks.pdf"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    additional_info_dir = output_dir / f"{_pol_prefix}_additional_info"
+    path_ph = additional_info_dir / f"{_pol_prefix}_compound_peak_heights.pdf"
+    path_rt = additional_info_dir / f"{_pol_prefix}_compound_rt_peaks.pdf"
 
     if not overwrite and path_ph.exists() and path_rt.exists():
         logger.info("Overwriting disabled: existing compound metric PDFs will be used.")
@@ -2402,7 +2402,7 @@ def make_compound_metric_plots(
 
     logger.info(
         f"Compound metric plots written to {additional_info_dir}: "
-        f"compound_peak_heights.pdf and compound_rt_peaks.pdf"
+        f"{_pol_prefix}_compound_peak_heights.pdf and {_pol_prefix}_compound_rt_peaks.pdf"
     )
 
 ###############################################
@@ -2679,16 +2679,16 @@ def make_boxplots(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
     base_dir = output_dir
-    additional_info_dir = base_dir / f"{_pol_prefix}additional_info"
+    additional_info_dir = base_dir / f"{_pol_prefix}_additional_info"
 
-    dir_peak_height = base_dir / f"{_pol_prefix}boxplot_peak_height"
-    dir_peak_height_log = base_dir / f"{_pol_prefix}boxplot_peak_height_log"
-    dir_rt_peak = additional_info_dir / f"boxplot_rt_peak"
-    dir_mz_centroid = additional_info_dir / f"boxplot_mz_centroid"
-    dir_mz_centroid_log = additional_info_dir / f"boxplot_mz_centroid_log"
-    dir_rt_peak_log = additional_info_dir / f"boxplot_rt_peak_log"
+    dir_peak_height = base_dir / f"{_pol_prefix}_boxplot_peak_height"
+    dir_peak_height_log = base_dir / f"{_pol_prefix}_boxplot_peak_height_log"
+    dir_rt_peak = additional_info_dir / f"{_pol_prefix}_boxplot_rt_peak"
+    dir_mz_centroid = additional_info_dir / f"{_pol_prefix}_boxplot_mz_centroid"
+    dir_mz_centroid_log = additional_info_dir / f"{_pol_prefix}_boxplot_mz_centroid_log"
+    dir_rt_peak_log = additional_info_dir / f"{_pol_prefix}_boxplot_rt_peak_log"
 
     all_metric_dirs = [
         dir_peak_height, dir_peak_height_log,
@@ -2828,7 +2828,7 @@ def make_boxplots(
 def make_best_ms2_hit_fragment_ions_csv(
     summary_obj: "AnalysisSummary",
     output_dir: Path | None = None,
-    output_filename: str = "best_ms2_hit_fragment_ions.csv",
+    output_filename: str | None = None,
     overwrite: bool = True,
     min_fragment_intensity: float | None = 1e4,
 ) -> None:
@@ -2837,8 +2837,10 @@ def make_best_ms2_hit_fragment_ions_csv(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    output_dir = output_dir / f"{_pol_prefix}data_sheets"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    output_dir = output_dir / f"{_pol_prefix}_data_sheets"
+    if output_filename is None:
+        output_filename = f"{_pol_prefix}_best_ms2_hit_fragment_ions.csv"
     output_file = output_dir / output_filename
     if not overwrite and output_file.exists():
         logger.info(f"Overwriting disabled: existing file {output_file} will be used.")
@@ -2951,8 +2953,8 @@ def make_data_sheets(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    output_dir = output_dir / f"{_pol_prefix}data_sheets"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    output_dir = output_dir / f"{_pol_prefix}_data_sheets"
     if overwrite and output_dir.exists():
         logger.info(f"Overwriting enabled: clearing existing contents of {output_dir}")
         shutil.rmtree(output_dir)
@@ -3061,7 +3063,7 @@ def make_data_sheets(
             )
             continue
 
-        csv_path = output_dir / f"{metric}.csv"
+        csv_path = output_dir / f"{_pol_prefix}_{metric}.csv"
 
         pfm_with_file = pfm[pfm["_file_col"].notna()]
         wide = (
@@ -3273,15 +3275,15 @@ def make_peak_height_filtered_csv(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    out_dir = output_dir / f"{_pol_prefix}data_sheets"
-    source_csv = out_dir / "peak_height.csv"
-    output_csv = out_dir / "peak_height_filtered.csv"
-    summary_tsv = out_dir / "peak_height_filter_summary.tsv"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    out_dir = output_dir / f"{_pol_prefix}_data_sheets"
+    source_csv = out_dir / f"{_pol_prefix}_peak_height.csv"
+    output_csv = out_dir / f"{_pol_prefix}_peak_height_filtered.csv"
+    summary_tsv = out_dir / f"{_pol_prefix}_peak_height_filter_summary.tsv"
 
     if not source_csv.exists():
         logger.error(
-            "peak_height.csv not found at %s — run make_data_sheets first.", source_csv
+            "%s not found at %s — run make_data_sheets first.", f"{_pol_prefix}_peak_height.csv", source_csv
         )
         return
     if not overwrite and output_csv.exists():
@@ -3395,15 +3397,15 @@ def make_log_fold_changes_csv(
 
     if output_dir is None:
         output_dir = Path(summary_obj.paths["analysis_results_output_dir"])
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper() + "_"
-    out_dir = output_dir / f"{_pol_prefix}data_sheets"
-    source_csv = out_dir / "peak_height_filtered.csv"
-    output_csv = out_dir / "group_mean_log_fold_changes.csv"
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    out_dir = output_dir / f"{_pol_prefix}_data_sheets"
+    source_csv = out_dir / f"{_pol_prefix}_peak_height_filtered.csv"
+    output_csv = out_dir / f"{_pol_prefix}_group_mean_log_fold_changes.csv"
 
     if not source_csv.exists():
         logger.error(
-            "peak_height_filtered.csv not found at %s — run make_peak_height_filtered_csv first.",
-            source_csv,
+            "%s not found at %s — run make_peak_height_filtered_csv first.",
+            f"{_pol_prefix}_peak_height_filtered.csv", source_csv,
         )
         return
     if not overwrite and output_csv.exists():
@@ -3569,14 +3571,15 @@ def make_metabomap(
     else:
         sib_pol_display = sib_pol_lc.title()
 
-    curr_pol_prefix = curr_pol_lc.upper() + "_"
-    sib_pol_prefix  = sib_pol_lc.upper() + "_"
+    curr_pol_prefix = curr_pol_lc.upper()
+    sib_pol_prefix  = sib_pol_lc.upper()
 
-    current_csv = analysis_output_dir / f"{curr_pol_prefix}data_sheets" / "peak_height_filtered.csv"
+    current_csv = analysis_output_dir / f"{curr_pol_prefix}_data_sheets" / f"{curr_pol_prefix}_peak_height_filtered.csv"
     sibling_csv = (
         Path(str(analysis_output_dir).replace(f"-{curr_pol_display}-", f"-{sib_pol_display}-"))
-        / f"{sib_pol_prefix}data_sheets" / "peak_height_filtered.csv"
+        / f"{sib_pol_prefix}_data_sheets" / f"{sib_pol_prefix}_peak_height_filtered.csv"
     )
+    # Note: metabomap paths already use _pol_prefix-prefixed filenames (updated with data_sheets)
 
     metabomaps_dir = analysis_output_dir / "../metabomap"
     merged_tsv = metabomaps_dir / "merged_peak_heights.tsv"

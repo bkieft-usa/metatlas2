@@ -218,7 +218,7 @@ def _extract_per_file_peak_rts(
     compound_mzrts: dict,
     exclude_inchikeys: set,
 ) -> dict[str, dict[str, dict]]:
-    """Extract the RT at the intensity peak for each compound × file.
+    """Extract the RT at the intensity peak for each compound x file.
 
     For every QC atlas compound, and for every QC file that has MS1 data for
     that compound, this function finds the single scan point with the highest
@@ -228,7 +228,7 @@ def _extract_per_file_peak_rts(
 
     Args:
         ms1_df:           Wide-format MS1 DataFrame (one row per
-                          ``mz_rt_uid × filename``) with list columns
+                          ``mz_rt_uid x filename``) with list columns
                           ``spec_rts``, ``spec_ints``, ``in_feature``.
         compound_mzrts:   Dict of ``mz_rt_uid → CompoundMzRt`` objects from
                           the QC atlas.
@@ -526,7 +526,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
         try:
             plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = plot_save_dir / "RT_Alignment_Summary.pdf"
+            pdf_path = plot_save_dir / f"RT_Alignment_Summary_{rt_align_obj.chromatography}.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
             logger.info(f"Plot saved to {pdf_path}")
             plt.close()
@@ -707,7 +707,7 @@ def visualize_rt_alignment_all(rt_align_obj: "RTAlign", save_plot: bool = True) 
         try:
             plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = plot_save_dir / "RT_Alignment_All.pdf"
+            pdf_path = plot_save_dir / f"RT_Alignment_All_{rt_align_obj.chromatography}.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
             logger.info(f"RT_Alignment_All plot saved to {pdf_path}")
             plt.close()
@@ -752,7 +752,7 @@ def build_rt_alignment_model(
     ms1_df = rt_align_obj.experimental_data.ms1_df
 
     # ------------------------------------------------------------------
-    # Step 1: extract per-file peak RTs for every compound × file
+    # Step 1: extract per-file peak RTs for every compound x file
     # ------------------------------------------------------------------
     logger.info("Extracting per-file peak RTs (RT at max intensity within atlas window)...")
     per_file_data = _extract_per_file_peak_rts(

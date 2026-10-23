@@ -255,7 +255,7 @@ def copy_outputs_to_google_drive(
                     text = "\n".join(lines)
                     logger.info(f"JIRA template for analysis release:\n")
                     display(HTML(
-                        f"<textarea rows='{len(lines)}' cols='60' "
+                        f"<textarea rows='{len(lines)}' cols='120' "
                         f"style='font-family:monospace;resize:none;border:1px solid #ccc;"
                         f"padding:6px;background:#f9f9f9;color:black;overflow:hidden' readonly>"
                         f"{text}</textarea>"
