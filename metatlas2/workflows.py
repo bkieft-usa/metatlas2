@@ -369,8 +369,11 @@ def run_analysis_gui(
     display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
 
     t.join()
-    time.sleep(2)
-    database_flush_errors: dict = getattr(dash_app, "database_flush_errors", {})
+    active_threads = getattr(dash_app, "active_flush_threads", [])
+    for ft in active_threads:
+        ft.join(timeout=30)
+    database_flush_errors = getattr(dash_app, "database_flush_errors", {})
+
 
     if database_flush_errors:
         logger.warning(
