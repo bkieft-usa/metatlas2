@@ -253,6 +253,7 @@ def copy_outputs_to_google_drive(
                         f"Link: {url}",
                     ]
                     text = "\n".join(lines)
+                    logger.info(f"JIRA template for analysis release:\n")
                     display(HTML(
                         f"<textarea rows='{len(lines)}' cols='60' "
                         f"style='font-family:monospace;resize:none;border:1px solid #ccc;"
