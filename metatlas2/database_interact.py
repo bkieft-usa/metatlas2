@@ -739,7 +739,7 @@ def save_rt_alignment_model_to_db(
     rt_alignment_output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. RT_Alignment_Model_Info.json (expanded) ──────────────────────────
-    rt_alignment_metadata_path = rt_alignment_output_dir / "RT_Alignment_Model_Info.json"
+    rt_alignment_metadata_path = rt_alignment_output_dir / f"RT_Alignment_Model_Info_{rt_align_obj.chromatography}.json"
     with open(rt_alignment_metadata_path, "w") as f:
         json.dump(model_metadata, f, indent=4)
     logger.info(f"RT alignment model metadata saved to {rt_alignment_metadata_path}")
@@ -747,7 +747,7 @@ def save_rt_alignment_model_to_db(
     # ── 2. RT_Alignment_Config.yaml ─────────────────────────────────────────
     try:
         rt_alignment_config_section = getattr(rt_align_obj.config, 'rt_alignment_config', {})
-        rt_alignment_config_yaml_path = rt_alignment_output_dir / "RT_Alignment_Config.yaml"
+        rt_alignment_config_yaml_path = rt_alignment_output_dir / f"RT_Alignment_Config_{rt_align_obj.chromatography}.yaml"
         with open(rt_alignment_config_yaml_path, "w") as f:
             yaml.dump({"RT_ALIGNMENT": rt_alignment_config_section}, f,
                       default_flow_style=False, sort_keys=False)
@@ -803,9 +803,9 @@ def _save_rt_alignment_comparison_csv(
     Relative RT Linear      : predicted RT from linear model
     Relative RT Polynomial  : predicted RT from 2nd-degree polynomial model
     Relative RT Offset      : predicted RT from median-offset model
-    RT Diff Linear          : RT Measured − Relative RT Linear
-    RT Diff Polynomial      : RT Measured − Relative RT Polynomial
-    RT Diff Offset          : RT Measured − Relative RT Offset
+    RT Diff Linear          : RT Measured - Relative RT Linear
+    RT Diff Polynomial      : RT Measured - Relative RT Polynomial
+    RT Diff Offset          : RT Measured - Relative RT Offset
     """
     import metatlas2.rt_align_tools as rat
 
@@ -870,7 +870,7 @@ def _save_rt_alignment_comparison_csv(
         'RT Diff Offset':         rt_measured - pred_offset,
     }, index=labels)
 
-    csv_path = output_dir / "RT_Alignment_Model_Comparison.csv"
+    csv_path = output_dir / f"RT_Alignment_Model_Comparison_{rt_align_obj.chromatography}.csv"
     comparison_df.to_csv(csv_path)
     logger.info(f"RT alignment model comparison table saved to {csv_path}")
 
