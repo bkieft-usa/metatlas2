@@ -240,5 +240,26 @@ def copy_outputs_to_google_drive(
             if url:
                 logger.info(f"Upload complete: {path_string} ({url})")
                 display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
+                owner = (getattr(obj, "owner", "") or "").lower()
+                if owner == "jgi":
+                    chromatography = (getattr(obj, "chromatography", "") or "").upper()
+                    polarity_display = (polarity or "").upper()
+                    lines = [
+                        "--- Jira Template --------------------",
+                        f"Chromatography: {chromatography}",
+                        f"Analysis: {analysis_name}",
+                        f"Polarity: {polarity_display}",
+                        "Comment: ",
+                        "Action: ",
+                        f"Link: {url}",
+                        "--------------------------------------",
+                    ]
+                    text = "\n".join(lines)
+                    display(HTML(
+                        f"<textarea rows='{len(lines)}' cols='60' "
+                        f"style='font-family:monospace;resize:none;border:1px solid #ccc;"
+                        f"padding:6px;background:#f9f9f9;color:black;overflow:hidden' readonly>"
+                        f"{text}</textarea>"
+                    ))
         else:
             logger.warning(f"analysis_results_output_dir '{tga_results_dir}' does not exist — skipping targeted analysis upload.")
