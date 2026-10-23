@@ -127,6 +127,7 @@ def run_all_summaries(
         gdrive_upload = summary_obj.override_parameters["upload_to_gdrive"]
     elif summary_obj.ta.params.get("upload_to_gdrive") is not None:
         gdrive_upload = summary_obj.ta.params["upload_to_gdrive"]
+
     if gdrive_upload:
         logger.info("Uploading outputs to Google Drive...")
         gdu.copy_outputs_to_google_drive(summary_obj, "ANALYSIS_SUMMARY", overwrite=overwrite)

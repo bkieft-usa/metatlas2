@@ -22,7 +22,7 @@ GUI:
 RT_ALIGNMENT:
   C18:
     ATLAS:
-      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261009-9318f06c532d4db98bd0e24c65095cda
+      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261023-b842dc218a47495a9cbf475296093940
     PARAMS:
         upload_to_gdrive: true
         include_lcmsruns: # 'QC'

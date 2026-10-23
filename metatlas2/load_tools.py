@@ -594,13 +594,38 @@ def check_missing_columns(df: pd.DataFrame, required_columns: list) -> None:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
-def load_atlas_input(file_path: str) -> pd.DataFrame:
-    """Load atlas input file and validate required columns."""
+
+def _inchi_key_prefix(inchi_key: str) -> str:
+    """Return the first 14-character block of an InChI key (the connectivity layer)."""
+    return str(inchi_key).split("-")[0] if inchi_key else ""
+
+
+def load_atlas_input(
+    file_path: str,
+    atlas_category: "str | None" = None,
+) -> pd.DataFrame:
+    """Load atlas input file, validate required columns, and sort rows.
+
+    Sorting rules (applied in order of priority):
+    1. The QC-anchor compound (``LCMZECCEEOQWLQ-UHFFFAOYSA-N``) is always
+       placed first, regardless of its ``rt_peak``.
+    2. For **ISTD** and **QC** atlases only: when two or more rows share the
+       same InChI-key prefix (first 14 characters) *and* the same ``rt_peak``,
+       rows whose ``compound_name`` contains an isotope-label string (currently
+       ``"13C"`` or ``"15N"``) are placed before unlabeled rows.
+    3. All remaining rows are sorted ascending by ``rt_peak``.
+
+    Args:
+        file_path:      Path to the atlas CSV or TSV file.
+        atlas_category: Optional atlas category string (``"QC"``, ``"ISTD"``,
+                        or ``"REF"``).  The labeled-before-unlabeled rule is
+                        only applied when this is ``"QC"`` or ``"ISTD"``.
+    """
     file_path = Path(file_path)
-    
+
     if not file_path.exists():
         raise FileNotFoundError(f"Atlas input file not found: {file_path}")
-    
+
     if file_path.suffix.lower() != '.csv':
         df = pd.read_csv(file_path, sep='\t')
     else:
@@ -613,7 +638,7 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
         df = df.rename(columns={'label': 'compound_name'})
     required_columns = ['inchi_key', 'compound_name', 'rt_peak', 'mz', 'adduct']
     check_missing_columns(df, required_columns)
-    
+
     # Add default values for optional columns
     if 'rt_min' not in df.columns:
         df['rt_min'] = df['rt_peak'] - 0.5
@@ -621,9 +646,48 @@ def load_atlas_input(file_path: str) -> pd.DataFrame:
         df['rt_max'] = df['rt_peak'] + 0.5
     if 'mz_tolerance' not in df.columns:
         df['mz_tolerance'] = 5.0
-    
+
+
+    _ISOTOPE_LABEL_STRINGS: list[str] = ["13C", "15N"]
+    _FIRST_INCHI_KEY = "LCMZECCEEOQWLQ-UHFFFAOYSA-N"
+    df['_sort_priority'] = (df['inchi_key'] != _FIRST_INCHI_KEY).astype(int)
+    cat_upper = str(atlas_category).upper() if atlas_category else ""
+    apply_labeled_first = cat_upper in {"ISTD", "QC"}
+
+    if apply_labeled_first:
+        df['_ik_prefix'] = df['inchi_key'].apply(_inchi_key_prefix)
+
+        def _is_labeled(name: str) -> bool:
+            return any(lbl in str(name) for lbl in _ISOTOPE_LABEL_STRINGS)
+
+        df['_is_labeled'] = df['compound_name'].apply(_is_labeled)
+
+        group_cols = ['_ik_prefix', 'rt_peak']
+        grp = df.groupby(group_cols)['_is_labeled']
+        has_labeled   = grp.transform('any')
+        has_unlabeled = grp.transform(lambda s: (~s).any())
+        mixed_group   = has_labeled & has_unlabeled
+
+        df['_labeled_priority'] = 0
+        df.loc[mixed_group & ~df['_is_labeled'], '_labeled_priority'] = 1
+
+        df = (
+            df.sort_values(
+                ['_sort_priority', 'rt_peak', '_labeled_priority'],
+                ascending=True,
+            )
+            .drop(columns=['_sort_priority', '_ik_prefix', '_is_labeled', '_labeled_priority'])
+            .reset_index(drop=True)
+        )
+    else:
+        df = (
+            df.sort_values(['_sort_priority', 'rt_peak'], ascending=True)
+              .drop(columns=['_sort_priority'])
+              .reset_index(drop=True)
+        )
+
     logger.info(f"Loaded {len(df)} atlas entries from {file_path}")
-    
+
     return df
 
 def save_atlas_metadata_to_csv(atlas_obj: "Atlas", output_path: str) -> None:

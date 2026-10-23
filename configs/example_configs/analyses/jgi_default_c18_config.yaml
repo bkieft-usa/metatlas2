@@ -7,7 +7,7 @@ GENERAL:
 GUI:
   gui_width: 32
   gui_height: 12
-  gui_require_all_evaluated: false
+  gui_require_all_evaluated: true
   gui_top_n_hits: 10
   gui_lcmsruns_colors:
     ISTD: blue
@@ -22,7 +22,7 @@ GUI:
 RT_ALIGNMENT:
   C18:
     ATLAS:
-      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261009-9318f06c532d4db98bd0e24c65095cda
+      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261023-b842dc218a47495a9cbf475296093940
     PARAMS:
         upload_to_gdrive: true
         include_lcmsruns: # 'QC'
@@ -49,7 +49,7 @@ TARGETED_ANALYSES:
       ISTD:
         ISTDsEtc:
           ATLAS:
-            uid: atlas-ipt-c18-pos-istd-istdsetc-bkieft-20261009-f298f7f8b94e4f26aa32238dcbf53f09
+            uid: atlas-ipt-c18-pos-istd-istdsetc-bkieft-20261023-0832f7af80da4325bb724d6020551d0b
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
@@ -123,7 +123,7 @@ TARGETED_ANALYSES:
       ISTD:
         ISTDsEtc:
           ATLAS:
-            uid: atlas-ipt-c18-neg-istd-istdsetc-bkieft-20261009-c5b9ca0172a540e5b9374b1ad3f8f776
+            uid: atlas-ipt-c18-neg-istd-istdsetc-bkieft-20261023-dd28405ef5d54443afaaa4393c8190bb
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:

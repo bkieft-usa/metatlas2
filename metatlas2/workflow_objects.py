@@ -414,7 +414,10 @@ class NewAtlasesConfig:
                 logger.debug(f"Skipping atlas with no path for {cat_key}/{atlas_name}/{chrom}/{pol}")
                 continue
             try:
-                atlas_compounds_df = ldt.load_atlas_input(entry.path)
+                atlas_compounds_df = ldt.load_atlas_input(
+                    entry.path,
+                    atlas_category=entry.atlas_category.value,
+                )
                 atlas_obj = dbi.create_new_atlas_from_dataframe(
                     atlas_df=atlas_compounds_df,
                     atlas_description=entry.desc,
