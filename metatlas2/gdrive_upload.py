@@ -239,7 +239,7 @@ def copy_outputs_to_google_drive(
             url = _drive_path_to_url(drive, tga_dest)
             if url:
                 logger.info(f"Upload complete: {path_string} ({url})")
-                display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
+                #display(HTML(f'Upload complete: <a href="{url}">{path_string}</a>'))
                 owner = (getattr(obj, "owner", "") or "").lower()
                 if owner == "jgi":
                     chromatography = (getattr(obj, "chromatography", "") or "").upper()
