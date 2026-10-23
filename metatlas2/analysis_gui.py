@@ -80,6 +80,7 @@ def build_dash_app(
     latest_flushed_seq_by_session = {}
     db_write_lock = threading.Lock()
     isomer_string_cache = {}
+    _active_flush_threads: list[threading.Thread] = []
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
     #logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
@@ -870,7 +871,7 @@ def build_dash_app(
 
         with flush_lock:
             latest_seq = latest_flushed_seq_by_session.get(flush_key, -1)
-            if seq <= latest_seq:
+            if seq < latest_seq:
                 return state
             latest_flushed_seq_by_session[flush_key] = seq
 
@@ -919,7 +920,13 @@ def build_dash_app(
                 else:
                     window_metrics = _compute_window_ms1_metrics(state)
                     if window_metrics is None:
-                        updates = {}
+                        updates = {
+                            "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+                            "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                            "other_notes": " // ".join(state.get("other_note", [])),
+                            "analyst_notes": state.get("analyst_notes", ""),
+                            "identification_notes": state.get("id_notes", ""),
+                        }
                     else:
                         updates = {
                             "passed_curation": False if "remove" in state.get("ms1_note", "").lower() else True,
@@ -936,7 +943,6 @@ def build_dash_app(
                             "identification_notes": state.get("id_notes", ""),
                         }
 
-                # DB write — serialize to prevent DuckDB CHECKPOINT race conditions.
                 with db_write_lock:
                     with flush_lock:
                         current_latest = latest_flushed_seq_by_session.get(flush_key, -1)
@@ -972,6 +978,7 @@ def build_dash_app(
         # Launch async worker thread - don't block UI!
         thread = threading.Thread(target=_async_flush_worker, daemon=True)
         thread.start()
+        _active_flush_threads.append(thread)
 
         # Return immediately with optimistic state update
         state["last_saved"] = {
@@ -2449,5 +2456,6 @@ def build_dash_app(
     logger.debug("App setup complete")
 
     app.database_flush_errors = database_flush_errors
+    app.active_flush_threads = _active_flush_threads
 
     return app

@@ -2163,7 +2163,7 @@ def get_atlas_uid_from_stage(
             f"No workflow_runs entries found from stage={stage}, "
             f"RTA={obj.rt_alignment_number}, TGA={obj.analysis_number}, "
             f"chromatography={obj.ta.chromatography}, polarity={obj.ta.polarity}, "
-            f"atlas_category={getattr(obj.ta.atlas_category, 'value', obj.ta.atlas_category)}, atlas_name={obj.ta.atlas_name}. "
+            f"atlas_category={getattr(obj.ta.atlas_category, 'value', obj.ta.atlas_category)}, atlas_name={obj.ta.atlas_name}"
         )
         return {}
     if len(df) > 1:

@@ -217,8 +217,6 @@ def copy_outputs_to_google_drive(
     targeted_subdir = Path("Analysis_Uploads") / obj.project_name / run_folder / "Targeted" / f"{owner_chrom}_{obj.project_name}"
 
     path_string = f"{drive}:{targeted_subdir}"
-    logger.info(f"Uploading analysis results to Google Drive at {path_string}")
-
     date_str = datetime.now().strftime("%Y-%m-%d-%H-%M")
 
     if stage == "RT_ALIGNMENT":
