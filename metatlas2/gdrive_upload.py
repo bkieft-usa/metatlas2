@@ -245,14 +245,12 @@ def copy_outputs_to_google_drive(
                     chromatography = (getattr(obj, "chromatography", "") or "").upper()
                     polarity_display = (polarity or "").upper()
                     lines = [
-                        "--- Jira Template --------------------",
                         f"Chromatography: {chromatography}",
                         f"Analysis: {analysis_name}",
                         f"Polarity: {polarity_display}",
                         "Comment: ",
                         "Action: ",
                         f"Link: {url}",
-                        "--------------------------------------",
                     ]
                     text = "\n".join(lines)
                     display(HTML(
