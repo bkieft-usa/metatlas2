@@ -1,27 +1,27 @@
 ATLASES:
-  HILICZ:
-    POS:
-      QC:
-        QCv7:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_QCv7_positive.tsv
-          desc: Current QC compounds used for RT alignment to HF RT space for HILICZ data
-      ISTD:
-        ISTDsEtc:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_ISTDsEtcV7_positive.tsv
-          desc: Current internal standard compounds used for checking performance in positive mode data
-      REF:
-        EMA:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_EMA-standards_positive.tsv
-          desc: Current experimental compounds used for targeted analysis of positive mode data
-    NEG:
-      ISTD:
-        ISTDsEtc:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_ISTDsEtcV7_negative.tsv
-          desc: Current internal standard compounds used for checking performance in negative mode data
-      REF:
-        EMA:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_EMA-standards_negative.tsv
-          desc: Current experimental compounds used for targeted analysis of negative mode data
+  # HILICZ:
+  #   POS:
+  #     QC:
+  #       QCv7:
+  #         path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_QCv7_positive.tsv
+  #         desc: Current QC compounds used for RT alignment to HF RT space for HILICZ data
+  #     ISTD:
+  #       ISTDsEtc:
+  #         path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_ISTDsEtcV7_positive.tsv
+  #         desc: Current internal standard compounds used for checking performance in positive mode data
+  #     REF:
+  #       EMA:
+  #         path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_EMA-standards_positive.tsv
+  #         desc: Current experimental compounds used for targeted analysis of positive mode data
+  #   NEG:
+  #     ISTD:
+  #       ISTDsEtc:
+  #         path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_ISTDsEtcV7_negative.tsv
+  #         desc: Current internal standard compounds used for checking performance in negative mode data
+  #     REF:
+  #       EMA:
+  #         path: /global/cfs/cdirs/metatlas/metatlas-data/HILIC/production/HILIC_EMA-standards_negative.tsv
+  #         desc: Current experimental compounds used for targeted analysis of negative mode data
   C18:
     POS:
       QC:
@@ -32,16 +32,16 @@ ATLASES:
         ISTDsEtc:
           path: /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_positive.tsv
           desc: Current internal standard compounds used for checking performance in positive mode data
-      REF:
-        EMA:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_EMA-standards_positive.tsv
-          desc: Current experimental compounds used for targeted analysis of positive mode data
+      # REF:
+      #   EMA:
+      #     path: /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_EMA-standards_positive.tsv
+      #     desc: Current experimental compounds used for targeted analysis of positive mode data
     NEG:
       ISTD:
         ISTDsEtc:
           path: /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_ISTD_negative.tsv
           desc: Current internal standard compounds used for checking performance in negative mode data
-      REF:
-        EMA:
-          path: /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_EMA-standards_negative.tsv
-          desc: Current experimental compounds used for targeted analysis of negative mode data
+      # REF:
+      #   EMA:
+      #     path: /global/cfs/cdirs/metatlas/metatlas-data/C18/production/C18_EMA-standards_negative.tsv
+      #     desc: Current experimental compounds used for targeted analysis of negative mode data

@@ -24,15 +24,13 @@ def build_dash_app(
 ):
     logger.debug("Starting the app factory for the Analysis GUI...")
 
-    # Set up basic GUI params
+    # Read in main data
     manual_curation_df = analysis_gui_obj.experimental_data.curation_df
-    if "atlas_rt_peak" in manual_curation_df.columns:
-        manual_curation_df = manual_curation_df.sort_values("atlas_rt_peak").reset_index(drop=True)
 
+    # Set up basic GUI params
     _gui_cfg = analysis_gui_obj.config.gui_config if analysis_gui_obj.config else {}
     _op = analysis_gui_obj.override_parameters or {}
     _resolved_cfg = {**_gui_cfg, **{k: v for k, v in _op.items() if v is not None}}
-
     top_n_hits = _resolved_cfg.get("gui_top_n_hits", 20)
     lcmsruns_color_map = _resolved_cfg.get("gui_lcmsruns_colors", {})
     force_eval = _resolved_cfg.get("gui_require_all_evaluated", False)

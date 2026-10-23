@@ -127,6 +127,11 @@ def run_all_summaries(
         gdrive_upload = summary_obj.override_parameters["upload_to_gdrive"]
     elif summary_obj.ta.params.get("upload_to_gdrive") is not None:
         gdrive_upload = summary_obj.ta.params["upload_to_gdrive"]
+
+    owner = (summary_obj.owner or "").lower()
+    if owner == "jgi":
+        _print_jira_template(summary_obj)
+
     if gdrive_upload:
         logger.info("Uploading outputs to Google Drive...")
         gdu.copy_outputs_to_google_drive(summary_obj, "ANALYSIS_SUMMARY", overwrite=overwrite)
@@ -3995,3 +4000,45 @@ def make_targeted_analysis_readme(
     output_dir.mkdir(parents=True, exist_ok=True)
     readme_path.write_text(readme_text, encoding="utf-8")
     logger.info("Wrote targeted analysis README to %s", readme_path)
+
+
+def _print_jira_template(summary_obj: "AnalysisSummary") -> None:
+    """Print a copyable Jira ticket template to notebook stdout for JGI analyses.
+
+    Printed before the Google Drive upload so the analyst can fill it in
+    while the upload runs.
+    """
+    from IPython.display import display, HTML
+
+    chromatography = (summary_obj.chromatography or "").upper()
+    analysis = summary_obj.ta.atlas_name if summary_obj.ta else ""
+    polarity = fpf.normalize_polarity(summary_obj.polarity or "").upper()
+
+    rows = [
+        ("Chromatography", chromatography),
+        ("Analysis",       analysis),
+        ("Polarity",       polarity),
+        ("Comment",        ""),
+        ("Action",         ""),
+        ("Link",           ""),
+    ]
+
+    try:
+        html_rows = "".join(
+            f"<tr><td><b>{key}:</b></td><td>{val if val else '&lt;fill in&gt;'}</td></tr>"
+            for key, val in rows
+        )
+        html = (
+            "<div style='font-family:monospace; border:1px solid #ccc; "
+            "padding:10px; margin:8px 0; background:#f9f9f9;'>"
+            "<b>Jira Template</b><br/>"
+            f"<table style='border-collapse:collapse'>{html_rows}</table>"
+            "</div>"
+        )
+        display(HTML(html))
+    except Exception:
+        # Fallback: plain-text to stdout
+        print("\n--- Jira Template ---")
+        for key, val in rows:
+            print(f"{key}: {val}")
+        print("---------------------\n")
