@@ -19,7 +19,7 @@ The standalone development environment allows you to run metatlas2 on any machin
   - **macOS**: Install Docker Desktop and ensure it is running before launching standalone mode.
   - **Linux**: Install Docker Desktop (or Docker Engine), sign in if prompted, and verify `docker` and `docker compose` are available in your shell.
   - **Windows + WSL2**: Install Docker Desktop on Windows, enable WSL 2 integration in Docker Desktop settings, enable your WSL distro (for example Ubuntu).
-- ~2MB free disk space in `~/.metatlas2-dev/`
+- ~50MB free disk space in `~/.metatlas2-dev/`
 - Internet connection (for first-time data download)
 
 - **GitHub authentication** for container registry access:

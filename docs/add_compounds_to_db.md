@@ -2,6 +2,8 @@
 
 `add_compounds_to_db.py` reads compound data from one or more TSV/CSV input files (described in a YAML config), retrieves additional metadata from PubChem, and writes everything to the central metatlas DuckDB database.
 
+IMPORTANT: Only add compounds to the database if you have run legitimate reference standards on JGI HPLC-MS/MS machines.
+
 ---
 
 ## Prerequisites
