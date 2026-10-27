@@ -35,12 +35,6 @@ The test suite is split into two tiers:
 | Local dev | Python 3.11+, `uv` on PATH |
 | GitHub Actions | Handled automatically (see [CI/CD](#cicd)) |
 
-### Install test dependencies
-
-```bash
-uv pip install -e ".[test]"
-```
-
 ### Run unit tests only (fast, no Docker required)
 
 ```bash

@@ -145,13 +145,13 @@ cp ~/metatlas2/configs/example_configs/analyses/jgi_default_hilicz_config.yaml \
 Edit the copy:
 
 1. **`GENERAL.owner`** — set to your owner string (e.g. `jgi`); must match your raw data directory name
-2. **Atlas UIDs** — the `uid:` values under `RT_ALIGNMENT` and `TARGETED_ANALYSES` must match atlases that exist in the downloaded main database. Query available atlases with:
+2. **Atlas UIDs** — the `uid:` values under `RT_ALIGNMENT` and `TARGETED_ANALYSES` must match atlases that exist in the downloaded main database. The UIDs in the example configs in the repo contains valid atlases that can be used. Or, query available atlases with a command like this:
    ```bash
    metatlas2.sh get-atlases query --chromatography HILICZ --polarity POS
    ```
-3. **`upload_to_gdrive: false`** — keep this `false` unless you have Google Drive credentials configured
+3. **`upload_to_gdrive: false`** — keep this `false` unless you have Google Drive credentials configured on your local machine.
 
-The config file can live anywhere on your filesystem — `metatlas2.sh` will add a read-only bind-mount for its directory automatically if it is outside `$METATLAS_DATA_DIR`.
+The config file can live anywhere on your filesystem — `metatlas2.sh` will add a read-only bind-mount for its directory automatically if it is outside `$METATLAS_DATA_DIR` (you pass the full path to the config in the initial command line call).
 
 ---
 
@@ -165,7 +165,7 @@ metatlas2.sh run \
     --analysis-num 0
 ```
 
-Add `--dev` to use your local repository source instead of the installed package:
+Add `--dev` to use your local repository source instead of the installed package (e.g., if you clone/fork the main repo and want to make changes):
 
 ```bash
 metatlas2.sh --dev run \
