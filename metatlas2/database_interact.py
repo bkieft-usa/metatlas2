@@ -16,6 +16,7 @@ import yaml
 from pathlib import Path
 from contextlib import contextmanager
 from tqdm.auto import tqdm
+from IPython.display import display
 
 import metatlas2.file_and_project_format as fpf
 import metatlas2.lcmsruns_tools as lrt
@@ -2883,12 +2884,12 @@ def _get_opposite_polarity_curation(
     ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes.  Returns an empty DataFrame
     (no error) when no matching entries are found.
     """
-    # Use canonical lowercase form to match what is stored in the DB.
+    from metatlas2.workflow_objects import AtlasCategory
+
     opposite_polarity = "neg" if fpf.normalize_polarity(obj.polarity) == "pos" else "pos"
     project_db_path = obj.paths['project_db_path']
     rt_alignment_number = obj.rt_alignment_number
     analysis_number = obj.analysis_number
-    from metatlas2.workflow_objects import AtlasCategory
     chromatography = obj.ta.chromatography
     _cat = obj.ta.atlas_category
     atlas_category = _cat.value if isinstance(_cat, AtlasCategory) else str(_cat)
@@ -2924,6 +2925,7 @@ def _get_opposite_polarity_curation(
             f"RTA{rt_alignment_number} and TGA{analysis_number} with attributes "
             f"{chromatography}-{opposite_polarity}-{atlas_category}-{atlas_name}."
         )
+    df = sanitize_curation_df(df)
     return df
 
 
@@ -2931,56 +2933,44 @@ def _apply_cross_polarity_curation(
     obj: "AnalysisGUI",
     opposite_polarity_df: pd.DataFrame,
 ) -> int:
-    """
-    Apply RT bounds (and notes) from opposite-polarity curated entries to
-    matching compounds in the current analysis.
-
-    Matching is on (compound_name, inchi_key, atlas_rt_peak) since adducts
-    differ across polarities.  Only updates rows that have not yet been manually
-    curated (ms2_notes == '').  Also updates RT bounds on the
-    auto_ided_atlas_obj CompoundMZRT objects (keyed by mz_rt_uid) so that EIC
-    plot windows reflect the transferred values when the GUI opens.
-
-    Returns n_transferred.
-    """
     if opposite_polarity_df.empty:
         return 0
 
-    # Build lookup keyed on (compound_name, inchi_key), not adduct or mz_rt_uid
     opp_lookup = {}
     for _, row in opposite_polarity_df.iterrows():
         name = row.get("compound_name", row.get("label"))
         if not name:
-            logger.warning(f"Skipping row with missing compound name: {row.to_dict()}")
             continue
-        key = (name, row["inchi_key"]) #, row["atlas_rt_peak"])
+        key = (name, row["inchi_key"])
         if key not in opp_lookup:
             opp_lookup[key] = row
 
-    # Atlas is keyed by mz_rt_uid — use that as the unique identifier.
     compound_mzrts = obj.auto_ided_atlas_obj.compound_mzrts
-
     n_transferred = 0
+    
     for idx, row in obj.experimental_data.curation_df.iterrows():
         name = row.get("compound_name", row.get("label"))
         if not name:
-            logger.warning(f"Skipping row with missing compound name: {row.to_dict()}")
             continue
-        key = (name, row["inchi_key"]) #, row["atlas_rt_peak"])
+        key = (name, row["inchi_key"])
         if key not in opp_lookup:
             continue
 
         ms2_note_val = row.get("ms2_notes", "")
         if ms2_note_val != "":
-            continue  # already curated — do not overwrite
+            continue  # already curated
 
         opp_row = opp_lookup[key]
+        
         obj.experimental_data.curation_df.at[idx, "rt_peak"] = opp_row["rt_peak"]
         obj.experimental_data.curation_df.at[idx, "rt_min"] = opp_row["rt_min"]
         obj.experimental_data.curation_df.at[idx, "rt_max"] = opp_row["rt_max"]
         obj.experimental_data.curation_df.at[idx, "ms1_notes"] = opp_row["ms1_notes"]
         obj.experimental_data.curation_df.at[idx, "ms2_notes"] = opp_row["ms2_notes"]
-        obj.experimental_data.curation_df.at[idx, "analyst_notes"] = opp_row["analyst_notes"] + " (curation transferred from opposite-polarity compound)"
+        
+        obj.experimental_data.curation_df.at[idx, "analyst_notes"] = (
+            str(opp_row["analyst_notes"]) + " (curation transferred from opposite-polarity compound)"
+        )
         obj.experimental_data.curation_df.at[idx, "identification_notes"] = opp_row["identification_notes"]
         obj.experimental_data.curation_df.at[idx, "other_notes"] = opp_row["other_notes"]
 
@@ -3022,27 +3012,28 @@ def _transfer_istd_curation(
         """, [obj.polarity, obj.rt_alignment_number, obj.analysis_number]).df()
 
     if istd_df.empty:
-        logger.info("No ISTD curation entries found to transfer to REF atlas.")
         return
-
-    logger.info(f"Merging ISTD curation with REF atlas for {len(istd_df)} compounds...")
-    merged = obj.experimental_data.curation_df.merge(istd_df, on='mz_rt_uid', how='left', suffixes=('', '_istd'))
+        
+    istd_df = sanitize_curation_df(istd_df)
+    current_curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
+    merged = current_curation_df.merge(istd_df, on='mz_rt_uid', how='left', suffixes=('', '_istd'))
     
     for col in ['rt_peak', 'rt_min', 'rt_max', 'ms1_notes', 'ms2_notes', 'analyst_notes','identification_notes', 'other_notes']:
         istd_col = f"{col}_istd"
         if istd_col in merged.columns:
-            # Update EMA value only if original is empty/default (don't overwrite a manually entered value)
             was_empty = (merged[col] == '') | (merged[col] == 0.0)
             merged[col] = np.where(was_empty, merged[istd_col], merged[col])
 
-    # Append the transfer note only to rows that actually received ISTD data
+    # Append transfer notes
     if 'analyst_notes_istd' in merged.columns:
         had_istd_match = merged['analyst_notes_istd'].notna() & (merged['analyst_notes_istd'] != '')
         merged.loc[had_istd_match, 'analyst_notes'] = (
-            merged.loc[had_istd_match, 'analyst_notes'] + " (curation transferred from ISTD compound)"
+            merged.loc[had_istd_match, 'analyst_notes'].astype(str) + " (curation transferred from ISTD compound)"
         )
     
-    obj.experimental_data.curation_df = merged[[c for c in merged.columns if not c.endswith('_istd')]]
+    final_df = merged[[c for c in merged.columns if not c.endswith('_istd')]]
+    obj.experimental_data.curation_df = sanitize_curation_df(final_df)
+
 
 def validate_override_parameters(override_parameters):
     if not isinstance(override_parameters, dict):
@@ -3585,6 +3576,7 @@ def _merge_best_ms1_metrics_with_curation_df(summary_obj: "AnalysisSummary") -> 
     curation_df = summary_obj.experimental_data.curation_df
     if curation_df is None or curation_df.empty:
         return curation_df
+    curation_df = sanitize_curation_df(curation_df)
     merged = curation_df.copy()
 
     best_ms1_df = summary_obj.best_ms1_metrics_df
@@ -3596,6 +3588,7 @@ def _merge_best_ms1_metrics_with_curation_df(summary_obj: "AnalysisSummary") -> 
         on="mz_rt_uid",
         how="left",
     )
+    merged = sanitize_curation_df(merged)
 
     summary_obj.experimental_data.curation_df = merged
 
@@ -3880,31 +3873,41 @@ def _apply_override_ms_filters(
         obj.experimental_data.ms1_df = obj.experimental_data.ms1_df[obj.experimental_data.ms1_df['mz_rt_uid'].isin(surviving_uids)]
         obj.experimental_data.ms2_df = obj.experimental_data.ms2_df[obj.experimental_data.ms2_df['mz_rt_uid'].isin(surviving_uids)]    
 
-def _transfer_cross_polarity_curation(
-    obj: "AnalysisGUI"
-):
-
+def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
     apply_cross_polarity = obj.ta.params.get("apply_cross_polarity_curation", True)
     if obj.override_parameters.get("apply_cross_polarity_curation") is not None:
         apply_cross_polarity = obj.override_parameters.get("apply_cross_polarity_curation")
+    
     if apply_cross_polarity:
         atlas_obj = obj.auto_ided_atlas_obj
-        logger.info(
-            f"Checking for curated opposite-polarity {getattr(atlas_obj.atlas_category, 'value', atlas_obj.atlas_category)} entries "
-            f"to pre-populate RT bounds..."
-        )
-        opp_polarity_df = _get_opposite_polarity_curation(
-            obj=obj
-        )
+        logger.info(f"Checking for curated opposite-polarity entries...")
+        
+        opp_polarity_df = _get_opposite_polarity_curation(obj=obj)
+        
         if not opp_polarity_df.empty:
+            opp_polarity_df = sanitize_curation_df(opp_polarity_df)
+            
             n_cross = _apply_cross_polarity_curation(
                 obj=obj,
                 opposite_polarity_df=opp_polarity_df
             )
-            logger.info(
-                f"Transferred opposite-polarity RT bounds to {n_cross} compound(s) "
-                f"(inchi_key matches, ms2_notes was empty)."
-            )
+            
+            obj.experimental_data.curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
+            
+            logger.info(f"Transferred opposite-polarity RT bounds to {n_cross} compound(s).")
+
+def sanitize_curation_df(df):
+    if df is None or df.empty:
+        return df
+    
+    df = df.copy()
+    notes_cols = ['ms1_notes', 'ms2_notes', 'other_notes', 'identification_notes', 'analyst_notes', 'isomers']
+    for col in notes_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna('').astype(str)
+            df[col] = df[col].replace(['nan', 'NaN', 'None'], '')
+            
+    return df
 
 def load_and_filter_for_gui(analysis_gui_obj):
 
@@ -3947,6 +3950,7 @@ def _load_data_from_db(
             f"WHERE rt_alignment_number = ? AND analysis_number = ? {uid_clause}",
             base_params,
         ).df()
+        curation_df = sanitize_curation_df(curation_df)
 
         ms1_df = conn.execute(
             f"SELECT * FROM ms1_data "
