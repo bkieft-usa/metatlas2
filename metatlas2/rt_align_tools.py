@@ -431,7 +431,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     """
     Visualize RT alignment model results using RTAlign object.
 
-    Produces ``RT_Alignment_Summary.pdf`` showing the chosen model type
+    Produces ``RTAlignment-Summary.pdf`` showing the chosen model type
     (default: polynomial) fitted to the chosen rt_peak_source
     (default: median across QC files).
     """
@@ -526,7 +526,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
         try:
             plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = plot_save_dir / f"RT_Alignment_Summary_{rt_align_obj.chromatography}.pdf"
+            pdf_path = plot_save_dir / f"RTAlignment-Summary__{rt_align_obj.project_name}.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
             logger.info(f"Plot saved to {pdf_path}")
             plt.close()
@@ -559,7 +559,7 @@ def _draw_facet(
     title: str,
     show_legend: bool = True,
 ) -> None:
-    """Draw one facet (subplot) of the RT_Alignment_All figure.
+    """Draw one facet (subplot) of the RTAlignment-All figure.
 
     Plots the scatter of atlas RT vs observed peak RT, then overlays a
     regression line for each of the three model types.
@@ -612,7 +612,7 @@ def _draw_facet(
 
 
 def visualize_rt_alignment_all(rt_align_obj: "RTAlign", save_plot: bool = True) -> None:
-    """Produce ``RT_Alignment_All.pdf`` — one facet per QC file plus composites.
+    """Produce ``RTAlignment-All.pdf`` — one facet per QC file plus composites.
 
     Each facet shows the atlas RT vs observed peak RT scatter and overlays
     three regression lines (linear, polynomial degree-2, median-offset) so
@@ -631,9 +631,9 @@ def visualize_rt_alignment_all(rt_align_obj: "RTAlign", save_plot: bool = True) 
                       ``composite_models``, ``per_file_modeling_data``,
                       ``composite_modeling_data`` attributes populated).
         save_plot:    When ``True`` (default) the figure is saved to
-                      ``rt_alignment_results_dir/RT_Alignment_All.pdf``.
+                      ``rt_alignment_results_dir/RTAlignment-All.pdf``.
     """
-    logger.info("Plotting RT_Alignment_All figure...")
+    logger.info("Plotting RTAlignment-All figure...")
 
     per_file_models: dict[str, dict] = getattr(rt_align_obj, 'per_file_models', {})
     composite_models: dict[str, dict] = getattr(rt_align_obj, 'composite_models', {})
@@ -648,7 +648,7 @@ def visualize_rt_alignment_all(rt_align_obj: "RTAlign", save_plot: bool = True) 
     n_panels = len(panels)
 
     if n_panels == 0:
-        logger.warning("No per-file or composite models found; skipping RT_Alignment_All plot.")
+        logger.warning("No per-file or composite models found; skipping RTAlignment-All plot.")
         return
 
     # Layout: try to keep roughly square grid
@@ -707,12 +707,12 @@ def visualize_rt_alignment_all(rt_align_obj: "RTAlign", save_plot: bool = True) 
         try:
             plot_save_dir = Path(output_dir)
             plot_save_dir.mkdir(parents=True, exist_ok=True)
-            pdf_path = plot_save_dir / f"RT_Alignment_All_{rt_align_obj.chromatography}.pdf"
+            pdf_path = plot_save_dir / f"RTAlignment-All__{rt_align_obj.project_name}.pdf"
             plt.savefig(pdf_path, bbox_inches='tight')
-            logger.info(f"RT_Alignment_All plot saved to {pdf_path}")
+            logger.info(f"RTAlignment-All plot saved to {pdf_path}")
             plt.close()
         except Exception as e:
-            logger.error(f"Error saving RT_Alignment_All plot: {e}")
+            logger.error(f"Error saving RTAlignment-All plot: {e}")
 
 
 def build_rt_alignment_model(
@@ -738,7 +738,7 @@ def build_rt_alignment_model(
       ``"median"``.
 
     All per-file and composite models are stored on *rt_align_obj* for the
-    ``RT_Alignment_All.pdf`` visualisation.
+    ``RTAlignment-All.pdf`` visualisation.
 
     Args:
         rt_align_obj: RTAlign object with alignment settings.
