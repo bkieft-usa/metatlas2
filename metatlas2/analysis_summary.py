@@ -656,27 +656,70 @@ def _plot_mirror(
             top_idx = valid_idx[order]
             top_idx_sorted = sorted(top_idx, key=lambda i: mz_np[i])
 
-            MIN_MZ_GAP = 5.0
-            TEXT_HEIGHT_FRACTION = 0.09
-            y_max = float(int_np[valid_idx].max())
+            # --- Labeling Logic ---
+            # Configuration for overlap prevention
+            X_MIN_GAP = 5       # m/z distance below which we start staggering
+            X_OFFSET = 0.2        # Initial gap to keep text off the bar line
+            X_STAGGER_STEP = 1   # Additional shift per overlapping label
+            Y_START_FACTOR = 0.98 # Shift start slightly towards y=0
+
+            def get_top_indices(mzs, ints, n=5):
+                m_np, i_np = np.array(mzs, dtype=float), np.array(ints, dtype=float)
+                valid = np.isfinite(m_np) & np.isfinite(i_np) & (i_np > 0)
+                if not np.any(valid): return []
+                valid_idx = np.where(valid)[0]
+                order = np.argsort(i_np[valid_idx])[::-1][:n]
+                return valid_idx[order]
+
+            # Process Query Labels (Point Up)
+            qry_top = sorted(get_top_indices(qry_mz, qry_int), key=lambda i: qry_mz[i])
             prev_x = None
             stagger_level = 0
-
-            for idx in top_idx_sorted:
-                x_txt = float(mz_np[idx])
-                y_base = float(int_np[idx]) * 1.02
-                if prev_x is not None and abs(x_txt - prev_x) < MIN_MZ_GAP:
+            for idx in qry_top:
+                x_val = float(qry_mz[idx])
+                y_val = float(qry_int[idx])
+                
+                if prev_x is not None and abs(x_val - prev_x) < X_MIN_GAP:
                     stagger_level += 1
                 else:
                     stagger_level = 0
-                y_txt = y_base + stagger_level * (y_max * TEXT_HEIGHT_FRACTION)
-                ax.text(
-                    x_txt, y_txt, f"{mz_np[idx]:.4f}",
-                    fontsize=10, ha="center", va="bottom", color="black",
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.65, pad=0.2),
-                    clip_on=False,
-                )
-                prev_x = x_txt
+                
+                # Final x = original + initial offset + (level * step)
+                x_txt = x_val + X_OFFSET + (stagger_level * X_STAGGER_STEP)
+                y_txt = y_val * Y_START_FACTOR
+                
+                ax.text(x_txt, y_txt, f"{x_val:.4f}", 
+                        fontsize=10, rotation=90, 
+                        ha="left", va="bottom", # Grow UP away from axis
+                        color="black",
+                        bbox=dict(facecolor="white", edgecolor="none", alpha=0.65, pad=0.2),
+                        clip_on=False)
+                prev_x = x_val
+
+            # Process Reference Labels (Point Down)
+            ref_top = sorted(get_top_indices(ref_mz, ref_int), key=lambda i: ref_mz[i])
+            prev_x = None
+            stagger_level = 0
+            for idx in ref_top:
+                x_val = float(ref_mz[idx])
+                y_val = -float(ref_int[idx]) * scale
+                
+                if prev_x is not None and abs(x_val - prev_x) < X_MIN_GAP:
+                    stagger_level += 1
+                else:
+                    stagger_level = 0
+                    
+                x_txt = x_val + X_OFFSET + (stagger_level * X_STAGGER_STEP)
+                y_txt = y_val * Y_START_FACTOR # Shift slightly towards y=0 (upwards)
+                
+                ax.text(x_txt, y_txt, f"{x_val:.4f}", 
+                        fontsize=10, rotation=90, 
+                        ha="left", va="top",    # Grow DOWN away from axis
+                        color="black",
+                        bbox=dict(facecolor="white", edgecolor="none", alpha=0.65, pad=0.2),
+                        clip_on=False)
+                prev_x = x_val
+
             ax.margins(y=0.20)
 
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
@@ -684,7 +727,6 @@ def _plot_mirror(
         f"Intensity",
         fontsize=14, weight="bold",
     )
-    # "Ref Scaled xN" label: bottom-left corner, vertical, size 10
     ax.text(
         0.02, 0.04,
         f"Ref Scaled x{scale:.4f}",
@@ -2851,7 +2893,7 @@ def make_best_ms2_hit_fragment_ions_csv(
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Exporting best MS2 hit fragment ions CSV to {output_file}")
+    logger.info(f"Exporting top 3 MS2 hit fragment ions (one per file) CSV to {output_file}")
 
     if summary_obj.experimental_data.curation_df is None:
         summary_obj.load_data()
@@ -2862,26 +2904,43 @@ def make_best_ms2_hit_fragment_ions_csv(
         return
 
     ms2_df = summary_obj.experimental_data.ms2_df
-    ms2_best: dict[str, "MS2Hit"] = {}
+    top_ms2_hits = {"first": {}, "second": {}, "third": {}}
+    
     if ms2_df is not None and not ms2_df.empty:
         for uid, grp in ms2_df.groupby("mz_rt_uid", sort=False):
-            best_score = -np.inf
-            best_hit: "MS2Hit" | None = None
+            # Track the best hit found so far for each unique file
+            best_hit_per_file = {} # { filename: MS2Hit }
+            
             for _, scan_row in grp.iterrows():
                 hits = MS2Hit.list_from_scan_row(scan_row)
-                if hits and hits[0].has_score and hits[0].score > best_score:
-                    best_score = hits[0].score
-                    best_hit = hits[0]
-            if best_hit is not None:
-                ms2_best[uid] = best_hit
+                for hit in hits:
+                    if not hit.has_score:
+                        continue
+                    
+                    fname = str(hit.filename)
+                    # If this file isn't recorded yet, or this hit is better than the previous best for this file
+                    if fname not in best_hit_per_file or hit.score > best_hit_per_file[fname].score:
+                        best_hit_per_file[fname] = hit
+            
+            # Now we have the best hit for every file. Sort these winners by score.
+            sorted_file_winners = sorted(
+                best_hit_per_file.values(), 
+                key=lambda h: h.score, 
+                reverse=True
+            )
+            
+            # Assign the top 3 unique-file hits
+            ranks = ["first", "second", "third"]
+            for i, hit in enumerate(sorted_file_winners[:3]):
+                top_ms2_hits[ranks[i]][uid] = hit
 
     mc_reset = manual_curation_df.reset_index(drop=True)
-
     rows: list[dict] = []
+
     for cmp_idx, mc_row in tqdm(
         mc_reset.iterrows(),
         total=len(mc_reset),
-        desc="Finding best MS2 hits for compounds",
+        desc="Finding top three MS2 hits for compounds",
         disable=should_disable_tqdm(),
     ):
         cmp_idx_display = _display_compound_idx(cmp_idx)
@@ -2892,52 +2951,47 @@ def make_best_ms2_hit_fragment_ions_csv(
         atlas_mz = safe_float(mc_row.get("atlas_mz"))
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
-        # Build the same compound_id as make_data_sheets
         compound_id = _make_compound_safe_stem(
             cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt
         )
 
-        best_hit = ms2_best.get(mz_rt_uid)
-        if best_hit is None:
-            continue
+        row_data = {"compound_id": compound_id}
+        
+        hit_keys = ["first", "second", "third"]
+        for i, key in enumerate(hit_keys, start=1):
+            hit = top_ms2_hits[key].get(mz_rt_uid)
+            
+            if hit:
+                q_mz_all = np.array(hit.aligned.query_mzs, dtype=float)
+                q_int_all = np.array(hit.aligned.query_ints, dtype=float)
+                
+                valid = ~np.isnan(q_mz_all)
+                mz_vals = q_mz_all[valid].tolist()
+                int_vals = q_int_all[valid].tolist()
 
-        q_mz_all = np.array(best_hit.aligned.query_mzs, dtype=float)
-        q_int_all = np.array(best_hit.aligned.query_ints, dtype=float)
+                if min_fragment_intensity is not None:
+                    filtered = [(mz, i) for mz, i in zip(mz_vals, int_vals) if i > min_fragment_intensity]
+                    if filtered:
+                        fmz, fint = zip(*filtered)
+                        mz_vals, int_vals = list(fmz), list(fint)
+                    else:
+                        mz_vals, int_vals = [], []
 
-        if q_mz_all.size > 0:
-            valid     = ~np.isnan(q_mz_all)
-            mz_vals   = q_mz_all[valid].tolist()
-            int_vals  = q_int_all[valid].tolist()
-        else:
-            mz_vals, int_vals = [], []
-
-        if min_fragment_intensity is not None:
-            filtered = [
-                (mz, i) for mz, i in zip(mz_vals, int_vals)
-                if i > min_fragment_intensity
-            ]
-            if filtered:
-                fmz, fint = zip(*filtered)
-                mz_vals, int_vals = list(fmz), list(fint)
+                row_data[f"hit_{i}_filename"] = os.path.basename(str(hit.filename))
+                row_data[f"hit_{i}_rt_peak"] = hit.scan_rt
+                row_data[f"hit_{i}_mz_peak"] = hit.mz_measured
+                row_data[f"hit_{i}_spectrum"] = json.dumps([mz_vals, int_vals])
+                row_data[f"hit_{i}_mz_array"] = json.dumps([round(v, 4) for v in mz_vals])
+                row_data[f"hit_{i}_intensity_array"] = json.dumps([round(v, 4) for v in int_vals])
             else:
-                mz_vals, int_vals = [], []
+                row_data[f"hit_{i}_filename"] = None
+                row_data[f"hit_{i}_rt_peak"] = None
+                row_data[f"hit_{i}_mz_peak"] = None
+                row_data[f"hit_{i}_spectrum"] = None
+                row_data[f"hit_{i}_mz_array"] = None
+                row_data[f"hit_{i}_intensity_array"] = None
 
-        # Full spectrum JSON (retained for backward compatibility)
-        raw_spectrum_output = json.dumps([mz_vals, int_vals])
-
-        # Separate arrays rounded to 4 decimal places
-        mz_4dp  = [round(v, 4) for v in mz_vals]
-        int_4dp = [round(v, 4) for v in int_vals]
-
-        rows.append({
-            "compound_id":     compound_id,
-            "filename":        os.path.basename(str(best_hit.filename)),
-            "rt_peak":         best_hit.scan_rt,
-            "mz_peak":         best_hit.mz_measured,
-            "spectrum":        raw_spectrum_output,
-            "mz_array":        json.dumps(mz_4dp),
-            "intensity_array": json.dumps(int_4dp),
-        })
+        rows.append(row_data)
 
     result_df = pd.DataFrame(rows)
     if result_df.empty:
@@ -2945,8 +2999,7 @@ def make_best_ms2_hit_fragment_ions_csv(
         return
 
     result_df.to_csv(output_file, index=False)
-    logger.info(f"Exported best MS2 hit fragment ions CSV ({len(result_df)} compounds)")
-
+    logger.info(f"Exported top 3 MS2 hit fragment ions CSV ({len(result_df)} compounds)")
 
 def make_data_sheets(
     summary_obj: "AnalysisSummary",
