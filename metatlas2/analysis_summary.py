@@ -283,6 +283,10 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
 
     ms1_bad_mask = mc["ms1_notes"].apply(lambda v: should_require_note_selection(v, ms1_options))
     ms2_bad_mask = mc["ms2_notes"].apply(lambda v: should_require_note_selection(v, ms2_options))
+    
+    # If MS1 note contains "remove", it overrides the need for an MS2 note
+    is_removed_ms1 = mc["ms1_notes"].str.contains("remove", case=False, na=False)
+    ms2_bad_mask = ms2_bad_mask & ~is_removed_ms1
 
     if not ms1_bad_mask.any() and not ms2_bad_mask.any():
         return
@@ -290,24 +294,24 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
     details = []
     if ms1_bad_mask.any():
         first_default = ms1_options[0] if ms1_options else ""
-        bad_rows = mc[ms1_bad_mask].head(8)
+        bad_rows = mc[ms1_bad_mask]
         examples = ", ".join(
-            f"{_display_compound_idx(i)}:{row.get('compound_name', 'unknown')}"
+            f"{_display_compound_idx(i)}: {row.get('compound_name', 'unknown')}"
             for i, row in bad_rows.iterrows()
         )
         details.append(
-            f"MS1 notes still at unresolved default '{first_default}' for {int(ms1_bad_mask.sum())} compound(s). Examples: {examples}"
+            f"MS1 notes still at unresolved default '{first_default}' for {int(ms1_bad_mask.sum())} compound(s).\n {examples}"
         )
 
     if ms2_bad_mask.any():
         first_default = ms2_options[0] if ms2_options else ""
-        bad_rows = mc[ms2_bad_mask].head(8)
+        bad_rows = mc[ms2_bad_mask]
         examples = ", ".join(
-            f"{_display_compound_idx(i)}:{row.get('compound_name', 'unknown')}"
+            f"{_display_compound_idx(i)}: {row.get('compound_name', 'unknown')}"
             for i, row in bad_rows.iterrows()
         )
         details.append(
-            f"MS2 notes still at unresolved default '{first_default}' for {int(ms2_bad_mask.sum())} compound(s). Examples: {examples}"
+            f"MS2 notes still at unresolved default '{first_default}' for {int(ms2_bad_mask.sum())} compound(s).\n {examples}"
         )
 
     raise ValueError(
