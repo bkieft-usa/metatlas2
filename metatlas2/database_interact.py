@@ -3555,6 +3555,8 @@ def load_and_filter_for_summary(summary_obj, update_raw_in_feature=False):
 
     _load_data_from_db(summary_obj, [v.prev_mz_rt_uid for v in summary_obj.manually_curated_atlas_obj.compound_mzrts.values()]) # need the previous mz_rt_uids because of the cloning step
 
+    _apply_override_ms_filters(summary_obj)
+
     _apply_remove_flagged_compounds(summary_obj)
 
     _update_infeature_tag(summary_obj)
