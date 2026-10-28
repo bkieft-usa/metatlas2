@@ -81,13 +81,10 @@ def build_dash_app(
     _active_flush_threads: list[threading.Thread] = []
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
-    #logger.info("Pre-indexing MS data by mz_rt_uid for fast lookups...")
     ms1_by_compound = {}
     ms2_by_compound = {}
 
-    # Index MS1 data — pre-convert spec_rts/spec_ints list columns to numpy arrays once
-    # at startup so _compute_y_max_in_range() and the trace-building loop never pay the
-    # Python-list → ndarray conversion cost on every render.
+    # Index MS1 data
     for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms1_df.groupby(["mz_rt_uid"], observed=True):
         if len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
@@ -99,7 +96,6 @@ def build_dash_app(
         ms1_by_compound[mz_rt_uid] = group
 
     # Index MS2 data and pre-sort each scan's hits list by score descending.
-    # This is done once at startup so _get_ms2_scans() never needs to re-sort hits per call.
     def _presort_hits(raw):
         if not isinstance(raw, list) or not raw:
             return raw
@@ -116,9 +112,6 @@ def build_dash_app(
             group["hits"] = group["hits"].apply(_presort_hits)
         ms2_by_compound[mz_rt_uid] = group
 
-    # Pre-build compact marker data for MS1 triangle markers.
-    # Stores (scan_rt, best_score) tuples per compound, pre-sorted by score descending.
-    # Pre-sorting at startup means per-drag filtering + top-100 slice requires no sort step.
     ms2_markers_by_compound = {}
     for uid, group_df in ms2_by_compound.items():
         markers = []
@@ -383,9 +376,9 @@ def build_dash_app(
                     dbc.Table(
                         [
                             html.Tbody([
-                                html.Tr([html.Td(html.Kbd("a"), className="text-center"), html.Td("RT min − 0.05")]),
+                                html.Tr([html.Td(html.Kbd("a"), className="text-center"), html.Td("RT min - 0.05")]),
                                 html.Tr([html.Td(html.Kbd("s"), className="text-center"), html.Td("RT min + 0.05")]),
-                                html.Tr([html.Td(html.Kbd("d"), className="text-center"), html.Td("RT max − 0.05")]),
+                                html.Tr([html.Td(html.Kbd("d"), className="text-center"), html.Td("RT max - 0.05")]),
                                 html.Tr([html.Td(html.Kbd("f"), className="text-center"), html.Td("RT max + 0.05")]),
                             ])
                         ],
@@ -448,6 +441,58 @@ def build_dash_app(
                                     html.Td(lbl),
                                 ])
                                 for lbl in analysis_gui_obj.notes["other_notes"]
+                            ])
+                        ],
+                        bordered=True, size="sm", className="mb-3",
+                    ),
+                ],
+            ),
+            # Figure Guide cheat-sheet panel
+            dbc.Offcanvas(
+                id="guide-offcanvas",
+                title="Figure Guide",
+                is_open=False,
+                placement="end",
+                style={"width": "600px"},
+                children=[
+                    html.H6("MS1 Plot Legend", className="mt-2 mb-1 fw-bold"),
+                    dbc.Table(
+                        [
+                            html.Tbody([
+                                html.Tr([html.Td("Sample Line Colors", className="fw-bold"), html.Td(f"Experimental samples: gray.\nTechnical samples: {lcmsruns_color_map}")]),
+                                html.Tr([html.Td("Purple VLine", className="fw-bold"), html.Td("Atlas RT peak")]),
+                                html.Tr([html.Td("Orange VLines", className="fw-bold"), html.Td("Suggested RT bounds (Solid: min, Dashed: max)")]),
+                                html.Tr([html.Td("Green VLines", className="fw-bold"), html.Td("Current RT bounds (Solid: min, Dashed: max)")]),
+                                html.Tr([html.Td("Black Triangles", className="fw-bold"), html.Td("RT of MS2 scans")]),
+                                html.Tr([html.Td("Red/Blue Shaded Boxes", className="fw-bold"), html.Td("Isomers (identical m/z or matching InChIKey prefix)")]),
+                            ])
+                        ],
+                        bordered=True, size="sm", className="mb-3",
+                    ),
+                    #html.H6("MS1 Interaction", className="mt-2 mb-1 fw-bold"),
+                    html.Div([
+                        html.P("RT Bound Adjustment:", className="fw-bold mb-1"),
+                        html.Ul([
+                            html.Li("Drag the green lines directly on the plot"),
+                            html.Li("Use hotkeys 'a', 's' (min; left/right) and 'd', 'f' (max; left/right)"),
+                            html.Li("Press 'm' to snap to the next shaded isomer box"),
+                            html.Li("Press 'n' to accept suggested RT bounds (orange lines)"),
+                        ], style={"fontSize": "0.9rem", "paddingLeft": "1.2rem"}),
+                        
+                        html.P("Range Slider:", className="fw-bold mb-1"),
+                        html.P(
+                            "The blue dotted line represents the max intensity point across all files at every RT for this compound. The white area is in the viewframe, and the gray area can be viewed by dragging the handles of the range slider.",
+                            style={"fontSize": "0.9rem"}
+                        ),
+                    ], className="mb-3"),
+                    html.H6("MS2 Plot Legend", className="mt-2 mb-1 fw-bold"),
+                    dbc.Table(
+                        [
+                            html.Tbody([
+                                html.Tr([html.Td("Mirror Plot", className="fw-bold"), html.Td("Data ions (up) vs. Reference ions (down)")]),
+                                html.Tr([html.Td("Ref Scaled", className="fw-bold"), html.Td("Reference spectrum intensity is scaled to match the data spectrum peak")]),
+                                html.Tr([html.Td("Green Bars", className="fw-bold"), html.Td("Matching fragments")]),
+                                html.Tr([html.Td("Red Bars", className="fw-bold"), html.Td("Non-matching fragments")]),
                             ])
                         ],
                         bordered=True, size="sm", className="mb-3",
@@ -550,6 +595,18 @@ def build_dash_app(
                                             size="sm",
                                             style={"marginTop": "0.5rem"},
                                             title="Keyboard shortcuts",
+                                        ),
+                                        width="auto",
+                                        className="d-flex justify-content-center",
+                                    ),
+                                    dbc.Col(
+                                        dbc.Button(
+                                            "Figure Guide",
+                                            id="guide-btn",
+                                            color="dark",
+                                            size="sm",
+                                            style={"marginTop": "0.5rem"},
+                                            title="Legend and Readme",
                                         ),
                                         width="auto",
                                         className="d-flex justify-content-center",
@@ -1020,9 +1077,6 @@ def build_dash_app(
             )
             return fig
 
-        # Determine y_max as the highest intensity point of all files within the current window.
-        # Uses an incremental cache: only re-scans newly-exposed slivers when the window grows,
-        # and does a full rescan when the window shrinks (so y_max correctly decreases).
         y_min_positive_data = None
         _rt_peak = row.get("rt_peak", np.nan)
         try:
@@ -1035,10 +1089,6 @@ def build_dash_app(
         expanded_rt_max = _eic_rt_hi + 1
 
         def _compute_y_max_in_range(df, lo, hi):
-            """Return the max intensity across all files within [lo, hi].
-            spec_rts/spec_ints are pre-converted to numpy arrays at startup,
-            so no list→ndarray conversion is needed here.
-            """
             y_max = 1.0
             for r in df.itertuples(index=False):
                 rt_arr = getattr(r, "spec_rts", None)
@@ -1058,13 +1108,10 @@ def build_dash_app(
         force_recalc = state.get("force_y_recalc", False)
 
         if force_recalc or cached_y is None or old_exp_min is None or old_exp_max is None:
-            # Cold cache or forced — full scan of current window
             y_max_data = _compute_y_max_in_range(sub, expanded_rt_min, expanded_rt_max)
         elif expanded_rt_min > old_exp_min or expanded_rt_max < old_exp_max:
-            # Window shrank — must full-rescan (can't know which file held the old max)
             y_max_data = _compute_y_max_in_range(sub, expanded_rt_min, expanded_rt_max)
         elif expanded_rt_min < old_exp_min or expanded_rt_max > old_exp_max:
-            # Window grew — scan only the newly-exposed slivers, keep cached max
             y_max_data = cached_y
             if expanded_rt_min < old_exp_min:
                 sliver_max = _compute_y_max_in_range(sub, expanded_rt_min, old_exp_min)
@@ -1073,7 +1120,6 @@ def build_dash_app(
                 sliver_max = _compute_y_max_in_range(sub, old_exp_max, expanded_rt_max)
                 y_max_data = max(y_max_data, sliver_max)
         else:
-            # Window unchanged — use cache directly
             y_max_data = cached_y
 
         # Update cache with current window bounds and computed y_max
@@ -2400,6 +2446,17 @@ def build_dash_app(
         prevent_initial_call=True,
     )
     def toggle_help(n_clicks, is_open):
+        if n_clicks:
+            return not is_open
+        raise dash.exceptions.PreventUpdate
+
+    @app.callback(
+        Output("guide-offcanvas", "is_open"),
+        Input("guide-btn", "n_clicks"),
+        State("guide-offcanvas", "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_guide(n_clicks, is_open):
         if n_clicks:
             return not is_open
         raise dash.exceptions.PreventUpdate

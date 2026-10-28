@@ -16,7 +16,7 @@ import yaml
 from pathlib import Path
 from contextlib import contextmanager
 from tqdm.auto import tqdm
-from IPython.display import display
+from IPython.display import display, HTML
 
 import metatlas2.file_and_project_format as fpf
 import metatlas2.lcmsruns_tools as lrt
@@ -94,6 +94,9 @@ def get_db_connection(db_path: str, read_only: bool = False, max_retries: int = 
                 raise
     if last_error:
         raise last_error
+
+def log_highlight(message):
+    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>{message}</div>"))
 
 def _generate_uid(entity_type: str, decorator: str | None = None) -> str:
     """Generate a unique identifier for a database entity.
@@ -646,12 +649,12 @@ def save_rt_alignment_model_to_db(
 
     In addition to writing the selected model to the database, this function:
 
-    * Writes ``RT_Alignment_Model_Info.json`` — expanded to include all three
+    * Writes ``RTAlignment-ModelInfo__.json`` — expanded to include all three
       candidate models (linear, polynomial, median_offset) plus the QC atlas
       UID and name.
-    * Writes ``RT_Alignment_Config.yaml`` — the ``RT_ALIGNMENT`` section of the
+    * Writes ``RTAlignment-Config__.yaml`` — the ``RT_ALIGNMENT`` section of the
       config used for this run.
-    * Writes ``RT_Alignment_Model_Comparison.csv`` — per-compound RT predictions
+    * Writes ``RTAlignment-ModelComparison__.csv`` — per-compound RT predictions
       from all three models with residuals.
     """
 
@@ -739,24 +742,24 @@ def save_rt_alignment_model_to_db(
     rt_alignment_output_dir = Path(rt_align_obj.paths['rt_alignment_results_dir'])
     rt_alignment_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. RT_Alignment_Model_Info.json (expanded) ──────────────────────────
-    rt_alignment_metadata_path = rt_alignment_output_dir / f"RT_Alignment_Model_Info_{rt_align_obj.chromatography}.json"
+    # RTAlignment-ModelInfo__.json
+    rt_alignment_metadata_path = rt_alignment_output_dir / f"RTAlignment-ModelInfo___{rt_align_obj.project_name}.json"
     with open(rt_alignment_metadata_path, "w") as f:
         json.dump(model_metadata, f, indent=4)
     logger.info(f"RT alignment model metadata saved to {rt_alignment_metadata_path}")
 
-    # ── 2. RT_Alignment_Config.yaml ─────────────────────────────────────────
+    # RTAlignment-Config__.yaml
     try:
         rt_alignment_config_section = getattr(rt_align_obj.config, 'rt_alignment_config', {})
-        rt_alignment_config_yaml_path = rt_alignment_output_dir / f"RT_Alignment_Config_{rt_align_obj.chromatography}.yaml"
+        rt_alignment_config_yaml_path = rt_alignment_output_dir / f"RTAlignment-Config___{rt_align_obj.project_name}.yaml"
         with open(rt_alignment_config_yaml_path, "w") as f:
             yaml.dump({"RT_ALIGNMENT": rt_alignment_config_section}, f,
                       default_flow_style=False, sort_keys=False)
         logger.info(f"RT alignment config section saved to {rt_alignment_config_yaml_path}")
     except Exception as e:
-        logger.warning(f"Could not write RT_Alignment_Config.yaml: {e}")
+        logger.warning(f"Could not write RTAlignment-Config__.yaml: {e}")
 
-    # ── 3. RT_Alignment_Model_Comparison.csv ────────────────────────────────
+    # RTAlignment-ModelComparison__.csv
     try:
         _save_rt_alignment_comparison_csv(
             rt_align_obj=rt_align_obj,
@@ -764,7 +767,7 @@ def save_rt_alignment_model_to_db(
             output_dir=rt_alignment_output_dir,
         )
     except Exception as e:
-        logger.warning(f"Could not write RT_Alignment_Model_Comparison.csv: {e}")
+        logger.warning(f"Could not write RTAlignment-ModelComparison__.csv: {e}")
 
     # display model metadata in log for easy reference
     logger.info(f"RT Alignment Model Metadata for UID {rt_alignment_uid}:")
@@ -794,7 +797,7 @@ def _save_rt_alignment_comparison_csv(
     all_models: dict,
     output_dir: "Path",
 ) -> None:
-    """Write ``RT_Alignment_Model_Comparison.csv`` to *output_dir*.
+    """Write ``RTAlignment-ModelComparison__.csv`` to *output_dir*.
 
     Columns
     -------
@@ -812,7 +815,7 @@ def _save_rt_alignment_comparison_csv(
 
     modeling_df = rt_align_obj.modeling_data
     if modeling_df is None or modeling_df.empty:
-        logger.warning("No modeling data available; skipping RT_Alignment_Model_Comparison.csv")
+        logger.warning("No modeling data available; skipping RTAlignment-ModelComparison__.csv")
         return
 
     df = modeling_df.sort_values('atlas_rt_peak').reset_index(drop=True)
@@ -871,7 +874,7 @@ def _save_rt_alignment_comparison_csv(
         'RT Diff Offset':         rt_measured - pred_offset,
     }, index=labels)
 
-    csv_path = output_dir / f"RT_Alignment_Model_Comparison_{rt_align_obj.chromatography}.csv"
+    csv_path = output_dir / f"RTAlignment-ModelComparison___{rt_align_obj.project_name}.csv"
     comparison_df.to_csv(csv_path)
     logger.info(f"RT alignment model comparison table saved to {csv_path}")
 
@@ -3979,7 +3982,7 @@ def _load_data_from_db(
             if _col in curation_df.columns:
                 curation_df[_col] = curation_df[_col].apply(as_list)
 
-    logger.info(
+    log_highlight(
         f"Loaded manual curation entries for {len(curation_df)} compounds: "
         f"{len(ms1_df)} MS1 data points ({ms1_df['filename'].nunique()} total files), "
         f"and {len(ms2_df)} MS2 data points ({ms2_df['filename'].nunique()} total files)."
