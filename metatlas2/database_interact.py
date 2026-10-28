@@ -3822,23 +3822,21 @@ def _build_per_file_metrics_df(summary_obj: "AnalysisSummary") -> pd.DataFrame:
     return
 
 
-def _apply_override_ms_filters(
-    obj: "AnalysisGUI"
-) -> None:
-
+def _apply_override_ms_filters(obj: "AnalysisGUI") -> None:
     # check if the user has provided any override parameters
     ms1_min_pts = obj.override_parameters.get("ms1_min_num_points", None)
     ms1_min_int = obj.override_parameters.get("ms1_min_peak_intensity", None)
     ms2_min_score = obj.override_parameters.get("ms2_min_score", None)
     ms2_min_frags = obj.override_parameters.get("ms2_min_matching_frags", None)
 
-    # Determine if any MS1/MS2 filter is set
-    ms1_filter = ms1_min_pts is not None or ms1_min_int is not None
-    ms2_filter = ms2_min_score is not None or ms2_min_frags is not None
+    # Determine if filters are active
+    ms1_filter_active = ms1_min_pts is not None or ms1_min_int is not None
+    ms2_filter_active = ms2_min_score is not None or ms2_min_frags is not None
 
-    # MS1 filtering
-    if not obj.experimental_data.ms1_df.empty and ms1_filter:
-        logger.info(f"Applying MS1 override filters: min_num_points={ms1_min_pts}, min_peak_intensity={ms1_min_int}...")
+    # --- MS1 filtering ---
+    if not obj.experimental_data.ms1_df.empty and ms1_filter_active:
+        logger.info(f"Applying MS1 override filters with ms1_min_pts={ms1_min_pts}, ms1_min_int={ms1_min_int}...")
+        logger.info(f"Starting with {len(obj.experimental_data.ms1_df)} MS1 rows.")
         max_ints = obj.experimental_data.ms1_df['spec_ints'].apply(lambda x: np.max(x) if len(x)>0 else 0)
         num_pts = obj.experimental_data.ms1_df['spec_ints'].apply(lambda x: len(x))
         mask = pd.Series([True] * len(obj.experimental_data.ms1_df))
@@ -3847,34 +3845,57 @@ def _apply_override_ms_filters(
         if ms1_min_int is not None:
             mask &= max_ints >= ms1_min_int
         passing_ms1 = set(obj.experimental_data.ms1_df.loc[mask, "mz_rt_uid"])
+        logger.info(f"MS1 filtering: {len(passing_ms1)} compounds passed the override filters.")
     else:
         passing_ms1 = set(obj.experimental_data.ms1_df["mz_rt_uid"])
 
-    # MS2 filtering
-    if not obj.experimental_data.ms2_df.empty and ms2_filter:
-        logger.info(f"Applying MS2 override filters: min_score={ms2_min_score}, min_matching_frags={ms2_min_frags}...")
+    # --- MS2 filtering ---
+    if not obj.experimental_data.ms2_df.empty and ms2_filter_active:
+        logger.info(f"Applying MS2 override filters with ms2_min_score={ms2_min_score}, ms2_min_frags={ms2_min_frags}...")
+        logger.info(f"Starting with {len(obj.experimental_data.ms2_df)} MS2 rows.")
         max_scores = obj.experimental_data.ms2_df['hits'].apply(_get_max_score)
         max_frags = obj.experimental_data.ms2_df['hits'].apply(_get_max_frags)
+        
         mask = pd.Series([True] * len(obj.experimental_data.ms2_df))
         if ms2_min_score is not None:
             mask &= max_scores >= ms2_min_score
         if ms2_min_frags is not None:
             mask &= max_frags >= ms2_min_frags
+
         passing_ms2 = set(obj.experimental_data.ms2_df.loc[mask, "mz_rt_uid"])
+        logger.info(f"MS2 filtering: {len(passing_ms2)} compounds passed the override filters.")
     else:
         passing_ms2 = set(obj.experimental_data.ms2_df["mz_rt_uid"])
 
-    # check whether to remove ids with no MS1 or MS2 data from curation df
-    remove_unided = obj.ta.params.get("remove_unided_compounds", True)
-    if obj.override_parameters.get("remove_unided_compounds", None) is not None:
-        remove_unided = obj.override_parameters.get("remove_unided_compounds", None)
+    # --- Final Retention Logic ---
+    # Start with a mask of all True
+    keep_mask = pd.Series([True] * len(obj.experimental_data.curation_df))
+
+    # If an MS1 filter was requested, compounds MUST pass it
+    if ms1_filter_active:
+        keep_mask &= obj.experimental_data.curation_df['mz_rt_uid'].isin(passing_ms1)
+    
+    # If an MS2 filter was requested, compounds MUST pass it
+    if ms2_filter_active:
+        keep_mask &= obj.experimental_data.curation_df['mz_rt_uid'].isin(passing_ms2)
+
+    # Handle the "remove_unided" logic separately if necessary
+    remove_unided = obj.override_parameters.get("remove_unided_compounds", obj.ta.params.get("remove_unided_compounds", True))
     if remove_unided:
-        logger.info(f"Removing unidentified compounds from curation object (those that do not have passing MS1 or MS2 data)...")
-        keep_mask = (obj.experimental_data.curation_df['mz_rt_uid'].isin(passing_ms1) | obj.experimental_data.curation_df['mz_rt_uid'].isin(passing_ms2))
-        obj.experimental_data.curation_df = obj.experimental_data.curation_df[keep_mask].copy()
-        surviving_uids = set(obj.experimental_data.curation_df['mz_rt_uid'])
-        obj.experimental_data.ms1_df = obj.experimental_data.ms1_df[obj.experimental_data.ms1_df['mz_rt_uid'].isin(surviving_uids)]
-        obj.experimental_data.ms2_df = obj.experimental_data.ms2_df[obj.experimental_data.ms2_df['mz_rt_uid'].isin(surviving_uids)]    
+        # Must have at least SOME data in MS1 or MS2 to not be "unidentified"
+        has_any_data = (obj.experimental_data.curation_df['mz_rt_uid'].isin(set(obj.experimental_data.ms1_df["mz_rt_uid"])) | 
+                        obj.experimental_data.curation_df['mz_rt_uid'].isin(set(obj.experimental_data.ms2_df["mz_rt_uid"])))
+        keep_mask &= has_any_data
+
+    obj.experimental_data.curation_df = obj.experimental_data.curation_df[keep_mask].copy()
+    
+    # Sync other dataframes
+    surviving_uids = set(obj.experimental_data.curation_df['mz_rt_uid'])
+    obj.experimental_data.ms1_df = obj.experimental_data.ms1_df[obj.experimental_data.ms1_df['mz_rt_uid'].isin(surviving_uids)]
+    obj.experimental_data.ms2_df = obj.experimental_data.ms2_df[obj.experimental_data.ms2_df['mz_rt_uid'].isin(surviving_uids)]
+
+    logger.info(f"Removed {len(obj.experimental_data.curation_df) - keep_mask.sum()} compounds based on override MS filters. {len(obj.experimental_data.curation_df)} compounds remain in curation_df.")
+    logger.info(f"After applying override MS filters, {len(obj.experimental_data.curation_df)} compounds remain in curation_df.")
 
 def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
     apply_cross_polarity = obj.ta.params.get("apply_cross_polarity_curation", True)
