@@ -99,7 +99,7 @@ TARGETED_ANALYSES:
               data_sheets: # INJBL
             apply_alignment: true
             remove_unided_compounds: true
-            remove_flagged_compounds: false
+            remove_flagged_compounds: true
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: true
             apply_istd_curation_to_ref: true
@@ -173,7 +173,7 @@ TARGETED_ANALYSES:
               data_sheets: # INJBL
             apply_alignment: true
             remove_unided_compounds: true
-            remove_flagged_compounds: false
+            remove_flagged_compounds: true
             only_keep_data_in_feature: false
             apply_cross_polarity_curation: true
             apply_istd_curation_to_ref: true

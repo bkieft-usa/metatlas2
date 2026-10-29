@@ -2513,12 +2513,12 @@ def check_require_evaluated(obj: "AnalysisSummary"):
         ms2_notes = str(mc_row.get('ms2_notes', '')).strip()
         if not ms1_notes:
             raise ValueError(
-                f"Compound {mc_row['compound_uid']} ({mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
+                f"Compound {mc_row['compound_uid']} ({mc_row.get('compound_name', 'Unknown')} / {mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
                 "has empty ms1_notes. Please update in GUI before generating summary."
             )
         if not ms2_notes:
             raise ValueError(
-                f"Compound {mc_row['compound_uid']} ({mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
+                f"Compound {mc_row['compound_uid']} ({mc_row.get('compound_name', 'Unknown')} / {mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
                 "has empty ms2_notes. Please update in GUI before generating summary."
             )
 
@@ -2765,8 +2765,6 @@ def save_auto_identification_results_to_db(auto_id_obj):
         'created_date': get_provenance()["timestamp"],
     }
 
-    # Add scalar provenance columns without deep-copying list-valued columns.
-    # DataFrame.assign() only allocates the new scalar columns, not the whole frame.
     if not curation_df.empty:
         curation_df = curation_df.assign(**constants)
     if not ms1_df.empty:
@@ -2889,7 +2887,7 @@ def _get_opposite_polarity_curation(
     """
     from metatlas2.workflow_objects import AtlasCategory
 
-    opposite_polarity = "neg" if fpf.normalize_polarity(obj.polarity) == "pos" else "pos"
+    opposite_polarity = "NEG" if fpf.normalize_polarity(obj.polarity) == "pos" else "POS"
     project_db_path = obj.paths['project_db_path']
     rt_alignment_number = obj.rt_alignment_number
     analysis_number = obj.analysis_number
@@ -2991,35 +2989,36 @@ def _transfer_istd_curation(
     obj: "AnalysisGUI"
 ):
     from metatlas2.workflow_objects import AtlasCategory
-    # Only applies to REF-category atlases
+
     obj_cat = obj.ta.atlas_category if hasattr(obj.ta, 'atlas_category') else None
     if obj_cat != AtlasCategory.REF:
-        return
+        return # Only transfer ISTD curation to REF atlases awaiting curation
 
     apply_istd_override = obj.ta.params.get("apply_istd_curation_to_ref", True)
     if obj.override_parameters.get("apply_istd_curation_to_ref", None) is not None:
         apply_istd_override = obj.override_parameters.get("apply_istd_curation_to_ref", False)
 
     if apply_istd_override:
-        logger.info("Applying ISTD transfer...")
+        logger.info("Finding previously-curated internal standards data to transfer to the reference atlas...")
     else:
         return
 
-    logger.info("Finding ISTD curation entries to transfer to REF atlas...")
+    istd_polarity = fpf.normalize_polarity(obj.polarity)
     with get_db_connection(obj.paths["project_db_path"], read_only=True) as conn:
         istd_df = conn.execute("""
-            SELECT mz_rt_uid, inchi_key, adduct, rt_peak, rt_min, rt_max,
+            SELECT compound_uid, inchi_key, adduct, rt_peak, rt_min, rt_max,
                    passed_curation, ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes
             FROM manual_curation
             WHERE atlas_category = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND passed_curation = 1
-        """, [obj.polarity, obj.rt_alignment_number, obj.analysis_number]).df()
+        """, [istd_polarity.upper(), obj.rt_alignment_number, obj.analysis_number]).df()
 
     if istd_df.empty:
         return
         
     istd_df = sanitize_curation_df(istd_df)
+    logger.info(f"Found {len(istd_df)} ISTD curation entries to transfer to REF atlas.")
     current_curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
-    merged = current_curation_df.merge(istd_df, on='mz_rt_uid', how='left', suffixes=('', '_istd'))
+    merged = current_curation_df.merge(istd_df, on='compound_uid', how='left', suffixes=('', '_istd'))
     
     for col in ['rt_peak', 'rt_min', 'rt_max', 'ms1_notes', 'ms2_notes', 'analyst_notes','identification_notes', 'other_notes']:
         istd_col = f"{col}_istd"
@@ -3035,6 +3034,7 @@ def _transfer_istd_curation(
         )
     
     final_df = merged[[c for c in merged.columns if not c.endswith('_istd')]]
+    logger.info(f"Final curation df after ISTD transfer has {len(final_df)} rows, {len(final_df[final_df['analyst_notes'].str.contains('curation transferred from ISTD compound', na=False)])} of which were transferred from ISTD compounds.")
     obj.experimental_data.curation_df = sanitize_curation_df(final_df)
 
 
@@ -3529,14 +3529,15 @@ def _apply_remove_flagged_compounds(summary_obj) -> None:
     if curation_df is None or curation_df.empty:
         return
 
-    flagged_mask = curation_df["ms1_notes"].fillna("").str.strip().str.lower() == "remove"
+    # instead of exact "remove" match, flagged_mask is True if the string "remove" (not case-sensitive) is present anywhere in the ms1_notes field
+    flagged_mask = curation_df["ms1_notes"].fillna("").str.strip().str.lower().str.contains("remove")
     n_flagged = int(flagged_mask.sum())
     if n_flagged == 0:
         return
 
     logger.info(
         f"remove_flagged_compounds=True: removing {n_flagged} compound(s) "
-        f"whose ms1_notes == 'remove' from all summary outputs."
+        f"whose ms1_notes contains 'remove' from all summary outputs."
     )
     keep_mask = ~flagged_mask
     summary_obj.experimental_data.curation_df = curation_df[keep_mask].copy()
@@ -3552,27 +3553,16 @@ def _apply_remove_flagged_compounds(summary_obj) -> None:
 
 
 def load_and_filter_for_summary(summary_obj, update_raw_in_feature=False):
-
     _load_data_from_db(summary_obj, [v.prev_mz_rt_uid for v in summary_obj.manually_curated_atlas_obj.compound_mzrts.values()]) # need the previous mz_rt_uids because of the cloning step
-
     _apply_override_ms_filters(summary_obj)
-
     _apply_remove_flagged_compounds(summary_obj)
-
     _update_infeature_tag(summary_obj)
-
     _save_updated_infeature_tag_to_db(summary_obj, update_raw_in_feature)
-
     _build_ms1_full_range_df(summary_obj)
-
     _filter_to_infeature_data(summary_obj)
-
     _build_per_file_metrics_df(summary_obj)
-
     _build_best_ms1_metrics_df(summary_obj)
-
     _merge_best_ms1_metrics_with_curation_df(summary_obj)
-
     return
 
 def _merge_best_ms1_metrics_with_curation_df(summary_obj: "AnalysisSummary") -> None:
@@ -3905,9 +3895,7 @@ def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
         apply_cross_polarity = obj.override_parameters.get("apply_cross_polarity_curation")
     
     if apply_cross_polarity:
-        atlas_obj = obj.auto_ided_atlas_obj
         logger.info(f"Checking for curated opposite-polarity entries...")
-        
         opp_polarity_df = _get_opposite_polarity_curation(obj=obj)
         
         if not opp_polarity_df.empty:
@@ -3921,31 +3909,6 @@ def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
             obj.experimental_data.curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
             
             logger.info(f"Transferred opposite-polarity RT bounds to {n_cross} compound(s).")
-
-def sanitize_curation_df(df):
-    if df is None or df.empty:
-        return df
-    
-    df = df.copy()
-    notes_cols = ['ms1_notes', 'ms2_notes', 'other_notes', 'identification_notes', 'analyst_notes', 'isomers']
-    for col in notes_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna('').astype(str)
-            df[col] = df[col].replace(['nan', 'NaN', 'None'], '')
-            
-    return df
-
-def load_and_filter_for_gui(analysis_gui_obj):
-
-    _load_data_from_db(analysis_gui_obj, list(analysis_gui_obj.auto_ided_atlas_obj.compound_mzrts.keys()))
-
-    _apply_override_ms_filters(analysis_gui_obj)
-
-    _transfer_istd_curation(analysis_gui_obj)
-
-    _transfer_cross_polarity_curation(analysis_gui_obj)
-
-    return
 
 def _load_data_from_db(
     obj: "AnalysisGUI" | "AnalysisSummary",
@@ -4018,6 +3981,84 @@ def _load_data_from_db(
 
     return atlas_uids
 
+def load_and_filter_for_gui(analysis_gui_obj):
+    _load_data_from_db(analysis_gui_obj, list(analysis_gui_obj.auto_ided_atlas_obj.compound_mzrts.keys()))
+    _apply_override_ms_filters(analysis_gui_obj)
+    for t_type in ["ISTD", "CROSS_POL"]:
+        _transfer_curation(analysis_gui_obj, type=t_type)
+
+def sanitize_curation_df(df):
+    if df is None or df.empty: return df
+    df = df.copy()
+    notes_cols = ['ms1_notes', 'ms2_notes', 'other_notes', 'identification_notes', 'analyst_notes', 'isomers']
+    for col in [c for c in notes_cols if c in df.columns]:
+        df[col] = df[col].fillna('').astype(str).replace(['nan', 'NaN', 'None'], '')
+    return df
+
+def _transfer_curation(obj: "AnalysisGUI", type="ISTD"):
+    from metatlas2.workflow_objects import AtlasCategory
+    
+    # Configuration
+    if type == "ISTD":
+        logger.info(f"Starting ISTD curation transfer for {len(obj.experimental_data.curation_df)} compounds...")
+        if (hasattr(obj.ta, 'atlas_category') and obj.ta.atlas_category != AtlasCategory.REF): 
+            return
+        param_key, note = "apply_istd_curation_to_ref", " (curation transferred from an ISTD compound)"
+        pol = fpf.normalize_polarity(obj.polarity).upper()
+        query = "SELECT * FROM manual_curation WHERE atlas_category = 'ISTD' AND polarity = ? AND rt_alignment_number = ? AND analysis_number = ? AND passed_curation = 1"
+        params = [pol, obj.rt_alignment_number, obj.analysis_number]
+    else: # CROSS_POL
+        logger.info(f"Starting cross-polarity curation transfer for {len(obj.experimental_data.curation_df)} compounds...")
+        param_key, note = "apply_cross_polarity_curation", " (curation transferred from an IDed compound in the opposite polarity)"
+        pol = "NEG" if fpf.normalize_polarity(obj.polarity) == "pos" else "POS"
+        cat_val = obj.ta.atlas_category.value if isinstance(obj.ta.atlas_category, AtlasCategory) else str(obj.ta.atlas_category)
+        query = "SELECT * FROM manual_curation WHERE rt_alignment_number = ? AND analysis_number = ? AND chromatography = ? AND atlas_category = ? AND atlas_name = ? AND polarity = ? AND passed_curation = 1"
+        params = [obj.rt_alignment_number, obj.analysis_number, obj.ta.chromatography, cat_val, obj.ta.atlas_name, pol]
+
+    enabled = obj.override_parameters.get(param_key)
+    if enabled is None:
+        enabled = obj.ta.params.get(param_key, True)
+    if not enabled:
+        logger.info(f"{type} curation transfer is disabled by override parameters or analysis config params; skipping transfer.")
+        return
+
+    # Database Retrieval
+    with get_db_connection(obj.paths["project_db_path"], read_only=True) as conn:
+        source_df = sanitize_curation_df(conn.execute(query, params).df())
+    if source_df.empty: 
+        logger.info(f"No {type} curation entries found in database.")
+        return
+    logger.info(f"Found {len(source_df)} {type} curation entries in database to transfer.")
+
+    # Merge and Apply
+    current_df = sanitize_curation_df(obj.experimental_data.curation_df)
+    logger.info(f"Merging {len(current_df)} current curation entries with {len(source_df)} source entries for {type} transfer...")
+    merged = current_df.merge(source_df, on='compound_uid', how='left', suffixes=('', '_src'))
+    
+    # Find transferred compounds
+    was_updated = pd.Series(False, index=merged.index)
+    cols_to_transfer = ['rt_peak', 'rt_min', 'rt_max', 'ms1_notes', 'ms2_notes', 'analyst_notes', 'identification_notes', 'other_notes']
+    for col in cols_to_transfer:
+        src_col = f"{col}_src"
+        if src_col not in merged.columns:
+            continue
+        mask = (merged['ms2_notes'] == '') if type == "CROSS_POL" else ((merged[col] == '') | (merged[col] == 0.0))
+        update_mask = mask & merged[src_col].notna()
+        merged.loc[update_mask, col] = merged.loc[update_mask, src_col]
+        was_updated |= update_mask
+
+    # Append transfer notes to any row that was updated
+    merged.loc[was_updated, 'analyst_notes'] = merged.loc[was_updated, 'analyst_notes'].astype(str) + note
+    logger.info(f"Applied {type} curation to {was_updated.sum()} row(s).")
+
+    # Finalize and Sync
+    final_df = sanitize_curation_df(merged[[c for c in merged.columns if not c.endswith('_src')]])
+    obj.experimental_data.curation_df = final_df
+    for idx, row in final_df.iterrows():
+        uid = row.get("mz_rt_uid") 
+        if uid and uid in obj.auto_ided_atlas_obj.compound_mzrts:
+            m_obj = obj.auto_ided_atlas_obj.compound_mzrts[uid]
+            m_obj.rt_peak, m_obj.rt_min, m_obj.rt_max = float(row['rt_peak']), float(row['rt_min']), float(row['rt_max'])
 
 def build_tic_df(ms1_df: "pd.DataFrame") -> "pd.DataFrame":
     """Build a per-file Total Ion Chromatogram (TIC) DataFrame from MS1 data.
