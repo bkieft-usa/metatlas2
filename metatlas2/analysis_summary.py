@@ -104,20 +104,21 @@ def run_all_summaries(
         make_log_fold_changes_csv(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "metabomap" not in (skip_outputs or []):
-        logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
-        make_metabomap(summary_obj, output_dir=output_dir, overwrite=overwrite)
+        if summary_obj.config.owner == "jgi":
+            logger.info("Making metabomap (merged pos/neg peak heights + LFC table)...")
+            make_metabomap(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
     if "analysis_parquet" not in (skip_outputs or []):
-        logger.info("Making unified analysis Parquet files...")
-        pqi.make_analysis_parquet(summary_obj, overwrite=overwrite)
+        if summary_obj.config.owner == "jgi":
+            logger.info("Making unified analysis Parquet files...")
+            pqi.make_analysis_parquet(summary_obj, overwrite=overwrite)
 
     if "targeted_analysis_readme" not in (skip_outputs or []):
         logger.info("Making targeted analysis README...")
         make_targeted_analysis_readme(summary_obj, output_dir=output_dir, overwrite=overwrite)
 
-    # mv CompoundAtlas__*AUTO*.csv atlas to "{POL}_additional_info" folder for upload
-    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
     for file in glob.glob(f"{output_dir}/CompoundAtlas__*AUTO*.csv"):
+        _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
         dest_dir = Path(output_dir) / f"{_pol_prefix}_additional_info"
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(file, dest_dir / Path(file).name)
@@ -2125,7 +2126,7 @@ def make_tic_thumbnails(
     pdf_indep  = PdfPages(path_indep)
     pdf_shared = PdfPages(path_shared)
     try:
-        for page_idx in range(total_pages):
+        for page_idx in tqdm(range(total_pages), desc="Generating TIC thumbnails", unit="page", disable=should_disable_tqdm()):
             start = page_idx * _PLOTS_PER_PAGE
             end   = min(start + _PLOTS_PER_PAGE, total_files)
             page_rows = tic_df.iloc[start:end]
@@ -2392,7 +2393,7 @@ def make_compound_metric_plots(
     pdf_ph = PdfPages(path_ph)
     pdf_rt = PdfPages(path_rt)
     try:
-        for page_idx in range(total_pages):
+        for page_idx in tqdm(range(total_pages), desc="Generating compound metric plots", unit="page", disable=should_disable_tqdm()):
             start = page_idx * _PLOTS_PER_PAGE
             end   = min(start + _PLOTS_PER_PAGE, n_compounds)
             page_compounds = compounds[start:end]
@@ -2978,15 +2979,17 @@ def make_best_ms2_hit_fragment_ions_csv(
                         mz_vals, int_vals = [], []
 
                 row_data[f"hit_{i}_filename"] = os.path.basename(str(hit.filename))
-                row_data[f"hit_{i}_rt_peak"] = hit.scan_rt
-                row_data[f"hit_{i}_mz_peak"] = hit.mz_measured
+                row_data[f"hit_{i}_scan_rt"] = hit.scan_rt
+                row_data[f"hit_{i}_mz_measured"] = hit.mz_measured
+                row_data[f"hit_{i}_score"] = hit.score
                 row_data[f"hit_{i}_spectrum"] = json.dumps([mz_vals, int_vals])
                 row_data[f"hit_{i}_mz_array"] = json.dumps([round(v, 4) for v in mz_vals])
                 row_data[f"hit_{i}_intensity_array"] = json.dumps([round(v, 4) for v in int_vals])
             else:
                 row_data[f"hit_{i}_filename"] = None
-                row_data[f"hit_{i}_rt_peak"] = None
-                row_data[f"hit_{i}_mz_peak"] = None
+                row_data[f"hit_{i}_scan_rt"] = None
+                row_data[f"hit_{i}_mz_measured"] = None
+                row_data[f"hit_{i}_score"] = None
                 row_data[f"hit_{i}_spectrum"] = None
                 row_data[f"hit_{i}_mz_array"] = None
                 row_data[f"hit_{i}_intensity_array"] = None
