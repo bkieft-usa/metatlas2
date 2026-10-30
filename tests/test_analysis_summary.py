@@ -227,15 +227,15 @@ class TestComputeAllOverlappingCompounds:
         return {ik: mass for ik in mc["inchi_key"].unique()}
 
     def test_single_compound_no_overlap(self):
-        mc = self._make_mc([{"compound_name": "adenine"}])
+        mc = self._make_mc([{"compound_name": "adenine", "adduct": "[M+H]+"}])
         result = _compute_all_overlapping_compounds(mc, self._mass_map(mc))
         assert result[0] == ("", "")
 
     def test_two_distinct_compounds_no_overlap(self):
         mc = self._make_mc([
-            {"compound_name": "adenine",   "atlas_mz": 136.062, "rt_min": 1.0, "rt_max": 3.0,
+            {"compound_name": "adenine", "adduct": "[M+H]+", "atlas_mz": 136.062, "rt_min": 1.0, "rt_max": 3.0,
              "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N"},
-            {"compound_name": "riboflavin","atlas_mz": 377.146, "rt_min": 4.0, "rt_max": 6.0,
+            {"compound_name": "riboflavin","adduct": "[M+H]+", "atlas_mz": 377.146, "rt_min": 4.0, "rt_max": 6.0,
              "inchi_key": "AUNGANRZJHBGPY-SCRDCRAPSA-N"},
         ])
         mass_map = {
@@ -248,9 +248,9 @@ class TestComputeAllOverlappingCompounds:
 
     def test_two_compounds_same_mz_overlapping_rt_detected(self):
         mc = self._make_mc([
-            {"compound_name": "leucine",    "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
+            {"compound_name": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
              "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N"},
-            {"compound_name": "isoleucine", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
+            {"compound_name": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
              "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N"},
         ])
         mass_map = {
@@ -264,9 +264,9 @@ class TestComputeAllOverlappingCompounds:
 
     def test_non_overlapping_rt_not_flagged(self):
         mc = self._make_mc([
-            {"compound_name": "leucine",    "atlas_mz": 132.102, "rt_min": 1.0, "rt_max": 3.0,
+            {"compound_name": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 1.0, "rt_max": 3.0,
              "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N"},
-            {"compound_name": "isoleucine", "atlas_mz": 132.102, "rt_min": 5.0, "rt_max": 7.0,
+            {"compound_name": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 5.0, "rt_max": 7.0,
              "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N"},
         ])
         mass_map = {
@@ -279,18 +279,18 @@ class TestComputeAllOverlappingCompounds:
 
     def test_result_keys_cover_all_compounds(self):
         mc = self._make_mc([
-            {"compound_name": "a", "atlas_mz": 100.0, "rt_min": 1.0, "rt_max": 2.0},
-            {"compound_name": "b", "atlas_mz": 200.0, "rt_min": 3.0, "rt_max": 4.0},
-            {"compound_name": "c", "atlas_mz": 300.0, "rt_min": 5.0, "rt_max": 6.0},
+            {"compound_name": "a", "adduct": "[M+H]+", "atlas_mz": 100.0, "rt_min": 1.0, "rt_max": 2.0},
+            {"compound_name": "b", "adduct": "[M+H]+", "atlas_mz": 200.0, "rt_min": 3.0, "rt_max": 4.0},
+            {"compound_name": "c", "adduct": "[M+H]+", "atlas_mz": 300.0, "rt_min": 5.0, "rt_max": 6.0},
         ])
         result = _compute_all_overlapping_compounds(mc, {})
         assert set(result.keys()) == {0, 1, 2}
 
     def test_overlapping_names_joined_with_double_slash(self):
         mc = self._make_mc([
-            {"compound_name": "leucine",    "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
+            {"compound_name": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
              "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N"},
-            {"compound_name": "isoleucine", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
+            {"compound_name": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
              "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N"},
         ])
         mass_map = {

@@ -16,6 +16,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import glob
+from collections import Counter
 
 import matplotlib
 matplotlib.use('Agg')
@@ -1632,6 +1633,7 @@ def total_score_and_msi(
         msi = "Level 1"
     return total, msi
 
+
 def _compute_all_overlapping_compounds(
     manual_curation_df: pd.DataFrame,
     mass_map: dict[str, float | None],
@@ -1659,6 +1661,7 @@ def _compute_all_overlapping_compounds(
         dtype=float,
     )
     names = mc["compound_name"].tolist()
+    adducts = mc["adduct"].tolist()
     inchi_keys = mc["inchi_key"].tolist()
 
     rt_overlap = (
@@ -1684,8 +1687,18 @@ def _compute_all_overlapping_compounds(
         if len(js) <= 1:
             result[i] = ("", "")
         else:
+            # Count occurrences of each name in the current overlapping set
+            current_names = [names[j] for j in js]
+            counts = Counter(current_names)
+            
+            # Apply "name (adduct)" only if the name appears more than once in this set
+            formatted_names = [
+                f"{names[j]} {adducts[j]}" if counts[names[j]] > 1 else names[j]
+                for j in js
+            ]
+            
             result[i] = (
-                "//".join(names[j] for j in js),
+                "//".join(formatted_names),
                 "//".join(inchi_keys[j] for j in js),
             )
     return result
@@ -2583,14 +2596,32 @@ def _plot_compound_boxplot(
 
     for pos, g, vals in zip(positions, groups, data_per_group):
         if not vals:
-            continue  # no real data for this group — leave the slot blank
+            continue 
+        
+        # Filter for rows in this group that actually have a value for the metric to ensure label alignment
+        group_rows = compound_metrics.loc[compound_metrics["file_group"] == g].dropna(subset=[metric])
+        
         dot_color = (group_color_map or {}).get(g, "#888888")
         jitter = rng.uniform(-0.15, 0.15, size=len(vals))
+        x_coords = np.array([pos] * len(vals), dtype=float) + jitter
+        
         ax.scatter(
-            np.array([pos] * len(vals), dtype=float) + jitter,
+            x_coords,
             vals,
             s=18, color=dot_color, alpha=0.75, zorder=3,
         )
+
+        # Add labels: "replicate (run_number)"
+        for i, (_, row) in enumerate(group_rows.iterrows()):
+            try:
+                fields = fpf.parse_file_name(row["filename"])
+                label = f"{fields['replicate']}"
+                ax.text(
+                    x_coords[i], vals[i], label,
+                    fontsize=6, ha='right', va='bottom', zorder=4
+                )
+            except Exception:
+                raise ValueError(f"Failed to parse filename for label: {row['filename']}")
 
     # Fit y-axis tightly to the actual data values only (excludes placeholder NaNs)
     if real_vals_all:
@@ -2607,11 +2638,6 @@ def _plot_compound_boxplot(
     ax.set_ylabel(ylabel, fontsize=10)
     ax.set_title(_make_title(wrapped=True), fontsize=13, pad=2, loc="center", fontweight="bold")
 
-    # Smart y-axis formatting: place a "1×10^X" offset label at the top of the
-    # y-axis and show tick labels with enough decimal places to differentiate
-    # adjacent ticks.  This handles cases where the data range is very narrow
-    # (e.g. 1.205–1.209 or 130.0012–130.0013) where a plain ScalarFormatter
-    # would collapse all ticks to the same displayed value.
     import matplotlib.ticker as mticker
 
     if real_vals_all:
@@ -2627,10 +2653,6 @@ def _plot_compound_boxplot(
                 # Exponent for the offset label (based on the magnitude of the values)
                 exp = int(np.floor(np.log10(abs_max_v)))
                 scale = 10 ** exp
-
-                # Determine how many decimal places are needed so adjacent ticks
-                # are distinguishable after dividing by scale.
-                # We aim for at least 2 significant digits in the range.
                 if data_range_v > 0:
                     # Number of decimals needed to show the range with ~3 sig figs
                     range_scaled = data_range_v / scale
@@ -2646,10 +2668,9 @@ def _plot_compound_boxplot(
                 ax.yaxis.set_major_formatter(
                     mticker.FuncFormatter(lambda v, _, _s=scale, _f=fmt_str: _f.format(v / _s))
                 )
-                # Place "×10^exp" text at the top of the y-axis spine
                 ax.text(
                     -0.01, 1.01,
-                    f"×10$^{{{exp}}}$",
+                    f"x10$^{{{exp}}}$",
                     transform=ax.transAxes,
                     fontsize=9, ha="right", va="bottom",
                 )
