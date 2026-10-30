@@ -122,6 +122,7 @@ def _make_params_cell(run_params: dict, auto_id_obj: "AutoIdentification") -> nb
         "gui_top_n_hits",
         "gui_lcmsruns_colors",
         "note_options_overrides",
+        "skip_outputs",
     ]
 
     src += "# Set a value to override the config default; leave as None to use the config value.\n"
