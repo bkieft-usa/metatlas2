@@ -38,17 +38,30 @@ def _classify_file_type(fields: dict) -> str:
     sn_segs = sample_name.split("-")
     rm_segs = run_metadata.split("-")
 
+    def _key_found_in(key: str, segments: list[str]) -> bool:
+        """Return True if *key* appears as a segment, ignoring 'qc' followed by 'c18qu'."""
+        for idx, seg in enumerate(segments):
+            if seg != key:
+                continue
+            if key == "qc" and idx + 1 < len(segments) and segments[idx + 1] == "c18qu":
+                continue
+            return True
+        return False
+
     for key, file_type in _HIGH_PRIORITY_RUN_METADATA_TYPES.items():
         if key == "qc":
-            if key in sn_segs or key in rm_segs:
+            if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
                 return file_type
         else:
-            if key in rm_segs:
+            if _key_found_in(key, rm_segs):
                 return file_type
 
     for key, file_type in _LOW_PRIORITY_SAMPLE_NAME_TYPES.items():
-        if key in sn_segs or key in rm_segs:
+        if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
             return file_type
+
+    if "qc" in sn_segs or "qc" in rm_segs:
+        return _HIGH_PRIORITY_RUN_METADATA_TYPES["qc"]
 
     return 'experimental'
 
