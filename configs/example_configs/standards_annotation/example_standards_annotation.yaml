@@ -1,0 +1,53 @@
+PROJECT:
+  standards_run_name: McGuiness_SorghSwg_11032026
+  standards_input_file: /global/cfs/cdirs/metatlas/tools/metatlas2/configs/example_configs/standards_annotation/example_standards_input.csv
+  owner: jgi
+
+  include_polarities:
+    - POS
+    - NEG
+
+  include_adducts:
+    - "[M+H]+"
+    - "[M+Na]+"
+    - "[M-H2O+H]+"
+    - "[M+K]+"
+    - "[M+NH4]+"
+    - "[M]+"
+    - "[M+2H]2+"
+    - "[M-H]-"
+    - "[M+Cl]-"
+    - "[M-H2O-H]-"
+    - "[M]-"
+    - "[M-2H]2-"
+
+EXTRACTION:
+  ms1_mz_tolerance_ppm: 2.0
+  ms1_min_num_points: 1
+  ms1_min_peak_intensity: 0
+  ms2_min_num_scans: 0
+  ms2_min_precursor_intensity: 0
+  ms2_top_n_per_peak: 10
+  max_workers: 4
+
+  peak_finding:
+    gaussian_sigma: 2.5              # smoothing width (higher = smoother, fewer peaks)
+    min_height_fraction: 0.15        # peak must be >= 15% of max intensity
+    min_prominence_fraction: 0.10    # peak must stand out >= 10% of max intensity
+    min_distance: 5                  # minimum scan-point separation between peaks
+    min_width: 0                     # minimum peak width in scan points (0 = no minimum)
+
+GUI:
+  gui_width: 35
+  gui_height: 20
+
+RT_ALIGNMENT:
+  qc_atlas_uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261009-7ad681da53cb4e2fb730e01b9f7fd5af
+  model_type: polynomial
+  poly_degree: 2
+  rt_peak_source: median
+  min_compounds_for_modeling: 3
+  min_observations_per_compound: 1
+  exclude_inchikeys: []
+  mz_tolerance_ppm: 2.0
+  rt_window_padding: 2

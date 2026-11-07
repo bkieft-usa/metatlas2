@@ -7,9 +7,11 @@
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] jupyter [--port PORT]
-#   metatlas2 [--image TAG] [--dev] add-compounds  --config_path FILE
-#   metatlas2 [--image TAG] [--dev] add-atlases    --config_path FILE
-#   metatlas2 [--image TAG] [--dev] add-msms-refs  --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-compounds          --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-atlases            --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-msms-refs          --config_path FILE
+#   metatlas2 [--image TAG] [--dev] standards-annotation   --config_path FILE
+#   metatlas2 [--image TAG] [--dev] reverse-rt-align       --config_path FILE
 #   metatlas2 [--image TAG] [--dev] get-atlases    fetch  --atlas_uids UID1,UID2 [--output_path PATH]
 #   metatlas2 [--image TAG] [--dev] get-atlases   query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
 #   metatlas2 [--image TAG] [--dev] get-db-table  --table-name NAME [--output_path PATH] [--database_path PATH]
@@ -271,7 +273,7 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
 
         sbatch "${TMPSCRIPT}"
 
-    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" ]]; then
+    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" || "${SUBCOMMAND}" == "standards-annotation" || "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev)..."
         else
@@ -299,7 +301,13 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
         _py_str() { [[ -n "$1" ]] && echo "'$1'" || echo "None"; }
         SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
 
-        if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
+        if [[ "${SUBCOMMAND}" == "standards-annotation" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
             CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
             _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
             PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${CONFIG_PATH}', overwrite_db=${OVERWRITE_PY})"
@@ -477,7 +485,7 @@ else
         echo "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems." >&2
         exit 1
 
-    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" ]]; then
+    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" || "${SUBCOMMAND}" == "standards-annotation" || "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev, runtime=docker)..."
         else
@@ -498,7 +506,13 @@ else
         }
         SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
 
-        if [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
+        if [[ "${SUBCOMMAND}" == "standards-annotation" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
+            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
+            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}')"
+        elif [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
             CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
             _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
             PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${CONFIG_PATH}', overwrite_db=${OVERWRITE_PY})"
