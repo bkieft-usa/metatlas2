@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Any
 
@@ -361,3 +362,38 @@ def get_filename_header_labels(
         "short_filename":   short_filename,
         "short_samplename": short_samplename,
     }
+
+
+def extract_collision_energy_label(filename: str) -> str:
+    """Extract the CE label from the run_metadata field of an h5 filename.
+
+    Searches the ``run_metadata`` field for a pattern matching ``CE`` followed
+    by one or more digits (e.g. ``CE205060``, ``CE102040``).  Returns the
+    matched string verbatim, or ``''`` if the filename cannot be parsed or no
+    CE pattern is found.
+
+    Examples::
+
+        extract_collision_energy_label(
+            "20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
+            "USHXG03401_POS_MS2_RefStd-1_FA-CoA_1_"
+            "Rg70to1050-CE205060norm-RxnMix-S1_Run135.h5"
+        )
+        # -> 'CE205060'
+
+        extract_collision_energy_label("InjBl_Run001.h5")
+        # -> ''
+
+    Args:
+        filename: Basename or full path to an h5 file.
+
+    Returns:
+        CE label string (e.g. ``'CE205060'``) or ``''``.
+    """
+    try:
+        fields = parse_file_name(os.path.basename(filename))
+        run_metadata = fields.get("run_metadata", "")
+        m = re.search(r"CE\d+", run_metadata)
+        return m.group(0) if m else ""
+    except Exception:
+        return ""

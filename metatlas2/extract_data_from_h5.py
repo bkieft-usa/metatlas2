@@ -822,19 +822,17 @@ def _join_metadata(ms1_df, ms2_df, atlas):
         ms2_df = ms2_df.merge(meta_df, on="mz_rt_uid", how="left")
     return ms1_df, ms2_df
 
-_VALID_STAGES = frozenset({"rt_alignment", "auto_identification"})
-
 def extract_data_from_raw(
-    obj: "RTAlign" | "AutoIdentification",
+    obj: "RTAlign" | "AutoIdentification" | "StandardsAnnotationAutoIdentification",
     stage: str,
 ) -> None:
     """Extract MS1 and MS2 data from raw HDF5 files and attach to *obj*.
 
     Args:
-        obj:   Either an :class:`RTAlign` or :class:`AutoIdentification`
+        obj:   Either an :class:`RTAlign` or :class:`AutoIdentification` or :class:`StandardsAnnotationAutoIdentification`
                workflow object that has already been set up (atlas and
                lcmsruns populated).
-        stage: ``"rt_alignment"`` or ``"auto_identification"``.  Passed
+        stage: ``"rt_alignment"`` or ``"auto_identification"`` or ``"standards_annotation"``.  Passed
                explicitly so the function does not need to inspect *obj*
                with fragile ``hasattr`` checks.
 
@@ -844,19 +842,29 @@ def extract_data_from_raw(
     """
     from metatlas2.workflow_objects import ExperimentalData
 
+    _VALID_STAGES = frozenset({"rt_alignment", "auto_identification", "standards_annotation"})
+
     if stage not in _VALID_STAGES:
-        raise ValueError(
-            f"Invalid stage {stage!r}. Expected one of: {sorted(_VALID_STAGES)}"
-        )
+        raise ValueError(f"Invalid stage {stage!r}. Expected one of: {sorted(_VALID_STAGES)}")
 
     if stage == "rt_alignment":
         atlas = obj.align_atlas_obj
         lcmsruns = obj.aligner_lcmsruns
+        lcmsruns = [r for r in lcmsruns if "c18qu" not in r.filename.lower()] # remove other QC type
         wp = obj.rt_alignment_params
-    else:
+        set_max_workers = obj.config.max_workers
+    elif stage == "auto_identification":
         atlas = obj.auto_ided_atlas_obj
         lcmsruns = obj.autoid_lcmsruns
         wp = obj.ta.params
+        set_max_workers = obj.config.max_workers
+    elif stage == "standards_annotation":
+        atlas = obj.standards_annotation_atlas_obj
+        lcmsruns = obj.standards_annotation_lcmsruns
+        wp = obj.standards_annotation_params
+        set_max_workers = wp.get("max_workers", 1)
+    else:
+        raise ValueError(f"Unexpected stage {stage}")
 
     _POL_TO_H5 = {"pos": "positive", "neg": "negative"}
     canonical_pol = fpf.normalize_polarity(atlas.polarity)
@@ -898,13 +906,66 @@ def extract_data_from_raw(
     logger.info(f"Extracting data for {len(runs)} files in stage '{stage}' with polarity '{polarity}'...")
 
     only_in_feature = wp.get("only_keep_data_in_feature", False)
-    max_workers = get_max_workers(obj.config.max_workers if obj.config else None)
+    max_workers = get_max_workers(set_max_workers)
     logger.info(f"Using {max_workers} worker processes for data extraction.")
     ms1_chunks: list[pd.DataFrame] = []
     ms2_chunks: list[pd.DataFrame] = []
+
+    # For the standards_annotation stage the atlas contains one row per
+    # (compound, adduct, file) — each file has its own unique mz_rt_uid.
+    # We MUST filter the atlas to only the rows for the file being processed;
+    # otherwise every file's scan points get matched to every other file's
+    # mz_rt_uid (same compound/adduct/m/z/RT window, different mz_rt_uid),
+    # producing cross-file mz_rt_uid contamination and wrong CE assignments.
+    #
+    # For rt_alignment and auto_identification the atlas is shared across all
+    # files (one mz_rt_uid per compound+adduct, not per file), so no filtering
+    # is needed.
+    # Per-file atlas filtering is enabled for standards_annotation when:
+    #   1. The stage is "standards_annotation"
+    #   2. The atlas has a "filename" column (added by StandardsAnnotationAtlas)
+    #   3. The obj has per_file_atlas=True (default True; set False for InjBl)
+    _obj_per_file = getattr(obj, "per_file_atlas", True)
+    per_file_atlas = (
+        stage == "standards_annotation"
+        and "filename" in atlas_expanded.columns
+        and _obj_per_file
+    )
+
+    if per_file_atlas:
+        # Pre-build a dict of filename -> per-file atlas slice for O(1) lookup
+        _atlas_by_file: dict[str, pd.DataFrame] = {
+            fn: grp.reset_index(drop=True)
+            for fn, grp in atlas_expanded.groupby("filename")
+        }
+        logger.info(
+            f"Standards-annotation mode: using per-file atlas slices "
+            f"({len(_atlas_by_file)} unique files in atlas)"
+        )
+
+    # Validate per-file atlas coverage before entering the executor so that a
+    # missing file raises immediately (not mid-pool with orphaned workers).
+    if per_file_atlas:
+        missing_in_atlas = [r.filename for r in runs if r.filename not in _atlas_by_file]
+        if missing_in_atlas:
+            msg = (
+                f"No atlas rows found for {len(missing_in_atlas)} file(s): "
+                + ", ".join(missing_in_atlas[:5])
+                + (" ..." if len(missing_in_atlas) > 5 else "")
+                + ". Check that filenames in the expanded_table match the h5 files exactly. "
+                "Polarity/chromatography/CE cannot be determined without atlas rows."
+            )
+            logger.error(msg)
+            raise ValueError(msg)
+
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_process_one_file, run, atlas_expanded, only_in_feature): run
+            executor.submit(
+                _process_one_file,
+                run,
+                _atlas_by_file[run.filename] if per_file_atlas else atlas_expanded,
+                only_in_feature,
+            ): run
             for run in runs
         }
         for fut in tqdm(

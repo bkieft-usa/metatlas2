@@ -482,3 +482,134 @@ def _make_custom_query_template_cell() -> nbformat.NotebookNode:
         "#   my_query.df.head(20)\n"
     )
     return nbformat.v4.new_code_cell(src)
+
+
+#### Standards annotation notebook generator
+
+def generate_standards_annotation_notebook(
+    data: "StandardsAnnotationData",
+    config: dict,
+    config_path: str,
+    output_root: "Path",
+) -> str:
+    """Build and write a Jupyter notebook for the standards-annotation GUI.
+
+    The notebook contains pre-filled ``RUN_PARAMS`` so the analyst can open
+    it in JupyterHub and run the GUI without any manual configuration.
+
+    Args:
+        data:        :class:`~metatlas2.standards_annotation_tools.StandardsAnnotationData`.
+        config:      Parsed config dict.
+        config_path: Absolute path to the config YAML file.
+        output_root: Root output directory for this project.
+
+    Returns:
+        Absolute path to the generated ``.ipynb`` file.
+    """
+    from pathlib import Path as _Path
+
+    output_root = _Path(output_root)
+    run_name = config["project"]["standards_run_name"]
+    db_path = data.project_db_path
+
+    image_tag = os.environ.get("METATLAS2_IMAGE_TAG", "latest")
+    if image_tag == "latest":
+        kernel_name = "metatlas2"
+        kernel_display_name = "metatlas2 (latest)"
+    else:
+        kernel_name = f"metatlas2-{image_tag}"
+        kernel_display_name = f"metatlas2 ({image_tag})"
+
+    run_params = {
+        "standards_run_name": run_name,
+        "project_db_path": str(db_path),
+        "config_path": str(config_path)
+    }
+
+    nb = nbformat.v4.new_notebook()
+    nb.metadata["kernelspec"] = {
+        "display_name": kernel_display_name,
+        "language": "python",
+        "name": kernel_name,
+    }
+    nb.metadata["language_info"] = {"name": "python"}
+
+    nb.cells = [
+        _sa_nb_header_cell(run_name),
+        _sa_nb_imports_cell(),
+        _sa_nb_run_params_cell(run_params),
+        _sa_nb_data_cell(),
+        _sa_nb_gui_cell(),
+        _sa_nb_summary_cell(),
+    ]
+
+    nb_filename = f"StandardsAnnotation_{run_name}.ipynb"
+    nb_path = output_root / nb_filename
+    with open(nb_path, "w") as f:
+        nbformat.write(nb, f)
+
+    logger.info(f"Standards annotation notebook written to {nb_path}")
+    return str(nb_path)
+
+
+def _sa_nb_header_cell(project_name: str) -> "nbformat.NotebookNode":
+    text = (
+        f"# **`{project_name}` - Standards Annotation**\n\n"
+    )
+    return nbformat.v4.new_markdown_cell(text)
+
+
+def _sa_nb_imports_cell() -> "nbformat.NotebookNode":
+    src = (
+        "import logging\n"
+        "import metatlas2.standards_annotation_db as sadb\n"
+        "import metatlas2.standards_annotation_gui as sag\n"
+        "import metatlas2.standards_annotation_summary as sas\n"
+        "import metatlas2.standards_annotation_tools as sat\n"
+        "import metatlas2.load_tools as ldt\n"
+        "import metatlas2.logging_config as lcf\n"
+        "lcf.setup_logging(log_level=logging.INFO, log_to_stdout=True)\n"
+        "logger = lcf.get_logger('standards_annotation')"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_run_params_cell(run_params: dict) -> "nbformat.NotebookNode":
+    src = "# Project-specific identifiers — generated automatically, do not edit.\n"
+    src += "RUN_PARAMS = {\n"
+    for key, val in run_params.items():
+        if isinstance(val, str):
+            src += f"    '{key}': '{val}',\n"
+        else:
+            src += f"    '{key}': {val!r},\n"
+    src += "}"
+    return nbformat.v4.new_code_cell(src)
+
+def _sa_nb_data_cell() -> "nbformat.NotebookNode":
+    src = (
+        "# Load extracted data from the project DB.\n"
+        "config = ldt.load_standards_config(RUN_PARAMS['config_path'])\n"
+        "data = sadb.load_extraction_from_db(RUN_PARAMS['project_db_path'], config)"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
+    src = (
+        "# Launch the annotation GUI. Click 'Save & Exit' when done.\n"
+        "sag.build_standards_annotation_gui(\n"
+        "    data=data,\n"
+        "    config=config"
+        ")"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
+    src = (
+        "# Generate summary figures and Excel table after the GUI has been closed.\n"
+        "sas.run_standards_annotation_summary(\n"
+        "    data=data,\n"
+        "    config=config,\n"
+        ")"
+    )
+    return nbformat.v4.new_code_cell(src)

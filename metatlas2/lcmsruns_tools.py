@@ -32,35 +32,22 @@ SAMPLE_NAME_TO_FILE_TYPE: dict[str, str] = {
 def _classify_file_type(fields: dict) -> str:
     """Return the file_type category for a parsed filename field dict.
     """
-    sample_name  = fields.get("sample_name",  "").lower().strip()
+    sample_name = fields.get("sample_name",  "").lower().strip()
     run_metadata = fields.get("run_metadata", "").lower().strip()
 
     sn_segs = sample_name.split("-")
     rm_segs = run_metadata.split("-")
 
-    def _key_found_in(key: str, segments: list[str]) -> bool:
-        """Return True if *key* appears as a non-skipped segment."""
-        for idx, seg in enumerate(segments):
-            if seg != key:
-                continue
-            # Special skip: QC-C18QU is not a real QC run.
-            if key == "qc" and idx + 1 < len(segments) and segments[idx + 1] == "c18qu":
-                continue
-            return True
-        return False
-
     for key, file_type in _HIGH_PRIORITY_RUN_METADATA_TYPES.items():
         if key == "qc":
-            # QC may appear in sample_name (e.g. "QC-SOPv7") or run_metadata
-            if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
+            if key in sn_segs or key in rm_segs:
                 return file_type
         else:
-            # ISTD / InjBl / blank: authoritative source is run_metadata only
-            if _key_found_in(key, rm_segs):
+            if key in rm_segs:
                 return file_type
 
     for key, file_type in _LOW_PRIORITY_SAMPLE_NAME_TYPES.items():
-        if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
+        if key in sn_segs or key in rm_segs:
             return file_type
 
     return 'experimental'
@@ -91,9 +78,6 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
                     "filename": file_path.name,
                     "file_format": ext,
                     "file_type": _classify_file_type(fields),
-                    # chromatography: parse_file_name now uses canonical_chromatography
-                    # internally, so the case from the filename is already preserved
-                    # (e.g. "HILIC" stays "HILIC", alias "HILICZ" → "HILIC").
                     "chromatography": fields.get("chromatography", "unknown"),
                     "ms_level": fields.get("ms_level", "unknown").lower(),
                     "polarity": fields.get("polarity", "unknown").lower(),
@@ -106,14 +90,15 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
     if not lcmsruns:
         raise ValueError(f"No .raw, .mzML, or .h5 files found in {project_path}")
 
-    # # Verify all formats have the same number of files.
-    # unique_counts = set(counts.values())
-    # if len(unique_counts) > 1:
-    #     counts_str = ", ".join(f".{ext}: {n}" for ext, n in counts.items())
-    #     raise ValueError(
-    #         f"File count mismatch across formats ({counts_str}). "
-    #         "Each .raw file should have a corresponding .mzML and .h5 file."
-    #     )
+    # Verify all formats have the same number of files, only if there is at least 1 file of each format. If any format has 0 files, skip the check.
+    if all(count > 0 for count in counts.values()):
+        unique_counts = set(counts.values())
+        if len(unique_counts) > 1:
+            counts_str = ", ".join(f".{ext}: {n}" for ext, n in counts.items())
+            raise ValueError(
+                f"File count mismatch across formats ({counts_str}). "
+                "Each .raw file should have a corresponding .mzML and .h5 file."
+            )
 
     # Log combined category breakdown for .h5 files only.
     h5_runs = [r for r in lcmsruns if r["file_format"] == "h5"]
@@ -138,14 +123,14 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
     return lcmsruns
 
 def filter_lcmsruns_list(
-    lcmsruns: list[dict],
+    lcmsruns: list["LCMSRun"],
     include_file_type: list[str] = None,
     exclude_file_type: list[str] = None,
     file_format: str = "h5",
     chromatography: str = None,
     polarity: str = None,
     ms_level: str = None
-) -> list[dict]:
+) -> list["LCMSRun"]:
     """Filter a list of LCMS run dicts/objects by the given criteria.
     """
 

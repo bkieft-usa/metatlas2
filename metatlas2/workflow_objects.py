@@ -1181,6 +1181,26 @@ class Atlas:
         }
 
 @dataclass
+class StandardsAnnotationAtlas:
+    """Minimal object that satisfies the Atlas interface expected by
+    :func:`metatlas2.extract_data_from_h5._expand_atlas_windows`.
+
+    The ``to_dataframe()`` method returns a DataFrame with the columns
+    required by the extraction engine: ``mz_rt_uid``, ``mz``, ``rt_min``,
+    ``rt_max``, ``inchi_key``, ``adduct``.
+    """
+
+    def __init__(self, expanded_df: pd.DataFrame, polarity: str) -> None:
+        self._df = expanded_df.copy()
+        self.polarity = polarity
+
+    def to_dataframe(self) -> pd.DataFrame:
+        cols = ["mz_rt_uid", "mz_theoretical", "rt_min", "rt_max", "inchi_key", "adduct", "filename"]
+        df = self._df[cols].copy()
+        df = df.rename(columns={"mz_theoretical": "mz"})
+        return df
+
+@dataclass
 class Project:
 
     project_name: str = field(default="")
@@ -1360,6 +1380,31 @@ class ExperimentalData:
     curation_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 @dataclass
+class StandardsAnnotationData:
+    """Container for all extracted data passed to the GUI and summary generator.
+
+    Attributes:
+        ms1_df:        Wide-format MS1 data for target sample files.
+        ms2_df:        Wide-format MS2 data for target sample files.
+        tic_by_file:   TIC per target filename.
+        expanded_table: One row per (compound, adduct, file) with compound_uid
+                        and mz_rt_uid columns.
+        injbl_ms1_df:  Wide-format MS1 data for InjBl (injection blank) files,
+                       keyed by (mz_rt_uid, injbl_filename).  Empty DataFrame
+                       when no InjBl files were found or extraction has not run.
+        config:        Parsed config dict.
+        project_db_path: Path to the project DuckDB file.
+    """
+
+    ms1_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    ms2_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    tic_by_file: dict[str, pd.DataFrame] = field(default_factory=dict)
+    expanded_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    injbl_ms1_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    config: dict[str, Any] = field(default_factory=dict)
+    project_db_path: str = field(default="")
+
+@dataclass
 class AutoIdentification:
     project_name: str | None = field(default=None)
     project_db_path: str | None = field(default=None)
@@ -1421,6 +1466,35 @@ class AutoIdentification:
                 f"RTA{self.rt_alignment_number} and TGA{self.analysis_number}. "
                 f"Per-analysis checks will skip already-completed analyses."
             )
+
+@dataclass
+class StandardsAnnotationAutoIdentification:
+    """Duck-typed wrapper satisfying the interface expected by
+    :func:`metatlas2.extract_data_from_h5.extract_data_from_raw` for
+    the standards annotation workflow.
+
+    No Atlas object is used — the extraction input is built directly from
+    the expanded compound x file x adduct table.
+
+    Attributes:
+        per_file_atlas: When ``True`` (default), the extraction engine
+            filters the atlas to only the rows whose ``filename`` matches
+            the file being processed.  This is required for target-file
+            extraction where each file has its own unique ``mz_rt_uid``.
+            Set to ``False`` for InjBl extraction where all InjBl files
+            share the same atlas entries (one ``mz_rt_uid`` per
+            compound+adduct, not per file).
+    """
+
+    standards_annotation_atlas_obj: Any
+    standards_annotation_lcmsruns: list
+    standards_annotation_params: dict
+    experimental_data: Any = field(default=None)
+    per_file_atlas: bool = True
+
+    def __post_init__(self):
+        if self.experimental_data is None:
+            self.experimental_data = ExperimentalData()
 
 class CurationStageBase(ABC):
     """Shared logic for AnalysisGUI and AnalysisSummary."""

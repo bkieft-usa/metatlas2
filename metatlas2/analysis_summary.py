@@ -754,20 +754,25 @@ def _plot_raw_ms2(
     mz_arr: list, int_arr: list,
     rt: float = np.nan,
     title: str = "",
+    type: str = None,
 ) -> None:
     """Draw a raw MS2 spectrum (no reference match) on *ax*."""
     ax.axhline(y=0, color="black", linewidth=1.0)
+    default_bar_color = "tomato"
+    if type is not None:
+        default_bar_color = "black"
     if mz_arr and int_arr:
         for mz, intensity in zip(mz_arr, int_arr):
-            ax.bar(mz, intensity, color="tomato", width=1.1, alpha=0.85)
+            ax.bar(mz, intensity, color=default_bar_color, width=1.1, alpha=0.85)
     ax.set_xlabel("m/z", fontsize=14, weight="bold")
     ax.set_ylabel("Intensity", fontsize=14)
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
     ax.tick_params(labelsize=14)
-    rt_str = f"{rt:.2f}" if not np.isnan(rt) else "N/A"
-    ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    if type is None:
+        ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+        rt_str = f"{rt:.2f}" if not np.isnan(rt) else "N/A"
+        ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
+        ax.text(0.5, 1.02, f"RT: {rt_str} min", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
 
@@ -1036,7 +1041,7 @@ def _get_file_color(filename: str, color_map: dict[str, str] | None = None) -> s
     
     return "gray"
 
-def _plot_empty_ms2(ax, title: str = "") -> None:
+def _plot_empty_ms2(ax, title: str = "", type: str | None = None) -> None:
     """Draw a blank MS2 panel with a 'No MS2 Data' annotation."""
     ax.set_xlim(0, 500)
     ax.set_ylim(0, 1e6)
@@ -1046,9 +1051,10 @@ def _plot_empty_ms2(ax, title: str = "") -> None:
     ax.tick_params(labelsize=14)
     ax.text(0.5, 0.5, "No MS2 Data", transform=ax.transAxes,
             ha="center", va="center", fontsize=14, weight="bold", color="gray")
-    ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
-    ax.text(0.5, 1.02, f"RT: N/A", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+    if type is None:
+        ax.text(0.5, 1.13, title, fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
+        ax.text(0.5, 1.07, f"Score: N/A", fontsize=14, weight="bold", ha="center", va="bottom", transform=ax.transAxes)
+        ax.text(0.5, 1.02, f"RT: N/A", fontsize=12, weight="normal", ha="center", va="bottom", transform=ax.transAxes)
     for spine in ax.spines.values():
         spine.set_linewidth(1.2)
 
@@ -2470,13 +2476,21 @@ def make_compound_metric_plots(
 ###############################################
 
 def _sort_boxplot_groups(groups: list[str]) -> list[str]:
-    _CONTROL_GROUPS_FIRST: frozenset[str] = frozenset({"EXCTRL", "INJBL", "ISTD", "QC"})
-    _CONTROL_GROUPS_LAST:  frozenset[str] = frozenset({"REFSTD"})
 
-    first  = sorted(g for g in groups if g in _CONTROL_GROUPS_FIRST)
-    last   = sorted(g for g in groups if g in _CONTROL_GROUPS_LAST)
-    middle = sorted(g for g in groups if g not in _CONTROL_GROUPS_FIRST and g not in _CONTROL_GROUPS_LAST)
-    return first + middle + last
+    _CONTROL_GROUPS_FIRST: tuple[str, ...] = ("ISTD", "INJBL", "EXCTRL", "QC")
+    _CONTROL_GROUPS_LAST:  tuple[str, ...] = ("REFSTD",)
+
+    _FIRST_ORDER = {g: i for i, g in enumerate(_CONTROL_GROUPS_FIRST)}
+    _LAST_ORDER = {g: i for i, g in enumerate(_CONTROL_GROUPS_LAST)}
+
+    def key(g: str) -> tuple[int, int, str]:
+        if g in _FIRST_ORDER:
+            return (0, _FIRST_ORDER[g], g)
+        if g in _LAST_ORDER:
+            return (2, _LAST_ORDER[g], g)
+        return (1, 0, g)
+
+    return sorted(groups, key=key)
 
 def _build_group_color_map(groups: list[str]) -> dict[str, str]:
     
@@ -2833,6 +2847,7 @@ def make_boxplots(
         if "file_group" in per_file_df.columns else []
     )
     all_groups: list[str] = _sort_boxplot_groups(raw_groups)
+    logger.info(f"Boxplot groups (x-axis order): {all_groups}")
     group_color_map: dict[str, str] = _build_group_color_map(all_groups)
 
     # One task per compound
