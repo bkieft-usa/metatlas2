@@ -825,3 +825,52 @@ def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, a
 
     return matched_uid
     
+def load_standards_config(config_path: str) -> dict[str, Any]:
+    """Load and validate the standards-annotation YAML config.
+
+    Args:
+        config_path: Path to the YAML config file.
+
+    Returns:
+        Parsed config dict with lower-cased top-level keys.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        ValueError: If required keys are missing.
+    """
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    # Normalise top-level keys to lowercase
+    config = {k.lower(): v for k, v in raw.items()}
+
+    project = config.get("project", {})
+    if not project:
+        raise ValueError("Config missing required 'PROJECT' section")
+    if not project.get("standards_run_name"):
+        raise ValueError("Config PROJECT.standards_run_name is required")
+    if not project.get("standards_input_file"):
+        raise ValueError("Config PROJECT.standards_input_file is required")
+    if not Path(project["standards_input_file"]).exists():
+        raise FileNotFoundError(
+            f"standards_input_file not found: {project['standards_input_file']}"
+        )
+
+    # Apply defaults for optional sections
+    config.setdefault("extraction", {})
+    config["extraction"].setdefault("ms1_mz_tolerance_ppm", 5.0)
+    config["extraction"].setdefault("ms1_min_num_points", 0)
+    config["extraction"].setdefault("ms1_min_peak_intensity", 0)
+    config["extraction"].setdefault("ms2_min_num_scans", 0)
+    config["extraction"].setdefault("ms2_min_precursor_intensity", 0)
+    config["extraction"].setdefault("ms2_top_n_per_peak", 5)
+    config["extraction"].setdefault("max_workers", 4)
+
+    config.setdefault("gui", {})
+
+    logger.info(f"Loaded standards annotation config from {config_path}")
+    return config

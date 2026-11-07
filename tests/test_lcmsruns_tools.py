@@ -17,8 +17,7 @@ Phase 2 — ``sample_name`` then ``run_metadata`` for lower-priority types:
 
 Phase 3 — fallback: ``'experimental'``.
 
-Special case: ``QC-C18QU`` in either field is **not** a real QC run; the
-``qc`` segment is skipped when immediately followed by ``c18qu``.
+Special case: ``QC-C18QU`` is a real QC run but won't be used in the RT align model
 
 Regression cases covered
 ------------------------
@@ -111,15 +110,15 @@ class TestClassifyFileTypeQC:
         ) == "exctrl"
 
     def test_qc_c18qu_in_run_metadata_skipped_experimental_fallback(self):
-        """QC-C18QU in run_metadata skipped; sample_name has no key → experimental."""
+        """QC-C18QU in run_metadata skipped; sample_name has no key → qc."""
         assert _classify_file_type(
             _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC-C18QU")
-        ) == "experimental"
+        ) == "qc"
 
     def test_qc_c18qu_alone_in_sample_name_is_not_qc(self):
         """QC-C18QU as the entire sample_name: 'qc' segment is followed by
-        'c18qu' → skip → no other key → experimental."""
-        assert _classify_file_type(_fields("QC-C18QU")) == "experimental"
+        'c18qu' → qc."""
+        assert _classify_file_type(_fields("QC-C18QU")) == "qc"
 
     def test_mixed_case_qc(self):
         assert _classify_file_type(_fields("Qc-SopV7")) == "qc"
