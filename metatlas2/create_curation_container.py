@@ -194,11 +194,7 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
         return {}
 
     if stage == "manual_curation_creator":
-        # Build the union RT grid once (cheap: concatenate raw RT arrays and unique-sort).
         all_rts = np.unique(np.concatenate(raw_rt_arrays))
-
-        # Compute max and mean EIC traces with online accumulators so we never
-        # hold more than one interpolated array in memory at a time.
         max_eic_intensity = np.zeros(len(all_rts), dtype=np.float64)
         eic_sum = np.zeros(len(all_rts), dtype=np.float64)
         n_files_eic = len(raw_rt_arrays)
@@ -206,7 +202,6 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
             interp = np.interp(all_rts, r, i, left=0.0, right=0.0)
             np.maximum(max_eic_intensity, interp, out=max_eic_intensity)
             eic_sum += interp
-            # `interp` goes out of scope here and is eligible for GC immediately
         avg_eic_intensity = eic_sum / max(n_files_eic, 1)
         del raw_rt_arrays, raw_int_arrays, eic_sum  # release before continuing
 

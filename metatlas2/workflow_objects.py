@@ -180,6 +180,7 @@ class PathsConfig(TypedDict, total=False):
     main_db_path: str
     pubchem_cache_path: str
     modelseed_table_path: str
+    chebi_cache_path: str
     parquet_output_dir: str
     rt_alignment_output_dir: str
     rt_alignment_results_dir: str
@@ -504,41 +505,32 @@ class NewCompoundsConfig:
         the old ``Compound.create_from_config()`` classmethod, keeping pipeline
         orchestration on the config object rather than on the domain object.
         """
-        import metatlas2.modelseed_retrieval as msr
-        import metatlas2.chebi_retrieval as chr
-
         paths = rtg.set_up_paths(config=self)
-        main_db_path = paths.get("main_db_path", None)
-        pubchem_cache_path = paths.get("pubchem_cache_path", None)
-        modelseed_cache_path = paths.get("modelseed_table_path", None)
-        chebi_cache_path = paths.get("chebi_cache_path", None)
+        add_compounds_from_files(
+            [file_path for _, _, file_path in self.iter_paths()], paths, overwrite_db,
+        )
 
-        compounds: list[Compound] = []
-        dbi.create_metatlas_database(main_db_path, overwrite=overwrite_db)
 
-        for chrom, pol, file_path in self.iter_paths():
-            logger.info(f"Processing compound file: {file_path}")
-            compounds_df = ldt.load_compound_input(file_path)
-            compounds_df = pcr.retrieve_pubchem_info(
-                compounds=compounds_df,
-                pubchem_cache_path=pubchem_cache_path,
-            )
-            compounds_df = msr.retrieve_modelseed_info(
-                compounds=compounds_df,
-                modelseed_cache_path=modelseed_cache_path,
-            )
-            compounds_df = chr.retrieve_metacyc_info(
-                compounds=compounds_df,
-                chebi_cache_path=chebi_cache_path,
-            )
-            for _, row in tqdm(compounds_df.iterrows(), total=len(compounds_df), desc="Processing compounds", disable=should_disable_tqdm()):
-                try:
-                    compound = Compound.from_atlas_row(row)
-                    compounds.append(compound)
-                except Exception as e:
-                    logger.warning(f"Failed to create Compound for row {row.get('compound_name', 'Unknown')}: {e}")
+def add_compounds_from_files(file_paths: list[str], paths: PathsConfig, overwrite_db: bool = False) -> None:
+    """Load, enrich and save compounds from atlas-format files."""
+    import metatlas2.modelseed_retrieval as msr
+    import metatlas2.chebi_retrieval as chr
 
-        dbi.batch_save_compounds(main_db_path, compounds)
+    compounds: list[Compound] = []
+    dbi.create_metatlas_database(paths["main_db_path"], overwrite=overwrite_db)
+    for file_path in file_paths:
+        logger.info(f"Processing compound file: {file_path}")
+        compounds_df = ldt.load_compound_input(file_path)
+        compounds_df = pcr.retrieve_pubchem_info(compounds=compounds_df, pubchem_cache_path=paths["pubchem_cache_path"])
+        compounds_df = msr.retrieve_modelseed_info(compounds=compounds_df, modelseed_cache_path=paths["modelseed_table_path"])
+        compounds_df = chr.retrieve_metacyc_info(compounds=compounds_df, chebi_cache_path=paths["chebi_cache_path"])
+        for _, row in tqdm(compounds_df.iterrows(), total=len(compounds_df), desc="Processing compounds", disable=should_disable_tqdm()):
+            try:
+                compounds.append(Compound.from_atlas_row(row))
+            except Exception as e:
+                logger.warning(f"Failed to create Compound for row {row.get('compound_name', 'Unknown')}: {e}")
+
+    dbi.batch_save_compounds(paths["main_db_path"], compounds)
 
 
 @dataclass
@@ -727,17 +719,16 @@ class NewMsmsRefsConfig:
                             'intensities': intensities.tolist(),
                         })
 
-                        # 3. Chunking: If buffer reaches batch_size, save to DB and clear
-                        if len(records) >= batch_size:
-                            inserted = dbi.batch_save_msms_refs(main_db_path, records)
-                            file_inserted += inserted
-                            total_inserted += inserted
-                            records = []
-
                     except Exception as e:
                         logger.warning(f"  Row {row_num}: parse error — {e}")
                         n_skipped += 1
                         continue
+
+                    if len(records) >= batch_size:
+                        inserted = dbi.batch_save_msms_refs(main_db_path, records)
+                        file_inserted += inserted
+                        total_inserted += inserted
+                        records = []
 
             # 4. Final Flush: Save any remaining records left in the buffer
             if records:
@@ -1181,26 +1172,6 @@ class Atlas:
         }
 
 @dataclass
-class StandardsAnnotationAtlas:
-    """Minimal object that satisfies the Atlas interface expected by
-    :func:`metatlas2.extract_data_from_h5._expand_atlas_windows`.
-
-    The ``to_dataframe()`` method returns a DataFrame with the columns
-    required by the extraction engine: ``mz_rt_uid``, ``mz``, ``rt_min``,
-    ``rt_max``, ``inchi_key``, ``adduct``.
-    """
-
-    def __init__(self, expanded_df: pd.DataFrame, polarity: str) -> None:
-        self._df = expanded_df.copy()
-        self.polarity = polarity
-
-    def to_dataframe(self) -> pd.DataFrame:
-        cols = ["mz_rt_uid", "mz_theoretical", "rt_min", "rt_max", "inchi_key", "adduct", "filename"]
-        df = self._df[cols].copy()
-        df = df.rename(columns={"mz_theoretical": "mz"})
-        return df
-
-@dataclass
 class Project:
 
     project_name: str = field(default="")
@@ -1241,7 +1212,8 @@ class Project:
         
         logger.info(f"Loading LCMS runs...")
         lcmsruns_list = lrt.get_project_lcmsruns_from_disk(
-            self.paths['lcmsruns_directory']
+            self.paths['lcmsruns_directory'],
+            owner=config["general"]["owner"]
         )
 
         logger.info(f"Saving {len(lcmsruns_list)} LCMS runs metadata to database...")
@@ -1486,8 +1458,8 @@ class StandardsAnnotationAutoIdentification:
             compound+adduct, not per file).
     """
 
-    standards_annotation_atlas_obj: Any
-    standards_annotation_lcmsruns: list
+    standards_annotation_atlas_df: pd.DataFrame # no need to create an actual Atlas object
+    standards_annotation_lcmsruns: list[LCMSRun]
     standards_annotation_params: dict
     experimental_data: Any = field(default=None)
     per_file_atlas: bool = True

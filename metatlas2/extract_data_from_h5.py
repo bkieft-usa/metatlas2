@@ -305,8 +305,6 @@ def _process_one_file(run, atlas, only_in_feature):
     ms1_df = _load_h5_table(run.file_path, ms1_key, columns=["mz", "rt", "i"],
                             mz_bounds=(float(atlas["mz_min"].min()), float(atlas["mz_max"].max())))
 
-    # Pre-filter MS1 rows to the extract RT windows when they are present and
-    # wider than the in-feature windows (i.e. extract_extra_time was set).
     if (
         not ms1_df.empty
         and "rt_min_extract" in atlas.columns
@@ -486,61 +484,6 @@ def _widen_one_file_ms2(ms2_long: pd.DataFrame) -> pd.DataFrame:
     wide = _sort_frags(wide)
     return wide
 
-
-def _merge_wide_ms1(
-    accumulator: pd.DataFrame,
-    new_chunk: pd.DataFrame,
-) -> pd.DataFrame:
-    """Append a per-file wide MS1 chunk to a running accumulator.
-
-    This helper is retained for use in tests and any external callers.
-    The main :func:`extract_data_from_raw` pipeline now collects all chunks
-    in a list and calls :func:`pandas.concat` once at the end to avoid
-    creating N-1 intermediate DataFrames.
-
-    Args:
-        accumulator: Current wide-format MS1 accumulator (may be empty on the
-                     first call).
-        new_chunk:   Wide-format MS1 DataFrame for one file (output of
-                     :func:`_widen_one_file_ms1`).
-
-    Returns:
-        Updated accumulator with *new_chunk* appended.
-    """
-    if new_chunk.empty:
-        return accumulator
-    if accumulator.empty:
-        return new_chunk
-    return pd.concat([accumulator, new_chunk], ignore_index=True)
-
-
-def _merge_wide_ms2(
-    accumulator: pd.DataFrame,
-    new_chunk: pd.DataFrame,
-) -> pd.DataFrame:
-    """Append a per-file wide MS2 chunk to a running accumulator.
-
-    This helper is retained for use in tests and any external callers.
-    The main :func:`extract_data_from_raw` pipeline now collects all chunks
-    in a list and calls :func:`pandas.concat` once at the end to avoid
-    creating N-1 intermediate DataFrames.
-
-    Args:
-        accumulator: Current wide-format MS2 accumulator (may be empty on the
-                     first call).
-        new_chunk:   Wide-format MS2 DataFrame for one file (output of
-                     :func:`_widen_one_file_ms2`).
-
-    Returns:
-        Updated accumulator with *new_chunk* appended.
-    """
-    if new_chunk.empty:
-        return accumulator
-    if accumulator.empty:
-        return new_chunk
-    return pd.concat([accumulator, new_chunk], ignore_index=True)
-
-
 def _log_ms_totals(ms1_df: pd.DataFrame, ms2_df: pd.DataFrame) -> None:
     """Log aggregate counts for the fully assembled wide MS1 and MS2 DataFrames.
 
@@ -615,12 +558,9 @@ def _filter_ms2_points(ms2_df, ms1_df, min_scans=None, min_int=None):
     starting_scans = len(ms2_df)
     starting_uids = ms2_df['mz_rt_uid'].nunique()
 
-    # Each row is one scan; in_feature is a scalar bool.
     # Build a per-(mz_rt_uid, filename) summary of in-feature scans.
     group_cols = ['mz_rt_uid', 'filename']
     in_feature_mask = ms2_df['in_feature'].astype(bool)
-
-    # Collect per-step stats for the summary table: (step_label, scans_after, compounds_after)
     steps = [("extracted", starting_scans, starting_uids)]
 
     if min_scans is not None and min_scans > 0 and not ms2_df.empty:
@@ -720,8 +660,6 @@ def _filter_ms1_points(ms1_df, min_pts, min_int):
 
     starting_compounds = ms1_df['mz_rt_uid'].nunique()
     starting_entries = len(ms1_df)
-
-    # Collect per-step stats for the summary table: (step_label, entries_after, compounds_after)
     steps = [("extracted", starting_entries, starting_compounds)]
 
     # compute per-row in-feature point count and max intensity
@@ -848,18 +786,20 @@ def extract_data_from_raw(
         raise ValueError(f"Invalid stage {stage!r}. Expected one of: {sorted(_VALID_STAGES)}")
 
     if stage == "rt_alignment":
-        atlas = obj.align_atlas_obj
+        atlas_df = obj.align_atlas_obj.to_dataframe()
         lcmsruns = obj.aligner_lcmsruns
-        lcmsruns = [r for r in lcmsruns if "c18qu" not in r.filename.lower()] # remove other QC type
+        lcmsruns = [r for r in lcmsruns if "c18qu" not in r.filename.lower()] # remove other QC type, placeholder
         wp = obj.rt_alignment_params
         set_max_workers = obj.config.max_workers
     elif stage == "auto_identification":
-        atlas = obj.auto_ided_atlas_obj
+        atlas_df = obj.auto_ided_atlas_obj.to_dataframe()
         lcmsruns = obj.autoid_lcmsruns
         wp = obj.ta.params
         set_max_workers = obj.config.max_workers
     elif stage == "standards_annotation":
-        atlas = obj.standards_annotation_atlas_obj
+        atlas_df = obj.standards_annotation_atlas_df
+        if 'mz_theoretical' in atlas_df.columns:
+            atlas_df['mz'] = atlas_df['mz_theoretical']
         lcmsruns = obj.standards_annotation_lcmsruns
         wp = obj.standards_annotation_params
         set_max_workers = wp.get("max_workers", 1)
@@ -867,10 +807,10 @@ def extract_data_from_raw(
         raise ValueError(f"Unexpected stage {stage}")
 
     _POL_TO_H5 = {"pos": "positive", "neg": "negative"}
-    canonical_pol = fpf.normalize_polarity(atlas.polarity)
+    canonical_pol = fpf.normalize_polarity(atlas_df['polarity'].iloc[0])
     if canonical_pol not in _POL_TO_H5:
         raise ValueError(
-            f"Atlas polarity '{atlas.polarity}' (canonical: '{canonical_pol}') is not supported "
+            f"Atlas polarity '{atlas_df['polarity'].iloc[0]}' (canonical: '{canonical_pol}') is not supported "
             f"for data extraction. Expected 'pos' or 'neg' — the atlas must have a single polarity."
         )
     polarity = _POL_TO_H5[canonical_pol]
@@ -885,7 +825,6 @@ def extract_data_from_raw(
         if k in wp:
             logger.info(f"  {k}: {wp[k]}")
 
-    atlas_df = atlas.to_dataframe()
     atlas_expanded = _expand_atlas_windows(
         atlas_df,
         wp.get("atlas_extra_time", 0.0),
@@ -911,20 +850,7 @@ def extract_data_from_raw(
     ms1_chunks: list[pd.DataFrame] = []
     ms2_chunks: list[pd.DataFrame] = []
 
-    # For the standards_annotation stage the atlas contains one row per
-    # (compound, adduct, file) — each file has its own unique mz_rt_uid.
-    # We MUST filter the atlas to only the rows for the file being processed;
-    # otherwise every file's scan points get matched to every other file's
-    # mz_rt_uid (same compound/adduct/m/z/RT window, different mz_rt_uid),
-    # producing cross-file mz_rt_uid contamination and wrong CE assignments.
-    #
-    # For rt_alignment and auto_identification the atlas is shared across all
-    # files (one mz_rt_uid per compound+adduct, not per file), so no filtering
-    # is needed.
-    # Per-file atlas filtering is enabled for standards_annotation when:
-    #   1. The stage is "standards_annotation"
-    #   2. The atlas has a "filename" column (added by StandardsAnnotationAtlas)
-    #   3. The obj has per_file_atlas=True (default True; set False for InjBl)
+    # For the standards_annotation stage, filter the atlas to only the rows for the file being processed
     _obj_per_file = getattr(obj, "per_file_atlas", True)
     per_file_atlas = (
         stage == "standards_annotation"
@@ -933,7 +859,6 @@ def extract_data_from_raw(
     )
 
     if per_file_atlas:
-        # Pre-build a dict of filename -> per-file atlas slice for O(1) lookup
         _atlas_by_file: dict[str, pd.DataFrame] = {
             fn: grp.reset_index(drop=True)
             for fn, grp in atlas_expanded.groupby("filename")
@@ -943,8 +868,6 @@ def extract_data_from_raw(
             f"({len(_atlas_by_file)} unique files in atlas)"
         )
 
-    # Validate per-file atlas coverage before entering the executor so that a
-    # missing file raises immediately (not mid-pool with orphaned workers).
     if per_file_atlas:
         missing_in_atlas = [r.filename for r in runs if r.filename not in _atlas_by_file]
         if missing_in_atlas:
@@ -987,7 +910,6 @@ def extract_data_from_raw(
     final_ms2_df = pd.concat(ms2_chunks, ignore_index=True) if ms2_chunks else pd.DataFrame()
     del ms1_chunks, ms2_chunks
 
-    # Sort MS1 list columns by RT (required for correct np.interp downstream)
     final_ms1_df = _sort_ms1_lists_by_rts(final_ms1_df)
     _log_ms_totals(final_ms1_df, final_ms2_df)
 

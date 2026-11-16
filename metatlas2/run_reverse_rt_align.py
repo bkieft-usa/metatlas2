@@ -1,24 +1,3 @@
-"""
-metatlas2/run_reverse_rt_align.py
-
-CLI entrypoint for the reverse RT alignment phase of the standards-annotation
-workflow.
-
-Reads analyst selections from the project DuckDB (sa_selections), builds a
-reverse RT alignment model using QC h5 files and a QC atlas from the main
-metatlas DuckDB, applies the model to the selections, and writes aligned rows
-to sa_rt_aligned.  Also generates:
-  - RTAlignment-Summary__{run_name}.pdf
-  - RTAlignment-Table__{run_name}.xlsx
-  - RefStd_Atlas__{chrom}__{pol}__{run_name}.csv  (one per chrom × polarity)
-  - A pre-filled Jupyter notebook for reviewing results.
-
-Usage (via metatlas2.sh):
-    metatlas2 reverse-rt-align --config_path /path/to/config.yaml
-
-Usage (direct Python):
-    python -m metatlas2.run_reverse_rt_align --config_path /path/to/config.yaml
-"""
 from __future__ import annotations
 
 import argparse
@@ -27,19 +6,19 @@ from pathlib import Path
 
 import metatlas2.logging_config as lcf
 
-
-def run_reverse_rt_align(config_path: str) -> None:
+def run_reverse_rt_align(config_path: str, timestamp: str, tags: str, skip_rt_alignment: bool = False) -> None:
     """Main entrypoint for the reverse RT alignment workflow.
 
     Steps:
       1. Loads the config YAML.
       2. Sets up the output directory and log file.
-      3. Runs the reverse RT alignment (or regenerates outputs if already done).
-      4. Generates a pre-filled Jupyter notebook for reviewing results.
+      3. Creates a new reverse RT alignment for the selected annotation run.
 
     Args:
         config_path: Absolute or relative path to the standards-annotation
                      YAML config file.
+        timestamp:   Timestamp of the approved summary session.
+        tags:        Semicolon-separated list of tags to apply to the new reverse RT alignment.
     """
     from metatlas2.load_tools import load_standards_config
     from metatlas2.standards_annotation_db import (
@@ -53,7 +32,12 @@ def run_reverse_rt_align(config_path: str) -> None:
 
     # Set up output directory and logging
     output_root = get_project_output_root(config)
-    output_root.mkdir(parents=True, exist_ok=True)
+    db_path = get_project_db_path(config)
+    if not output_root.is_dir() or not Path(db_path).is_file():
+        raise FileNotFoundError(
+            f"Standards annotation project database not found: {db_path}. "
+            "Run standards-annotation and generate a summary first."
+        )
     log_dir = output_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = str(log_dir / "reverse_rt_align.log")
@@ -67,9 +51,8 @@ def run_reverse_rt_align(config_path: str) -> None:
         logger = lcf.get_logger("run_reverse_rt_align")
         logger.info(f"Reverse RT alignment starting for config: {config_path}")
 
-        db_path = get_project_db_path(config)
         output_path = output_root / "outputs"
-        run_reverse_rt_alignment(config_path, db_path, output_path)
+        run_reverse_rt_alignment(config_path, db_path, output_path, timestamp, tags, skip_rt_alignment)
 
         logger.info("Reverse RT alignment complete.")
 
@@ -81,9 +64,26 @@ if __name__ == "__main__":
         )
     )
     parser.add_argument(
+        "--annotation_timestamp",
+        required=True,
+        help="Timestamp of the approved summary session.",
+    )
+    parser.add_argument(
         "--config_path",
         required=True,
         help="Path to the standards_annotation YAML config file.",
     )
+    parser.add_argument(
+        "--tags",
+        default="EMA",
+        required=False,
+        help="Semicolon-separated list of tags to apply to the new reverse RT alignment.",
+    )
+    parser.add_argument(
+        "--skip_rt_alignment",
+        action="store_true",
+        help="Skip the reverse RT alignment step and only create a new run with the specified tags.",
+        required=False
+    )
     args = parser.parse_args()
-    run_reverse_rt_align(args.config_path)
+    run_reverse_rt_align(args.config_path, args.timestamp, args.tags, args.skip_rt_alignment)

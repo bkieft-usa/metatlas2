@@ -3732,14 +3732,28 @@ def _file_group_from_filename(filename: str) -> str:
     """Return the file-group label for a single LCMS filename.
     """
     try:
-        fields = fpf.parse_file_name(
-            # parse_file_name expects a bare filename; strip any directory prefix.
-            str(filename).replace("\\", "/").rsplit("/", 1)[-1]
-        )
-        file_type = lrt._classify_file_type(fields)
-        if file_type == "experimental":
+        fields = fpf.parse_file_name(str(filename).replace("\\", "/").rsplit("/", 1)[-1])
+        owner = fields.get("owner", "")
+        file_type = lrt._classify_file_type(fields, owner)
+        if file_type == "istd":
+            return "ISTD"
+        elif file_type == "refstd":
+            return f"{fields.get('sample_name', '')} (RefStd)"
+        elif file_type == "exctrl":
+            return f"{fields.get('sample_name', '')} (ExCtrl)"
+        elif file_type == "txctrl":
+            return f"{fields.get('sample_name', '')} (TxCtrl)"
+        elif file_type == "qc":
+            return f"{fields.get('sample_name', '')} (QC)"
+        elif file_type == "qc-c18qu":
+            return f"{fields.get('sample_name', '')} (QC-C18QU)"
+        elif file_type == "injbl":
+            return f"{fields.get('sample_name', '')} (InjBl)"
+        elif file_type == "experimental":
+            return f"{fields.get('sample_name', '')}"
+        else:
             return fields.get("sample_name", "")
-        return file_type.upper()
+
     except Exception:
         return ""
 
@@ -3889,26 +3903,44 @@ def _apply_override_ms_filters(obj: "AnalysisGUI") -> None:
     logger.info(f"Removed {len(obj.experimental_data.curation_df) - keep_mask.sum()} compounds based on override MS filters. {len(obj.experimental_data.curation_df)} compounds remain in curation_df.")
     logger.info(f"After applying override MS filters, {len(obj.experimental_data.curation_df)} compounds remain in curation_df.")
 
-def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
-    apply_cross_polarity = obj.ta.params.get("apply_cross_polarity_curation", True)
-    if obj.override_parameters.get("apply_cross_polarity_curation") is not None:
-        apply_cross_polarity = obj.override_parameters.get("apply_cross_polarity_curation")
+# def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
+#     apply_cross_polarity = obj.ta.params.get("apply_cross_polarity_curation", True)
+#     if obj.override_parameters.get("apply_cross_polarity_curation") is not None:
+#         apply_cross_polarity = obj.override_parameters.get("apply_cross_polarity_curation")
     
-    if apply_cross_polarity:
-        logger.info(f"Checking for curated opposite-polarity entries...")
-        opp_polarity_df = _get_opposite_polarity_curation(obj=obj)
+#     if apply_cross_polarity:
+#         logger.info(f"Checking for curated opposite-polarity entries...")
+#         opp_polarity_df = _get_opposite_polarity_curation(obj=obj)
         
-        if not opp_polarity_df.empty:
-            opp_polarity_df = sanitize_curation_df(opp_polarity_df)
+#         if not opp_polarity_df.empty:
+#             opp_polarity_df = sanitize_curation_df(opp_polarity_df)
             
-            n_cross = _apply_cross_polarity_curation(
-                obj=obj,
-                opposite_polarity_df=opp_polarity_df
-            )
+#             n_cross = _apply_cross_polarity_curation(
+#                 obj=obj,
+#                 opposite_polarity_df=opp_polarity_df
+#             )
             
-            obj.experimental_data.curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
+#             obj.experimental_data.curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
             
-            logger.info(f"Transferred opposite-polarity RT bounds to {n_cross} compound(s).")
+#             logger.info(f"Transferred opposite-polarity RT bounds to {n_cross} compound(s).")
+
+def _filter_excluded_filenames(
+    df: pd.DataFrame, 
+    substrings: list[str]
+) -> pd.DataFrame:
+    """Drop rows whose ``filename`` column contains any of *substrings*."""
+    if df.empty or "filename" not in df.columns or not substrings:
+        return df
+    pattern = "|".join(re.escape(s) for s in substrings)
+    mask = ~df["filename"].str.contains(pattern, regex=True, na=False)
+    removed = int((~mask).sum())
+    if removed:
+        logger.info(
+            f"Excluded {removed} rows "
+            f"({df.loc[~mask, 'filename'].nunique()} files) matching "
+            f"filename substrings {list(substrings)}."
+        )
+    return df[mask]
 
 def _load_data_from_db(
     obj: "AnalysisGUI" | "AnalysisSummary",
@@ -3973,6 +4005,10 @@ def _load_data_from_db(
         f"{len(ms1_df)} MS1 data points ({ms1_df['filename'].nunique()} total files), "
         f"and {len(ms2_df)} MS2 data points ({ms2_df['filename'].nunique()} total files)."
     )
+
+    # turn on to remove substrings from summary
+    #ms1_df = _filter_excluded_filenames(ms1_df, ["C18QU"])
+    #ms2_df = _filter_excluded_filenames(ms2_df, ["C18QU"])
 
     obj.experimental_data = ExperimentalData()
     obj.experimental_data.curation_df = curation_df

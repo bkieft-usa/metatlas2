@@ -347,7 +347,7 @@ All `compound_file` columns above **except** `filename`, `file_group`,
 
 def _make_query_builder_guide_cell() -> nbformat.NotebookNode:
     """Markdown cell: filter suffix system and custom query instructions."""
-    text = """\
+    text = """
 ---
 ## Query Builder Guide
 
@@ -364,10 +364,10 @@ Append a suffix to a column name to create a filter:
 | `_in` | Value is in list | `'adduct_in': ['[M+H]+', '[M+Na]+']` |
 | `_min` | Column ≥ value | `'best_ms1_intensity_min': 10_000` |
 | `_max` | Column ≤ value | `'best_ms1_ppm_error_max': 5.0` |
-| `_abs_gt` | \|column\| > value | `'log2_fold_change_abs_gt': 1.5` |
-| `_abs_lt` | \|column\| < value | `'log2_fold_change_abs_lt': 0.1` |
-| `_abs_min` | \|column\| ≥ value | `'log2_fold_change_abs_min': 1.0` |
-| `_abs_max` | \|column\| ≤ value | `'log2_fold_change_abs_max': 3.0` |
+| `_abs_gt` | abs(column) > value | `'log2_fold_change_abs_gt': 1.5` |
+| `_abs_lt` | abs(column) < value | `'log2_fold_change_abs_lt': 0.1` |
+| `_abs_min` | abs(column) ≥ value | `'log2_fold_change_abs_min': 1.0` |
+| `_abs_max` | abs(column) ≤ value | `'log2_fold_change_abs_max': 3.0` |
 
 ### Special keys (compound_lfc only)
 
@@ -606,7 +606,7 @@ def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Generate summary figures and Excel table after the GUI has been closed.\n"
+        "# Generate a new timestamped annotation run with figures and a CSV table.\n"
         "sas.run_standards_annotation_summary(\n"
         "    data=data,\n"
         "    config=config,\n"

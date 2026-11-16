@@ -26,23 +26,25 @@ _POLARITY_TO_MATCHMS: dict[str, str] = {
 }
 
 DEFAULT_EXCLUDE_LCMSRUNS = {
-    'gui': ['INJBL', 'BLANK'],
-    'id_sheet': ['INJBL', 'BLANK', 'REFSTD'],
-    'chromatograms': ['INJBL', 'BLANK'],
-    'id_plots': ['INJBL', 'BLANK', 'REFSTD'],
-    'data_sheets': ['INJBL', 'BLANK'],
+    'gui': ['injbl'],
+    'id_sheet': ['injbl', 'refstd'],
+    'chromatograms': ['injbl'],
+    'id_plots': ['injbl', 'refstd'],
+    'data_sheets': ['injbl'],
 }
 
 DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = [
-    'EXPERIMENTAL',
-    'ISTD',
-    'ISTDsEtc',
-    'EXCTRL',
-    'REFSTD',
-    'INJBLK'
+    'experimental',
+    'istd',
+    'exctrl',
+    'txctrl',
+    'refstd',
+    'injblk',
+    'qc',
+    'qc-c18qu'
     ]
 
-DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['QC']
+DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['qc']
 
 def load_msms_refs_file(
     file_path: str,

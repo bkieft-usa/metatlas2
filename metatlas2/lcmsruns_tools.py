@@ -8,65 +8,54 @@ import metatlas2.logging_config as lcf
 
 logger = lcf.get_logger('lcmsruns_tools')
 
-_HIGH_PRIORITY_RUN_METADATA_TYPES: dict[str, str] = {
-    'qc':     'qc',
-    'istd':   'istd',
-    'injbl':  'injbl',
-    'injblk': 'injbl',
-    'blank':  'injbl',
+_FILE_TYPE_RULES: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
+    "jgi": [
+        ("qc-c18qu", "run_metadata",  ("qc", "c18qu")),
+        ("qc",       "run_metadata",  ("qc",)),
+        ("istd",     "run_metadata",  ("istd",)),
+        ("injbl",    "run_metadata",  ("injbl",)),
+        ("exctrl",   "sample_name",  ("exctrl",)),
+        ("refstd",   "sample_number", ("refstd",)),
+    ],
+    "egsb": [
+        ("qc",       "sample_name",   ("qc",)),
+        ("istd",     "sample_name",   ("istd",)),
+        ("injbl",    "sample_name",   ("injbl",)),
+        ("exctrl",   "sample_name",   ("exctrl",)),
+        ("txctrl",   "sample_name",   ("txctrl",)),
+        ("refstd",   "sample_number", ("refstd",)),
+    ],
 }
 
-_LOW_PRIORITY_SAMPLE_NAME_TYPES: dict[str, str] = {
-    'exctrl':   'exctrl',
-    'txctrl':   'exctrl',
-    'refstd':   'refstd',
-    'standard': 'refstd',
-}
 
-SAMPLE_NAME_TO_FILE_TYPE: dict[str, str] = {
-    **_HIGH_PRIORITY_RUN_METADATA_TYPES,
-    **_LOW_PRIORITY_SAMPLE_NAME_TYPES,
-}
+def _has_segments(segments: list[str], pattern: tuple[str, ...]) -> bool:
+    """Return True if *pattern* appears as consecutive whole segments."""
+    n = len(pattern)
+    return any(tuple(segments[i:i + n]) == pattern for i in range(len(segments) - n + 1))
 
 
-def _classify_file_type(fields: dict) -> str:
-    """Return the file_type category for a parsed filename field dict.
+def _classify_file_type(fields: dict, owner: str) -> str:
+    """Return the file_type for a parsed filename field dict.
+
+    *owner* selects the file-format rule set ("jgi" or "egsb").
     """
-    sample_name = fields.get("sample_name",  "").lower().strip()
-    run_metadata = fields.get("run_metadata", "").lower().strip()
+    owner_lc = (owner or "").lower().strip()
+    if owner_lc == "eb":
+        owner_lc = "egsb"
+    if owner_lc not in _FILE_TYPE_RULES:
+        raise ValueError(f"Unknown owner '{owner}'. Expected one of: {list(_FILE_TYPE_RULES)}")
 
-    sn_segs = sample_name.split("-")
-    rm_segs = run_metadata.split("-")
-
-    def _key_found_in(key: str, segments: list[str]) -> bool:
-        """Return True if *key* appears as a segment, ignoring 'qc' followed by 'c18qu'."""
-        for idx, seg in enumerate(segments):
-            if seg != key:
-                continue
-            if key == "qc" and idx + 1 < len(segments) and segments[idx + 1] == "c18qu":
-                continue
-            return True
-        return False
-
-    for key, file_type in _HIGH_PRIORITY_RUN_METADATA_TYPES.items():
-        if key == "qc":
-            if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
-                return file_type
-        else:
-            if _key_found_in(key, rm_segs):
-                return file_type
-
-    for key, file_type in _LOW_PRIORITY_SAMPLE_NAME_TYPES.items():
-        if _key_found_in(key, sn_segs) or _key_found_in(key, rm_segs):
+    segs: dict[str, list[str]] = {}
+    for file_type, field, pattern in _FILE_TYPE_RULES[owner_lc]:
+        if field not in segs:
+            segs[field] = (fields.get(field) or "").lower().strip().split("-")
+        if _has_segments(segs[field], pattern):
             return file_type
 
-    if "qc" in sn_segs or "qc" in rm_segs:
-        return _HIGH_PRIORITY_RUN_METADATA_TYPES["qc"]
-
-    return 'experimental'
+    return "experimental"
 
 
-def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
+def get_project_lcmsruns_from_disk(project_raw_files_path: str, owner: str = "jgi") -> list[dict]:
     project_path = Path(project_raw_files_path)
     if not project_path.exists():
         raise FileNotFoundError(f"Project path does not exist: {project_path}")
@@ -90,7 +79,7 @@ def get_project_lcmsruns_from_disk(project_raw_files_path: str) -> list[dict]:
                     "file_path": str(file_path),
                     "filename": file_path.name,
                     "file_format": ext,
-                    "file_type": _classify_file_type(fields),
+                    "file_type": _classify_file_type(fields, owner),
                     "chromatography": fields.get("chromatography", "unknown"),
                     "ms_level": fields.get("ms_level", "unknown").lower(),
                     "polarity": fields.get("polarity", "unknown").lower(),

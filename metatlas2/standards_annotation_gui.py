@@ -1,37 +1,3 @@
-"""
-metatlas2/standards_annotation_gui.py
-
-Dash-based GUI for the standards-annotation workflow.
-
-Layout (per compound):
-  - Top bar: compound dropdown, navigation buttons, Save & Exit.
-  - Per-chromatography columns:
-      - Peak checklist: POS / NEG sections, each with CE subsections
-      - Manual peak entry row
-      - EIC row: one graph per CE label (up to MAX_CE=2), side by side
-      - Scale toggle + MS2 button row
-      - TIC graph (full width)
-      - InjBl graph (full width, below TIC)
-      - MS2 mini-plots (collapsible)
-
-Key design decisions:
-  - ``peaks_holder``: a one-element list ``[peaks_df]`` used as a mutable
-    container so that the closure can update the in-memory DataFrame after
-    a manual peak is added, without needing ``nonlocal``.
-  - MS2 triangle y-position: interpolated from the EIC row that matches
-    both ``peak.mz_rt_uid`` AND ``peak.filename``, not just the first file.
-  - Workflow state: keyed on ``(compound_uid, chromatography)`` so that
-    C18 and HILIC states are tracked independently.
-  - Analyst selections: cleared and re-saved by ``compound_uid`` (not
-    compound_name) to avoid LIKE-pattern ambiguity.
-  - Collision energy: files are grouped by ``collision_energy_label``
-    (extracted from run_metadata field).  Each CE gets its own EIC graph
-    (MAX_CE=2 fixed slots with IDs ``sa-eic-graph-{slot}-{ce_idx}``).
-    Checklists show CE subsection headers within each polarity group.
-  - InjBl graph: displayed below the TIC (full width).
-
-Selections are persisted to ``sa_analyst_selections`` on every Next/Prev/Save.
-"""
 from __future__ import annotations
 
 import logging
@@ -41,7 +7,6 @@ import socket
 import threading
 import time
 import uuid
-import json
 from typing import Any
 
 import numpy as np
@@ -58,29 +23,34 @@ import metatlas2.standards_annotation_tools as sat
 
 logger = lcf.get_logger("standards_annotation_gui")
 
-# ---------------------------------------------------------------------------
-# Fixed adduct color palette (up to 12 adducts)
-# ---------------------------------------------------------------------------
-_ADDUCT_COLORS = [
-    "#1f77b4",  # blue
-    "#d62728",  # red
-    "#2ca02c",  # green
-    "#ff7f0e",  # orange
-    "#9467bd",  # purple
-    "#8c564b",  # brown
-    "#e377c2",  # pink
-    "#17becf",  # cyan
-    "#bcbd22",  # yellow-green
-    "#7f7f7f",  # gray
-    "#aec7e8",  # light blue
-    "#ffbb78",  # light orange
-]
 
-# Maximum number of distinct CE labels per chrom panel
-MAX_CE = 2
+def _resolve_polarity_choices(previous: set[str], checked: set[str], no_good: str) -> set[str]:
+    """Make a newly selected peak and the no-good option mutually exclusive."""
+    added = checked - previous
+    if no_good in added:
+        return {no_good}
+    if added - {no_good}:
+        return checked - {no_good}
+    return checked
 
 
 def _adduct_color_from_list(adduct: str, adduct_list: list[str]) -> str:
+
+    _ADDUCT_COLORS = [
+        "#1f77b4",  # blue
+        "#d62728",  # red
+        "#2ca02c",  # green
+        "#ff7f0e",  # orange
+        "#9467bd",  # purple
+        "#8c564b",  # brown
+        "#e377c2",  # pink
+        "#17becf",  # cyan
+        "#bcbd22",  # yellow-green
+        "#7f7f7f",  # gray
+        "#aec7e8",  # light blue
+        "#ffbb78",  # light orange
+    ]
+
     try:
         i = adduct_list.index(adduct)
     except ValueError:
@@ -128,9 +98,7 @@ def _run_number_from_filename(filename: str) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
 # Main GUI factory
-# ---------------------------------------------------------------------------
 
 def build_standards_annotation_gui(
     data: "StandardsAnnotationData",
@@ -148,6 +116,7 @@ def build_standards_annotation_gui(
     db_path = data.project_db_path
     gui_cfg = cfg.get("gui", {})
     lcmsruns_color_map = gui_cfg.get("gui_lcmsruns_colors", {})
+    MAX_CE = 2
 
     ms1_df = data.ms1_df
     ms2_df = data.ms2_df
@@ -188,6 +157,7 @@ def build_standards_annotation_gui(
         compound_chroms[name] = chroms
 
     compound_chrom_adducts: dict[tuple[str, str], list[str]] = {}
+    compound_chrom_polarities: dict[tuple[str, str], set[str]] = {}
     for name in compound_names:
         for chrom in compound_chroms[name]:
             sub = expanded_table[
@@ -196,10 +166,13 @@ def build_standards_annotation_gui(
             ]
             adducts = list(dict.fromkeys(sub["adduct"].tolist()))
             compound_chrom_adducts[(name, chrom)] = adducts
+            compound_chrom_polarities[(name, chrom)] = {
+                str(pol).upper() for pol in sub["polarity"]
+            }
 
     # mz_rt_uid -> polarity
     uid_polarity: dict[str, str] = {
-        str(row["mz_rt_uid"]): str(row.get("polarity", "POS")).upper()
+        str(row["mz_rt_uid"]): str(row["polarity"]).upper()
         for _, row in expanded_table.iterrows()
     }
 
@@ -232,7 +205,6 @@ def build_standards_annotation_gui(
             "inchi_key": str(sub.get("inchi_key", "")),
             "smiles": str(sub.get("smiles", "")),
             "inchi": str(sub.get("inchi", "")),
-            "annotation_notes": str(sub.get("annotation_notes", "")),
         }
 
     # (compound_name, chromatography, adduct) -> list of mz_rt_uids
@@ -292,86 +264,32 @@ def build_standards_annotation_gui(
                 else:
                     union_rts_map[(name, chrom, adduct)] = []
 
-    # RT grid per (compound, chrom, adduct, ce_label) for CE-filtered manual RT dropdown
-    # Also build CE file options: (compound, chrom, adduct) -> list of
-    #   {"label": "CE205060 (Run135)", "value": mz_rt_uid}
-    union_rts_map_by_ce: dict[tuple[str, str, str, str], list[float]] = {}
-    ce_file_options_map: dict[tuple[str, str, str], list[dict]] = {}
-    for name in compound_names:
-        for chrom in compound_chroms[name]:
-            for adduct in compound_chrom_adducts.get((name, chrom), []):
-                uids = uid_map.get((name, chrom, adduct), [])
-                opts: list[dict] = []
-                seen_ce_run: set[tuple[str, str]] = set()
-                for uid in uids:
-                    ce = uid_ce_label.get(uid, "")
-                    fn = uid_to_filename.get(uid, "")
-                    run_n = _run_number_from_filename(fn)
-                    key = (ce, run_n)
-                    if key in seen_ce_run:
-                        continue
-                    seen_ce_run.add(key)
-                    ce_display = ce if ce else "no CE"
-                    run_display = f" (Run{run_n})" if run_n else ""
-                    opts.append({
-                        "label": f"{ce_display}{run_display}",
-                        "value": uid,  # value = mz_rt_uid to identify the specific file
-                    })
-                    # RT grid for this CE
-                    sub = ms1_df[ms1_df["mz_rt_uid"] == uid]
-                    all_rts_ce: list[np.ndarray] = []
-                    for _, row in sub.iterrows():
-                        rts = row.get("spec_rts", [])
-                        if rts is not None and len(rts) > 0:
-                            all_rts_ce.append(np.asarray(rts, dtype=np.float64))
-                    if all_rts_ce:
-                        union_rts_ce = np.unique(np.concatenate(all_rts_ce))
-                        union_rts_map_by_ce[(name, chrom, adduct, uid)] = [float(r) for r in union_rts_ce]
-                    else:
-                        union_rts_map_by_ce[(name, chrom, adduct, uid)] = []
-                ce_file_options_map[(name, chrom, adduct)] = opts
-
-    # peak_uid -> MS2 row
-    peak_ms2_by_uid: dict[str, dict] = {}
+    # peak_uid -> MS2 rows
+    peak_ms2_by_uid: dict[str, list[dict]] = {}
     if not peak_ms2_df.empty:
         for _, row in peak_ms2_df.iterrows():
-            peak_ms2_by_uid[str(row["peak_uid"])] = row.to_dict()
+            peak_ms2_by_uid.setdefault(str(row["peak_uid"]), []).append(row.to_dict())
 
     # ── Workflow state ────────────────────────────────────────────────────────
     uid_to_compound_name: dict[str, str] = {}
     for _, row in expanded_table.iterrows():
         uid_to_compound_name[str(row["compound_uid"])] = str(row["compound_name"])
 
-    first_incomplete_uid, _ = sadb.get_first_incomplete_compound(db_path)
-    if first_incomplete_uid:
-        first_incomplete_name = uid_to_compound_name.get(first_incomplete_uid)
-        if first_incomplete_name and first_incomplete_name in compound_names:
-            starting_idx = compound_names.index(first_incomplete_name)
-        else:
-            starting_idx = 0
+    checkpoint = sadb.load_gui_checkpoint(db_path)
+    if checkpoint and checkpoint in compound_names:
+        starting_idx = compound_names.index(checkpoint)
     else:
-        starting_idx = 0
+        first_incomplete_uid, _ = sadb.get_first_incomplete_compound(db_path)
+        first_incomplete_name = uid_to_compound_name.get(first_incomplete_uid)
+        starting_idx = (
+            compound_names.index(first_incomplete_name)
+            if first_incomplete_name in compound_names else 0
+        )
 
     # ── Helper functions ──────────────────────────────────────────────────────
 
-    def _to_float(v, default: float = float("nan")) -> float:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return default
-
-    def _to_float_list(v) -> list[float]:
-        if v is None:
-            return []
-        if isinstance(v, str):
-            try:
-                v = json.loads(v)
-            except Exception:
-                return []
-        try:
-            return [float(x) for x in list(v)]
-        except (TypeError, ValueError):
-            return []
+    def _no_good_key(chrom: str, polarity: str) -> str:
+        return f"__no_good__:{chrom}:{polarity}"
 
     def _get_compound_name(idx: int) -> str:
         if 0 <= idx < len(compound_names):
@@ -391,15 +309,15 @@ def build_standards_annotation_gui(
         """Return rows from peaks_holder[0] for this compound+chrom."""
         peaks_df = peaks_holder[0]
         if peaks_df.empty:
-            return pd.DataFrame()
+            return peaks_df.copy()
         mask = (
             (peaks_df["compound_name"] == compound_name) &
             (peaks_df["chromatography"] == chrom)
         )
         return peaks_df[mask].copy()
 
-    def _get_ms2_for_peak(peak_uid: str) -> dict | None:
-        return peak_ms2_by_uid.get(peak_uid)
+    def _get_ms2_for_peak(peak_uid: str) -> list[dict]:
+        return peak_ms2_by_uid.get(peak_uid, [])
 
     def _get_ms1_row_for_peak(peak_row: pd.Series) -> pd.Series | None:
         """Return the MS1 row matching peak.mz_rt_uid AND peak.filename exactly."""
@@ -417,17 +335,13 @@ def build_standards_annotation_gui(
         compound_name: str,
         chrom: str,
     ) -> tuple[list[dict], list[str], int]:
-        """Build checklist options with POS/NEG and CE subsections.
+        """Build checklist options grouped by polarity.
 
         Structure:
             -- POS --
-              -- CE205060 --
-                [M+H]+ (peak1) [...]
-              -- CE102040 --
-                [M+H]+ (peak1) [...]
+              [M+H]+ (peak1) [...]
             -- NEG --
-              -- CE205060 --
-                [M-H]- (peak1) [...]
+              [M-H]- (peak1) [...]
 
         Returns:
             options:         List of option dicts for dcc.Checklist.
@@ -439,23 +353,20 @@ def build_standards_annotation_gui(
         options: list[dict] = []
         default_checked: list[str] = []
 
-        # CE buckets are derived from each peak's own CE label
-        pos_ce_entries: dict[str, list[tuple]] = {}
-        neg_ce_entries: dict[str, list[tuple]] = {}
+        polarity_entries: dict[str, list[tuple]] = {"POS": [], "NEG": []}
 
         for _, peak_row in chrom_peaks.iterrows():
             peak_uid = str(peak_row["peak_uid"])
             adduct = str(peak_row["adduct"])
-            polarity = str(peak_row.get("polarity", "POS")).upper()
+            polarity = str(peak_row["polarity"]).upper()
             rt_peak = float(peak_row["rt_peak"])
             intensity = float(peak_row["peak_intensity"])
             peak_num = int(peak_row.get("peak_num", 1))
             is_manual = bool(peak_row.get("is_manual", False))
             filename = str(peak_row.get("filename", ""))
-            _peak_uid_for_ce = str(peak_row.get("mz_rt_uid", ""))
-            ce = str(peak_row.get("collision_energy_label") or "") or uid_ce_label.get(_peak_uid_for_ce, "")
+            ce = str(peak_row.get("collision_energy_label") or "no CE")
             run_label = _run_number_from_filename(filename)
-            run_str = f"; Run{run_label} ({ce})" if run_label else ""
+            run_str = f"; Run{run_label} ({ce})" if run_label else f"; {ce}"
             has_ms2 = peak_uid in peak_ms2_by_uid
             prefix = "* " if has_ms2 else ""
             manual_str = " [manual]" if is_manual else ""
@@ -469,66 +380,60 @@ def build_standards_annotation_gui(
             if is_manual:
                 default_checked.append(peak_uid)
 
-            if polarity == "NEG":
-                neg_ce_entries.setdefault(ce, []).append(entry)
+            if polarity.startswith("NEG"):
+                polarity_entries["NEG"].append(entry)
+            elif polarity.startswith("POS"):
+                polarity_entries["POS"].append(entry)
             else:
-                pos_ce_entries.setdefault(ce, []).append(entry)
+                raise ValueError(f"Unexpected polarity value: {polarity}")
 
         n_items = 0
 
-        def _emit_polarity_section(pol_label: str, ce_entries: dict[str, list[tuple]]):
+        def _emit_polarity_section(pol_label: str, entries: list[tuple]):
             nonlocal n_items
-            if not any(ce_entries.values()):
+            if pol_label not in compound_chrom_polarities.get((compound_name, chrom), set()):
                 return
             options.append({
                 "label": f"-- {pol_label} --",
                 "value": f"__{pol_label.lower()}_header__",
                 "disabled": True,
             })
+            options.append({
+                "label": "No good peaks",
+                "value": _no_good_key(chrom, pol_label),
+            })
 
-            def _ce_key(c: str) -> float:
-                m = re.search(r"\d+(?:\.\d+)?", c)
-                return float(m.group()) if m else float("-inf")
+            for _, adduct, peak_uid, label, is_manual, _ in sorted(
+                entries, key=lambda entry: entry[0], reverse=True
+            ):
+                options.append({"label": label, "value": peak_uid})
+                n_items += 1
 
-            show_ce_headers = any(ce_entries)
-            for ce in sorted(ce_entries, key=_ce_key, reverse=True):
-                entries = ce_entries[ce]
-                if show_ce_headers:
-                    ce_display = ce if ce else "no CE"
-                    options.append({
-                        "label": f"  -- {ce_display} --",
-                        "value": f"__ce_{pol_label.lower()}_{ce}_header__",
-                        "disabled": True,
-                    })
-                entries.sort(key=lambda e: e[0], reverse=True)
-                for _, adduct, peak_uid, label, is_manual, _ in entries:
-                    options.append({"label": label, "value": peak_uid})
-                    n_items += 1
-
-        _emit_polarity_section("POS", pos_ce_entries)
-        _emit_polarity_section("NEG", neg_ce_entries)
+        _emit_polarity_section("POS", polarity_entries["POS"])
+        _emit_polarity_section("NEG", polarity_entries["NEG"])
 
         return options, default_checked, n_items
 
     def _split_options_by_polarity(
         options: list[dict],
     ) -> tuple[list[dict], list[dict]]:
-        """Split flat options list into POS and NEG sub-lists (excluding headers)."""
+        """Split flat options list into POS and NEG sub-lists.
+
+        Top-level polarity headers are excluded (redundant per checklist).
+        """
         pos_opts, neg_opts = [], []
         current = "pos"
         for o in options:
+            lbl = o.get("label", "")
             if o.get("disabled"):
-                lbl = o.get("label", "")
-                if "-- NEG --" in lbl.upper() or lbl.strip().startswith("-- NEG"):
+                stripped = lbl.strip().upper()
+                if stripped.startswith("-- NEG"):
                     current = "neg"
-                elif "-- POS --" in lbl.upper() or lbl.strip().startswith("-- POS"):
+                    continue
+                if stripped.startswith("-- POS"):
                     current = "pos"
-                # CE subsection headers are also disabled — skip them
-                continue
-            if current == "pos":
-                pos_opts.append(o)
-            else:
-                neg_opts.append(o)
+                    continue
+            (pos_opts if current == "pos" else neg_opts).append(o)
         return pos_opts, neg_opts
 
     def _get_rt_bounds_for_chrom(
@@ -568,8 +473,7 @@ def build_standards_annotation_gui(
     ) -> go.Figure:
         """Build the EIC figure for one polarity within a chromatography panel.
 
-        Plots all adducts for the given polarity (POS or NEG).  Line dash style
-        encodes the collision energy label: solid = first CE, dash = second CE.
+        Plots all adducts for the given polarity (POS or NEG).
         Peak markers and MS2 triangles are filtered to the same polarity.
 
         Args:
@@ -616,7 +520,6 @@ def build_standards_annotation_gui(
                     continue
                 uid = str(row.get("mz_rt_uid", ""))
                 ce = uid_ce_label.get(uid, "")
-                dash_style = _CE_DASH_MAP.get(ce, "solid")
                 ce_display = ce if ce else ""
                 # Adduct legend: one solid colored entry per adduct (no CE in name)
                 show_adduct_leg = adduct not in shown_adduct_legend
@@ -625,7 +528,7 @@ def build_standards_annotation_gui(
                 fig.add_trace(go.Scattergl(
                     x=list(rts), y=list(ints),
                     mode="lines",
-                    line=dict(color=color, width=1.2, dash=dash_style),
+                    line=dict(color=color, width=1.2),
                     name=adduct,
                     legendgroup=adduct,
                     showlegend=show_adduct_leg,
@@ -681,54 +584,19 @@ def build_standards_annotation_gui(
                 ),
             ))
 
-            ms2 = _get_ms2_for_peak(peak_uid)
-            if ms2:
+            for ms2 in _get_ms2_for_peak(peak_uid):
                 scan_rt = float(ms2.get("scan_rt", float("nan")))
                 if not np.isnan(scan_rt):
-                    # Y-position: interpolate the EIC of the peak's own MS1 row
+                    rt_lo = min(rt_lo, scan_rt)
+                    rt_hi = max(rt_hi, scan_rt)
                     ms1_row = _get_ms1_row_for_peak(peak_row)
-                    if ms1_row is not None:
-                        raw_rts = ms1_row.get("spec_rts", [])
-                        raw_ints = ms1_row.get("spec_ints", [])
-                        rts_arr = (
-                            np.asarray(raw_rts, dtype=np.float64)
-                            if raw_rts is not None and np.ndim(raw_rts) > 0
-                            else np.asarray([], dtype=np.float64)
-                        )
-                        ints_arr = (
-                            np.asarray(raw_ints, dtype=np.float64)
-                            if raw_ints is not None and np.ndim(raw_ints) > 0
-                            else np.asarray([], dtype=np.float64)
-                        )
-                        ms2_int = (
-                            float(np.interp(scan_rt, rts_arr, ints_arr))
-                            if len(rts_arr) > 0 else peak_int
-                        )
-                    else:
-                        ms2_int = peak_int
-
-                    # Find other peaks (this polarity) whose best MS2 scan is
-                    # the same scan: same file and ~identical scan RT.
-                    shared_nums = {peak_num}
-                    for _, other in pol_peaks.iterrows():
-                        if str(other["peak_uid"]) == peak_uid:
-                            continue
-                        o_ms2 = _get_ms2_for_peak(str(other["peak_uid"]))
-                        if o_ms2 is None:
-                            continue
-                        o_rt = float(o_ms2.get("scan_rt", float("nan")))
-                        if np.isnan(o_rt) or not np.isclose(
-                            o_rt, scan_rt, rtol=0.0, atol=1e-6
-                        ):
-                            continue
-                        if str(o_ms2.get("filename", "")) != str(ms2.get("filename", "")):
-                            continue
-                        shared_nums.add(int(other.get("peak_num", 1)))
-                    nums_sorted = sorted(shared_nums)
-                    if len(nums_sorted) > 1:
-                        peaks_str = "peak" + " and peak".join(str(n) for n in nums_sorted)
-                    else:
-                        peaks_str = f"peak{nums_sorted[0]}"
+                    if ms1_row is None:
+                        raise ValueError(f"No MS1 EIC for peak {peak_uid}")
+                    rts_arr = np.asarray(ms1_row["spec_rts"], dtype=np.float64)
+                    ints_arr = np.asarray(ms1_row["spec_ints"], dtype=np.float64)
+                    if not len(rts_arr) or len(rts_arr) != len(ints_arr):
+                        raise ValueError(f"Invalid MS1 EIC for peak {peak_uid}")
+                    ms2_int = float(ints_arr[np.argmin(np.abs(rts_arr - scan_rt))])
 
                     ms2_prec_mz = float(ms2.get("precursor_mz", float("nan")))
                     ms2_prec_int = float(ms2.get("precursor_intensity", float("nan")))
@@ -738,7 +606,7 @@ def build_standards_annotation_gui(
                         str(ms2.get("filename", "")) or str(peak_row.get("filename", ""))
                     )
                     run_disp = f"Run{run_number}" if run_number else "file"
-                    ce_disp = ce if ce else "no CE"
+                    ce_disp = fpf.extract_collision_energy_label(str(ms2["filename"])) or "no CE"
                     tri_sym = "triangle-up-open" if is_manual else "triangle-up"
                     tri_kw = dict(color=color, size=12, symbol=tri_sym)
                     if is_manual:
@@ -751,7 +619,7 @@ def build_standards_annotation_gui(
                         showlegend=False,
                         hovertemplate=(
                             f"Best MS2 scan for {run_disp} ({ce_disp})<br>"
-                            f"{adduct} ({peaks_str})<br>"
+                            f"{adduct} (peak{peak_num})<br>"
                             f"RT={scan_rt:.4f}<br>"
                             f"Int={ms2_prec_int_str}<br>"
                             f"Theo precursor m/z={mz_theo_str}<br>"
@@ -766,6 +634,9 @@ def build_standards_annotation_gui(
             uids = [u for u in uid_map.get((compound_name, chrom, adduct), [])
                     if u in pol_uids]
             for uid in uids:
+                scan_file = uid_to_filename[uid]
+                run_number = _run_number_from_filename(scan_file)
+                ce = uid_ce_label.get(uid, "")
                 uid_ms2 = (
                     ms2_df[ms2_df["mz_rt_uid"] == uid]
                     if ms2_df is not None and not ms2_df.empty
@@ -790,16 +661,6 @@ def build_standards_annotation_gui(
                         ),
                         cliponaxis=False,
                     ))
-
-        # CE dash-style legend entries
-        for ce, dash in _CE_DASH_MAP.items():
-            if ce == "":
-                continue
-            fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode="lines",
-                line=dict(color="#555", width=2, dash=dash),
-                name=ce, legendgroup=f"__ce_{ce}__", showlegend=True,
-            ))
 
         pol_display = "Positive" if pol == "POS" else "Negative"
         y_range = [-y_upper * 0.05, y_upper] if y_scale == "linear" else None
@@ -1040,22 +901,22 @@ def build_standards_annotation_gui(
         return fig
 
     def _make_ms2_figure(
-        mzs: list[float], ints: list[float], title_text: str
+        mzs: list[float], ints: list[float], title_text: str,
+        color: str, mz_range: list[float] | None,
     ) -> go.Figure:
         fig = go.Figure()
         if mzs and ints:
-            mz_range = max(mzs) - min(mzs) if len(mzs) > 1 else 1.0
-            bar_width = max(0.5, mz_range / max(len(mzs), 1) * 0.6)
             fig.add_trace(go.Bar(
                 x=mzs, y=ints,
-                width=[bar_width] * len(mzs),
-                marker_color="black", showlegend=False,
+                width=[2] * len(mzs),
+                marker_color=color, showlegend=False,
             ))
         fig.update_layout(
             title=dict(text=title_text, x=0.5, font=dict(size=9)),
             margin=dict(l=30, r=10, t=55, b=30),
             plot_bgcolor="white", bargap=0,
-            xaxis=dict(showgrid=False, zeroline=False, title="m/z", title_font=dict(size=8)),
+            xaxis=dict(showgrid=False, zeroline=False, title="m/z",
+                       title_font=dict(size=8), range=mz_range, fixedrange=True),
             yaxis=dict(showgrid=False, zeroline=False, title="Int", title_font=dict(size=8)),
             height=190,
         )
@@ -1063,83 +924,118 @@ def build_standards_annotation_gui(
 
     def _make_ms2_plots_for_chrom(compound_name: str, chrom: str) -> list:
         chrom_peaks = _peaks_for_chrom(compound_name, chrom)
-        mini_figs = []
+        if chrom_peaks.empty:
+            return []
+
+        compound_peaks = peaks_holder[0][peaks_holder[0]["compound_name"] == compound_name]
+        all_mzs = [
+            float(mz)
+            for uid in compound_peaks["peak_uid"]
+            for scan in _get_ms2_for_peak(str(uid))
+            for mz in scan["frag_mzs"]
+        ]
+        if any(not np.isfinite(mz) for mz in all_mzs):
+            raise ValueError(f"Invalid MS2 fragment m/z for compound {compound_name}")
+        if all_mzs:
+            lo, hi = min(all_mzs), max(all_mzs)
+            padding = max(0.5, (hi - lo) * 0.02)
+            mz_range = [lo - padding, hi + padding]
+        else:
+            mz_range = None
+
+        ce_labels = sat.STANDARD_CE_LABELS
+        rows = [dbc.Row([
+            dbc.Col(html.Div(ce, className="text-center fw-bold"), width=6)
+            for ce in ce_labels
+        ], className="mb-1")]
+        adducts = compound_chrom_adducts.get((compound_name, chrom), [])
         for _, peak_row in chrom_peaks.iterrows():
             peak_uid = str(peak_row["peak_uid"])
             adduct = str(peak_row["adduct"])
             rt_peak = float(peak_row["rt_peak"])
             peak_num = int(peak_row.get("peak_num", 1))
-            ce = str(peak_row.get("collision_energy_label", ""))
-            ms2 = _get_ms2_for_peak(peak_uid)
-            if not ms2:
-                continue
-            frag_mzs = [float(v) for v in (ms2.get("frag_mzs") or [])]
-            frag_ints = [float(v) for v in (ms2.get("frag_ints") or [])]
-            scan_rt = float(ms2.get("scan_rt", float("nan")))
-            collision_e = float(ms2.get("collision_energy", float("nan")))
-            ce_str = f" CE={collision_e:.0f}" if not np.isnan(collision_e) else (f" {ce}" if ce else "")
-            scan_rt_str = f" MS2RT={scan_rt:.3f}" if not np.isnan(scan_rt) else ""
-            title_text = f"{adduct} peak{peak_num}<br>RT={rt_peak:.3f}{ce_str}{scan_rt_str}"
-            mini_figs.append(dcc.Graph(
-                figure=_make_ms2_figure(frag_mzs, frag_ints, title_text),
-                config={"displayModeBar": False},
-            ))
-        if not mini_figs:
-            return []
-        rows = []
-        for i in range(0, len(mini_figs), 3):
-            chunk = mini_figs[i:i + 3]
-            rows.append(dbc.Row([dbc.Col(g, width=4) for g in chunk], className="mb-1"))
+            scans_by_ce = {}
+            for ms2 in _get_ms2_for_peak(peak_uid):
+                ce = fpf.extract_collision_energy_label(str(ms2["filename"]))
+                if ce not in ce_labels or ce in scans_by_ce:
+                    raise ValueError(f"Unexpected or duplicate MS2 CE label {ce!r} for peak {peak_uid}")
+                scans_by_ce[ce] = ms2
+            columns = []
+            for ce in ce_labels:
+                ms2 = scans_by_ce.get(ce)
+                if ms2 is None:
+                    columns.append(dbc.Col(html.Div(
+                        f"{adduct} peak{peak_num}: no {ce} scan",
+                        className="text-center text-muted",
+                    ), width=6))
+                    continue
+                frag_mzs = [float(v) for v in (ms2.get("frag_mzs") or [])]
+                frag_ints = [float(v) for v in (ms2.get("frag_ints") or [])]
+                scan_rt = float(ms2.get("scan_rt", float("nan")))
+                title_text = f"{adduct} peak{peak_num}<br>RT={rt_peak:.3f} {ce} MS2RT={scan_rt:.3f}"
+                graph = dcc.Graph(
+                    figure=_make_ms2_figure(
+                        frag_mzs, frag_ints, title_text, _adduct_color(adduct, adducts), mz_range
+                    ),
+                    config={"displayModeBar": False},
+                )
+                columns.append(dbc.Col(graph, width=6))
+            rows.append(dbc.Row(columns, className="mb-1"))
         return rows
 
     def _count_ms2_for_chrom(compound_name: str, chrom: str) -> int:
         chrom_peaks = _peaks_for_chrom(compound_name, chrom)
-        return sum(1 for uid in chrom_peaks["peak_uid"].tolist() if uid in peak_ms2_by_uid)
+        if chrom_peaks.empty:
+            return 0
+        return sum(len(peak_ms2_by_uid.get(uid, [])) for uid in chrom_peaks["peak_uid"].tolist())
 
     def _save_compound_selections(
         compound_name: str,
         checked_peak_uids: list[str],
         analyst_notes_by_chrom: dict[str, str],
+        resume_compound: str | None = None,
     ) -> None:
         compound_uids = compound_name_to_uids.get(compound_name, [])
-        for cuid in compound_uids:
-            try:
-                sadb.delete_all_analyst_selections_for_compound(db_path, cuid)
-            except Exception as exc:
-                logger.error(f"Failed to clear old selections for compound_uid={cuid}: {exc}")
-
         peaks_df = peaks_holder[0]
+        selections = []
+        no_good_keys = {
+            _no_good_key(chrom, pol): (chrom, pol)
+            for chrom in compound_chroms.get(compound_name, [])
+            for pol in compound_chrom_polarities.get((compound_name, chrom), set())
+        }
+        no_good = []
         for peak_uid in checked_peak_uids:
-            if peaks_df.empty:
+            if peak_uid in no_good_keys:
+                no_good.append(no_good_keys[peak_uid])
                 continue
+            if peaks_df.empty:
+                raise ValueError(f"Cannot save selected peak {peak_uid}: peak data is empty.")
             row_match = peaks_df[peaks_df["peak_uid"] == peak_uid]
             if row_match.empty:
-                continue
+                raise ValueError(f"Cannot save selected peak {peak_uid}: peak not found.")
             row = row_match.iloc[0]
             chrom = str(row.get("chromatography", ""))
             notes = analyst_notes_by_chrom.get(chrom, "")
-            try:
-                sadb.save_analyst_selection(db_path, peak_uid, analyst_notes=notes)
-            except Exception as exc:
-                logger.error(f"Failed to save selection for {peak_uid}: {exc}")
-
-        for chrom in compound_chroms.get(compound_name, []):
-            for cuid in compound_uids:
-                try:
-                    sadb.update_workflow_state(db_path, cuid, chrom, "complete")
-                except Exception as exc:
-                    logger.error(
-                        f"Failed to update workflow state for "
-                        f"compound_uid={cuid}, chrom={chrom}: {exc}"
-                    )
+            selections.append((peak_uid, notes))
+        try:
+            sadb.replace_compound_selections(
+                db_path, compound_name, compound_uids, selections,
+                analyst_notes_by_chrom, compound_chroms.get(compound_name, []),
+                resume_compound=resume_compound, no_good_peaks=no_good,
+            )
+        except Exception:
+            logger.exception(
+                "Could not save %s. The previous checkpoint is intact; "
+                "fix the error and retry before leaving the compound.", compound_name,
+            )
+            raise
 
     def _load_session_for_compound(compound_name: str) -> dict:
         checked_peaks: dict[str, bool] = {}
-        notes_by_chrom: dict[str, str] = {}
-        try:
-            sel_df = sadb.load_analyst_selections(db_path)
-        except Exception:
-            return {"checked_peaks": checked_peaks, "analyst_notes_by_chrom": notes_by_chrom}
+        for chrom, polarity in sadb.load_no_good_peaks(db_path, compound_name):
+            checked_peaks[_no_good_key(chrom, polarity)] = True
+        notes_by_chrom = sadb.load_compound_notes(db_path, compound_name)
+        sel_df = sadb.load_analyst_selections(db_path)
         if sel_df.empty:
             return {"checked_peaks": checked_peaks, "analyst_notes_by_chrom": notes_by_chrom}
         cmp_sel = sel_df[sel_df["compound_name"] == compound_name]
@@ -1280,14 +1176,6 @@ def build_standards_annotation_gui(
                             style={"fontSize": "0.8rem"},
                         ),
                         width=2,
-                    ),
-                    dbc.Col(
-                        dcc.Dropdown(
-                            id=f"sa-manual-ce-{slot}", options=[],
-                            placeholder="CE (file)", clearable=True,
-                            style={"fontSize": "0.8rem"},
-                        ),
-                        width=3,
                     ),
                     dbc.Col(
                         dcc.Dropdown(
@@ -1599,44 +1487,17 @@ def build_standards_annotation_gui(
 
         return result
 
-    # Per-slot CE dropdown update when adduct changes
-    for _slot in range(MAX_CHROMS):
-        def _make_ce_options_cb(slot):
-            @app.callback(
-                Output(f"sa-manual-ce-{slot}", "options", allow_duplicate=True),
-                Output(f"sa-manual-ce-{slot}", "value", allow_duplicate=True),
-                Input(f"sa-manual-adduct-{slot}", "value"),
-                State("sa-session-store", "data"),
-                prevent_initial_call=True,
-            )
-            def update_ce_options(adduct, session):
-                if not adduct or session is None:
-                    raise dash.exceptions.PreventUpdate
-                idx = int(session.get("compound_idx", 0))
-                name = _get_compound_name(idx)
-                chroms = compound_chroms.get(name, [])
-                if slot >= len(chroms):
-                    raise dash.exceptions.PreventUpdate
-                chrom = chroms[slot]
-                opts = ce_file_options_map.get((name, chrom, adduct), [])
-                # Auto-select if only one option
-                auto_val = opts[0]["value"] if len(opts) == 1 else None
-                return opts, auto_val
-            return update_ce_options
-        _make_ce_options_cb(_slot)
-
-    # Per-slot RT dropdown update when adduct OR CE changes
+    # Per-slot RT dropdown update when adduct changes
     for _slot in range(MAX_CHROMS):
         def _make_rt_options_cb(slot):
             @app.callback(
                 Output(f"sa-manual-rt-{slot}", "options", allow_duplicate=True),
                 Output(f"sa-manual-rt-{slot}", "value", allow_duplicate=True),
                 Input(f"sa-manual-adduct-{slot}", "value"),
-                Input(f"sa-manual-ce-{slot}", "value"),
                 State("sa-session-store", "data"),
                 prevent_initial_call=True,
             )
-            def update_rt_options(adduct, ce_uid, session):
+            def update_rt_options(adduct, session):
                 if not adduct or session is None:
                     raise dash.exceptions.PreventUpdate
                 idx = int(session.get("compound_idx", 0))
@@ -1645,12 +1506,7 @@ def build_standards_annotation_gui(
                 if slot >= len(chroms):
                     raise dash.exceptions.PreventUpdate
                 chrom = chroms[slot]
-                if ce_uid:
-                    # RT options for the specific CE file (mz_rt_uid)
-                    rt_vals = union_rts_map_by_ce.get((name, chrom, adduct, ce_uid), [])
-                else:
-                    # Fall back to union across all files for this adduct
-                    rt_vals = union_rts_map.get((name, chrom, adduct), [])
+                rt_vals = union_rts_map.get((name, chrom, adduct), [])
                 return [{"label": f"{r}", "value": r} for r in rt_vals], None
             return update_rt_options
         _make_rt_options_cb(_slot)
@@ -1676,6 +1532,20 @@ def build_standards_annotation_gui(
         _make_ms2_toggle_cb(_slot)
 
     # Per-slot POS checklist callbacks
+    def _update_polarity_choices(session, options, checked_values, chrom, polarity):
+        checked_dict = dict(session.get("checked_peaks") or {})
+        values = {o["value"] for o in options if not o.get("disabled")}
+        previous = {v for v in values if checked_dict.get(v, False)}
+        checked = set(checked_values or []) & values
+        no_good = _no_good_key(chrom, polarity)
+        checked = _resolve_polarity_choices(previous, checked, no_good)
+        if checked == previous:
+            raise dash.exceptions.PreventUpdate
+        for value in values:
+            checked_dict[value] = value in checked
+        session["checked_peaks"] = checked_dict
+        return session
+
     for _slot in range(MAX_CHROMS):
         def _make_pos_checklist_cb(slot):
             @app.callback(
@@ -1697,11 +1567,7 @@ def build_standards_annotation_gui(
                 chrom = chroms[slot]
                 options, _, _ = _build_checklist_options_for_chrom(name, chrom)
                 pos_opts, _ = _split_options_by_polarity(options)
-                checked_dict = dict(session.get("checked_peaks") or {})
-                for o in pos_opts:
-                    checked_dict[o["value"]] = o["value"] in (checked_values or [])
-                session["checked_peaks"] = checked_dict
-                return session
+                return _update_polarity_choices(session, pos_opts, checked_values, chrom, "POS")
             return update_pos_checked
         _make_pos_checklist_cb(_slot)
 
@@ -1727,11 +1593,7 @@ def build_standards_annotation_gui(
                 chrom = chroms[slot]
                 options, _, _ = _build_checklist_options_for_chrom(name, chrom)
                 _, neg_opts = _split_options_by_polarity(options)
-                checked_dict = dict(session.get("checked_peaks") or {})
-                for o in neg_opts:
-                    checked_dict[o["value"]] = o["value"] in (checked_values or [])
-                session["checked_peaks"] = checked_dict
-                return session
+                return _update_polarity_choices(session, neg_opts, checked_values, chrom, "NEG")
             return update_neg_checked
         _make_neg_checklist_cb(_slot)
 
@@ -1850,12 +1712,11 @@ def build_standards_annotation_gui(
                 Input(f"sa-add-peak-btn-{slot}", "n_clicks"),
                 State(f"sa-manual-rt-{slot}", "value"),
                 State(f"sa-manual-adduct-{slot}", "value"),
-                State(f"sa-manual-ce-{slot}", "value"),
                 State("sa-session-store", "data"),
                 State("sa-compound-dd", "value"),
                 prevent_initial_call=True,
             )
-            def add_manual_peak(n_clicks, rt_selected, adduct, ce_uid, session, compound_idx):
+            def add_manual_peak(n_clicks, rt_selected, adduct, session, compound_idx):
                 if not n_clicks or rt_selected is None or not adduct:
                     raise dash.exceptions.PreventUpdate
                 session = dict(session)
@@ -1867,8 +1728,11 @@ def build_standards_annotation_gui(
                 chrom = chroms[slot]
                 manual_rt_peak = float(rt_selected)
 
-                if isinstance(ce_uid, list) or ce_uid is None or not isinstance(ce_uid, str):
-                    raise ValueError("Only one CE file can be selected for a manual peak.")
+                uids = uid_map.get((name, chrom, adduct), [])
+                matching_rows = ms1_df[ms1_df["mz_rt_uid"].isin(uids)]
+                if len(matching_rows) != 1:
+                    raise ValueError(f"Expected one MS1 EIC for {name}, {chrom}, {adduct}; found {len(matching_rows)}")
+                ce_uid = str(matching_rows.iloc[0]["mz_rt_uid"])
                 
                 closest_intensity = 0.0
                 mz_observed = float("nan")
@@ -1952,66 +1816,17 @@ def build_standards_annotation_gui(
                     "is_manual":              True,
                     "collision_energy_label": ce_label,
                 }
-                try:
-                    sadb.save_manual_peak_to_db(db_path, new_peak)
-                except Exception as exc:
-                    logger.error(f"Failed to save manual peak: {exc}")
-
-                if ms2_df is not None and not ms2_df.empty and source_file:
-                    try:
-                        cand = ms2_df[ms2_df["mz_rt_uid"] == ce_uid]
-                        if "filename" in cand.columns and not cand.empty:
-                            exact = cand[cand["filename"] == source_file]
-                            if exact.empty:
-                                base = os.path.basename(source_file)
-                                exact = cand[cand["filename"].astype(str).map(
-                                    lambda f: os.path.basename(str(f)) == base
-                                )]
-                            if not exact.empty:
-                                cand = exact
-                            else:
-                                logger.warning(
-                                    f"MS2: no scans match filename '{source_file}' for "
-                                    f"uid={ce_uid}; using uid-only ({len(cand)} scans)."
-                                )
-                        scan = sat.pick_best_ms2_scan(cand, manual_rt_peak)
-                        if scan is None:
-                            logger.warning(f"MS2: no scans for uid={ce_uid}.")
-                        else:
-                            frag_mzs = _to_float_list(scan.get("frag_mzs"))
-                            frag_ints = _to_float_list(scan.get("frag_ints"))
-                            precursor_col = (
-                                "precursor_MZ" if "precursor_MZ" in cand.columns
-                                else "precursor_mz"
-                            )
-                            if not frag_mzs or not frag_ints:
-                                logger.warning(
-                                    f"MS2: closest scan (RT={float(scan['scan_rt']):.4f}) "
-                                    "has no fragment data — no association saved."
-                                )
-                            else:
-                                ms2_assoc = {
-                                    "peak_uid":            new_peak_uid,
-                                    "scan_rt":             float(scan.get("scan_rt", float("nan"))),
-                                    "precursor_mz":        float(scan.get(precursor_col, float("nan"))),
-                                    "precursor_intensity": float(scan.get("precursor_intensity", float("nan"))),
-                                    "collision_energy":    float(scan.get("collision_energy", float("nan"))),
-                                    "frag_mzs":            frag_mzs,
-                                    "frag_ints":           frag_ints,
-                                    "filename":            source_file,
-                                }
-                                sadb.save_peak_ms2_to_db(db_path, [ms2_assoc])
-                                peak_ms2_by_uid[new_peak_uid] = {"peak_uid": new_peak_uid, **ms2_assoc}
-                    except Exception as exc:
-                        logger.error(f"MS2 assignment failed for manual peak: {exc}")
-
-                try:
-                    peaks_holder[0] = sadb.load_peaks(db_path)
-                except Exception as exc:
-                    logger.error(f"Failed to reload peaks after manual add: {exc}")
+                ms2_assoc = sat.associate_peak_ms2(
+                    new_peak, expanded_table, ms2_df if ms2_df is not None else pd.DataFrame()
+                )
+                sadb.save_manual_peak_to_db(db_path, new_peak, ms2_assoc)
+                if ms2_assoc:
+                    peak_ms2_by_uid[new_peak_uid] = ms2_assoc
+                peaks_holder[0] = sadb.load_peaks(db_path)
 
                 checked_dict = dict(session.get("checked_peaks") or {})
                 checked_dict[new_peak_uid] = True
+                checked_dict[_no_good_key(chrom, polarity)] = False
                 session["checked_peaks"] = checked_dict
                 session["render_seq"] = int(session.get("render_seq") or 0) + 1
 
@@ -2035,10 +1850,10 @@ def build_standards_annotation_gui(
 
     def _navigate(session: dict, delta: int) -> tuple[dict, dict]:
         name, checked_list, notes_by_chrom = _extract_session_for_save(session)
-        _save_compound_selections(name, checked_list, notes_by_chrom)
         idx = int(session.get("compound_idx", 0))
         new_idx = max(0, min(idx + delta, len(compound_names) - 1))
         new_name = _get_compound_name(new_idx)
+        _save_compound_selections(name, checked_list, notes_by_chrom, new_name)
         restored = _load_session_for_compound(new_name)
         new_session = {
             "compound_idx": new_idx,
@@ -2090,8 +1905,8 @@ def build_standards_annotation_gui(
         if new_idx == int(session.get("compound_idx", 0)):
             raise dash.exceptions.PreventUpdate
         name, checked_list, notes_by_chrom = _extract_session_for_save(session)
-        _save_compound_selections(name, checked_list, notes_by_chrom)
         new_name = _get_compound_name(new_idx)
+        _save_compound_selections(name, checked_list, notes_by_chrom, new_name)
         restored = _load_session_for_compound(new_name)
         new_session = {
             "compound_idx": new_idx,

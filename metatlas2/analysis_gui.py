@@ -229,7 +229,10 @@ def build_dash_app(
         Looks for compounds where ms2_notes is blank (empty string or NaN) and returns next index to start
         """
 
-        blank_mask = manual_curation_df["ms2_notes"].isna() | (manual_curation_df["ms2_notes"] == "") | (manual_curation_df["ms2_notes"] == "no selection")
+        blank_mask = (
+            manual_curation_df["ms2_notes"].isna()
+            | manual_curation_df["ms2_notes"].isin(["", "no selection"])
+                ) & (~manual_curation_df["ms1_notes"].str.lower().str.contains("remove", na=False))
         blank_positions = manual_curation_df.index[blank_mask]
 
         if len(blank_positions) == 0:
@@ -237,7 +240,7 @@ def build_dash_app(
 
         first_blank_idx = blank_positions[0]
         first_blank_compound = manual_curation_df.index.get_loc(first_blank_idx)
-        return first_blank_compound - 1
+        return first_blank_compound
 
     use_starting_index_finder = True
     if use_starting_index_finder is True:

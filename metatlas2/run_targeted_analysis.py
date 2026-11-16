@@ -166,7 +166,7 @@ def get_project_db_path(project_name: str) -> str:
 
 
 def set_up_paths(
-    config: "Metatlas2Config",
+    config: "Metatlas2Config | None",
     project_name: str | None = None,
     rt_alignment_number: int | None = None,
     analysis_number: int | None = None,
@@ -202,6 +202,8 @@ def set_up_paths(
             "chebi_cache_path": str(chebi_cache_path),
         }
 
+    if config is None:
+        raise ValueError("A config is required when project_name is specified.")
     owner = config.owner
     user = os.environ.get("USER", "other")
     if not owner:

@@ -64,6 +64,8 @@ def run_all_summaries(
 
     output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
 
+    export_filenames_with_metadata(summary_obj, output_dir=output_dir, overwrite=overwrite)
+
     if "final_id_sheet" not in (skip_outputs or []):
         logger.info("Making Final Identification sheet...")
         make_final_id_sheet(summary_obj, output_dir=output_dir, overwrite=overwrite)
@@ -133,6 +135,59 @@ def run_all_summaries(
     if gdrive_upload:
         logger.info("Uploading outputs to Google Drive...")
         gdu.copy_outputs_to_google_drive(summary_obj, "ANALYSIS_SUMMARY", overwrite=overwrite)
+
+
+def export_filenames_with_metadata(
+    summary_obj: "AnalysisSummary",
+    output_dir: Path | None = None,
+    overwrite: bool = False,
+) -> None:
+    """Export currently selected extraction files and their summary categorization."""
+    if output_dir is None:
+        output_dir = Path(summary_obj.paths['analysis_results_output_dir'])
+    _pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    base_dir = output_dir
+    additional_info_dir = base_dir / f"{_pol_prefix}_additional_info"
+    pol_prefix = fpf.normalize_polarity(summary_obj.polarity).upper()
+    output_file = additional_info_dir / f"{pol_prefix}_filenames_with_metadata.csv"
+    if output_file.exists() and not overwrite:
+        logger.info("Overwriting disabled: existing file %s will be used.", output_file)
+        return
+
+    runs = dbi.get_lcmsruns_from_db(project_db_path=summary_obj.paths["project_db_path"])
+    for run in runs:
+        fields = fpf.parse_file_name(run.filename)
+        run.file_type = lrt._classify_file_type(fields, fields["owner"])
+    runs = lrt.filter_lcmsruns_list(
+        lcmsruns=runs,
+        include_file_type=summary_obj.ta.params.get("include_lcmsruns", []),
+        exclude_file_type=summary_obj.ta.params["exclude_lcmsruns"].get("data_extraction", []),
+        chromatography=summary_obj.ta.chromatography,
+        polarity=summary_obj.ta.polarity,
+    )
+    columns = [
+        "filename", "file_type", "boxplot_group", "group", "file",
+        "short_groupname", "sample_treatment", "short_filename", "short_samplename",
+    ]
+    rows = []
+    for run in runs:
+        stem = os.path.splitext(os.path.basename(run.filename))[0]
+        labels = fpf.get_filename_header_labels(
+            stem,
+            rt_alignment_number=summary_obj.rt_alignment_number,
+            analysis_number=summary_obj.analysis_number,
+        )
+        rows.append({
+            "filename": run.filename,
+            "file_type": run.file_type,
+            "boxplot_group": dbi._file_group_from_filename(run.filename),
+            **labels,
+        })
+
+    additional_info_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=columns).to_csv(output_file, index=False)
+    logger.info("Exported metadata for %d files to %s", len(rows), output_file)
+
 
 def apply_auto_curation_defaults(curation_df: "pd.DataFrame") -> "pd.DataFrame":
     """Apply default curation values to a curation DataFrame when skipping the manual GUI.
@@ -1114,7 +1169,7 @@ def _plot_structure(
             img = Draw.MolToImage(mol, size=(size, size), kekulize=True)
 
             # Build annotation lines: compound name + InChIKey below the structure
-            font_size = 22
+            font_size = 20
             line_height = int(font_size * 1.3)
 
             try:
@@ -2336,22 +2391,13 @@ def make_compound_metric_plots(
         key=_run_number_sort_key,
     )
 
-    _DEFINED_FILE_GROUPS: frozenset[str] = frozenset({"EXCTRL", "INJBL", "ISTD", "QC", "REFSTD"})
-
     def _run_label(filename: str) -> str:
         try:
             run_num = fpf.get_file_parts(filename, "run_number")
         except Exception:
             run_num = os.path.basename(filename)
         file_group = dbi._file_group_from_filename(filename)
-        if file_group in _DEFINED_FILE_GROUPS:
-            sample_group = file_group
-        else:
-            try:
-                sample_group = fpf.get_file_parts(filename, "sample_name")
-            except Exception:
-                sample_group = file_group
-        return f"{sample_group}_{run_num}"
+        return f"{file_group}_{run_num}"
 
     x_labels = [_run_label(f) for f in all_files_sorted]
     file_to_idx = {f: i for i, f in enumerate(all_files_sorted)}
@@ -2477,20 +2523,23 @@ def make_compound_metric_plots(
 
 def _sort_boxplot_groups(groups: list[str]) -> list[str]:
 
-    _CONTROL_GROUPS_FIRST: tuple[str, ...] = ("ISTD", "INJBL", "EXCTRL", "QC")
-    _CONTROL_GROUPS_LAST:  tuple[str, ...] = ("REFSTD",)
+    _FIRST_ORDER = ("ISTD", "(ExCtrl)")
+    _LAST_ORDER = ("(RefStd)",)
+    _REMOVE_GROUPS = ("(QC)", "(QC-C18QU)", "(InjBl)")
 
-    _FIRST_ORDER = {g: i for i, g in enumerate(_CONTROL_GROUPS_FIRST)}
-    _LAST_ORDER = {g: i for i, g in enumerate(_CONTROL_GROUPS_LAST)}
+    def is_removed(g: str) -> bool:
+        return any(g.endswith(p) for p in _REMOVE_GROUPS)
 
     def key(g: str) -> tuple[int, int, str]:
-        if g in _FIRST_ORDER:
-            return (0, _FIRST_ORDER[g], g)
-        if g in _LAST_ORDER:
-            return (2, _LAST_ORDER[g], g)
+        for i, pattern in enumerate(_FIRST_ORDER):
+            if pattern in g:
+                return (0, i, g)
+        for i, pattern in enumerate(_LAST_ORDER):
+            if pattern in g:
+                return (2, i, g)
         return (1, 0, g)
 
-    return sorted(groups, key=key)
+    return sorted((g for g in groups if not is_removed(g)), key=key)
 
 def _build_group_color_map(groups: list[str]) -> dict[str, str]:
     
@@ -2792,8 +2841,6 @@ def make_boxplots(
     for d in all_metric_dirs:
         d.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Exporting boxplot figures to {base_dir} and {additional_info_dir}")
-
     manual_curation_df = summary_obj.experimental_data.curation_df
 
     if manual_curation_df is None or manual_curation_df.empty:
@@ -2847,7 +2894,6 @@ def make_boxplots(
         if "file_group" in per_file_df.columns else []
     )
     all_groups: list[str] = _sort_boxplot_groups(raw_groups)
-    logger.info(f"Boxplot groups (x-axis order): {all_groups}")
     group_color_map: dict[str, str] = _build_group_color_map(all_groups)
 
     # One task per compound
@@ -3120,7 +3166,7 @@ def make_data_sheets(
             seen.add(fc)
 
     # Build the 6 header rows for each file column
-    analyst = getattr(summary_obj, "analyst", "") or ""
+    analyst = getattr(summary_obj, "analyst", "") or "" # don't need anymore?
     rta_num = getattr(summary_obj, "rt_alignment_number", None)
     tga_num = getattr(summary_obj, "analysis_number", None)
 
@@ -3135,7 +3181,6 @@ def make_data_sheets(
     for fc in all_file_cols:
         labels = fpf.get_filename_header_labels(
             fc,
-            analyst=analyst,
             rt_alignment_number=rta_num,
             analysis_number=tga_num,
         )
@@ -3199,7 +3244,7 @@ def make_data_sheets(
         # No column-name row is emitted — the first column of each header row
         # holds the row label (e.g. "group", "file", …) and the first column
         # of each data row holds the compound_id value.
-        sample_cols = [c for c in wide.columns if c != _INDEX_COL]
+        # sample_cols = [c for c in wide.columns if c != _INDEX_COL]
 
         # Build header rows: label in col-0, file values in cols 1+
         header_records = []
@@ -3217,14 +3262,9 @@ def make_data_sheets(
         header_df = header_df[[c for c in wide.columns if c in header_df.columns]]
 
         combined = pd.concat([header_df, wide], ignore_index=True)
-        # Write without the pandas column-name row (header=False)
         combined.to_csv(csv_path, index=False, header=False)
-        logger.info(
-            f"Exported {metric} data sheet ({len(wide)} compounds x {len(sample_cols)} files, "
-            f"with 6 header rows, no column-name row)"
-        )
 
-    logger.info(f"Data sheets written to {output_dir}")
+    logger.info(f"All data sheets written to {output_dir}")
 
 def _parse_peak_height_csv(
     csv_path: Path,
@@ -3845,6 +3885,7 @@ _README_TEXT = """\
       <analysis_results>/
       |-- FinalIdentifications__*.xlsx
       |-- CompoundAtlas__*.csv
+      |-- <POL>_filenames_with_metadata.csv
       |-- identification_figures_with_msms_mirror_plots/
       |-- boxplot_peak_height/
       |-- boxplot_peak_height_log/
@@ -3929,6 +3970,12 @@ _README_TEXT = """\
 ==============================================================================
 
   Wide-format CSV tables: one row per compound, one column per sample file.
+
+  <POL>_filenames_with_metadata.csv in the results directory lists runs matching
+  the extraction filters using current filename classification, including runs
+  without detected MS1 signal. It contains file types, boxplot groups, and
+  data-sheet header labels. The selected runs can differ from the original
+  extraction if classification rules have changed.
 
   The first six rows of each CSV are metadata header rows:
       group, file, short_groupname, sample_treatment, short_filename,
