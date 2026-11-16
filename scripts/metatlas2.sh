@@ -7,14 +7,15 @@
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] jupyter [--port PORT]
-#   metatlas2 [--image TAG] [--dev] add-compounds          --config_path FILE
-#   metatlas2 [--image TAG] [--dev] add-atlases            --config_path FILE
-#   metatlas2 [--image TAG] [--dev] add-msms-refs          --config_path FILE
-#   metatlas2 [--image TAG] [--dev] standards-annotation   --config_path FILE
-#   metatlas2 [--image TAG] [--dev] reverse-rt-align       --config_path FILE
-#   metatlas2 [--image TAG] [--dev] get-atlases    fetch  --atlas_uids UID1,UID2 [--output_path PATH]
-#   metatlas2 [--image TAG] [--dev] get-atlases   query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
-#   metatlas2 [--image TAG] [--dev] get-db-table  --table-name NAME [--output_path PATH] [--database_path PATH]
+#   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-atlases --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-msms-refs --config_path FILE
+#   metatlas2 [--image TAG] [--dev] standards-annotation --config_path FILE
+#   metatlas2 [--image TAG] [--dev] reverse-rt-align --config_path FILE --annotation_timestamp TIMESTAMP [--tags TAG1;TAG2;...]
+#   metatlas2 [--image TAG] [--dev] atlas-msms-deposit --config_path FILE --annotation_timestamp TIMESTAMP --alignment_timestamp TIMESTAMP [--dry_run] [--force_add]
+#   metatlas2 [--image TAG] [--dev] get-atlases fetch --atlas_uids UID1,UID2 [--output_path PATH]
+#   metatlas2 [--image TAG] [--dev] get-atlases query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
+#   metatlas2 [--image TAG] [--dev] get-db-table --table-name NAME [--output_path PATH] [--database_path PATH]
 #   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):
@@ -97,8 +98,11 @@ EXTRA_CONFIG_MOUNT=""
 if [[ "${RUNTIME}" == "docker" && "${STANDALONE_MODE}" == "false" ]]; then
     CONFIG_PATH=""
     for i in "${!PASSTHROUGH_ARGS[@]}"; do
-        if [[ "${PASSTHROUGH_ARGS[$i]}" == "--config" ]]; then
+        if [[ "${PASSTHROUGH_ARGS[$i]}" == "--config" || ( "${PASSTHROUGH_ARGS[0]:-}" == "atlas-msms-deposit" && "${PASSTHROUGH_ARGS[$i]}" == "--config_path" ) ]]; then
             CONFIG_PATH="${PASSTHROUGH_ARGS[$i+1]:-}"
+            break
+        elif [[ "${PASSTHROUGH_ARGS[0]:-}" == "atlas-msms-deposit" && "${PASSTHROUGH_ARGS[$i]}" == --config_path=* ]]; then
+            CONFIG_PATH="${PASSTHROUGH_ARGS[$i]#*=}"
             break
         fi
     done
@@ -106,8 +110,15 @@ if [[ "${RUNTIME}" == "docker" && "${STANDALONE_MODE}" == "false" ]]; then
     if [[ -n "${CONFIG_PATH}" ]]; then
         # Resolve to absolute path
         CONFIG_ABS="$(cd "$(dirname "${CONFIG_PATH}")" 2>/dev/null && pwd)/$(basename "${CONFIG_PATH}")" || CONFIG_ABS="${CONFIG_PATH}"
+        if [[ "${PASSTHROUGH_ARGS[0]:-}" == "atlas-msms-deposit" ]]; then
+            if [[ "${PASSTHROUGH_ARGS[$i]}" == "--config_path" ]]; then
+                PASSTHROUGH_ARGS[$((i+1))]="${CONFIG_ABS}"
+            else
+                PASSTHROUGH_ARGS[$i]="--config_path=${CONFIG_ABS}"
+            fi
+        fi
         DATA_ABS="$(cd "${METATLAS_DATA_DIR}" && pwd)"
-        if [[ "${CONFIG_ABS}" != "${DATA_ABS}"* ]]; then
+        if [[ "${CONFIG_ABS}" != "${DATA_ABS}" && "${CONFIG_ABS}" != "${DATA_ABS}/"* ]]; then
             # Config is outside $METATLAS_DATA_DIR — add a read-only mount of its directory.
             CONFIG_DIR="$(dirname "${CONFIG_ABS}")"
             EXTRA_CONFIG_MOUNT="${CONFIG_DIR}"
@@ -273,6 +284,9 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
 
         sbatch "${TMPSCRIPT}"
 
+    elif [[ "${SUBCOMMAND}" == "atlas-msms-deposit" ]]; then
+        shifter "${SHIFTER_ARGS[@]}" /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${PASSTHROUGH_ARGS[@]:1}"
+
     elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" || "${SUBCOMMAND}" == "standards-annotation" || "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev)..."
@@ -306,7 +320,21 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
             PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${CONFIG_PATH}')"
         elif [[ "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
             CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}')"
+            TIMESTAMP="$(_parse_arg --annotation_timestamp "${SUB_ARGS[@]}")"
+            TAGS="$(_parse_arg --tags "${SUB_ARGS[@]}")"
+            SKIP_ALIGNMENT=false
+            if [[ ! "${TIMESTAMP}" =~ ^[0-9]{8}T[0-9]{6}_[0-9]{6}Z$ ]]; then
+                echo "Error: reverse-rt-align requires --annotation_timestamp from a completed summary." >&2
+                exit 1
+            fi
+            if _has_flag --skip_rt_alignment "${SUB_ARGS[@]}"; then
+                echo "Skipping reverse RT alignment and just creating a new run with the specified tags." >&2
+                SKIP_ALIGNMENT=true
+            fi
+            if [[ -z "${TAGS}" ]]; then
+                TAGS="EMA"
+            fi
+            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}', '${TIMESTAMP}', '${TAGS}', '${SKIP_ALIGNMENT}')"
         elif [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
             CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
             _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
@@ -366,7 +394,7 @@ else
     # Download from Zenodo if missing or if the local version stamp differs
     # from ZENODO_MAIN_DB_DOI.  Skipped when ZENODO_MAIN_DB_DOI is unset
     # (e.g. during development before the first Zenodo upload).
-    if [[ -n "${ZENODO_MAIN_DB_DOI}" ]]; then
+    if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "atlas-msms-deposit" ]]; then
         MAIN_DB_DIR="${METATLAS_DATA_DIR}/databases/main_db"
         MAIN_DB_PATH="${MAIN_DB_DIR}/metatlas.duckdb"
         MAIN_DB_VERSION_FILE="${MAIN_DB_DIR}/.zenodo_version"
@@ -485,6 +513,17 @@ else
         echo "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems." >&2
         exit 1
 
+    elif [[ "${SUBCOMMAND}" == "atlas-msms-deposit" ]]; then
+        ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
+        DEPOSIT_DRY_RUN=false
+        for arg in "${PASSTHROUGH_ARGS[@]:1}"; do
+            [[ "${arg}" == "--dry_run" ]] && DEPOSIT_DRY_RUN=true
+        done
+        if [[ "${DEPOSIT_DRY_RUN}" == "false" && -f "${ATLAS_KEY}" ]]; then
+            DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
+        fi
+        docker run "${DOCKER_ARGS[@]}" "${IMAGE_FULL}" /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${PASSTHROUGH_ARGS[@]:1}"
+
     elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" || "${SUBCOMMAND}" == "standards-annotation" || "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
         if [[ "${DEV_MODE}" == "true" ]]; then
             echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev, runtime=docker)..."
@@ -511,7 +550,21 @@ else
             PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${CONFIG_PATH}')"
         elif [[ "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
             CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}')"
+            TIMESTAMP="$(_parse_arg --annotation_timestamp "${SUB_ARGS[@]}")"
+            TAGS="$(_parse_arg --tags "${SUB_ARGS[@]}")"
+            SKIP_ALIGNMENT=false
+            if [[ ! "${TIMESTAMP}" =~ ^[0-9]{8}T[0-9]{6}_[0-9]{6}Z$ ]]; then
+                echo "Error: reverse-rt-align requires --annotation_timestamp from a completed summary." >&2
+                exit 1
+            fi
+            if [[ -z "${TAGS}" ]]; then
+                TAGS="EMA"
+            fi
+            if _has_flag --skip_rt_alignment "${SUB_ARGS[@]}"; then
+                echo "Skipping reverse RT alignment and just creating a new run with the specified tags." >&2
+                SKIP_ALIGNMENT=true
+            fi
+            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}', '${TIMESTAMP}', '${TAGS}', '${SKIP_ALIGNMENT}')"
         elif [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
             CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
             _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
