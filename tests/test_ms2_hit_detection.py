@@ -20,8 +20,10 @@ import numpy as np
 import pandas as pd
 import pytest
 from matchms import Spectrum
+from matchms.similarity import CosineHungarian
 
 from metatlas2.ms2_hit_detection import (
+    _add_precursor_to_ref,
     _align_spectra_for_plotting,
     _assign_hits,
     _filter_out_ms2_data,
@@ -416,28 +418,28 @@ class TestProcessCompoundBatch:
 
     def _job(self, scans, refs, *, frag_tol=0.05, min_score=0.0,
              min_frags=0, ppm=20.0, limit=10):
-        return ("uid-001", "f.h5", scans, refs, frag_tol, min_score, min_frags, ppm, limit)
+        return ("uid-001", "f.h5", scans, refs, frag_tol, min_score, min_frags, ppm, limit, "GFFGJBXGBJISGV-UHFFFAOYSA-N")
 
     def test_returns_uid_filename_results_tuple(self):
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        uid, fname, results = _process_compound_batch(self._job([scan], [self._ref()]))
+        uid, fname, results, _ = _process_compound_batch(self._job([scan], [self._ref()]))
         assert uid == "uid-001"
         assert fname == "f.h5"
         assert isinstance(results, list)
 
     def test_results_length_matches_scans(self):
         scans = [_scan_dict(self._ADENINE_MZ, self._ADENINE_INT)] * 3
-        _, _, results = _process_compound_batch(self._job(scans, [self._ref()]))
+        _, _, results, _ = _process_compound_batch(self._job(scans, [self._ref()]))
         assert len(results) == 3
 
     def test_matching_scan_produces_hit(self):
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(self._job([scan], [self._ref()]))
+        _, _, results, _ = _process_compound_batch(self._job([scan], [self._ref()]))
         assert len(results[0]) > 0
 
     def test_hit_has_expected_keys(self):
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(self._job([scan], [self._ref()]))
+        _, _, results, _ = _process_compound_batch(self._job([scan], [self._ref()]))
         hit = results[0][0]
         for key in ("score", "num_matches", "mz_measured", "mz_theoretical",
                     "ppm_error", "ref_frags", "data_frags",
@@ -449,22 +451,22 @@ class TestProcessCompoundBatch:
         # matchms CosineHungarian can return values marginally above 1.0 due to
         # float32 rounding; allow a small epsilon rather than asserting strict ≤ 1.
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(self._job([scan], [self._ref()]))
+        _, _, results, _ = _process_compound_batch(self._job([scan], [self._ref()]))
         assert 0.0 <= results[0][0]["score"] <= 1.0 + 1e-5
 
     def test_identical_spectra_score_near_1(self):
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(self._job([scan], [self._ref()]))
+        _, _, results, _ = _process_compound_batch(self._job([scan], [self._ref()]))
         assert results[0][0]["score"] > 0.9
 
     def test_no_refs_returns_empty_hits(self):
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(self._job([scan], []))
+        _, _, results, _ = _process_compound_batch(self._job([scan], []))
         assert results[0] == []
 
     def test_empty_scan_frag_mzs_skipped(self):
         scan = _scan_dict([], [], precursor_mz=ADENINE_MZ)
-        _, _, results = _process_compound_batch(self._job([scan], [self._ref()]))
+        _, _, results, _ = _process_compound_batch(self._job([scan], [self._ref()]))
         assert results[0] == []
 
     def test_min_score_threshold_does_not_filter_hits_in_process_batch(self):
@@ -478,7 +480,7 @@ class TestProcessCompoundBatch:
             intensities=[1e4, 2e4, 3e4],
         )
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(
+        _, _, results, _ = _process_compound_batch(
             self._job([scan], [bad_ref], min_score=0.9)
         )
         # Hit is stored even though score < min_score=0.9
@@ -493,7 +495,7 @@ class TestProcessCompoundBatch:
             intensities=self._ADENINE_INT,
         )
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT, precursor_mz=ADENINE_MZ)
-        _, _, results = _process_compound_batch(
+        _, _, results, _ = _process_compound_batch(
             self._job([scan], [far_ref], ppm=5.0)
         )
         assert results[0] == []
@@ -502,13 +504,13 @@ class TestProcessCompoundBatch:
         # Build 5 identical references; with limit=2 only 2 hits should be returned
         refs = [self._ref() for _ in range(5)]
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
-        _, _, results = _process_compound_batch(self._job([scan], refs, limit=2))
+        _, _, results, _ = _process_compound_batch(self._job([scan], refs, limit=2))
         assert len(results[0]) <= 2
 
     def test_ppm_error_computed_correctly(self):
         scan = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT, precursor_mz=ADENINE_MZ)
         ref = self._ref(precursor_mz=ADENINE_MZ)
-        _, _, results = _process_compound_batch(self._job([scan], [ref]))
+        _, _, results, _ = _process_compound_batch(self._job([scan], [ref]))
         hit = results[0][0]
         expected_ppm = (ADENINE_MZ - ADENINE_MZ) / ADENINE_MZ * 1e6
         assert abs(hit["ppm_error"] - expected_ppm) < 0.01
@@ -517,8 +519,216 @@ class TestProcessCompoundBatch:
         # Two scans: one matches, one has empty fragments
         scan_good  = _scan_dict(self._ADENINE_MZ, self._ADENINE_INT)
         scan_empty = _scan_dict([], [])
-        _, _, results = _process_compound_batch(
+        _, _, results, _ = _process_compound_batch(
             self._job([scan_good, scan_empty], [self._ref()])
         )
         assert len(results[0]) > 0   # good scan has hits
         assert results[1] == []      # empty scan has no hits
+
+# ===========================================================================
+# _add_precursor_to_ref
+# ===========================================================================
+
+class TestAddPrecursorToRef:
+    """Direct unit tests for the reference-augmentation helper."""
+
+    TOL = 0.05
+
+    def _ref(self, mz, ints):
+        return _ref_spectrum(precursor_mz=ADENINE_MZ, mz=mz, intensities=ints)
+
+    def _q(self, mz, ints):
+        return np.array(mz, dtype=np.float32), np.array(ints, dtype=np.float32)
+
+    def test_returns_none_when_ref_already_has_precursor(self):
+        ref = self._ref([94.04, ADENINE_MZ], [1e5, 5e4])
+        q_mz, q_int = self._q([94.04, ADENINE_MZ], [1e5, 8e4])
+        assert _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL) is None
+
+    def test_returns_none_when_ref_peak_within_tolerance(self):
+        ref = self._ref([94.04, ADENINE_MZ + 0.03], [1e5, 5e4])
+        q_mz, q_int = self._q([94.04, ADENINE_MZ], [1e5, 8e4])
+        assert _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL) is None
+
+    def test_adds_peak_when_ref_peak_just_outside_tolerance(self):
+        ref = self._ref([94.04, ADENINE_MZ + 0.08], [1e5, 5e4])
+        q_mz, q_int = self._q([94.04, ADENINE_MZ], [1e5, 8e4])
+        out = _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL)
+        assert out is not None
+        assert len(out.mz) == 3
+
+    def test_returns_none_when_query_has_no_precursor_peak(self):
+        ref = self._ref([94.04, 119.04], [1e5, 5e4])
+        q_mz, q_int = self._q([94.04, 119.04], [1e5, 5e4])
+        assert _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL) is None
+
+    def test_added_intensity_scaled_to_reference(self):
+        # Query precursor peak = 80% of query base peak -> 80% of ref base peak
+        ref = self._ref([94.04, 119.04], [2e5, 1e5])
+        q_mz, q_int = self._q([94.04, ADENINE_MZ], [1e5, 8e4])
+        out = _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL)
+        idx = int(np.argmin(np.abs(out.mz - ADENINE_MZ)))
+        assert out.mz[idx] == pytest.approx(ADENINE_MZ, abs=1e-3)
+        assert out.intensities[idx] == pytest.approx(0.8 * 2e5, rel=1e-4)
+
+    def test_output_mz_sorted_and_peak_count_incremented(self):
+        # Precursor falls in the middle of the ref peaks
+        ref = self._ref([50.0, ADENINE_MZ + 20.0], [1e5, 5e4])
+        q_mz, q_int = self._q([50.0, ADENINE_MZ], [1e5, 8e4])
+        out = _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL)
+        assert len(out.mz) == 3
+        assert np.all(np.diff(out.mz) > 0)
+
+    def test_original_reference_not_mutated(self):
+        ref = self._ref([94.04, 119.04], [1e5, 5e4])
+        q_mz, q_int = self._q([94.04, ADENINE_MZ], [1e5, 8e4])
+        _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL)
+        assert len(ref.mz) == 2
+
+    def test_metadata_preserved(self):
+        ref = self._ref([94.04, 119.04], [1e5, 5e4])
+        q_mz, q_int = self._q([94.04, ADENINE_MZ], [1e5, 8e4])
+        out = _add_precursor_to_ref(ref, q_mz, q_int, ADENINE_MZ, self.TOL)
+        assert out.metadata["id"] == ref.metadata["id"]
+        #assert out.metadata["name"] == ref.metadata["name"]
+        assert out.metadata["database"] == ref.metadata["database"]
+
+
+# ===========================================================================
+# _process_compound_batch: precursor augmentation
+# ===========================================================================
+
+class TestProcessCompoundBatchPrecursorAddition:
+    """End-to-end tests of the add-missing-precursor behaviour in the worker."""
+
+    INCHI = "GFFGJBXGBJISGV-UHFFFAOYSA-N"
+
+    # Query: two fragments plus a precursor peak at 80% of the *ref-equivalent* scale.
+    # A reference with the identical pattern (incl. precursor) is a perfect match.
+    _Q_MZ  = [94.04, 119.04, ADENINE_MZ]
+    _Q_INT = [1e5,   5e4,    8e4]
+
+    # Reference that lacks the precursor peak entirely
+    _REF_NO_PREC_MZ  = [94.04, 119.04]
+    _REF_NO_PREC_INT = [1e5,   5e4]
+
+    def _job(self, scans, refs, *, frag_tol=0.05, ppm=20.0, limit=10):
+        return ("uid-001", "f.h5", scans, refs, frag_tol, 0.0, 0, ppm, limit, self.INCHI)
+
+    def _ref_no_prec(self, ref_id="ref_no_prec"):
+        return _ref_spectrum(ADENINE_MZ, self._REF_NO_PREC_MZ, self._REF_NO_PREC_INT, ref_id=ref_id)
+
+    def _ref_with_prec(self, ref_id="ref_with_prec"):
+        return _ref_spectrum(ADENINE_MZ, self._Q_MZ, self._Q_INT, ref_id=ref_id)
+
+    def _scan(self, mz=None, ints=None):
+        return _scan_dict(mz or self._Q_MZ, ints or self._Q_INT, precursor_mz=ADENINE_MZ)
+
+    # ---- precursor missing -> added ----------------------------------------
+
+    def test_missing_precursor_returns_inchi_key(self):
+        *_, added_key = _process_compound_batch(self._job([self._scan()], [self._ref_no_prec()]))
+        assert added_key == self.INCHI
+
+    def test_missing_precursor_hit_is_flagged(self):
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_no_prec()]))
+        assert results[0][0]["precursor_added"] is True
+
+    def test_missing_precursor_hit_still_returned(self):
+        # Regression for the original draft: the hit must NOT be dropped.
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_no_prec()]))
+        assert len(results[0]) == 1
+
+    def test_missing_precursor_ref_frags_incremented(self):
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_no_prec()]))
+        assert results[0][0]["ref_frags"] == len(self._REF_NO_PREC_MZ) + 1
+
+    def test_missing_precursor_counts_as_match(self):
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_no_prec()]))
+        assert results[0][0]["num_matches"] == 3
+
+    def test_missing_precursor_score_improves_vs_unaugmented(self):
+        # Baseline: score the query against the reference *without* augmentation
+        scan = self._scan()
+        ref = self._ref_no_prec()
+        query = Spectrum(
+            mz=np.array(self._Q_MZ, dtype=np.float32),
+            intensities=np.array(self._Q_INT, dtype=np.float32),
+            metadata={"precursor_mz": ADENINE_MZ},
+        )
+        baseline = float(CosineHungarian(tolerance=0.05).pair(ref, query)["score"])
+
+        _, _, results, _ = _process_compound_batch(self._job([scan], [ref]))
+        augmented = results[0][0]["score"]
+
+        assert augmented > baseline + 0.1
+        # Scaled precursor intensity makes ref identical to query -> ~perfect score
+        assert augmented > 0.99
+
+    def test_aligned_ref_contains_added_precursor_peak(self):
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_no_prec()]))
+        ref_mz_aligned = np.array(results[0][0]["ref_aligned"][0], dtype=float)
+        ref_mz_aligned = ref_mz_aligned[~np.isnan(ref_mz_aligned)]
+        assert np.any(np.abs(ref_mz_aligned - ADENINE_MZ) <= 0.05)
+
+    def test_input_reference_not_mutated(self):
+        ref = self._ref_no_prec()
+        _process_compound_batch(self._job([self._scan()], [ref]))
+        assert len(ref.mz) == len(self._REF_NO_PREC_MZ)
+
+    # ---- precursor present -> unchanged ------------------------------------
+
+    def test_present_precursor_returns_none_key(self):
+        *_, added_key = _process_compound_batch(self._job([self._scan()], [self._ref_with_prec()]))
+        assert added_key is None
+
+    def test_present_precursor_hit_not_flagged(self):
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_with_prec()]))
+        assert results[0][0]["precursor_added"] is False
+
+    def test_present_precursor_ref_frags_unchanged(self):
+        _, _, results, _ = _process_compound_batch(self._job([self._scan()], [self._ref_with_prec()]))
+        assert results[0][0]["ref_frags"] == len(self._Q_MZ)
+
+    def test_ref_precursor_within_tolerance_not_augmented(self):
+        ref = _ref_spectrum(ADENINE_MZ, [94.04, 119.04, ADENINE_MZ + 0.03], self._Q_INT)
+        *_, added_key = _process_compound_batch(self._job([self._scan()], [ref], frag_tol=0.05))
+        assert added_key is None
+
+    def test_ref_precursor_outside_tolerance_is_augmented(self):
+        ref = _ref_spectrum(ADENINE_MZ, [94.04, 119.04, ADENINE_MZ + 0.08], self._Q_INT)
+        *_, added_key = _process_compound_batch(self._job([self._scan()], [ref], frag_tol=0.05))
+        assert added_key == self.INCHI
+
+    # ---- query has no precursor peak -> nothing to add ---------------------
+
+    def test_query_without_precursor_peak_not_augmented(self):
+        scan = self._scan(mz=[94.04, 119.04], ints=[1e5, 5e4])
+        _, _, results, added_key = _process_compound_batch(self._job([scan], [self._ref_no_prec()]))
+        assert added_key is None
+        assert results[0][0]["precursor_added"] is False
+        assert results[0][0]["ref_frags"] == len(self._REF_NO_PREC_MZ)
+
+    # ---- mixed refs / multiple scans ---------------------------------------
+
+    def test_only_refs_missing_precursor_are_flagged(self):
+        refs = [self._ref_no_prec("A_missing"), self._ref_with_prec("B_present")]
+        _, _, results, added_key = _process_compound_batch(self._job([self._scan()], refs))
+        by_id = {h["ref_id"]: h for h in results[0]}
+        assert by_id["A_missing"]["precursor_added"] is True
+        assert by_id["B_present"]["precursor_added"] is False
+        assert added_key == self.INCHI
+
+    def test_augmentation_is_per_scan(self):
+        scan_with = self._scan()
+        scan_without = self._scan(mz=[94.04, 119.04], ints=[1e5, 5e4])
+        _, _, results, added_key = _process_compound_batch(
+            self._job([scan_with, scan_without], [self._ref_no_prec()])
+        )
+        assert results[0][0]["precursor_added"] is True
+        assert results[1][0]["precursor_added"] is False
+        assert added_key == self.INCHI
+
+    def test_no_refs_returns_none_key(self):
+        *_, added_key = _process_compound_batch(self._job([self._scan()], []))
+        assert added_key is None

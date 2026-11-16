@@ -5,29 +5,21 @@ Tested functions
 * :func:`_classify_file_type`
 * :func:`filter_lcmsruns_list`
 
-Algorithm overview (two-phase)
--------------------------------
-Phase 1 — ``run_metadata`` (and ``sample_name`` for QC) for high-priority types:
-    ``qc``, ``istd``, ``injbl`` / ``injblk`` / ``blank`` — in that order.
-    ``qc`` is checked in both fields; ``istd`` / ``injbl`` are checked in
-    ``run_metadata`` only (they rarely appear in ``sample_name``).
+Classification rules (first match wins; no match -> ``'experimental'``)
+------------------------------------------------------------------------
+Each field is lowercased and split on ``-``; keywords must match whole segments.
 
-Phase 2 — ``sample_name`` then ``run_metadata`` for lower-priority types:
-    ``exctrl`` / ``txctrl``, ``refstd`` / ``standard``.
+owner="jgi"
+    1. ``qc-c18qu``  -- segments ``qc``, ``c18qu`` (consecutive) in run_metadata
+    2. ``qc``        -- ``qc`` in run_metadata
+    3. ``istd``      -- ``istd`` in run_metadata
+    4. ``injbl``     -- ``injbl`` in run_metadata
 
-Phase 3 — fallback: ``'experimental'``.
-
-Special case: ``QC-C18QU`` is a real QC run but won't be used in the RT align model
-
-Regression cases covered
-------------------------
-1. ``QC-SOPv7`` in ``sample_name`` → ``'qc'`` (first-segment match).
-2. ``ExCtrl-NA-NA-NA-NA`` / ``TxCtrl-NA-NA-NA-NA`` → ``'exctrl'`` via Phase 2.
-3. ``run_metadata`` ending in ``-QC`` → ``'qc'`` via Phase 1.
-4. ``QC-C18QU`` in ``run_metadata`` is skipped; next available key wins.
-5. ``ISTD`` / ``InjBL`` in ``run_metadata`` → ``'istd'`` / ``'injbl'`` via Phase 1,
-   even when ``ExCtrl`` is present in ``sample_name``.
-6. Real-world HILICZ filenames from the SorghSwg project.
+owner="egsb"
+    1. ``qc``, 
+    2. ``istd``, 
+    3. ``injbl``
+    run_metadata is never used.
 """
 
 from __future__ import annotations
@@ -41,9 +33,21 @@ from metatlas2.lcmsruns_tools import _classify_file_type, filter_lcmsruns_list
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fields(sample_name: str, run_metadata: str = "") -> dict:
+def _fields(sample_name: str = "", run_metadata: str = "", sample_number: str = "") -> dict:
     """Return a minimal fields dict as produced by ``fpf.parse_file_name``."""
-    return {"sample_name": sample_name, "run_metadata": run_metadata}
+    return {
+        "sample_number": sample_number,
+        "sample_name": sample_name,
+        "run_metadata": run_metadata,
+    }
+
+
+def jgi(**kw) -> str:
+    return _classify_file_type(_fields(**kw), "jgi")
+
+
+def egsb(**kw) -> str:
+    return _classify_file_type(_fields(**kw), "egsb")
 
 
 def _run(file_type: str, polarity: str = "fps", chromatography: str = "hilic",
@@ -60,304 +64,317 @@ def _run(file_type: str, polarity: str = "fps", chromatography: str = "hilic",
     }
 
 
+OWNERS = ["jgi", "egsb"]
+
+
 # ===========================================================================
-# _classify_file_type — Phase 1: QC detection (sample_name and run_metadata)
+# Owner handling
 # ===========================================================================
 
-class TestClassifyFileTypeQC:
+class TestOwnerHandling:
 
-    def test_exact_qc_in_sample_name(self):
-        assert _classify_file_type(_fields("QC")) == "qc"
+    def test_owner_is_required(self):
+        with pytest.raises(TypeError):
+            _classify_file_type(_fields("QC"))  # type: ignore[call-arg]
 
-    def test_exact_qc_lowercase_in_sample_name(self):
-        assert _classify_file_type(_fields("qc")) == "qc"
+    @pytest.mark.parametrize("owner", ["", None, "esbg", "jig", "egbs", "unknown"])
+    def test_unknown_owner_raises(self, owner):
+        with pytest.raises(ValueError, match="Unknown owner"):
+            _classify_file_type(_fields("QC"), owner)
 
-    def test_qc_sopv7_in_sample_name(self):
-        """QC-SOPv7: first segment 'qc' → 'qc'."""
-        assert _classify_file_type(_fields("QC-SOPv7")) == "qc"
+    @pytest.mark.parametrize("owner", ["JGI", " jgi ", "Jgi"])
+    def test_jgi_owner_is_case_and_whitespace_insensitive(self, owner):
+        assert _classify_file_type(_fields(run_metadata="Rg80-QC"), owner) == "qc"
 
-    def test_qc_sopv7_lowercase_in_sample_name(self):
-        assert _classify_file_type(_fields("qc-sopv7")) == "qc"
+    @pytest.mark.parametrize("owner", ["EGSB", " egsb ", "Egsb"])
+    def test_egsb_owner_is_case_and_whitespace_insensitive(self, owner):
+        assert _classify_file_type(_fields(sample_name="QC"), owner) == "qc"
 
-    def test_qc_v2_in_sample_name(self):
-        assert _classify_file_type(_fields("QC-v2")) == "qc"
+    def test_same_fields_classify_differently_per_owner(self):
+        f = _fields(sample_name="QC-SOPv7", run_metadata="Rg80-ISTD")
+        assert _classify_file_type(f, "jgi") == "istd"   # run_metadata only
+        assert _classify_file_type(f, "egsb") == "qc"    # sample_name only
 
-    def test_qc_in_run_metadata_trailing(self):
-        """run_metadata ending in '-QC' must be classified as 'qc'."""
-        assert _classify_file_type(
-            _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC")
-        ) == "qc"
 
-    def test_qc_in_run_metadata_with_exctrl_sample_name(self):
-        assert _classify_file_type(
-            _fields("ExCtrl-MeOH-PPL", "Rg80to1200-CE102040norm-filtrate-QC")
-        ) == "qc"
+# ===========================================================================
+# JGI: QC and QC-C18QU (run_metadata only)
+# ===========================================================================
+
+class TestJgiQC:
+
+    def test_qc_trailing_in_run_metadata(self):
+        assert jgi(sample_name="AB-T1-ENDO",
+                   run_metadata="Rg80to1200-CE102040norm-cells-QC") == "qc"
 
     def test_qc_standalone_in_run_metadata(self):
-        """Standalone 'QC' in run_metadata (no other segments) → 'qc'."""
-        assert _classify_file_type(_fields("unknown", "QC")) == "qc"
+        assert jgi(sample_name="unknown", run_metadata="QC") == "qc"
 
-    def test_qc_in_sample_name_beats_istd_in_run_metadata(self):
-        """Phase 1 checks 'qc' before 'istd'; QC in sample_name wins."""
-        assert _classify_file_type(
-            _fields("QC-SOPv7", "Rg80to1200-CE102040norm-filtrate-ISTD")
-        ) == "qc"
+    def test_qc_lowercase_in_run_metadata(self):
+        assert jgi(run_metadata="Rg80-qc") == "qc"
 
-    def test_qc_c18qu_in_run_metadata_skipped(self):
-        """QC-C18QU in run_metadata must be skipped; ExCtrl in sample_name wins."""
-        assert _classify_file_type(
-            _fields("ExCtrl-MeOH-PPL", "Rg80to1200-CE102040norm-filtrate-QC-C18QU")
-        ) == "exctrl"
+    def test_qc_in_run_metadata_with_exctrl_sample_name(self):
+        assert jgi(sample_name="ExCtrl-MeOH-PPL",
+                   run_metadata="Rg80to1200-CE102040norm-filtrate-QC") == "qc"
 
-    def test_qc_c18qu_in_run_metadata_skipped_experimental_fallback(self):
-        """QC-C18QU in run_metadata skipped; sample_name has no key → qc."""
-        assert _classify_file_type(
-            _fields("AB-T1-ENDO", "Rg80to1200-CE102040norm-cells-QC-C18QU")
-        ) == "qc"
+    @pytest.mark.parametrize("sample_name", ["QC", "QC-SOPv7", "qc-v2", "QC-C18QU"])
+    def test_qc_in_sample_name_only_is_experimental(self, sample_name):
+        assert jgi(sample_name=sample_name) == "experimental"
 
-    def test_qc_c18qu_alone_in_sample_name_is_not_qc(self):
-        """QC-C18QU as the entire sample_name: 'qc' segment is followed by
-        'c18qu' → qc."""
-        assert _classify_file_type(_fields("QC-C18QU")) == "qc"
+    def test_qc_requires_whole_segment(self):
+        assert jgi(run_metadata="Rg80-QC1") == "experimental"
+        assert jgi(run_metadata="Rg80-myQC") == "experimental"
+
+    def test_qc_c18qu_in_run_metadata(self):
+        assert jgi(sample_name="AB-T1-ENDO",
+                   run_metadata="Rg80to1200-CE102040norm-cells-QC-C18QU") == "qc-c18qu"
+
+    def test_qc_c18qu_standalone_in_run_metadata(self):
+        assert jgi(run_metadata="QC-C18QU") == "qc-c18qu"
+
+    def test_qc_c18qu_lowercase(self):
+        assert jgi(run_metadata="Rg80-qc-c18qu") == "qc-c18qu"
+
+    def test_qc_c18qu_beats_exctrl_sample_name(self):
+        """Old behaviour (skip QC-C18QU, fall through to exctrl) is gone."""
+        assert jgi(sample_name="ExCtrl-MeOH-PPL",
+                   run_metadata="Rg80to1200-CE102040norm-filtrate-QC-C18QU") == "qc-c18qu"
+
+    def test_qc_c18qu_is_not_plain_qc(self):
+        assert jgi(run_metadata="Rg80-QC-C18QU") != "qc"
+
+    def test_qc_and_c18qu_must_be_adjacent(self):
+        """Non-adjacent 'qc' ... 'c18qu' is plain qc."""
+        assert jgi(run_metadata="Rg80-QC-S1-C18QU") == "qc"
+
+    def test_c18qu_without_qc_is_experimental(self):
+        assert jgi(run_metadata="Rg80-C18QU") == "experimental"
+
+    def test_qc_beats_istd_in_run_metadata(self):
+        assert jgi(run_metadata="Rg80-QC-ISTD") == "qc"
 
     def test_mixed_case_qc(self):
-        assert _classify_file_type(_fields("Qc-SopV7")) == "qc"
+        assert jgi(run_metadata="Rg80-Qc") == "qc"
 
 
 # ===========================================================================
-# _classify_file_type — Phase 1: ISTD detection (run_metadata only)
+# JGI: ISTD and InjBl (run_metadata only)
 # ===========================================================================
 
-class TestClassifyFileTypeISTD:
+class TestJgiISTDAndInjBl:
 
-    def test_istd_in_run_metadata_trailing(self):
-        """ISTD as last segment of run_metadata → 'istd'."""
-        assert _classify_file_type(
-            _fields("AB-T0-PPL", "Rg80to1200-CE102040norm-filtrate-ISTD")
-        ) == "istd"
+    def test_istd_trailing(self):
+        assert jgi(sample_name="AB-T0-PPL",
+                   run_metadata="Rg80to1200-CE102040norm-filtrate-ISTD") == "istd"
 
-    def test_istd_in_run_metadata_standalone(self):
-        assert _classify_file_type(_fields("unknown", "ISTD")) == "istd"
+    def test_istd_standalone(self):
+        assert jgi(sample_name="unknown", run_metadata="ISTD") == "istd"
 
-    def test_istd_in_run_metadata_with_exctrl_sample_name(self):
-        """ISTD in run_metadata beats ExCtrl in sample_name (Phase 1 wins)."""
-        assert _classify_file_type(
-            _fields("ExCtrl", "Rg70to1050-CE205060norm-ExCtrl-ISTD")
-        ) == "istd"
+    def test_istd_lowercase(self):
+        assert jgi(sample_name="WT-P1-L",
+                   run_metadata="Rg70to1050-CE102040norm-Leaf-istd") == "istd"
 
-    def test_istd_in_run_metadata_with_experimental_sample_name(self):
-        """ISTD in run_metadata; experimental sample_name → 'istd'."""
-        assert _classify_file_type(
-            _fields("WT-P1-S", "Rg70to1050-CE102040norm-Stem-ISTD")
-        ) == "istd"
+    def test_istd_beats_exctrl_sample_name(self):
+        assert jgi(sample_name="ExCtrl",
+                   run_metadata="Rg70to1050-CE205060norm-ExCtrl-ISTD") == "istd"
 
-    def test_istd_in_run_metadata_lowercase(self):
-        assert _classify_file_type(
-            _fields("WT-P1-L", "Rg70to1050-CE102040norm-Leaf-istd")
-        ) == "istd"
-
-    def test_istd_only_in_sample_name_no_run_metadata_is_experimental(self):
-        """ISTD in sample_name only (no run_metadata) → 'experimental' under
-        the new algorithm (Phase 1 checks run_metadata only for ISTD)."""
-        assert _classify_file_type(_fields("ISTD")) == "experimental"
-
-    def test_istd_with_suffix_in_sample_name_only_is_experimental(self):
-        """ISTD-v2 in sample_name only → 'experimental'."""
-        assert _classify_file_type(_fields("ISTD-v2")) == "experimental"
-
-
-# ===========================================================================
-# _classify_file_type — Phase 1: InjBl detection (run_metadata only)
-# ===========================================================================
-
-class TestClassifyFileTypeInjBl:
+    def test_istd_only_in_sample_name_is_experimental(self):
+        assert jgi(sample_name="ISTD") == "experimental"
+        assert jgi(sample_name="ISTD-v2") == "experimental"
 
     def test_injbl_in_run_metadata(self):
-        assert _classify_file_type(
-            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-InjBL-MeOH")
-        ) == "injbl"
+        assert jgi(sample_name="WC-T0-PPL",
+                   run_metadata="Rg80to1200-CE102040norm-filtrate-InjBL-MeOH") == "injbl"
 
-    def test_injbl_in_run_metadata_with_exctrl_sample_name(self):
-        """InjBL in run_metadata beats ExCtrl in sample_name (Phase 1 wins)."""
-        assert _classify_file_type(
-            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH")
-        ) == "injbl"
+    def test_injbl_beats_exctrl_sample_name(self):
+        assert jgi(sample_name="ExCtrl",
+                   run_metadata="Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH") == "injbl"
 
-    def test_injblk_alias_in_run_metadata(self):
-        assert _classify_file_type(
-            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-InjBlk-MeOH")
-        ) == "injbl"
+    def test_injbl_only_in_sample_name_is_experimental(self):
+        assert jgi(sample_name="INJBL") == "experimental"
 
-    def test_blank_alias_in_run_metadata(self):
-        assert _classify_file_type(
-            _fields("WC-T0-PPL", "Rg80to1200-CE102040norm-filtrate-Blank")
-        ) == "injbl"
+    def test_istd_beats_injbl(self):
+        assert jgi(run_metadata="Rg80-ISTD-InjBl") == "istd"
 
-    def test_injbl_only_in_sample_name_no_run_metadata_is_experimental(self):
-        """InjBL in sample_name only → 'experimental' (Phase 1 checks run_metadata only)."""
-        assert _classify_file_type(_fields("INJBL")) == "experimental"
-
-    def test_blank_only_in_sample_name_no_run_metadata_is_experimental(self):
-        assert _classify_file_type(_fields("BLANK")) == "experimental"
-
-    def test_injbl_priority_over_exctrl_in_run_metadata(self):
-        """'injbl' is checked before 'exctrl' in Phase 1; InjBL wins."""
-        assert _classify_file_type(
-            _fields("unknown", "Rg70to1050-ExCtrl-InjBL-MeOH")
-        ) == "injbl"
+    @pytest.mark.parametrize("alias", ["InjBlk", "Blank"])
+    def test_old_injbl_aliases_no_longer_match(self, alias):
+        assert jgi(sample_name="WC-T0-PPL",
+                   run_metadata=f"Rg80to1200-CE102040norm-filtrate-{alias}") == "experimental"
 
 
 # ===========================================================================
-# _classify_file_type — Phase 2: ExCtrl / RefStd (sample_name then run_metadata)
+# ExCtrl / TxCtrl are not types
 # ===========================================================================
 
-class TestClassifyFileTypePhase2:
+class TestExCtrlTxCtrlAreExperimental:
 
-    def test_exctrl_in_sample_name(self):
-        assert _classify_file_type(_fields("EXCTRL")) == "exctrl"
+    @pytest.mark.parametrize("owner", OWNERS)
+    @pytest.mark.parametrize("sample_name", [
+        "ExCtrl", "EXCTRL-batch1", "TxCtrl", "TxCtrl-NA-NA-NA-NA", "ExCtrl-NA-NA-NA-NA",
+        "ExCtrl-LCMS-PPL", "ExCtrl-MeOH-PPL", "ExCtrl-Vial-PPL", "ExCtrl-Full-PPL",
+        "ExCtrl-N2-PPL", "ExCtrl-MeOHHCl-PPL", "ExCtrl-Vial-ENDO", "ExCtrl-MeOH-ENDO",
+        "ExCtrl-TefTube-ENDO", "ExCtrl-Filter-ENDO", "ExCtrl-LCMS-ENDO",
+    ])
+    def test_sample_names(self, owner, sample_name):
+        assert _classify_file_type(_fields(sample_name=sample_name), owner) == "experimental"
 
-    def test_exctrl_with_suffix_in_sample_name(self):
-        assert _classify_file_type(_fields("EXCTRL-batch1")) == "exctrl"
-
-    def test_txctrl_maps_to_exctrl(self):
-        assert _classify_file_type(_fields("TXCTRL")) == "exctrl"
-
-    def test_txctrl_na_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("TxCtrl-NA-NA-NA-NA")) == "exctrl"
-
-    def test_exctrl_na_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-NA-NA-NA-NA")) == "exctrl"
-
-    def test_exctrl_lcms_ppl_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-LCMS-PPL")) == "exctrl"
-
-    def test_exctrl_meoh_ppl_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-MeOH-PPL")) == "exctrl"
-
-    def test_exctrl_vial_ppl_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-Vial-PPL")) == "exctrl"
-
-    def test_exctrl_full_ppl_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-Full-PPL")) == "exctrl"
-
-    def test_exctrl_n2_ppl_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-N2-PPL")) == "exctrl"
-
-    def test_exctrl_meohhcl_ppl_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-MeOHHCl-PPL")) == "exctrl"
-
-    def test_exctrl_vial_endo_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-Vial-ENDO")) == "exctrl"
-
-    def test_exctrl_meoh_endo_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-MeOH-ENDO")) == "exctrl"
-
-    def test_exctrl_teftube_endo_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-TefTube-ENDO")) == "exctrl"
-
-    def test_exctrl_filter_endo_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-Filter-ENDO")) == "exctrl"
-
-    def test_exctrl_lcms_endo_classified_as_exctrl(self):
-        assert _classify_file_type(_fields("ExCtrl-LCMS-ENDO")) == "exctrl"
-
-    def test_refstd_in_sample_name(self):
-        assert _classify_file_type(_fields("REFSTD")) == "refstd"
-
-    def test_refstd_with_suffix_in_sample_name(self):
-        assert _classify_file_type(_fields("REFSTD-pooled")) == "refstd"
-
-    def test_standard_maps_to_refstd(self):
-        assert _classify_file_type(_fields("STANDARD")) == "refstd"
-
-    def test_exctrl_in_run_metadata_only_no_sample_name_match(self):
-        """ExCtrl in run_metadata only (no sample_name match) → 'exctrl' via Phase 2."""
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_exctrl_in_run_metadata(self, owner):
         assert _classify_file_type(
-            _fields("AB-T1-ENDO", "Rg70to1050-CE102040norm-ExCtrl-S1")
-        ) == "exctrl"
+            _fields(sample_name="AB-T1-ENDO", run_metadata="Rg70to1050-CE102040norm-ExCtrl-S1"),
+            owner,
+        ) == "experimental"
 
-    def test_exctrl_sample_name_no_high_priority_run_metadata(self):
-        """ExCtrl in sample_name, run_metadata has no high-priority token → 'exctrl'."""
+
+# ===========================================================================
+# EGSB (sample_name only)
+# ===========================================================================
+
+class TestEgsbSampleNameTypes:
+
+    @pytest.mark.parametrize("sample_name, expected", [
+        ("QC", "qc"), ("qc", "qc"), ("QC-SOPv7", "qc"), ("qc-sopv7", "qc"),
+        ("QC-v2", "qc"), ("Qc-SopV7", "qc"),
+        ("ISTD", "istd"), ("ISTD-v2", "istd"), ("istd", "istd"),
+        ("InjBl", "injbl"), ("INJBL", "injbl"), ("injbl-MeOH", "injbl"),
+    ])
+    def test_keyword_in_sample_name(self, sample_name, expected):
+        assert egsb(sample_name=sample_name) == expected
+
+    def test_keyword_in_segment_middle(self):
+        assert egsb(sample_name="AB-QC-1") == "qc"
+
+    def test_qc_requires_whole_segment(self):
+        assert egsb(sample_name="QC1") == "experimental"
+
+    def test_qc_c18qu_has_no_special_type(self):
+        assert egsb(sample_name="QC-C18QU") == "qc"
+
+    @pytest.mark.parametrize("run_metadata", [
+        "Rg80-QC", "Rg80-ISTD", "Rg80-InjBl", "Rg80-ExCtrl", "Rg80-TxCtrl", "Rg80-QC-C18QU",
+    ])
+    def test_run_metadata_is_ignored(self, run_metadata):
+        assert egsb(sample_name="AB-T1-ENDO", run_metadata=run_metadata) == "experimental"
+
+    @pytest.mark.parametrize("sample_name", ["INJBLK", "BLANK", "STANDARD"])
+    def test_old_aliases_no_longer_match(self, sample_name):
+        assert egsb(sample_name=sample_name) == "experimental"
+
+    def test_priority_qc_beats_istd(self):
+        assert egsb(sample_name="QC-ISTD") == "qc"
+
+    def test_priority_istd_beats_injbl(self):
+        assert egsb(sample_name="ISTD-InjBl") == "istd"
+
+    def test_exctrl_sample_name_does_not_block_refstd(self):
+        assert egsb(sample_name="ExCtrl", sample_number="RefStd-1") == "experimental"
+
+
+# ===========================================================================
+# RefStd (sample_number, both owners)
+# ===========================================================================
+
+class TestRefStd:
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    @pytest.mark.parametrize("sample_number", ["RefStd", "REFSTD", "refstd", "RefStd-1", "RefStd-pooled"])
+    def test_refstd_in_sample_number(self, owner, sample_number):
+        assert _classify_file_type(_fields(sample_number=sample_number), owner) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    @pytest.mark.parametrize("sample_name", ["REFSTD", "REFSTD-pooled", "STANDARD"])
+    def test_refstd_in_sample_name_only_is_experimental(self, owner, sample_name):
+        assert _classify_file_type(_fields(sample_name=sample_name), owner) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_refstd_in_run_metadata_only_is_experimental(self, owner):
+        assert _classify_file_type(_fields(run_metadata="Rg80-RefStd"), owner) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_standard_in_sample_number_is_experimental(self, owner):
+        assert _classify_file_type(_fields(sample_number="Standard"), owner) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_refstd_requires_whole_segment(self, owner):
+        assert _classify_file_type(_fields(sample_number="RefStd1"), owner) == "experimental"
+
+    def test_jgi_refstd_is_lowest_priority(self):
+        assert jgi(sample_number="RefStd-1", run_metadata="Rg80-InjBl") == "injbl"
+
+
+# ===========================================================================
+# Experimental fallback
+# ===========================================================================
+
+class TestExperimental:
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    @pytest.mark.parametrize("sample_name", [
+        "Ctrl-Media-PPL", "WC-T0-PPL", "AB-T1-ENDO", "soil-Slyc-OMTmb-inf-35dag",
+        "RtTis-Slyc-OMTmb-inf-35dag", "T1-256534-8-Tr-RE", "",
+    ])
+    def test_no_keyword_is_experimental(self, owner, sample_name):
+        assert _classify_file_type(_fields(sample_name=sample_name), owner) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_all_fields_empty(self, owner):
+        assert _classify_file_type(_fields(), owner) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_missing_keys_and_none_values(self, owner):
+        assert _classify_file_type({}, owner) == "experimental"
         assert _classify_file_type(
-            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-S1")
-        ) == "exctrl"
+            {"sample_name": None, "run_metadata": None, "sample_number": None}, owner
+        ) == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_documented_example_filename_is_experimental(self, owner):
+        """20260925_JGI_TS_..._POS_MS2_40_J319-A-Lowland-653-Progeny_1_Rg80to1200-CE102040norm-G00031908-S1_Run123.h5"""
+        f = _fields(
+            sample_number="40",
+            sample_name="J319-A-Lowland-653-Progeny",
+            run_metadata="Rg80to1200-CE102040norm-G00031908-S1",
+        )
+        assert _classify_file_type(f, owner) == "experimental"
 
 
 # ===========================================================================
-# _classify_file_type — Phase 3: experimental fallback
+# Real-world HILICZ SorghSwg filenames
 # ===========================================================================
 
-class TestClassifyFileTypeExperimental:
-
-    def test_ctrl_media_ppl_classified_as_experimental(self):
-        assert _classify_file_type(_fields("Ctrl-Media-PPL")) == "experimental"
-
-    def test_wc_t0_ppl_classified_as_experimental(self):
-        assert _classify_file_type(_fields("WC-T0-PPL")) == "experimental"
-
-    def test_ab_t1_endo_classified_as_experimental(self):
-        assert _classify_file_type(_fields("AB-T1-ENDO")) == "experimental"
-
-    def test_soil_sample_classified_as_experimental(self):
-        assert _classify_file_type(_fields("soil-Slyc-OMTmb-inf-35dag")) == "experimental"
-
-    def test_rttis_sample_classified_as_experimental(self):
-        assert _classify_file_type(_fields("RtTis-Slyc-OMTmb-inf-35dag")) == "experimental"
-
-    def test_empty_sample_name_returns_experimental(self):
-        assert _classify_file_type(_fields("")) == "experimental"
-
-    def test_both_fields_empty_returns_experimental(self):
-        assert _classify_file_type(_fields("", "")) == "experimental"
-
-    def test_unknown_sample_name_returns_experimental(self):
-        assert _classify_file_type(_fields("T1-256534-8-Tr-RE")) == "experimental"
-
-    def test_wt_p1_s_with_stem_istd_run_metadata_is_istd(self):
-        """Experimental-looking sample_name but ISTD in run_metadata → 'istd'."""
-        assert _classify_file_type(
-            _fields("WT-P1-S", "Rg70to1050-CE102040norm-Stem-ISTD")
-        ) == "istd"
-
-
-# ===========================================================================
-# _classify_file_type — real-world HILICZ SorghSwg filenames
-# ===========================================================================
-
-class TestClassifyFileTypeRealWorldFilenames:
-    """Verify the four ambiguous SorghSwg filenames from the design discussion."""
+class TestRealWorldFilenames:
+    """The four ambiguous SorghSwg filenames, classified with JGI rules."""
 
     def test_exctrl_4_with_istd_run_metadata_is_istd(self):
-        """..._36_ExCtrl_4_Rg70to1050-CE205060norm-ExCtrl-ISTD_Run114
-        ExCtrl in sample_name, ISTD in run_metadata → Phase 1 wins → 'istd'."""
-        assert _classify_file_type(
-            _fields("ExCtrl", "Rg70to1050-CE205060norm-ExCtrl-ISTD")
-        ) == "istd"
+        """..._36_ExCtrl_4_Rg70to1050-CE205060norm-ExCtrl-ISTD_Run114"""
+        assert jgi(sample_number="36", sample_name="ExCtrl",
+                   run_metadata="Rg70to1050-CE205060norm-ExCtrl-ISTD") == "istd"
 
     def test_wt_p1_s_2_with_stem_istd_is_istd(self):
-        """..._2_WT-P1-S_2_Rg70to1050-CE102040norm-Stem-ISTD_Run49
-        Experimental sample_name, ISTD in run_metadata → Phase 1 wins → 'istd'."""
-        assert _classify_file_type(
-            _fields("WT-P1-S", "Rg70to1050-CE102040norm-Stem-ISTD")
-        ) == "istd"
+        """..._2_WT-P1-S_2_Rg70to1050-CE102040norm-Stem-ISTD_Run49"""
+        assert jgi(sample_number="2", sample_name="WT-P1-S",
+                   run_metadata="Rg70to1050-CE102040norm-Stem-ISTD") == "istd"
 
     def test_exctrl_1_with_injbl_meoh_run_metadata_is_injbl(self):
-        """..._33_ExCtrl_1_Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH_Run16
-        ExCtrl in sample_name, InjBL in run_metadata → Phase 1 wins → 'injbl'."""
-        assert _classify_file_type(
-            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH")
-        ) == "injbl"
+        """..._33_ExCtrl_1_Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH_Run16"""
+        assert jgi(sample_number="33", sample_name="ExCtrl",
+                   run_metadata="Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH") == "injbl"
 
-    def test_exctrl_1_neg_ms2_with_s1_run_metadata_is_exctrl(self):
+    def test_exctrl_1_neg_ms2_with_s1_run_metadata_is_now_experimental(self):
         """..._NEG_MS2_33_ExCtrl_1_Rg70to1050-CE102040norm-ExCtrl-S1_Run15
-        ExCtrl in sample_name, no high-priority token in run_metadata → Phase 2 → 'exctrl'."""
-        assert _classify_file_type(
-            _fields("ExCtrl", "Rg70to1050-CE102040norm-ExCtrl-S1")
-        ) == "exctrl"
+        Was 'exctrl'; ExCtrl is no longer a JGI type."""
+        assert jgi(sample_number="33", sample_name="ExCtrl",
+                   run_metadata="Rg70to1050-CE102040norm-ExCtrl-S1") == "experimental"
+
+    @pytest.mark.parametrize("owner", OWNERS)
+    def test_refstd_sample_number_filename(self, owner):
+        """..._POS_MS2_RefStd-1_FA-CoA_1_Rg70to1050-CE205060norm-RxnMix-S1_Run135"""
+        f = _fields(sample_number="RefStd-1", sample_name="FA-CoA",
+                    run_metadata="Rg70to1050-CE205060norm-RxnMix-S1")
+        assert _classify_file_type(f, owner) == "experimental"
 
 
 # ===========================================================================
-# filter_lcmsruns_list
+# filter_lcmsruns_list  (function unchanged)
 # ===========================================================================
 
 class TestFilterLcmsrunsList:
@@ -369,9 +386,8 @@ class TestFilterLcmsrunsList:
     _EXP_POS = _run("experimental", polarity="pos")
     _EXP_NEG = _run("experimental", polarity="neg")
     _ISTD    = _run("istd",         polarity="fps")
-    _EXCTRL  = _run("exctrl",       polarity="fps")
 
-    _ALL = [_QC_FPS, _QC_POS, _QC_NEG, _EXP_FPS, _EXP_POS, _EXP_NEG, _ISTD, _EXCTRL]
+    _ALL = [_QC_FPS, _QC_POS, _QC_NEG, _EXP_FPS, _EXP_POS, _EXP_NEG, _ISTD]
 
     # --- RT alignment scenario: include QC, exclude NEG ---
 
@@ -405,47 +421,38 @@ class TestFilterLcmsrunsList:
     # --- exclude polarity only ---
 
     def test_exclude_neg_removes_neg_runs(self):
-        result = filter_lcmsruns_list(
-            lcmsruns=self._ALL,
-            exclude_file_type=["NEG"],
-        )
+        result = filter_lcmsruns_list(lcmsruns=self._ALL, exclude_file_type=["NEG"])
         assert all(r["polarity"] != "neg" for r in result)
 
     def test_exclude_pos_removes_pos_runs(self):
-        result = filter_lcmsruns_list(
-            lcmsruns=self._ALL,
-            exclude_file_type=["POS"],
-        )
+        result = filter_lcmsruns_list(lcmsruns=self._ALL, exclude_file_type=["POS"])
         assert all(r["polarity"] != "pos" for r in result)
 
     # --- include file_type only ---
 
     def test_include_qc_returns_only_qc_runs(self):
-        result = filter_lcmsruns_list(
-            lcmsruns=self._ALL,
-            include_file_type=["QC"],
-        )
+        result = filter_lcmsruns_list(lcmsruns=self._ALL, include_file_type=["QC"])
         assert all(r["file_type"] == "qc" for r in result)
 
     def test_include_istd_returns_only_istd_runs(self):
-        result = filter_lcmsruns_list(
-            lcmsruns=self._ALL,
-            include_file_type=["ISTD"],
-        )
+        result = filter_lcmsruns_list(lcmsruns=self._ALL, include_file_type=["ISTD"])
         assert all(r["file_type"] == "istd" for r in result)
 
-    def test_include_exctrl_returns_only_exctrl_runs(self):
-        result = filter_lcmsruns_list(
-            lcmsruns=self._ALL,
-            include_file_type=["exctrl"],
-        )
-        assert all(r["file_type"] == "exctrl" for r in result)
+    # --- new file types ---
+
+    def test_include_qc_c18qu_returns_only_qc_c18qu_runs(self):
+        runs = [_run("qc"), _run("qc-c18qu"), _run("experimental")]
+        result = filter_lcmsruns_list(lcmsruns=runs, include_file_type=["QC-C18QU"])
+        assert [r["file_type"] for r in result] == ["qc-c18qu"]
+
+    def test_include_qc_excludes_qc_c18qu_runs(self):
+        """RT alignment ('qc' only) must not pick up QC-C18QU runs."""
+        runs = [_run("qc"), _run("qc-c18qu")]
+        result = filter_lcmsruns_list(lcmsruns=runs, include_file_type=["QC"])
+        assert [r["file_type"] for r in result] == ["qc"]
 
     # --- no matching runs raises ValueError ---
 
     def test_no_matching_runs_raises_value_error(self):
         with pytest.raises(ValueError, match="No LCMS runs matched"):
-            filter_lcmsruns_list(
-                lcmsruns=self._ALL,
-                include_file_type=["refstd"],
-            )
+            filter_lcmsruns_list(lcmsruns=self._ALL, include_file_type=["InjBl"])

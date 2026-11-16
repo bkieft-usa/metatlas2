@@ -33,7 +33,10 @@ from metatlas2.analysis_summary import (
     _short_fname,
     _strip_non_chars,
     apply_auto_curation_defaults,
+    export_filenames_with_metadata,
+    make_data_sheets,
     mz_quality,
+    run_all_summaries,
     rt_quality,
     total_score_and_msi,
 )
@@ -685,83 +688,210 @@ def _make_fname(sample_number: str, sample_name: str, replicate: str,
     )
 
 
-class TestFileGroupFromFilename:
-    """Tests for _file_group_from_filename() in database_interact."""
+def test_export_filenames_with_metadata_matches_summary_headers(tmp_path, monkeypatch):
+    filenames = [
+        _make_fname("1", "Plant", "1", "Stem-ISTD", "Run1", ext="h5"),
+        _make_fname("2", "Plant", "2", "Stem-EXP", "Run2", ext="h5"),
+        _make_fname("3", "Plant", "3", "Stem-QC", "Run3", ext="h5"),
+        _make_fname("4", "Plant", "4", "Stem-InjBl", "Run4", ext="h5"),
+    ]
+    runs = [
+        SimpleNamespace(
+            filename=name, file_path=f"/raw/{name}", file_format="h5",
+            file_type=file_type, chromatography="hilic", polarity="fps", ms_level="ms1",
+        )
+        for name, file_type in zip(filenames, ["injbl", "qc", "experimental", "experimental"])
+    ]
+    monkeypatch.setattr(
+        "metatlas2.analysis_summary.dbi.get_lcmsruns_from_db",
+        lambda project_db_path: runs,
+    )
+    curation = pd.DataFrame([{
+        "mz_rt_uid": "uid", "compound_name": "compound", "inchi_key": "key",
+        "polarity": "positive", "adduct": "M+H", "atlas_mz": 100, "atlas_rt_peak": 1,
+    }])
+    metrics = pd.DataFrame([{
+        "mz_rt_uid": "uid", "filename": runs[0].file_path,
+        "file_group": _file_group_from_filename(runs[0].file_path),
+        "peak_height": 123.0,
+    }])
+    obj = SimpleNamespace(
+        paths={"project_db_path": "project.db", "analysis_results_output_dir": str(tmp_path)},
+        polarity="positive", rt_alignment_number=7, analysis_number=8,
+        ta=SimpleNamespace(
+            chromatography="hilic", polarity="positive",
+            params={"exclude_lcmsruns": {"data_extraction": ["injbl"]}},
+        ),
+        experimental_data=SimpleNamespace(curation_df=curation),
+        per_file_metrics_df=metrics,
+    )
 
-    # --- ISTD files: ISTD token in run_metadata → group = "ISTD" ---
+    export_filenames_with_metadata(obj)
+    make_data_sheets(obj, output_dir=tmp_path)
+    result = pd.read_csv(tmp_path / "POS_filenames_with_metadata.csv", keep_default_na=False)
+    assert result.columns.tolist() == [
+        "filename", "file_type", "boxplot_group", "group", "file",
+        "short_groupname", "sample_treatment", "short_filename", "short_samplename",
+    ]
+    assert result["filename"].tolist() == filenames[:3]
+    assert result["file_type"].tolist() == ["istd", "experimental", "qc"]
+    assert result["boxplot_group"].tolist() == ["Plant_ISTD", "Plant", "Plant_QC"]
+    sheet = pd.read_csv(tmp_path / "POS_data_sheets/POS_peak_height.csv", header=None)
+    assert result.loc[0, sheet.iloc[:6, 0].tolist()].tolist() == sheet.iloc[:6, 1].tolist()
+    assert "7_8_ISTD" in result.loc[0, "group"]
+
+    output = tmp_path / "POS_filenames_with_metadata.csv"
+    output.write_text("existing\n")
+    export_filenames_with_metadata(obj)
+    assert output.read_text() == "existing\n"
+    export_filenames_with_metadata(obj, overwrite=True)
+    assert len(pd.read_csv(output)) == 3
+    obj.ta.params["include_lcmsruns"] = ["istd"]
+    runs[0].file_type = "experimental"
+    runs[1].file_type = "istd"
+    export_filenames_with_metadata(obj, overwrite=True)
+    assert pd.read_csv(output)["filename"].tolist() == [filenames[0]]
+
+
+def test_export_filenames_with_metadata_rejects_empty_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "metatlas2.analysis_summary.dbi.get_lcmsruns_from_db",
+        lambda project_db_path: [],
+    )
+    obj = SimpleNamespace(
+        paths={"project_db_path": "project.db"}, polarity="negative",
+        rt_alignment_number=None, analysis_number=None,
+        ta=SimpleNamespace(
+            chromatography="hilic", polarity="negative",
+            params={"exclude_lcmsruns": {"data_extraction": []}},
+        ),
+    )
+    with pytest.raises(ValueError, match="No LCMS runs matched"):
+        export_filenames_with_metadata(obj, output_dir=tmp_path)
+    assert not (tmp_path / "NEG_filenames_with_metadata.csv").exists()
+
+
+def test_run_all_summaries_passes_overwrite_to_filename_export(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "metatlas2.analysis_summary.export_filenames_with_metadata",
+        lambda obj, output_dir, overwrite: calls.append((output_dir, overwrite)),
+    )
+    monkeypatch.setattr("metatlas2.analysis_summary._validate_required_note_selections", lambda obj: None)
+    skip_outputs = [
+        "final_id_sheet", "id_figures", "eic_thumbnails", "tic_thumbnails",
+        "compound_metric_plots", "boxplots", "data_sheets", "best_ms2_hits_csv",
+        "peak_height_filtered_csv", "log_fold_changes_csv", "metabomap",
+        "analysis_parquet", "targeted_analysis_readme",
+    ]
+    obj = SimpleNamespace(
+        paths={"analysis_results_output_dir": str(tmp_path)},
+        experimental_data=SimpleNamespace(curation_df=pd.DataFrame([{"id": 1}])),
+        override_parameters={"skip_outputs": skip_outputs},
+        ta=SimpleNamespace(params={}),
+    )
+    run_all_summaries(obj, overwrite=True)
+    assert calls == [(tmp_path, True)]
+
+
+class TestFileGroupFromFilenameJGI:
+    """_file_group_from_filename() with owner="jgi" (keywords read from run_metadata)."""
+
+    OWNER = "jgi"
+
+    def _group(self, fname):
+        return _file_group_from_filename(fname)
+
+    # --- ISTD: ISTD token in run_metadata → "ISTD" ---
 
     def test_istd_run_metadata_experimental_sample_name_returns_ISTD(self):
-        """WT-P1-S sample with ISTD in run_metadata → 'ISTD'."""
         fname = _make_fname("1", "WT-P1-S", "1",
                             "Rg70to1050-CE102040norm-Stem-ISTD", "Run40")
-        assert _file_group_from_filename(fname) == "ISTD"
+        assert self._group(fname) == "ISTD"
 
     def test_istd_run_metadata_exctrl_sample_name_returns_ISTD(self):
-        """ExCtrl sample_name but ISTD in run_metadata → Phase 1 wins → 'ISTD'."""
+        """ExCtrl sample_name is irrelevant for JGI; ISTD in run_metadata → 'ISTD'."""
         fname = _make_fname("36", "ExCtrl", "4",
                             "Rg70to1050-CE205060norm-ExCtrl-ISTD", "Run114")
-        assert _file_group_from_filename(fname) == "ISTD"
+        assert self._group(fname) == "ISTD"
 
     def test_istd_run_metadata_leaf_sample_returns_ISTD(self):
         fname = _make_fname("18", "WT-P1-L", "2",
                             "Rg70to1050-CE102040norm-Leaf-ISTD", "Run68")
-        assert _file_group_from_filename(fname) == "ISTD"
+        assert self._group(fname) == "ISTD"
 
-    # --- InjBl files: InjBL token in run_metadata → group = "INJBL" ---
+    # --- InjBl: InjBl token in run_metadata → "INJBL" ---
 
     def test_injbl_run_metadata_exctrl_sample_name_returns_INJBL(self):
-        """ExCtrl sample_name but InjBL in run_metadata → Phase 1 wins → 'INJBL'."""
         fname = _make_fname("33", "ExCtrl", "1",
                             "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH", "Run16")
-        assert _file_group_from_filename(fname) == "INJBL"
+        assert self._group(fname) == "INJBL"
 
     def test_injbl_run_metadata_second_replicate_returns_INJBL(self):
         fname = _make_fname("34", "ExCtrl", "2",
                             "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH", "Run52")
-        assert _file_group_from_filename(fname) == "INJBL"
+        assert self._group(fname) == "INJBL"
 
-    # --- ExCtrl files: ExCtrl in sample_name, no high-priority run_metadata → "EXCTRL" ---
-
-    def test_exctrl_sample_name_s1_run_metadata_returns_EXCTRL(self):
-        """ExCtrl in sample_name, run_metadata has no ISTD/InjBL → 'EXCTRL'."""
-        fname = _make_fname("33", "ExCtrl", "1",
-                            "Rg70to1050-CE102040norm-ExCtrl-S1", "Run14")
-        assert _file_group_from_filename(fname) == "EXCTRL"
-
-    # --- Experimental files: no control token → group = sample_name ---
+    # --- Experimental: no keyword → group = sample_name ---
 
     def test_experimental_wt_p1_s_returns_sample_name(self):
-        """Experimental file: no control token → sample_name 'WT-P1-S'."""
         fname = _make_fname("3", "WT-P1-S", "3",
                             "Rg70to1050-CE102040norm-Stem-EXP", "Run77")
-        assert _file_group_from_filename(fname) == "WT-P1-S"
+        assert self._group(fname) == "WT-P1-S"
 
     def test_experimental_1120_sample_returns_sample_name(self):
         fname = _make_fname("11", "1120-005a-P3-S", "3",
                             "Rg70to1050-CE102040norm-Stem-EXP", "Run95")
-        assert _file_group_from_filename(fname) == "1120-005a-P3-S"
+        assert self._group(fname) == "1120-005a-P3-S"
 
-    # --- h5 extension ---
+    # --- Extension / path handling ---
 
     def test_h5_extension_parsed_correctly(self):
         fname = _make_fname("1", "WT-P1-S", "1",
-                            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40",
-                            ext="h5")
-        assert _file_group_from_filename(fname) == "ISTD"
-
-    # --- Full path (directory prefix) ---
+                            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40", ext="h5")
+        assert self._group(fname) == "ISTD"
 
     def test_full_path_prefix_stripped(self):
         fname = "/some/long/path/" + _make_fname(
-            "1", "WT-P1-S", "1",
-            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40"
+            "1", "WT-P1-S", "1", "Rg70to1050-CE102040norm-Stem-ISTD", "Run40"
         )
-        assert _file_group_from_filename(fname) == "ISTD"
+        assert self._group(fname) == "ISTD"
 
     # --- Unparseable filename → empty string ---
 
     def test_unparseable_filename_returns_empty_string(self):
-        assert _file_group_from_filename("not_a_valid_filename.h5") == ""
+        assert self._group("not_a_valid_filename.h5") == ""
 
     def test_empty_string_returns_empty_string(self):
-        assert _file_group_from_filename("") == ""
+        assert self._group("") == ""
+
+
+class TestFileGroupFromFilenameEGSB:
+    """_file_group_from_filename() with owner="egsb" (keywords read from sample_name)."""
+
+    OWNER = "egsb"
+
+    def _group(self, fname):
+        return _file_group_from_filename(fname)
+
+    def test_istd_in_sample_name_returns_ISTD(self):
+        fname = _make_fname("1", "ISTD", "1", "Rg70to1050-CE102040norm-S1", "Run40")
+        assert self._group(fname) == "ISTD"
+
+    def test_injbl_in_sample_name_returns_INJBL(self):
+        fname = _make_fname("2", "InjBl", "1", "Rg70to1050-CE102040norm-S1", "Run41")
+        assert self._group(fname) == "InjBl"
+
+    def test_run_metadata_keywords_ignored(self):
+        """ISTD / InjBl only in run_metadata → experimental → group = sample_name."""
+        fname = _make_fname("1", "WT-P1-S", "1",
+                            "Rg70to1050-CE102040norm-Stem-ISTD", "Run40")
+        assert self._group(fname) == "ISTD"
+
+    def test_experimental_returns_sample_name(self):
+        fname = _make_fname("3", "WT-P1-S", "3",
+                            "Rg70to1050-CE102040norm-Stem-EXP", "Run77")
+        assert self._group(fname) == "WT-P1-S"
+
+    def test_unparseable_filename_returns_empty_string(self):
+        assert self._group("not_a_valid_filename.h5") == ""

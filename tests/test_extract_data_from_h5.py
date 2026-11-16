@@ -16,7 +16,6 @@ Tested functions
 * :func:`_sort_ms1_lists_by_rts`
 * :func:`_filter_ms1_points`
 * :func:`_filter_ms2_points`
-* :func:`_merge_wide_ms1` / :func:`_merge_wide_ms2`
 * :func:`_join_metadata`
 * :func:`_load_h5_table`  (round-trip through the synthetic HDF5 file)
 * :func:`_process_one_file` (integration of load + join for one file)
@@ -39,8 +38,6 @@ from metatlas2.extract_data_from_h5 import (
     _join_ms1_to_atlas,
     _join_ms2_to_atlas,
     _load_h5_table,
-    _merge_wide_ms1,
-    _merge_wide_ms2,
     _process_one_file,
     _sort_frags,
     _sort_ms1_lists_by_rts,
@@ -507,34 +504,6 @@ class TestFilterMs2Points:
     def test_empty_df_returns_empty(self):
         out = _filter_ms2_points(pd.DataFrame(), pd.DataFrame(), min_scans=1, min_int=None)
         assert out.empty
-
-
-# ===========================================================================
-# _merge_wide_ms1 / _merge_wide_ms2
-# ===========================================================================
-
-class TestMergeWide:
-
-    def test_merge_ms1_empty_accumulator(self, ms1_wide_df):
-        result = _merge_wide_ms1(pd.DataFrame(), ms1_wide_df)
-        assert len(result) == len(ms1_wide_df)
-
-    def test_merge_ms1_accumulates_rows(self, ms1_wide_df):
-        chunk2 = ms1_wide_df.copy()
-        chunk2["filename"] = "second_file.h5"
-        acc = _merge_wide_ms1(ms1_wide_df, chunk2)
-        assert len(acc) == 2
-
-    def test_merge_ms2_empty_accumulator(self, ms2_wide_df):
-        result = _merge_wide_ms2(pd.DataFrame(), ms2_wide_df)
-        assert len(result) == len(ms2_wide_df)
-
-    def test_merge_ms2_accumulates_rows(self, ms2_wide_df):
-        chunk2 = ms2_wide_df.copy()
-        chunk2["filename"] = "second_file.h5"
-        acc = _merge_wide_ms2(ms2_wide_df, chunk2)
-        assert len(acc) == 2
-
 
 # ===========================================================================
 # _join_metadata
