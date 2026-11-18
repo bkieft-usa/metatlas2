@@ -44,7 +44,10 @@ GUI:
 
 RT_ALIGNMENT:
   HILIC:
-    qc_atlas_uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261009-7ad681da53cb4e2fb730e01b9f7fd5af
+    ATLAS:
+      #tags: [QCv7]
+      uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261117-4491b0de7696488daa13ee195f665ece
+      polarity: POS
     model_type: polynomial
     poly_degree: 2
     rt_peak_source: median
@@ -54,7 +57,10 @@ RT_ALIGNMENT:
     mz_tolerance_ppm: 2.0
     rt_window_padding: 2
   C18:
-    qc_atlas_uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261023-b842dc218a47495a9cbf475296093940
+    ATLAS:
+      #tags: [QCv7]
+      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261117-4acaece55cf048e098c0a899266ffa7f
+      polarity: POS
     model_type: polynomial
     poly_degree: 2
     rt_peak_source: median

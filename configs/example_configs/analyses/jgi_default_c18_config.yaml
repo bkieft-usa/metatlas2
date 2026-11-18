@@ -22,7 +22,9 @@ GUI:
 RT_ALIGNMENT:
   C18:
     ATLAS:
-      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261023-b842dc218a47495a9cbf475296093940
+      tags: [QCv7]
+      uid:
+      polarity: POS
     PARAMS:
         upload_to_gdrive: true
         include_lcmsruns: # 'QC'
@@ -49,7 +51,8 @@ TARGETED_ANALYSES:
       ISTD:
         ISTDsEtc:
           ATLAS:
-            uid: atlas-ipt-c18-pos-istd-istdsetc-bkieft-20261023-0832f7af80da4325bb724d6020551d0b
+            tags: [ISTDsEtc]
+            uid:
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
@@ -85,7 +88,8 @@ TARGETED_ANALYSES:
       REF:
         EMA:
           ATLAS:
-            uid: atlas-ipt-c18-pos-ref-ema-bkieft-20261009-8849a3756e0e4d5cb8c3c33a43f8fbcc
+            tags: [EMA]
+            uid:
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
@@ -123,7 +127,8 @@ TARGETED_ANALYSES:
       ISTD:
         ISTDsEtc:
           ATLAS:
-            uid: atlas-ipt-c18-neg-istd-istdsetc-bkieft-20261023-dd28405ef5d54443afaaa4393c8190bb
+            tags: [ISTDsEtc]
+            uid:
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
@@ -159,7 +164,8 @@ TARGETED_ANALYSES:
       REF:
         EMA:
           ATLAS:
-            uid: atlas-ipt-c18-neg-ref-ema-bkieft-20261009-6bad24582d5045238c6d0f304e79a3ac
+            tags: [EMA]
+            uid:
           PARAMS:
             include_lcmsruns: # 'EXPERIMENTAL', 'ISTD', 'EXCTRL', 'REFSTD', 'INJBL'
             exclude_lcmsruns:
