@@ -26,23 +26,25 @@ _POLARITY_TO_MATCHMS: dict[str, str] = {
 }
 
 DEFAULT_EXCLUDE_LCMSRUNS = {
-    'gui': ['INJBL', 'BLANK'],
-    'id_sheet': ['INJBL', 'BLANK', 'REFSTD'],
-    'chromatograms': ['INJBL', 'BLANK'],
-    'id_plots': ['INJBL', 'BLANK', 'REFSTD'],
-    'data_sheets': ['INJBL', 'BLANK'],
+    'gui': ['injbl'],
+    'id_sheet': ['injbl', 'refstd'],
+    'chromatograms': ['injbl'],
+    'id_plots': ['injbl', 'refstd'],
+    'data_sheets': ['injbl'],
 }
 
 DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = [
-    'EXPERIMENTAL',
-    'ISTD',
-    'ISTDsEtc',
-    'EXCTRL',
-    'REFSTD',
-    'INJBLK'
+    'experimental',
+    'istd',
+    'exctrl',
+    'txctrl',
+    'refstd',
+    'injblk',
+    'qc',
+    'qc-c18qu'
     ]
 
-DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['QC']
+DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['qc']
 
 def load_msms_refs_file(
     file_path: str,
@@ -437,8 +439,39 @@ def _validate_targeted_analysis_params(params: dict[str, Any], location: str) ->
     params['skip_outputs'] = params.get('skip_outputs', None)
     return params
 
-def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2Config":
+def _parse_analysis_subset(
+    analysis_subset: list[str] | None,
+) -> set[tuple[str, str, str, str]] | None:
+    """Parse CHROM-POL-CATEGORY-NAME subset entries into normalized match keys."""
+    if not analysis_subset:
+        return None
+    keys: set[tuple[str, str, str, str]] = set()
+    for entry in analysis_subset:
+        parts = entry.strip().split('-', 3)
+        if len(parts) != 4:
+            raise ValueError(
+                f"Invalid analysis_subset entry '{entry}'. "
+                "Must be in 'CHROM-POL-CATEGORY-NAME' format (e.g. 'HILIC-POS-REF-EMA')."
+            )
+        chrom, pol, cat, name = parts
+        keys.add((
+            fpf.normalize_chromatography(chrom),
+            fpf.normalize_polarity(pol),
+            cat.lower(),
+            name.lower(),
+        ))
+    return keys
+
+
+def _build_metatlas2_config(
+    raw: dict[str, Any],
+    source_name: str,
+    analysis_subset: list[str] | None = None,
+) -> "Metatlas2Config":
     from metatlas2.workflow_objects import Metatlas2Config, TargetedAnalysis
+
+    subset_keys = _parse_analysis_subset(analysis_subset)
+    subset_chroms = {k[0] for k in subset_keys} if subset_keys else None
 
     for subsection in ("RT_ALIGNMENT", "TARGETED_ANALYSES"):
         if subsection not in raw:
@@ -449,13 +482,22 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
     rt_alignment_config: dict[str, Any] = {}
     for chrom_key, chrom_cfg in raw['RT_ALIGNMENT'].items():
         chromatography = fpf.canonical_chromatography(chrom_key)
+        if subset_chroms is not None and fpf.normalize_chromatography(chromatography) not in subset_chroms:
+            logger.info(f"Skipping RT_ALIGNMENT {chromatography}: not in analysis subset")
+            continue
         location = f"RT_ALIGNMENT {chromatography}"
         if 'ATLAS' not in chrom_cfg:
             raise ValueError(f"{location} missing ATLAS section")
-        if 'uid' not in chrom_cfg['ATLAS']:
-            raise ValueError(f"{location} missing ATLAS uid field")
-        uid = chrom_cfg['ATLAS']['uid']
-        chrom_cfg['ATLAS']['uid'] = str(uid) if uid else None
+        tags, atlas_uid = normalize_atlas_selector(
+            chrom_cfg['ATLAS'], f"{location} ATLAS"
+        )
+        if 'polarity' not in chrom_cfg['ATLAS']:
+            raise ValueError(f"{location} missing ATLAS polarity field")
+        chrom_cfg['ATLAS']['tags'] = tags
+        chrom_cfg['ATLAS']['uid'] = atlas_uid
+        chrom_cfg['ATLAS']['polarity'] = fpf.canonical_polarity(
+            str(chrom_cfg['ATLAS']['polarity'])
+        )
         chrom_cfg['PARAMS'] = _validate_rt_alignment_params(
             dict(chrom_cfg.get('PARAMS') or {}), location
         )
@@ -484,14 +526,21 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
                 for name_key, entry in named_entries.items():
                     atlas_name = str(name_key)
                     location = f"TARGETED_ANALYSES {chromatography}/{polarity}/{cat_upper}/{atlas_name}"
+                    if subset_keys is not None and (
+                        fpf.normalize_chromatography(chromatography),
+                        fpf.normalize_polarity(polarity),
+                        cat_upper.lower(),
+                        atlas_name.lower(),
+                    ) not in subset_keys:
+                        logger.info(f"Skipping {location}: not in analysis subset")
+                        continue
                     if not isinstance(entry, dict):
                         raise ValueError(f"{location} must be a dict with ATLAS and PARAMS keys")
                     if 'ATLAS' not in entry:
                         raise ValueError(f"{location} missing ATLAS section")
-                    if 'uid' not in entry['ATLAS']:
-                        raise ValueError(f"{location} missing ATLAS uid field")
-                    atlas_uid = entry['ATLAS']['uid']
-                    atlas_uid = str(atlas_uid) if atlas_uid else None
+                    tags, atlas_uid = normalize_atlas_selector(
+                        entry['ATLAS'], f"{location} ATLAS"
+                    )
                     params = _validate_targeted_analysis_params(
                         dict(entry.get('PARAMS') or {}), location
                     )
@@ -501,6 +550,7 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
                         atlas_category=atlas_category,
                         atlas_name=atlas_name,
                         atlas_uid=atlas_uid,
+                        tags=tags,
                         params=params,
                         chromatography_label=chromatography,
                         polarity_label=polarity,
@@ -519,10 +569,61 @@ def _build_metatlas2_config(raw: dict[str, Any], source_name: str) -> "Metatlas2
         gui_config=gui_config,
     )
 
-def load_metatlas2_config(config_path: str) -> "Metatlas2Config":
+
+def normalize_atlas_selector(
+    atlas_config: Any,
+    location: str = "ATLAS",
+) -> tuple[list[str], str | None]:
+    """Validate mutually exclusive ``tags`` and ``uid`` atlas selectors."""
+    if not isinstance(atlas_config, dict):
+        raise ValueError(f"{location} must be a mapping with 'tags' or 'uid'")
+    has_tags = "tags" in atlas_config and atlas_config["tags"] is not None
+    has_uid = "uid" in atlas_config and atlas_config["uid"] is not None
+    if has_tags and has_uid: # only allow input of one way to get an atlas
+        raise ValueError(
+            f"{location} has both 'tags' and 'uid'; provide only one of 'tags' or 'uid', not both"
+        )
+    if not has_tags and not has_uid:
+        raise ValueError(f"{location} must specify exactly one of 'tags' or 'uid'")
+
+    if has_tags:
+        return normalize_atlas_tags(atlas_config["tags"], f"{location}.tags"), None
+
+    uid = atlas_config["uid"]
+    if not isinstance(uid, str) or not uid.strip():
+        raise ValueError(f"{location}.uid must be a non-empty string")
+    return [], uid.strip()
+
+
+def normalize_atlas_tags(value: Any, location: str = "ATLAS.tags") -> list[str]:
+    """Validate a tag selector and return unique, trimmed tags in input order."""
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError(f"{location} must be a tag string or a list of tag strings")
+
+    tags: list[str] = []
+    for tag in values:
+        if not isinstance(tag, str) or not tag.strip():
+            raise ValueError(f"{location} must contain only non-empty tag strings")
+        normalized = tag.strip()
+        if normalized not in tags:
+            tags.append(normalized)
+    if not tags:
+        raise ValueError(f"{location} must contain at least one tag")
+    return tags
+
+
+def load_metatlas2_config(
+    config_path: str,
+    analysis_subset: list[str] | None = None,
+) -> "Metatlas2Config":
+    """Load a config; if ``analysis_subset`` is given, sections outside it are skipped unvalidated."""
     with open(config_path, 'r') as f:
         raw = yaml.safe_load(f)
-    return _build_metatlas2_config(raw, config_path)
+    return _build_metatlas2_config(raw, config_path, analysis_subset)
 
 def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
     """
@@ -546,11 +647,9 @@ def load_compound_input(file_path: str) -> pd.DataFrame:
     else:
         df = pd.read_csv(file_path)
 
-    if 'compound_name' in df.columns and 'label' in df.columns:
-        df.rename(columns={'compound_name': 'compound_name_input', 'label': 'compound_name'}, inplace=True)
-    elif 'compound_name' not in df.columns and 'label' in df.columns:
-        df = df.rename(columns={'label': 'compound_name'})
-    required_columns = ['inchi_key', 'compound_name']
+    if 'label' not in df.columns and 'compound_name' in df.columns:
+        df['label'] = df['compound_name']
+    required_columns = ['inchi_key', 'label']
     check_missing_columns(df, required_columns)
     
     logger.info(f"Loaded {len(df)} compounds from {file_path}")
@@ -611,7 +710,7 @@ def load_atlas_input(
        placed first, regardless of its ``rt_peak``.
     2. For **ISTD** and **QC** atlases only: when two or more rows share the
        same InChI-key prefix (first 14 characters) *and* the same ``rt_peak``,
-       rows whose ``compound_name`` contains an isotope-label string (currently
+       rows whose ``label`` contains an isotope-label string (currently
        ``"13C"`` or ``"15N"``) are placed before unlabeled rows.
     3. All remaining rows are sorted ascending by ``rt_peak``.
 
@@ -631,12 +730,9 @@ def load_atlas_input(
     else:
         df = pd.read_csv(file_path)
 
-    # Check for required columns for atlas creation (need to use label if it's present)
-    if 'compound_name' in df.columns and 'label' in df.columns:
-        df.rename(columns={'compound_name': 'compound_name_input', 'label': 'compound_name'}, inplace=True)
-    elif 'compound_name' not in df.columns and 'label' in df.columns:
-        df = df.rename(columns={'label': 'compound_name'})
-    required_columns = ['inchi_key', 'compound_name', 'rt_peak', 'mz', 'adduct']
+    if 'label' not in df.columns and 'compound_name' in df.columns:
+        df['label'] = df['compound_name']
+    required_columns = ['inchi_key', 'label', 'rt_peak', 'mz', 'adduct']
     check_missing_columns(df, required_columns)
 
     # Add default values for optional columns
@@ -648,6 +744,17 @@ def load_atlas_input(
         df['mz_tolerance'] = 5.0
 
 
+    df = sort_atlas_input_dataframe(df, atlas_category)
+    logger.info("Loaded %s atlas entries from %s", len(df), file_path)
+    return df
+
+
+def sort_atlas_input_dataframe(
+    df: pd.DataFrame,
+    atlas_category: "str | None" = None,
+) -> pd.DataFrame:
+    """Apply the standard atlas input ordering to an already-loaded frame."""
+    df = df.copy()
     _ISOTOPE_LABEL_STRINGS: list[str] = ["13C", "15N"]
     _FIRST_INCHI_KEY = "LCMZECCEEOQWLQ-UHFFFAOYSA-N"
     df['_sort_priority'] = (df['inchi_key'] != _FIRST_INCHI_KEY).astype(int)
@@ -660,7 +767,7 @@ def load_atlas_input(
         def _is_labeled(name: str) -> bool:
             return any(lbl in str(name) for lbl in _ISOTOPE_LABEL_STRINGS)
 
-        df['_is_labeled'] = df['compound_name'].apply(_is_labeled)
+        df['_is_labeled'] = df['label'].apply(_is_labeled)
 
         group_cols = ['_ik_prefix', 'rt_peak']
         grp = df.groupby(group_cols)['_is_labeled']
@@ -685,8 +792,6 @@ def load_atlas_input(
               .drop(columns=['_sort_priority'])
               .reset_index(drop=True)
         )
-
-    logger.info(f"Loaded {len(df)} atlas entries from {file_path}")
 
     return df
 

@@ -36,18 +36,36 @@ EXTRACTION:
     min_prominence_fraction: 0.10    # peak must stand out >= 10% of max intensity
     min_distance: 5                  # minimum scan-point separation between peaks
     min_width: 0                     # minimum peak width in scan points (0 = no minimum)
+    prominence_snr: 5.0              # signal-to-noise ratio for peak prominence
 
 GUI:
   gui_width: 35
   gui_height: 20
 
 RT_ALIGNMENT:
-  qc_atlas_uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261009-7ad681da53cb4e2fb730e01b9f7fd5af
-  model_type: polynomial
-  poly_degree: 2
-  rt_peak_source: median
-  min_compounds_for_modeling: 3
-  min_observations_per_compound: 1
-  exclude_inchikeys: []
-  mz_tolerance_ppm: 2.0
-  rt_window_padding: 2
+  HILIC:
+    ATLAS:
+      #tags: [QCv7]
+      uid: atlas-ipt-hilicz-pos-qc-qcv7-bkieft-20261117-4491b0de7696488daa13ee195f665ece
+      polarity: POS
+    model_type: polynomial
+    poly_degree: 2
+    rt_peak_source: median
+    min_compounds_for_modeling: 3
+    min_observations_per_compound: 1
+    exclude_inchikeys: []
+    mz_tolerance_ppm: 2.0
+    rt_window_padding: 2
+  C18:
+    ATLAS:
+      #tags: [QCv7]
+      uid: atlas-ipt-c18-pos-qc-qcv7-bkieft-20261117-4acaece55cf048e098c0a899266ffa7f
+      polarity: POS
+    model_type: polynomial
+    poly_degree: 2
+    rt_peak_source: median
+    min_compounds_for_modeling: 2
+    min_observations_per_compound: 1
+    exclude_inchikeys: []
+    mz_tolerance_ppm: 2.0
+    rt_window_padding: 1.5

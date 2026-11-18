@@ -197,6 +197,17 @@ All summary files are written to the analysis results output directory: `TGA<M>/
 
 All files are written to the analysis results output directory (`TGA<N>/<CHROM>-<POL>-<ATLAS_NAME>/`) unless noted otherwise.
 
+### Filename metadata
+
+`<POL>_filenames_with_metadata.csv` lists the H5 runs matching the extraction
+filters using the current filename classification, including runs without
+detected MS1 signal. It records each filename, its reclassified `file_type`, its
+`boxplot_group`, and the six data-sheet header labels. If classification rules
+have changed, the listed runs can differ from those originally extracted. A
+group can be listed even if it is omitted from boxplots (for example, QC groups)
+or has no measured data. Existing files are preserved unless the summary is run
+with overwrite enabled.
+
 ### Identification figures
 
 **One PDF per compound**, named by compound, adduct, and index.
@@ -269,7 +280,7 @@ Each box represents one compound; points are coloured by run type (ISTD, QC, EXC
 | Column | Description |
 |---|---|
 | `compound_index` | 1-based integer matching the compound's position in the curation table |
-| `compound_name` | Compound name |
+| `label` | Canonical compound name |
 | `adduct` | Ion adduct |
 | `file_name` | Basename of the file containing the best-scoring MS2 hit |
 | `rt_peak` | Retention time of the best-scoring MS2 scan (min) |

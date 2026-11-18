@@ -2,6 +2,12 @@
 
 `add_atlases_to_db.py` reads atlas tables from TSV/CSV files (described in a YAML config), validates them, and writes them as reference atlases to the central metatlas DuckDB database. These reference atlases are the starting point for RT alignment and targeted analysis workflows.
 
+This command remains available for other database consumers and workflows. The
+tag-based `analysis.yaml` workflow selects input compounds from the shared
+master atlas Google Sheet and creates its own main-database atlas snapshot
+during project setup; it no longer accepts these atlas UIDs directly. Add or
+update sheet rows and their tags to make entries available to that workflow.
+
 ---
 
 ## Prerequisites
@@ -109,7 +115,7 @@ ATLASES:
         desc:
 ```
 
-> **Tip:** The `uid` values assigned to atlases after creation are printed in the log output. Copy these UIDs into your analysis config file (e.g., `analysis.yaml`) to reference the new atlases in targeted workflows.
+> **Tip:** The `uid` values assigned to atlases after creation are printed in the log output and can be used by database consumers that accept atlas UIDs. The tagged `analysis.yaml` workflow instead resolves tagged rows from the shared master atlas sheet at project setup.
 
 ---
 
@@ -122,10 +128,13 @@ Each file must be a **tab-separated (TSV)** or **comma-separated (CSV)** table. 
 | Column | Description |
 |---|---|
 | `inchi_key` | Standard InChIKey identifier (e.g. `BPGDAMSIGCZZLK-UHFFFAOYSA-N`). |
-| `compound_name` | Human-readable compound name. |
+| `label` | Canonical compound name used for display. |
 | `rt_peak` | Expected retention time at peak apex (minutes). |
 | `mz` | Expected precursor m/z value. |
 | `adduct` | Ion adduct (e.g. `[M+H]+`, `[M-H]-`, `[M+NH4]+`). |
+
+The optional `compound_name` column stores vendor-provided naming and does not
+replace `label`. Legacy files with only `compound_name` use it as the label.
 
 ### Optional columns
 
@@ -172,7 +181,10 @@ After running the script, atlas UIDs are printed in log output like:
 Created new atlas: Default HILICZ QC Atlas Positive (UID: atl-ref-qc-hilicz-pos-cdf8c6709c6e4953b75917e72e851130) - 42 compounds
 ```
 
-Copy these UIDs into your analysis YAML configuration file under the corresponding `ATLAS: uid:` fields before running the targeted analysis workflow.
+These UIDs are available to tools and workflows that consume atlas UIDs
+directly. The regular tagged `analysis.yaml` workflow does not use them; it
+creates/reuses its input atlas records from master-sheet tags during project
+setup.
 
 ---
 

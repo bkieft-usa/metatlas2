@@ -552,22 +552,29 @@ PY
 fi
 
 echo ""
-echo "Creating configuration files..."
+echo "Creating compound input and configuration files..."
 
-# Create compounds configuration
-cat > configs/compounds_config.yaml << 'EOF'
-PARAMS:
-  use_pubchem_cache: true
-  update_pubchem_cache: false
+# Combine compounds from all atlas inputs for the single-file add-compounds command.
+python - <<'PY'
+from pathlib import Path
 
-COMPOUNDS:
-    HILICZ:
-      POS:
-        PATHS:
-          - atlases/qc_compounds_pos.tsv
-          - atlases/ema_compounds_pos.tsv
-          - atlases/ema_compounds_neg.tsv
-EOF
+import pandas as pd
+
+input_paths = [
+    Path("atlases/qc_compounds_pos.tsv"),
+    Path("atlases/ema_compounds_pos.tsv"),
+    Path("atlases/ema_compounds_neg.tsv"),
+]
+missing = [str(path) for path in input_paths if not path.exists()]
+if missing:
+    raise FileNotFoundError(f"Missing compound input tables: {missing}")
+
+compounds = pd.concat(
+    [pd.read_csv(path, sep="\t") for path in input_paths],
+    ignore_index=True,
+).drop_duplicates(subset="inchi_key", keep="first")
+compounds.to_csv("compounds.csv", index=False)
+PY
 
 # Create atlases configuration
 cat > configs/atlases_config.yaml << 'EOF'
@@ -704,7 +711,7 @@ TARGETED_ANALYSES:
             skip_outputs:
 EOF
 
-echo "   Created configs/compounds_config.yaml"
+echo "   Created compounds.csv"
 echo "   Created configs/atlases_config.yaml"
 echo "   Created configs/analysis_config.yaml"
 

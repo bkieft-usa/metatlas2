@@ -52,7 +52,7 @@ def create_manual_curation_obj(auto_id_obj) -> None:
             'compound_uid': atlas_row.get('compound_uid', ''),
             'inchi_key': atlas_row.get('inchi_key', ''),
             'adduct': atlas_row.get('adduct', ''),
-            'compound_name': atlas_row.get('compound_name', ''),
+            'label': atlas_row.get('label', ''),
             'passed_autoid': False,
             'passed_curation': False,
             'polarity': atlas_row.get('polarity', ''),
@@ -194,11 +194,7 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
         return {}
 
     if stage == "manual_curation_creator":
-        # Build the union RT grid once (cheap: concatenate raw RT arrays and unique-sort).
         all_rts = np.unique(np.concatenate(raw_rt_arrays))
-
-        # Compute max and mean EIC traces with online accumulators so we never
-        # hold more than one interpolated array in memory at a time.
         max_eic_intensity = np.zeros(len(all_rts), dtype=np.float64)
         eic_sum = np.zeros(len(all_rts), dtype=np.float64)
         n_files_eic = len(raw_rt_arrays)
@@ -206,7 +202,6 @@ def analyze_ms1(atlas_row, compound_ms1_df, stage="manual_curation_creator", app
             interp = np.interp(all_rts, r, i, left=0.0, right=0.0)
             np.maximum(max_eic_intensity, interp, out=max_eic_intensity)
             eic_sum += interp
-            # `interp` goes out of scope here and is eligible for GC immediately
         avg_eic_intensity = eic_sum / max(n_files_eic, 1)
         del raw_rt_arrays, raw_int_arrays, eic_sum  # release before continuing
 
@@ -298,12 +293,12 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
         atlas_obj: An ``Atlas`` instance that exposes a ``to_dataframe()`` method
             returning a :class:`pandas.DataFrame` with columns ``mz_rt_uid``,
             ``mz``, ``mono_isotopic_molecular_weight``, ``inchi_key``,
-            ``adduct``, ``compound_name``, and ``rt_peak``.
+            ``adduct``, ``label``, and ``rt_peak``.
 
     Returns:
         A ``dict`` mapping each ``mz_rt_uid`` to a (possibly empty) list of
         isomer records, each containing keys ``mz_rt_uid``, ``inchi_key``,
-        ``adduct``, ``compound_name``, ``rt``, and ``mz``.
+        ``adduct``, ``label``, ``rt``, and ``mz``.
     """
     atlas_df = atlas_obj.to_dataframe().reset_index(drop=True)
     n = len(atlas_df)
@@ -327,7 +322,7 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
             isomer_dict[uids[i]] = [
                 {
                     "mz_rt_uid": row.mz_rt_uid, "inchi_key": row.inchi_key,
-                    "adduct": row.adduct, "compound_name": row.compound_name,
+                    "adduct": row.adduct, "label": row.label,
                     "rt": row.rt_peak, "mz": row.mz,
                 } for row in matches.itertuples()
             ]

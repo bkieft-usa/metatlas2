@@ -18,7 +18,7 @@ from metatlas2.utils import jsonable_list
 logger = lcf.get_logger('analysis_summary')
 
 _COMPOUND_FILE_STR_COLS = [
-    "mz_rt_uid", "compound_name", "identified_metabolite", "label", "inchi_key", "formula", "smiles",
+    "mz_rt_uid", "identified_metabolite", "label", "inchi_key", "formula", "smiles",
     "inchi", "pubchem_cid", "iupac_name", "adduct", "best_ms1_file",
     "filename", "file_group", "ms1_notes", "ms2_notes",
     "msi_level", "control_filter", "overlapping_compound", "overlapping_inchi_keys",
@@ -44,7 +44,7 @@ _COMPOUND_FILE_FLOAT_COLS = [
 ]
 
 _COMPOUND_LFC_STR_COLS = [
-    "mz_rt_uid", "inchi_key", "compound_name", "control_filter",
+    "mz_rt_uid", "inchi_key", "label", "control_filter",
     "condition_1", "condition_2", "adduct", "formula", "smiles", "inchi",
     "pubchem_cid", "iupac_name", "ms1_notes", "ms2_notes", "msi_level",
     "identification_notes", "analyst_notes", "other_notes",
@@ -359,9 +359,8 @@ def _build_compound_per_file_table(
         quality_rows.append({
             "compound_index": int(cmp_idx) + 1,
             "mz_rt_uid":    mz_rt_uid,
-            "compound_name": str(mc_row.get("compound_name", "")),
-            "identified_metabolite": str(mc_row.get("compound_name", "")),
-            "label": str(mc_row.get("compound_name", "")),
+            "label": str(mc_row.get("label", "")),
+            "identified_metabolite": str(mc_row.get("label", "")),
             "inchi_key":    str(mc_row.get("inchi_key", "")),
             "formula":      str(mc_row.get("formula", "")),
             "smiles":       str(mc_row.get("smiles", "")),
@@ -419,7 +418,7 @@ def _build_compound_per_file_table(
     quality_df["_compound_id"] = quality_df.apply(
         lambda r: asm._make_compound_safe_stem(
             int(r["compound_index"]),
-            r["compound_name"],
+            r["label"],
             r["polarity"],
             r["adduct"],
             r["atlas_mz"] if not (isinstance(r["atlas_mz"], float) and np.isnan(r["atlas_mz"])) else None,
@@ -576,7 +575,7 @@ def _build_compound_lfc_table(
     lfc_df = pd.read_csv(lfc_csv)
 
     _ID_COLS = {
-        "compound_id", "compound_index", "mz_rt_uid", "inchi_key", "compound_name", "adduct",
+        "compound_id", "compound_index", "mz_rt_uid", "inchi_key", "label", "adduct",
         "control_filter", "chosen_adduct", "chosen_polarity",
     }
     id_cols  = [c for c in lfc_df.columns if c in _ID_COLS]
@@ -604,7 +603,7 @@ def _build_compound_lfc_table(
     mc = summary_obj.experimental_data.curation_df
     if mc is not None and not mc.empty:
         mc_slim_cols = [
-            "mz_rt_uid", "inchi_key", "compound_name", "adduct", "formula", "smiles", "inchi",
+            "mz_rt_uid", "inchi_key", "label", "adduct", "formula", "smiles", "inchi",
             "pubchem_cid", "iupac_name", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
             "rt_min", "rt_max", "best_ms1_rt", "best_ms1_mz", "best_ms1_intensity",
             "best_ms1_ppm_error", "best_ms1_rt_error",
@@ -623,7 +622,7 @@ def _build_compound_lfc_table(
             for pos, (_, mc_row) in enumerate(mc_reset.iterrows()):
                 cid = asm._make_compound_safe_stem(
                     pos + 1,
-                    mc_row.get("compound_name", ""),
+                    mc_row.get("label", ""),
                     mc_row.get("polarity", ""),
                     mc_row.get("adduct", ""),
                     mc_row.get("atlas_mz") if not (isinstance(mc_row.get("atlas_mz"), float) and np.isnan(mc_row.get("atlas_mz"))) else None,
@@ -643,7 +642,7 @@ def _build_compound_lfc_table(
             )
 
         # Fill core identity columns from curation metadata when missing.
-        for col in ("compound_name", "adduct"):
+        for col in ("label", "adduct"):
             mc_col = f"{col}_mc"
             if mc_col in long_df.columns:
                 long_df[col] = long_df[col].where(long_df[col].notna() & (long_df[col].astype(str) != ""), long_df[mc_col])

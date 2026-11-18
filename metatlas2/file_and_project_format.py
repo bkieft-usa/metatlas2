@@ -1,6 +1,5 @@
 import os
 import re
-from typing import Any
 
 FILE_PATTERN = re.compile(
     r"^(?P<date>[^_]+)_"
@@ -203,30 +202,25 @@ def get_file_parts(name: str, part: str):
     except Exception:
         raise ValueError(f"File name '{name}' does not match the expected format.")
 
-# File types that use the type label itself (not sample_name) for group/short_groupname
-_CONTROL_FILE_TYPES: frozenset[str] = frozenset({"istd", "istdsetc", "qc", "injbl", "exctrl"})
-
-# Human-readable labels for each file_type
-_FILE_TYPE_LABELS: dict[str, str] = {
-    "istd":         "ISTD",
-    "istdsetc":     "ISTDsEtc",
-    "qc":           "QC",
-    "injbl":        "InjBl",
-    "exctrl":       "ExCtrl",
-    "refstd":       "RefStd",
-    "experimental": "Experimental",
-}
-
-
 def _file_type_label(file_type: str, sample_name: str) -> str:
     """Return the display label for the group/short_groupname suffix.
 
-    Control types (ISTD, QC, InjBl, ExCtrl) use the type label.
+    Control types (ISTD, QC, InjBl) use the type label.
     RefStd and Experimental use the sample_name field.
     """
-    ft = (file_type or "experimental").lower()
-    if ft in _CONTROL_FILE_TYPES:
-        return _FILE_TYPE_LABELS.get(ft, ft.upper())
+    # File types that use the type label itself (not sample_name) for group/short_groupname
+    _CONTROL_FILE_TYPES: frozenset[str] = frozenset({"istd", "qc", "qc-c18qu", "injbl"})
+
+    # Human-readable labels for each file_type
+    _FILE_TYPE_LABELS: dict[str, str] = {
+        "istd":         "ISTD",
+        "qc":           "QC",
+        "qc-c18qu":     "QC-C18QU",
+        "injbl":        "InjBl",
+    }
+
+    if file_type in _CONTROL_FILE_TYPES:
+        return _FILE_TYPE_LABELS[file_type]
     return sample_name
 
 
@@ -249,7 +243,7 @@ def get_filename_header_labels(
         RTA / TGA numbers used in the ``group`` label.
     file_type:
         Pre-classified file type (``"istd"``, ``"qc"``, ``"injbl"``,
-        ``"exctrl"``, ``"refstd"``, ``"experimental"``).  When ``None``
+        ``"refstd"``, ``"experimental"``).  When ``None``
         the function attempts to classify from the filename fields.
 
     Returns
@@ -308,7 +302,7 @@ def get_filename_header_labels(
     if file_type is None:
         try:
             from metatlas2.lcmsruns_tools import _classify_file_type
-            file_type = _classify_file_type(fields)
+            file_type = _classify_file_type(fields, owner)
         except Exception:
             file_type = "experimental"
 

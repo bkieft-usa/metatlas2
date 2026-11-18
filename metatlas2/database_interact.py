@@ -182,7 +182,7 @@ def create_new_atlas_from_dataframe(
             logger.warning(f"Compound with inchi_key {inchi_key} missing from metatlas database, skipping. (Note: mz_rt_uid is the unique identifier for all compounds.)")
             continue
         compound_uid = compound_lookup[inchi_key]
-        compound_name = str(row.get('compound_name', row.get('label', 'Unknown Compound')))
+        label = str(row.get('label', row.get('compound_name', 'Unknown Compound')))
         rt_peak = row.get('rt_peak', None)
         rt_min = row.get('rt_min', rt_peak - 0.5)
         rt_max = row.get('rt_max', rt_peak + 0.5)
@@ -198,7 +198,7 @@ def create_new_atlas_from_dataframe(
         compound_mzrt = CompoundMZRT(
             mz_rt_uid=mz_rt_uid,
             compound_uid=compound_uid,
-            compound_name=compound_name,
+            label=label,
             inchi_key=inchi_key,
             adduct=adduct,
             rt_space=rt_space,
@@ -316,6 +316,36 @@ def enrich_atlas_df_with_compound_metadata(atlas_df: pd.DataFrame, main_db_path:
     )
     return merged
 
+def get_atlas_uid_by_source(
+    database_path: str,
+    source: str,
+    atlas_name: str,
+    atlas_category: str,
+    chromatography: str,
+    polarity: str,
+) -> str | None:
+    """Find a previously saved atlas generated from the same sheet snapshot."""
+    with get_db_connection(database_path, read_only=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT atlas_uid
+            FROM atlases
+            WHERE source = ?
+              AND LOWER(atlas_name) = LOWER(?)
+              AND LOWER(atlas_category) = LOWER(?)
+              AND LOWER(chromatography) = LOWER(?)
+              AND LOWER(polarity) = LOWER(?)
+            """,
+            [source, atlas_name, atlas_category, chromatography, polarity],
+        ).fetchall()
+    if len(rows) > 1:
+        raise RuntimeError(
+            "Multiple main-database atlases have the same master-sheet source "
+            f"identity: {source}"
+        )
+    return str(rows[0][0]) if rows else None
+
+
 def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: str = None) -> pd.DataFrame:
     """
     Extract all compound information for a given atlas UID from the database.
@@ -354,7 +384,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.created_date,
                         a.source,
                         c.compound_uid,
-                        COALESCE(mzrt.compound_name, c.compound_name) AS compound_name,
+                        COALESCE(mzrt.label, c.label) AS label,
+                        c.compound_name,
                         c.inchi_key,
                         c.inchi,
                         COALESCE(c.formula, '') AS formula,
@@ -403,7 +434,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                         a.created_date,
                         a.source,
                         aca.compound_uid,
-                        mzrt.compound_name,
+                        mzrt.label,
                         mzrt.adduct,
                         mzrt.mz,
                         mzrt.rt_peak,
@@ -435,7 +466,8 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
                     cmp_df = main_conn.execute(f"""
                         SELECT
                             compound_uid,
-                            compound_name  AS main_compound_name,
+                            label AS main_label,
+                            compound_name,
                             inchi_key,
                             inchi,
                             COALESCE(formula, '') AS formula,
@@ -449,18 +481,18 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
             else:
                 cmp_df = pd.DataFrame()
 
-            # Step 3: merge — project mzrt data takes precedence for compound_name
+            # Step 3: merge — project mzrt labels take precedence over main metadata.
             if not cmp_df.empty:
                 df = proj_df.merge(cmp_df, on='compound_uid', how='left')
-                df['compound_name'] = df['compound_name'].where(
-                    df['compound_name'].notna() & (df['compound_name'] != ''),
-                    df.get('main_compound_name', '')
+                df['label'] = df['label'].where(
+                    df['label'].notna() & (df['label'] != ''),
+                    df.get('main_label', '')
                 )
-                df.drop(columns=['main_compound_name'], errors='ignore', inplace=True)
+                df.drop(columns=['main_label'], errors='ignore', inplace=True)
             else:
                 df = proj_df
                 for col in ('inchi_key', 'inchi', 'formula', 'smiles', 'pubchem_cid',
-                            'mono_isotopic_molecular_weight', 'iupac_name'):
+                            'mono_isotopic_molecular_weight', 'iupac_name', 'compound_name'):
                     df[col] = '' if col != 'mono_isotopic_molecular_weight' else 0.0
 
     except Exception as e:
@@ -470,7 +502,7 @@ def get_atlas_compounds_table(database_path: str, atlas_uid: str, main_db_path: 
     if df.empty:
         raise ValueError(f"No compounds found for atlas UID {atlas_uid} in database at {database_path}")
 
-    df['compound_name'] = df['compound_name'].fillna('')
+    df['label'] = df['label'].fillna('')
     logger.debug(f"Retrieved {len(df)} compounds for atlas {atlas_uid} ({df['atlas_name'].iloc[0]})")
     return df
 
@@ -801,7 +833,7 @@ def _save_rt_alignment_comparison_csv(
 
     Columns
     -------
-    Index (compound label)  : ``{zero_padded_idx}_{compound_name}_{adduct}_{rt_peak}``
+    Index (compound label)  : ``{zero_padded_idx}_{label}_{adduct}_{rt_peak}``
     RT Measured             : observed apex RT (RT at max intensity) from the active rt_peak_source
     RT Reference            : atlas RT peak
     Relative RT Linear      : predicted RT from linear model
@@ -852,7 +884,7 @@ def _save_rt_alignment_comparison_csv(
     # e.g. 0000_inosine_U15N_positive_M+H273p0762_1p02
     def _make_label(idx: int, row: pd.Series) -> str:
         import re as _re
-        name = str(row.get('compound_name', '')).replace(' ', '_')
+        name = str(row.get('label', '')).replace(' ', '_')
         # Strip brackets from adduct: [M+H]+ -> M+H
         adduct_raw = str(row.get('adduct', ''))
         adduct_clean = _re.sub(r'[\[\]]', '', adduct_raw).rstrip('+').rstrip('-').strip()
@@ -1002,14 +1034,12 @@ def _prepare_compound_record_from_dict(compound_data: dict) -> tuple | None:
 
         return (
             compound_uid,
-            _safe_str('compound_name', 'Unknown Compound'),
+            _safe_str('label', 'Unknown Compound'),
+            _safe_str('compound_name'),
             inchi_key,
             _safe_str('inchi'),
             _safe_str('smiles'),
             _safe_str('formula'),
-            _safe_str('classes'),
-            _safe_str('pathways'),
-            _safe_str('tags'),
             _safe_float('mono_isotopic_molecular_weight'),
             _safe_str('iupac_name'),
             _safe_str('pubchem_cid'),
@@ -1241,11 +1271,20 @@ def batch_save_compounds(
         if compound_records:
             logger.info(f"Creating {len(compound_records)} new compounds...")
             conn.executemany("""
-                INSERT INTO compounds VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                INSERT INTO compounds (
+                    compound_uid, label, compound_name, inchi_key, inchi, smiles, formula,
+                    mono_isotopic_molecular_weight, iupac_name,
+                    pubchem_cid, cas_number, synonyms, created_by, created_date,
+                    isomeric_smiles, molecular_weight, xlogp, tpsa, complexity, charge,
+                    heavy_atom_count, hbd_count, hba_count, rotatable_bond_count, chebi_id,
+                    chembl_id, hmdb_id, kegg_id, drugbank_id, metabolights_id,
+                    metabolomics_workbench_id, wikipedia_url, description,
+                    pubchem_retrieval_date, pubchem_compound_url, modelseed_id, metacyc_id
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?
                 )
             """, compound_records)
 
@@ -1295,7 +1334,7 @@ def _create_database_tables(conn, db_type: str = "main"):
             mz_rt_uid          TEXT PRIMARY KEY,
             compound_uid       TEXT,
             prev_mz_rt_uid     TEXT,
-            compound_name      TEXT,
+            label              TEXT,
             inchi_key          TEXT,
             adduct             TEXT,
             rt_space           TEXT,
@@ -1332,14 +1371,12 @@ def _create_database_tables(conn, db_type: str = "main"):
         conn.execute("""
             CREATE TABLE IF NOT EXISTS compounds (
                 compound_uid                   TEXT PRIMARY KEY,
+                label                          TEXT,
                 compound_name                  TEXT,
                 inchi_key                      TEXT,
                 inchi                          TEXT,
                 smiles                         TEXT,
                 formula                        TEXT,
-                classes                        TEXT,
-                pathways                       TEXT,
-                tags                           TEXT,
                 mono_isotopic_molecular_weight REAL,
                 iupac_name                     TEXT,
                 pubchem_cid                    TEXT,
@@ -1537,7 +1574,7 @@ def _create_database_tables(conn, db_type: str = "main"):
                 compound_uid            VARCHAR,
                 inchi_key               VARCHAR,
                 adduct                  VARCHAR,
-                compound_name           VARCHAR,
+                label                   VARCHAR,
                 passed_autoid           BOOLEAN,
                 passed_curation         BOOLEAN,
                 polarity                VARCHAR,
@@ -2289,7 +2326,7 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                         mz_rt_uid,
                         compound_mzrt.compound_uid,
                         getattr(compound_mzrt, 'prev_mz_rt_uid', None),
-                        compound_mzrt.compound_name,
+                        compound_mzrt.label,
                         compound_mzrt.inchi_key,
                         compound_mzrt.adduct,
                         compound_mzrt.rt_space,
@@ -2513,12 +2550,12 @@ def check_require_evaluated(obj: "AnalysisSummary"):
         ms2_notes = str(mc_row.get('ms2_notes', '')).strip()
         if not ms1_notes:
             raise ValueError(
-                f"Compound {mc_row['compound_uid']} ({mc_row.get('compound_name', 'Unknown')} / {mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
+                f"Compound {mc_row['compound_uid']} ({mc_row.get('label', 'Unknown')} / {mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
                 "has empty ms1_notes. Please update in GUI before generating summary."
             )
         if not ms2_notes:
             raise ValueError(
-                f"Compound {mc_row['compound_uid']} ({mc_row.get('compound_name', 'Unknown')} / {mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
+                f"Compound {mc_row['compound_uid']} ({mc_row.get('label', 'Unknown')} / {mc_row.get('inchi_key', 'Unknown')} / {mc_row.get('adduct', 'Unknown')}) "
                 "has empty ms2_notes. Please update in GUI before generating summary."
             )
 
@@ -2708,19 +2745,19 @@ def display_auto_id_summary(auto_id_obj: "AutoIdentification") -> None:
         uid = row.get("mz_rt_uid", "")
         summary_rows.append({
             "mz_rt_uid":      uid,
-            "compound_name":  row.get("compound_name", ""),
+            "label":  row.get("label", ""),
             "MS1 datapoints": int(ms1_counts.get(uid, 0)),
             "MS2 datapoints": int(ms2_counts.get(uid, 0)),
             "MS2 hits":       int(ms2_hit_counts.get(uid, 0)),
         })
 
     if summary_rows:
-        header = f"{'compound_name':<40} {'MS1':>6} {'MS2':>6} {'hits':>6}"
+        header = f"{'label':<40} {'MS1':>6} {'MS2':>6} {'hits':>6}"
         logger.info(f"Auto-ID summary:\n{header}")
         for r in summary_rows:
             logger.info(
                 "  %-40s %6d %6d %6d",
-                r["compound_name"][:40],
+                r["label"][:40],
                 r["MS1 datapoints"],
                 r["MS2 datapoints"],
                 r["MS2 hits"],
@@ -2771,7 +2808,7 @@ def save_auto_identification_results_to_db(auto_id_obj):
         ms1_df = ms1_df.assign(**constants)
 
     manual_curation_columns = [
-        "mz_rt_uid", "compound_uid", "inchi_key", "adduct", "compound_name",
+        "mz_rt_uid", "compound_uid", "inchi_key", "adduct", "label",
         "passed_autoid", "passed_curation", "polarity", "chromatography",
         "mz_tolerance", "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
         "mz", "rt_peak", "rt_min", "rt_max", "initial_rt_min", "initial_rt_max",
@@ -2844,7 +2881,7 @@ def get_istd_curation_for_polarity(
     Retrieve manual_curation entries for the ISTD analysis matching polarity,
     rt_alignment_number, and analysis_number.
 
-    Returns a DataFrame with columns: compound_name, inchi_key, adduct,
+    Returns a DataFrame with columns: label, inchi_key, adduct,
     atlas_rt_peak, rt_peak, rt_min, rt_max, ms1_notes, ms2_notes, other_notes,
     analyst_notes, identification_notes.  Returns an empty DataFrame (no error) when no matching ISTD
     run is found.
@@ -2852,7 +2889,7 @@ def get_istd_curation_for_polarity(
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute("""
-                SELECT compound_name, inchi_key, adduct, atlas_rt_peak,
+                SELECT label, inchi_key, adduct, atlas_rt_peak,
                        rt_peak, rt_min, rt_max,
                        ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes
                 FROM manual_curation
@@ -2879,9 +2916,9 @@ def _get_opposite_polarity_curation(
     manually curated (passed_curation = 1), matching the same atlas_category,
     rt_alignment_number, and analysis_number.
 
-    Matching across polarities is done on (compound_name, inchi_key, atlas_rt_peak)
-    since adducts differ between positive and negative mode.  Returns a DataFrame
-    with columns: compound_name, inchi_key, atlas_rt_peak, rt_peak, rt_min, rt_max,
+    Matching across polarities is done on (label, inchi_key, atlas_rt_peak)
+    since adducts differ between positive and negative mode. Returns a DataFrame
+    with columns: label, inchi_key, atlas_rt_peak, rt_peak, rt_min, rt_max,
     ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes.  Returns an empty DataFrame
     (no error) when no matching entries are found.
     """
@@ -2899,7 +2936,7 @@ def _get_opposite_polarity_curation(
     try:
         with get_db_connection(project_db_path, read_only=True) as conn:
             df = conn.execute("""
-                SELECT compound_name, inchi_key, atlas_rt_peak,
+                SELECT label, inchi_key, atlas_rt_peak,
                        rt_peak, rt_min, rt_max,
                        ms1_notes, ms2_notes, other_notes, analyst_notes, identification_notes
                 FROM manual_curation
@@ -2939,7 +2976,7 @@ def _apply_cross_polarity_curation(
 
     opp_lookup = {}
     for _, row in opposite_polarity_df.iterrows():
-        name = row.get("compound_name", row.get("label"))
+        name = row.get("label", "")
         if not name:
             continue
         key = (name, row["inchi_key"])
@@ -2950,7 +2987,7 @@ def _apply_cross_polarity_curation(
     n_transferred = 0
     
     for idx, row in obj.experimental_data.curation_df.iterrows():
-        name = row.get("compound_name", row.get("label"))
+        name = row.get("label", "")
         if not name:
             continue
         key = (name, row["inchi_key"])
@@ -3133,7 +3170,7 @@ def get_manual_curation_entries(
     if df.empty:
         raise ValueError(f"No manual curation entries found for RT alignment number {rt_alignment_number} and analysis number {analysis_number}.")
 
-    df['compound_name'] = df['compound_name'].fillna('')
+    df['label'] = df['label'].fillna('')
 
     if atlas_compounds is not None and not atlas_compounds.empty:
         _order = (
@@ -3149,7 +3186,7 @@ def get_manual_curation_entries(
             .reset_index(drop=True)
         )
     else:
-        df['has_unlabeled'] = df['compound_name'].str.contains('unlabeled', case=False, na=False).astype(int)
+        df['has_unlabeled'] = df['label'].str.contains('unlabeled', case=False, na=False).astype(int)
         df = (
             df.sort_values(by=['rt_peak', 'has_unlabeled'], ascending=[True, True])
             .drop('has_unlabeled', axis=1)
@@ -3732,14 +3769,28 @@ def _file_group_from_filename(filename: str) -> str:
     """Return the file-group label for a single LCMS filename.
     """
     try:
-        fields = fpf.parse_file_name(
-            # parse_file_name expects a bare filename; strip any directory prefix.
-            str(filename).replace("\\", "/").rsplit("/", 1)[-1]
-        )
-        file_type = lrt._classify_file_type(fields)
-        if file_type == "experimental":
+        fields = fpf.parse_file_name(str(filename).replace("\\", "/").rsplit("/", 1)[-1])
+        owner = fields.get("owner", "")
+        file_type = lrt._classify_file_type(fields, owner)
+        if file_type == "istd":
+            return "ISTD"
+        elif file_type == "refstd":
+            return f"{fields.get('sample_name', '')} (RefStd)"
+        elif file_type == "exctrl":
+            return f"{fields.get('sample_name', '')} (ExCtrl)"
+        elif file_type == "txctrl":
+            return f"{fields.get('sample_name', '')} (TxCtrl)"
+        elif file_type == "qc":
+            return f"{fields.get('sample_name', '')} (QC)"
+        elif file_type == "qc-c18qu":
+            return f"{fields.get('sample_name', '')} (QC-C18QU)"
+        elif file_type == "injbl":
+            return f"{fields.get('sample_name', '')} (InjBl)"
+        elif file_type == "experimental":
+            return f"{fields.get('sample_name', '')}"
+        else:
             return fields.get("sample_name", "")
-        return file_type.upper()
+
     except Exception:
         return ""
 
@@ -3889,26 +3940,44 @@ def _apply_override_ms_filters(obj: "AnalysisGUI") -> None:
     logger.info(f"Removed {len(obj.experimental_data.curation_df) - keep_mask.sum()} compounds based on override MS filters. {len(obj.experimental_data.curation_df)} compounds remain in curation_df.")
     logger.info(f"After applying override MS filters, {len(obj.experimental_data.curation_df)} compounds remain in curation_df.")
 
-def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
-    apply_cross_polarity = obj.ta.params.get("apply_cross_polarity_curation", True)
-    if obj.override_parameters.get("apply_cross_polarity_curation") is not None:
-        apply_cross_polarity = obj.override_parameters.get("apply_cross_polarity_curation")
+# def _transfer_cross_polarity_curation(obj: "AnalysisGUI"):
+#     apply_cross_polarity = obj.ta.params.get("apply_cross_polarity_curation", True)
+#     if obj.override_parameters.get("apply_cross_polarity_curation") is not None:
+#         apply_cross_polarity = obj.override_parameters.get("apply_cross_polarity_curation")
     
-    if apply_cross_polarity:
-        logger.info(f"Checking for curated opposite-polarity entries...")
-        opp_polarity_df = _get_opposite_polarity_curation(obj=obj)
+#     if apply_cross_polarity:
+#         logger.info(f"Checking for curated opposite-polarity entries...")
+#         opp_polarity_df = _get_opposite_polarity_curation(obj=obj)
         
-        if not opp_polarity_df.empty:
-            opp_polarity_df = sanitize_curation_df(opp_polarity_df)
+#         if not opp_polarity_df.empty:
+#             opp_polarity_df = sanitize_curation_df(opp_polarity_df)
             
-            n_cross = _apply_cross_polarity_curation(
-                obj=obj,
-                opposite_polarity_df=opp_polarity_df
-            )
+#             n_cross = _apply_cross_polarity_curation(
+#                 obj=obj,
+#                 opposite_polarity_df=opp_polarity_df
+#             )
             
-            obj.experimental_data.curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
+#             obj.experimental_data.curation_df = sanitize_curation_df(obj.experimental_data.curation_df)
             
-            logger.info(f"Transferred opposite-polarity RT bounds to {n_cross} compound(s).")
+#             logger.info(f"Transferred opposite-polarity RT bounds to {n_cross} compound(s).")
+
+def _filter_excluded_filenames(
+    df: pd.DataFrame, 
+    substrings: list[str]
+) -> pd.DataFrame:
+    """Drop rows whose ``filename`` column contains any of *substrings*."""
+    if df.empty or "filename" not in df.columns or not substrings:
+        return df
+    pattern = "|".join(re.escape(s) for s in substrings)
+    mask = ~df["filename"].str.contains(pattern, regex=True, na=False)
+    removed = int((~mask).sum())
+    if removed:
+        logger.info(
+            f"Excluded {removed} rows "
+            f"({df.loc[~mask, 'filename'].nunique()} files) matching "
+            f"filename substrings {list(substrings)}."
+        )
+    return df[mask]
 
 def _load_data_from_db(
     obj: "AnalysisGUI" | "AnalysisSummary",
@@ -3973,6 +4042,10 @@ def _load_data_from_db(
         f"{len(ms1_df)} MS1 data points ({ms1_df['filename'].nunique()} total files), "
         f"and {len(ms2_df)} MS2 data points ({ms2_df['filename'].nunique()} total files)."
     )
+
+    # turn on to remove substrings from summary
+    #ms1_df = _filter_excluded_filenames(ms1_df, ["C18QU"])
+    #ms2_df = _filter_excluded_filenames(ms2_df, ["C18QU"])
 
     obj.experimental_data = ExperimentalData()
     obj.experimental_data.curation_df = curation_df

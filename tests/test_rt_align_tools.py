@@ -317,7 +317,7 @@ class TestSaveRtAlignedStatsToJson:
     def test_file_created(self, tmp_path):
         _save_rt_aligned_stats_to_json(
             all_rt_shifts=[0.1, -0.05, 0.2],
-            per_compound_rt_shifts=[{"compound_name": "adenine", "rt_shift": 0.1}],
+            per_compound_rt_shifts=[{"label": "adenine", "rt_shift": 0.1}],
             output_file="rt_shifts.json",
             output_dir=str(tmp_path),
         )
@@ -361,7 +361,7 @@ class TestSaveRtAlignedStatsToJson:
         assert abs(data["stats"]["rt_shift_median"] - float(np.median(shifts))) < 1e-9
 
     def test_compounds_list_stored(self, tmp_path):
-        compounds = [{"compound_name": "adenine", "rt_shift": 0.05}]
+        compounds = [{"label": "adenine", "rt_shift": 0.05}]
         _save_rt_aligned_stats_to_json(
             all_rt_shifts=[0.05],
             per_compound_rt_shifts=compounds,
@@ -470,7 +470,7 @@ class TestBuildRtAlignmentModel:
         # → apex is at index 1 (intensity 1e5), so exp_rt_peak ≈ ADENINE_RT + 0.2
         df = rt_align_stub.modeling_data
         from conftest import ADENINE_RT
-        ade_row = df[df['compound_name'].str.contains('adenine', case=False, na=False)]
+        ade_row = df[df['label'].str.contains('adenine', case=False, na=False)]
         if not ade_row.empty:
             assert abs(ade_row.iloc[0]['exp_rt_peak'] - (ADENINE_RT + 0.2)) < 0.01
 

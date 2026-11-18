@@ -13,7 +13,8 @@ GUI:
 RT_ALIGNMENT:
   HILICZ:
     ATLAS:
-      uid: atlas-test-242cd7485564b4e5
+      tags: [QCv7]
+      polarity: POS
     PARAMS:
       include_lcmsruns:
         - QC
@@ -33,7 +34,7 @@ TARGETED_ANALYSES:
     POS:
       ISTD:
         ATLAS:
-          uid: atlas-test-7e3c0794ac3ed436
+          tags: [ISTDsEtc]
         PARAMS:
           include_lcmsruns:
             - EXPERIMENTAL
@@ -73,7 +74,7 @@ TARGETED_ANALYSES:
 
       EMA:
         ATLAS:
-          uid: atlas-test-119437acbaa03b7c
+          tags: [EMA]
         PARAMS:
           include_lcmsruns:
             - EXPERIMENTAL

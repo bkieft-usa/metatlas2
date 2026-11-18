@@ -493,7 +493,8 @@ def retrieve_pubchem_info(compounds: pd.DataFrame, pubchem_cache_path: str) -> p
             # Fill missing values with PubChem data
             pubchem_col = f"{col}_pubchem"
             if pubchem_col in compounds.columns:
-                compounds[col] = compounds[col].fillna(compounds[pubchem_col])
+                missing = compounds[col].isna() | compounds[col].eq('')
+                compounds[col] = compounds[col].where(~missing, compounds[pubchem_col])
                 compounds = compounds.drop(columns=[pubchem_col])
 
     successful_retrievals = [k for k, v in pubchem_cache.items() 

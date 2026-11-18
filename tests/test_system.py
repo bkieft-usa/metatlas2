@@ -84,7 +84,7 @@ def _write_compound_tsv(path: Path, rows: list[dict]) -> None:
     """Write a minimal compound TSV file that :func:`load_compound_input` can read."""
 
     _COMPOUND_TSV_HEADER = (
-        "compound_name\tinchi_key\tadduct\trt_peak\trt_min\trt_max\t"
+        "label\tcompound_name\tinchi_key\tadduct\trt_peak\trt_min\trt_max\t"
         "mz\tmz_tolerance\tchromatography\tpolarity\t"
         "mono_isotopic_molecular_weight\tformula\tsmiles\tinchi\t"
         "compound_uid\tcreated_by\tcreated_date\n"
@@ -94,7 +94,8 @@ def _write_compound_tsv(path: Path, rows: list[dict]) -> None:
         fh.write(_COMPOUND_TSV_HEADER)
         for r in rows:
             fh.write(
-                f"{r.get('compound_name', 'Unknown')}\t"
+                f"{r.get('label', r.get('compound_name', 'Unknown'))}\t"
+                f"{r.get('compound_name', '')}\t"
                 f"{r.get('inchi_key', '')}\t"
                 f"{r.get('adduct', '[M+H]+')}\t"
                 f"{r.get('rt_peak', 0.0)}\t"
@@ -119,7 +120,8 @@ def adenine_tsv(tmp_path: Path) -> Path:
     p = tmp_path / "adenine_pos.tsv"
     _write_compound_tsv(p, [
         {
-            "compound_name": "adenine",
+            "label": "Adenine",
+            "compound_name": "adenine-vendor",
             "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N",
             "adduct": "[M+H]+",
             "rt_peak": ADENINE_RT,
@@ -135,7 +137,8 @@ def adenine_tsv(tmp_path: Path) -> Path:
             "inchi": "InChI=1S/C5H5N5/c6-4-3-5(9-1-7-3)10-2-8-4/h1-2H,(H3,6,7,8,9,10)",
         },
         {
-            "compound_name": "riboflavin",
+            "label": "Riboflavin",
+            "compound_name": "riboflavin-vendor",
             "inchi_key": "AUNGANRZJHBGPY-SCRDCRAPSA-N",
             "adduct": "[M+H]+",
             "rt_peak": RIBOFLAVIN_RT,
@@ -154,16 +157,11 @@ def adenine_tsv(tmp_path: Path) -> Path:
     return p
 
 @pytest.fixture()
-def compounds_yaml(tmp_path: Path, adenine_tsv: Path) -> Path:
-    """Write a minimal compounds config YAML pointing at the local TSV."""
-    p = tmp_path / "test_compounds.yaml"
-    p.write_text(textwrap.dedent(f"""\
-        COMPOUNDS:
-          HILICZ:
-            POS:
-              PATHS:
-                - {adenine_tsv}
-    """))
+def compounds_csv(tmp_path: Path, adenine_tsv: Path) -> Path:
+    """Write a minimal compound CSV from the shared two-compound fixture."""
+    compounds = pd.read_csv(adenine_tsv, sep="\t")
+    p = tmp_path / "test_compounds.csv"
+    compounds.to_csv(p, index=False)
     return p
 
 @pytest.fixture()
@@ -172,7 +170,8 @@ def atlas_tsv(tmp_path: Path) -> Path:
     p = tmp_path / "test_atlas_pos.tsv"
     _write_compound_tsv(p, [
         {
-            "compound_name": "adenine",
+            "label": "Adenine",
+            "compound_name": "adenine-vendor",
             "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N",
             "adduct": "[M+H]+",
             "rt_peak": ADENINE_RT,
@@ -185,7 +184,8 @@ def atlas_tsv(tmp_path: Path) -> Path:
             "mono_isotopic_molecular_weight": 135.054,
         },
         {
-            "compound_name": "riboflavin",
+            "label": "Riboflavin",
+            "compound_name": "riboflavin-vendor",
             "inchi_key": "AUNGANRZJHBGPY-SCRDCRAPSA-N",
             "adduct": "[M+H]+",
             "rt_peak": RIBOFLAVIN_RT,
@@ -215,14 +215,9 @@ def atlases_yaml(tmp_path: Path, atlas_tsv: Path) -> Path:
     """))
     return p
 
-def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
-    """Write a minimal analysis config YAML using *atlas_uid* for both the QC and EMA atlas.
-
-    Using the same UID for both the RT-alignment QC atlas and the EMA targeted-analysis
-    atlas means the seeded DB only needs to contain one atlas, and no in-memory config
-    mutation is required in tests.
-    """
-    path.write_text(textwrap.dedent(f"""\
+def _write_analysis_yaml(path: Path) -> Path:
+    """Write a minimal analysis config using a synthetic centralized-atlas tag."""
+    path.write_text(textwrap.dedent("""\
         GENERAL:
           owner: jgi
           msms_refs_path:
@@ -231,12 +226,13 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
         GUI:
           gui_require_all_evaluated: false
           gui_top_n_hits: 10
-          gui_lcmsruns_colors: {{}}
-          note_options_overrides: {{}}
+          gui_lcmsruns_colors: {}
+          note_options_overrides: {}
         RT_ALIGNMENT:
           HILICZ:
             ATLAS:
-              uid: {atlas_uid}
+              tags: [system-test]
+              polarity: POS
             PARAMS:
               upload_to_gdrive: false
               include_lcmsruns:
@@ -260,7 +256,7 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
               REF:
                 EMA:
                   ATLAS:
-                    uid: {atlas_uid}
+                    tags: [system-test]
                   PARAMS:
                     include_lcmsruns:
                     exclude_lcmsruns:
@@ -290,20 +286,10 @@ def _write_analysis_yaml(path: Path, atlas_uid: str) -> Path:
     return path
 
 @pytest.fixture()
-def analysis_yaml(tmp_path: Path) -> tuple[Path, str]:
-    """Write a minimal analysis config YAML with a placeholder UID.
-
-    Returns (path, atlas_uid).  The same UID is used for both the RT-alignment
-    QC atlas slot and the EMA targeted-analysis slot so that a single seeded
-    atlas satisfies both.
-
-    Tests that only exercise config parsing (no DB required) use this fixture.
-    Tests that need the UIDs to match a real DB entry use :func:`seeded_analysis_yaml`.
-    """
-    placeholder_uid = f"atl-placeholder-{uuid.uuid4().hex[:32]}"
+def analysis_yaml(tmp_path: Path) -> Path:
+    """Write a minimal tag-based analysis config for parsing tests."""
     p = tmp_path / "test_analysis.yaml"
-    _write_analysis_yaml(p, placeholder_uid)
-    return p, placeholder_uid
+    return _write_analysis_yaml(p)
 
 def _fake_pubchem_info(compounds: pd.DataFrame, **kwargs) -> pd.DataFrame:
     """Return the input DataFrame unchanged (simulates a cache-hit with no enrichment)."""
@@ -895,14 +881,9 @@ class TestModelSEEDRetrieval:
         # Write a minimal compounds TSV
         tsv_path = tmp_path / "compounds.tsv"
         tsv_path.write_text(
-            "compound_name\tinchi_key\n"
-            "Adenine\tGFFGJBXGBJISGV-UHFFFAOYSA-N\n"
+            "label\tcompound_name\tinchi_key\n"
+            "Adenine\tvendor adenine\tGFFGJBXGBJISGV-UHFFFAOYSA-N\n"
         )
-        compounds_yaml = tmp_path / "compounds.yaml"
-        compounds_yaml.write_text(
-            f"COMPOUNDS:\n  HILICZ:\n    POS:\n      PATHS:\n        - {tsv_path}\n"
-        )
-
         def _fake_modelseed_with_match(compounds, **kwargs):
             result = compounds.copy()
             result["modelseed_id"] = result["inchi_key"].map(
@@ -912,18 +893,18 @@ class TestModelSEEDRetrieval:
 
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_with_match):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+            add_compounds_to_db(str(tsv_path), overwrite_db=True)
 
         main_db_path = metatlas_data_dir / "databases" / "main_db" / "metatlas.duckdb"
         conn = duckdb.connect(str(main_db_path), read_only=True)
         row = conn.execute(
-            "SELECT modelseed_id FROM compounds WHERE inchi_key = ?",
+            "SELECT label, compound_name, modelseed_id FROM compounds WHERE inchi_key = ?",
             ["GFFGJBXGBJISGV-UHFFFAOYSA-N"],
         ).fetchone()
         conn.close()
 
         assert row is not None, "Adenine not found in compounds table"
-        assert row[0] == "cpd00003", f"Expected 'cpd00003', got {row[0]!r}"
+        assert row == ("Adenine", "vendor adenine", "cpd00003")
 
 
 @pytest.mark.system
@@ -936,7 +917,7 @@ class TestAddCompounds:
 
     def test_add_compounds_creates_main_database(
         self,
-        compounds_yaml: Path,
+        compounds_csv: Path,
         main_db_path: Path,
         metatlas_data_dir: Path,
     ) -> None:
@@ -946,13 +927,13 @@ class TestAddCompounds:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         assert main_db_path.exists(), "Main database was not created by add_compounds_to_db"
 
     def test_add_compounds_persists_compounds_to_db(
         self,
-        compounds_yaml: Path,
+        compounds_csv: Path,
         main_db_path: Path,
         metatlas_data_dir: Path,
     ) -> None:
@@ -963,19 +944,158 @@ class TestAddCompounds:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
-        df = conn.execute("SELECT compound_name, inchi_key FROM compounds").df()
+        df = conn.execute("SELECT label, compound_name, inchi_key FROM compounds").df()
         conn.close()
 
         inchi_keys = set(df["inchi_key"].tolist())
         assert "GFFGJBXGBJISGV-UHFFFAOYSA-N" in inchi_keys, "Adenine not found in compounds table"
         assert "AUNGANRZJHBGPY-SCRDCRAPSA-N" in inchi_keys, "Riboflavin not found in compounds table"
+        assert set(df["label"]) == {"Adenine", "Riboflavin"}
+        assert set(df["compound_name"]) == {"adenine-vendor", "riboflavin-vendor"}
+
+    def test_add_compounds_enriches_csv_with_supplied_structures(
+        self,
+        tmp_path: Path,
+        main_db_path: Path,
+        metatlas_data_dir: Path,
+    ) -> None:
+        """Supplied structures are retained while missing metadata is enriched."""
+        import duckdb
+        from metatlas2.add_compounds_to_db import add_compounds_to_db
+
+        csv_path = tmp_path / "compounds.csv"
+        pd.DataFrame([
+            {
+                "label": "Adenine",
+                "compound_name": "vendor adenine",
+                "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N",
+                "smiles": "supplied-smiles",
+                "inchi": "supplied-inchi",
+            },
+            {
+                "label": "Riboflavin",
+                "inchi_key": "AUNGANRZJHBGPY-SCRDCRAPSA-N",
+                "smiles": "",
+                "inchi": "",
+            },
+        ]).to_csv(csv_path, index=False)
+
+        cache = {
+            "GFFGJBXGBJISGV-UHFFFAOYSA-N": {
+                "smiles": "pubchem-smiles", "inchi": "pubchem-inchi",
+                "pubchem_cid": "1", "chebi_id": "CHEBI:1", "kegg_id": "C00001",
+            },
+            "AUNGANRZJHBGPY-SCRDCRAPSA-N": {
+                "smiles": "riboflavin-smiles", "inchi": "riboflavin-inchi",
+                "pubchem_cid": "2",
+            },
+        }
+        with patch(
+            "metatlas2.pubchem_retrieval.load_or_create_pubchem_cache", return_value=cache,
+        ), patch(
+            "metatlas2.modelseed_retrieval._build_inchikey_to_cpd",
+            return_value={"GFFGJBXGBJISGV-UHFFFAOYSA-N": "cpd00003"},
+        ), patch(
+            "metatlas2.chebi_retrieval.load_or_create_chebi_cache",
+            return_value={"CHEBI:1": "META-1"},
+        ):
+            add_compounds_to_db(str(csv_path), overwrite_db=True)
+
+        with duckdb.connect(str(main_db_path), read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT label, compound_name, inchi_key, smiles, inchi, "
+                "pubchem_cid, chebi_id, kegg_id, modelseed_id, metacyc_id "
+                "FROM compounds ORDER BY label"
+            ).fetchall()
+        assert rows[0] == (
+            "Adenine", "vendor adenine", "GFFGJBXGBJISGV-UHFFFAOYSA-N",
+            "supplied-smiles", "supplied-inchi", "1", "CHEBI:1", "C00001",
+            "cpd00003", "META-1",
+        )
+        assert rows[1][:5] == (
+            "Riboflavin", None, "AUNGANRZJHBGPY-SCRDCRAPSA-N",
+            "riboflavin-smiles", "riboflavin-inchi",
+        )
+
+    def test_add_compounds_preserves_existing_database_with_legacy_input(
+        self, tmp_path: Path, main_db_path: Path, metatlas_data_dir: Path,
+    ) -> None:
+        import duckdb
+        from metatlas2 import database_interact as dbi
+        from metatlas2.add_compounds_to_db import add_compounds_to_db
+
+        dbi.create_metatlas_database(str(main_db_path))
+        with duckdb.connect(str(main_db_path)) as conn:
+            conn.execute(
+                "INSERT INTO compounds (compound_uid, label, compound_name, inchi_key) VALUES (?, ?, ?, ?)",
+                ["old-uid", "Old label", "Old name", "old-key"],
+            )
+            conn.execute(
+                "INSERT INTO compound_mzrt (mz_rt_uid, compound_uid, label) VALUES (?, ?, ?)",
+                ["mzrt-uid", "old-uid", "Old atlas name"],
+            )
+
+        csv_path = tmp_path / "compounds.csv"
+        csv_path.write_text("compound_name,inchi_key\nNew name,new-key\n")
+        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+            add_compounds_to_db(str(csv_path))
+            add_compounds_to_db(str(csv_path))
+
+        with duckdb.connect(str(main_db_path), read_only=True) as conn:
+            assert conn.execute(
+                "SELECT inchi_key, label, compound_name FROM compounds ORDER BY inchi_key"
+            ).fetchall() == [
+                ("new-key", "New name", "New name"), ("old-key", "Old label", "Old name"),
+            ]
+            assert conn.execute("SELECT label FROM compound_mzrt").fetchone() == ("Old atlas name",)
+
+    def test_add_compounds_looks_up_structures_when_a_column_is_absent(
+        self,
+        tmp_path: Path,
+        main_db_path: Path,
+        metatlas_data_dir: Path,
+    ) -> None:
+        """PubChem lookup runs when either smiles or inchi is absent from the CSV."""
+        import duckdb
+        from metatlas2.add_compounds_to_db import add_compounds_to_db
+
+        csv_path = tmp_path / "compounds.csv"
+        pd.DataFrame([{
+            "label": "Adenine",
+            "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N",
+            "smiles": "supplied-smiles",
+        }]).to_csv(csv_path, index=False)
+
+        def _add_inchi(compounds: pd.DataFrame, **_) -> pd.DataFrame:
+            result = compounds.copy()
+            result["inchi"] = "looked-up-inchi"
+            return result
+
+        with patch(
+            "metatlas2.pubchem_retrieval.retrieve_pubchem_info",
+            side_effect=_add_inchi,
+        ) as pubchem, patch(
+            "metatlas2.modelseed_retrieval.retrieve_modelseed_info",
+            side_effect=_fake_modelseed_info,
+        ), patch(
+            "metatlas2.chebi_retrieval.retrieve_metacyc_info",
+            side_effect=_fake_metacyc_info,
+        ):
+            add_compounds_to_db(str(csv_path), overwrite_db=True)
+
+        pubchem.assert_called_once()
+        with duckdb.connect(str(main_db_path), read_only=True) as conn:
+            row = conn.execute("SELECT smiles, inchi FROM compounds").fetchone()
+        assert row == ("supplied-smiles", "looked-up-inchi")
 
     def test_add_compounds_correct_compound_count(
         self,
-        compounds_yaml: Path,
+        compounds_csv: Path,
         main_db_path: Path,
         metatlas_data_dir: Path,
     ) -> None:
@@ -986,7 +1106,7 @@ class TestAddCompounds:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
         count = conn.execute("SELECT COUNT(*) FROM compounds").fetchone()[0]
@@ -996,7 +1116,7 @@ class TestAddCompounds:
 
     def test_add_compounds_idempotent_on_rerun(
         self,
-        compounds_yaml: Path,
+        compounds_csv: Path,
         main_db_path: Path,
         metatlas_data_dir: Path,
     ) -> None:
@@ -1013,7 +1133,7 @@ class TestAddCompounds:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         count_after_first = duckdb.connect(str(main_db_path), read_only=True).execute(
             "SELECT COUNT(*) FROM compounds"
@@ -1024,7 +1144,7 @@ class TestAddCompounds:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=False)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=False)
 
         count_after_second = duckdb.connect(str(main_db_path), read_only=True).execute(
             "SELECT COUNT(*) FROM compounds"
@@ -1035,55 +1155,52 @@ class TestAddCompounds:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=False)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=False)
 
         count_after_third = duckdb.connect(str(main_db_path), read_only=True).execute(
             "SELECT COUNT(*) FROM compounds"
         ).fetchone()[0]
         assert count_after_third == 2, f"Expected 2 compounds after third run (upsert), got {count_after_third}"
 
-    def test_add_compounds_missing_config_raises(
+    def test_add_compounds_missing_csv_raises(
         self,
         tmp_path: Path,
         metatlas_data_dir: Path,
     ) -> None:
-        """Passing a non-existent config path should raise an error."""
+        """Passing a non-existent CSV path should raise an error."""
         from metatlas2.add_compounds_to_db import add_compounds_to_db
-
-        with pytest.raises(Exception):
-            add_compounds_to_db(str(tmp_path / "does_not_exist.yaml"))
-
-    def test_add_compounds_config_missing_compounds_key_raises(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A YAML missing the required COMPOUNDS key should raise a ValueError through add_compounds_to_db."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
-
-        bad_yaml = tmp_path / "bad_compounds2.yaml"
-        bad_yaml.write_text("PARAMS:\n  some_ignored_key: true\n")
-
-        with pytest.raises(ValueError, match="COMPOUNDS"):
-            add_compounds_to_db(str(bad_yaml))
-
-    def test_add_compounds_nonexistent_tsv_raises(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A YAML referencing a TSV that does not exist should raise FileNotFoundError through add_compounds_to_db."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
-
-        bad_yaml = tmp_path / "missing_tsv.yaml"
-        bad_yaml.write_text(textwrap.dedent("""\
-            COMPOUNDS:
-              HILICZ:
-                POS:
-                  PATHS:
-                    - /nonexistent/path/compounds.tsv
-        """))
 
         with pytest.raises(FileNotFoundError):
-            add_compounds_to_db(str(bad_yaml))
+            add_compounds_to_db(str(tmp_path / "does_not_exist.csv"))
+
+    def test_add_compounds_rejects_yaml_input(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The routine accepts only direct CSV/TSV input, not a YAML config."""
+        from metatlas2.add_compounds_to_db import add_compounds_to_db
+
+        yaml_path = tmp_path / "compounds.yaml"
+        yaml_path.write_text("COMPOUNDS: {}\n")
+
+        with pytest.raises(ValueError, match="CSV or TSV"):
+            add_compounds_to_db(str(yaml_path))
+
+    def test_add_compounds_rejects_csv_missing_required_columns(
+        self,
+        tmp_path: Path,
+        main_db_path: Path,
+        metatlas_data_dir: Path,
+    ) -> None:
+        """Validate CSV columns before creating or overwriting the database."""
+        from metatlas2.add_compounds_to_db import add_compounds_to_db
+
+        csv_path = tmp_path / "missing_required.csv"
+        csv_path.write_text("label\nAdenine\n")
+
+        with pytest.raises(ValueError):
+            add_compounds_to_db(str(csv_path), overwrite_db=True)
+        assert not main_db_path.exists()
 
 @pytest.mark.system
 class TestAddAtlases:
@@ -1096,7 +1213,7 @@ class TestAddAtlases:
     @pytest.fixture(autouse=True)
     def _seed_main_db(
         self,
-        compounds_yaml: Path,
+        compounds_csv: Path,
         main_db_path: Path,
         metatlas_data_dir: Path,
     ) -> None:
@@ -1106,7 +1223,7 @@ class TestAddAtlases:
         with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-            add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+            add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
     def test_add_atlases_creates_atlas_in_db(
         self,
@@ -1322,7 +1439,7 @@ def project_with_h5_files(
 
 @pytest.fixture()
 def seeded_main_db(
-    compounds_yaml: Path,
+    compounds_csv: Path,
     atlases_yaml: Path,
     main_db_path: Path,
     metatlas_data_dir: Path,
@@ -1335,7 +1452,7 @@ def seeded_main_db(
     with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
              patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
              patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
-        add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+        add_compounds_to_db(str(compounds_csv), overwrite_db=True)
     add_atlases_to_db(str(atlases_yaml))
 
     conn = duckdb.connect(str(main_db_path), read_only=True)
@@ -1348,23 +1465,18 @@ def seeded_main_db(
 def seeded_analysis_yaml(
     tmp_path: Path,
     seeded_main_db: tuple[Path, str],
-) -> tuple[Path, str]:
-    """Write an analysis YAML whose atlas UIDs match the atlas already in the seeded DB.
-
-    Returns (yaml_path, atlas_uid).  Using the real atlas UID in the YAML means
-    tests that call ``run_project_setup`` followed by ``run_rt_alignment`` do not
-    need to mutate the config object in-memory after loading it.
-    """
-    _, atlas_uid = seeded_main_db
+) -> Path:
+    """Write a tag-based analysis YAML with compounds available in the main DB."""
     p = tmp_path / "test_analysis_seeded.yaml"
-    _write_analysis_yaml(p, atlas_uid)
-    return p, atlas_uid
+    return _write_analysis_yaml(p)
 
 @pytest.fixture()
 def project_config_and_paths(
-    seeded_analysis_yaml: tuple[Path, str],
+    seeded_analysis_yaml: Path,
     metatlas_data_dir: Path,
     project_raw_data_dir: Path,
+    atlas_tsv: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Any, dict]:
     """Return (config, paths) ready for use in TestRunTargetedAnalysis tests.
 
@@ -1375,9 +1487,13 @@ def project_config_and_paths(
     """
     from metatlas2.load_tools import load_metatlas2_config
     from metatlas2.run_targeted_analysis import set_up_paths
+    from metatlas2 import atlas_sheet
 
-    yaml_path, _ = seeded_analysis_yaml
-    config = load_metatlas2_config(str(yaml_path))
+    sheet_rows = pd.read_csv(atlas_tsv, sep="\t").fillna("")
+    sheet_rows["tags"] = "system-test"
+    sheet_rows = sheet_rows.reindex(columns=atlas_sheet.ATLAS_COLUMNS, fill_value="")
+    monkeypatch.setattr(atlas_sheet, "read_centralized_atlas_sheet", lambda: sheet_rows.copy())
+    config = load_metatlas2_config(str(seeded_analysis_yaml))
     paths = set_up_paths(
         config,
         project_name=VALID_PROJECT_NAME,
@@ -1400,7 +1516,7 @@ class TestRunTargetedAnalysis:
 
     def test_set_up_paths_raises_without_env_var(
         self,
-        analysis_yaml: tuple[Path, str, str],
+        analysis_yaml: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """set_up_paths should raise EnvironmentError when METATLAS_DATA_DIR is unset."""
@@ -1408,22 +1524,20 @@ class TestRunTargetedAnalysis:
         from metatlas2.load_tools import load_metatlas2_config
 
         monkeypatch.delenv("METATLAS_DATA_DIR", raising=False)
-        config_path, _ = analysis_yaml
-        config = load_metatlas2_config(str(config_path))
+        config = load_metatlas2_config(str(analysis_yaml))
 
         with pytest.raises(EnvironmentError, match="METATLAS_DATA_DIR"):
             set_up_paths(config, project_name=VALID_PROJECT_NAME, rt_alignment_number=0, analysis_number=0)
 
     def test_set_up_paths_raises_when_raw_data_missing(
         self,
-        analysis_yaml: tuple[Path, str, str],
+        analysis_yaml: Path,
     ) -> None:
         """set_up_paths should raise ValueError when the project raw-data directory is absent."""
         from metatlas2.run_targeted_analysis import set_up_paths
         from metatlas2.load_tools import load_metatlas2_config
 
-        config_path, _ = analysis_yaml
-        config = load_metatlas2_config(str(config_path))
+        config = load_metatlas2_config(str(analysis_yaml))
 
         # Raw data directory does NOT exist yet — no project_raw_data_dir fixture.
         with pytest.raises(ValueError, match="Raw data directory not found"):
@@ -1456,14 +1570,13 @@ class TestRunTargetedAnalysis:
 
     def test_load_metatlas2_config_parses_correctly(
         self,
-        seeded_analysis_yaml: tuple[Path, str],
+        seeded_analysis_yaml: Path,
     ) -> None:
         """load_metatlas2_config should parse the YAML into a Metatlas2Config object."""
         from metatlas2.load_tools import load_metatlas2_config
         from metatlas2.file_and_project_format import normalize_chromatography
 
-        config_path, atlas_uid = seeded_analysis_yaml
-        config = load_metatlas2_config(str(config_path))
+        config = load_metatlas2_config(str(seeded_analysis_yaml))
 
         # rt_alignment_config keys now preserve the YAML case (e.g. "HILIC" not "hilic").
         # Use case-insensitive lookup via normalize_chromatography for the assertion.
@@ -1478,13 +1591,15 @@ class TestRunTargetedAnalysis:
         actual_chrom_key = chrom_keys_lc[expected_chrom_lc]
         rta_block = config.rt_alignment_config[actual_chrom_key]
         assert "ATLAS" in rta_block, "RT_ALIGNMENT block missing ATLAS section"
-        assert "uid" in rta_block["ATLAS"], "RT_ALIGNMENT ATLAS block missing uid field"
-        assert rta_block["ATLAS"]["uid"] == atlas_uid
+        assert rta_block["ATLAS"]["tags"] == ["system-test"]
+        assert rta_block["ATLAS"]["polarity"] == "POS"
+        assert rta_block["ATLAS"]["uid"] is None
         assert "PARAMS" in rta_block, "RT_ALIGNMENT block missing PARAMS section"
 
         assert len(config.targeted_analyses) == 1
         ta = config.targeted_analyses[0]
-        assert ta.atlas_uid == atlas_uid
+        assert ta.tags == ["system-test"]
+        assert ta.atlas_uid is None
         assert ta.polarity.upper() == "POS"
         assert ta.atlas_category.value.upper() == "REF"
         assert ta.atlas_name.upper() == "EMA"
@@ -1527,7 +1642,8 @@ class TestRunTargetedAnalysis:
             RT_ALIGNMENT:
               HILICZ:
                 ATLAS:
-                  uid: some-uid
+                  tags: [QCv7]
+                  polarity: POS
                 PARAMS: {}
         """))
 
@@ -1634,6 +1750,24 @@ class TestRunTargetedAnalysis:
         conn.close()
 
         assert count >= 1, "Config snapshot was not saved to project_config table"
+        from metatlas2.database_interact import load_config_from_db
+
+        stored_config = load_config_from_db(paths["project_db_path"], 0, 0)
+        assert stored_config is not None
+        chromatography = next(iter(config.rt_alignment_config))
+        assert (
+            stored_config.rt_alignment_config[chromatography]["ATLAS"]["tags"]
+            == config.rt_alignment_config[chromatography]["ATLAS"]["tags"]
+        )
+        assert (
+            stored_config.rt_alignment_config[chromatography]["ATLAS"]["uid"]
+            == config.rt_alignment_config[chromatography]["ATLAS"]["uid"]
+        )
+        assert stored_config.targeted_analyses[0].tags == config.targeted_analyses[0].tags
+        assert stored_config.targeted_analyses[0].atlas_uid == config.targeted_analyses[0].atlas_uid
+        assert stored_config.rt_alignment_config[chromatography]["ATLAS"]["uid"]
+        assert stored_config.targeted_analyses[0].atlas_uid
+        assert stored_config.rt_alignment_config[chromatography]["ATLAS"]["uid"] != stored_config.targeted_analyses[0].atlas_uid
 
     def test_run_project_setup_idempotent_when_db_exists(
         self,
@@ -1740,9 +1874,7 @@ class TestRunTargetedAnalysis:
     ) -> None:
         """With --skip-rt-align the RT_ALIGNED atlases should be registered without running the model.
 
-        The ``seeded_analysis_yaml`` fixture writes the YAML with the real atlas UID
-        already embedded, so ``project_config_and_paths`` loads a config that already
-        points at the seeded atlas.  No in-memory config mutation is required.
+        The fixture supplies synthetic sheet rows without Google Sheets credentials.
         """
         import duckdb
         from metatlas2.workflows import run_project_setup, run_rt_alignment
@@ -1798,7 +1930,7 @@ class TestRunTargetedAnalysis:
         self,
         tmp_path: Path,
         project_config_and_paths: tuple[Any, dict],
-        seeded_analysis_yaml: tuple[Path, str],
+        seeded_analysis_yaml: Path,
         monkeypatch: pytest.MonkeyPatch,
         metatlas_data_dir: Path,
     ) -> None:
@@ -1807,7 +1939,6 @@ class TestRunTargetedAnalysis:
         from metatlas2.run_targeted_analysis import generate_slurm_script
 
         config, paths = project_config_and_paths
-        config_path, _ = seeded_analysis_yaml
         out_script = tmp_path / "test_slurm.sh"
 
         args = argparse.Namespace(
@@ -1817,7 +1948,7 @@ class TestRunTargetedAnalysis:
             cpus=8,
             mem="128G",
             time="00:30:00",
-            config=str(config_path),
+            config=str(seeded_analysis_yaml),
             project=VALID_PROJECT_NAME,
             rt_align_num=0,
             analysis_num=0,

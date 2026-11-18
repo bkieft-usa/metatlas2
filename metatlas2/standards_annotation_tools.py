@@ -1,21 +1,3 @@
-"""
-metatlas2/standards_annotation_tools.py
-
-Core logic for the standards-annotation workflow:
-  - Loading and validating the config YAML
-  - Expanding the input compound table to one row per (compound, file, adduct)
-  - Building the duck-typed extraction wrapper (no Atlas object)
-  - Running data extraction via the existing extract_data_from_h5 engine
-  - Building the TIC from the already-extracted MS1 data
-  - Detecting MS1 peaks and associating the best MS2 scan per peak
-
-Key identity design:
-  compound_uid — stable uuid5 per (compound_name, adduct); used for grouping
-                 in the DB and GUI.
-  mz_rt_uid    — random uuid4 per (compound_name, adduct, file); used as the
-                 extraction engine's join key (unchanged from the engine's
-                 perspective).
-"""
 from __future__ import annotations
 
 import glob
@@ -23,6 +5,7 @@ import os
 import uuid
 import numpy as np
 import pandas as pd
+import json
 from pathlib import Path
 from typing import Any
 
@@ -41,8 +24,7 @@ from metatlas2.chem_info import (
 
 logger = lcf.get_logger("standards_annotation_tools")
 
-# Namespace for deterministic compound_uid generation (uuid5)
-_COMPOUND_UID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # uuid.NAMESPACE_URL
+STANDARD_CE_LABELS = ("CE102040", "CE205060")
 
 
 def _make_compound_uid(compound_name: str, adduct: str) -> str:
@@ -58,6 +40,7 @@ def _make_compound_uid(compound_name: str, adduct: str) -> str:
     Returns:
         32-character hex string (UUID without hyphens).
     """
+    _COMPOUND_UID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # uuid.NAMESPACE_URL
     return str(uuid.uuid5(_COMPOUND_UID_NAMESPACE, f"{compound_name}|{adduct}")).replace("-", "")
 
 
@@ -137,7 +120,7 @@ def _find_h5_files_for_row(
                 fields.get("chromatography", "")
             ),
             "file_format": "h5",
-            "file_type": lrt._classify_file_type(fields),
+            "file_type": lrt._classify_file_type(fields, fields.get("owner", "")),
         })
 
     logger.info(
@@ -150,8 +133,9 @@ def _find_h5_files_for_row(
 def build_standards_lcmsrun_table(
     config: dict[str, Any],
     raw_data_root: str | None = None,
+    output_dir: str | None = None
 ) -> pd.DataFrame:
-    """Build the expanded compound × file × adduct table.
+    """Build the expanded compound x file x adduct table.
 
     Reads the input CSV, resolves chemical structure info, computes exact
     masses, globs matching h5 files, and expands to one row per
@@ -175,7 +159,6 @@ def build_standards_lcmsrun_table(
         ``file_path``, ``filename``, ``annotation_notes``.
     """
     project = config["project"]
-    extraction = config["extraction"]
     include_polarities = project.get("include_polarities", ["POS", "NEG"])
     include_adducts = project.get("include_adducts", DEFAULT_ADDUCTS)
 
@@ -338,7 +321,7 @@ def build_standards_lcmsrun_table(
                 "rt_max":                rt_max,
                 "file_path":             str(row.get("file_path", "")),
                 "filename":              _filename,
-                "file_type":             str(row.get("file_type", "refstd")),
+                "file_type":             str(row.get("file_type", "")),
                 "annotation_notes":      str(row.get("annotation_notes", "")),
                 "collision_energy_label": ce_label,
             })
@@ -353,6 +336,12 @@ def build_standards_lcmsrun_table(
         f"{result['adduct'].nunique()} unique adducts, "
         f"{result['file_path'].nunique()} unique files)"
     )
+
+    if output_dir is not None:
+        expanded_table_path = os.path.join(output_dir, "full_search_table.csv")
+        result.to_csv(expanded_table_path, index=False)
+        logger.info(f"Expanded table saved to {expanded_table_path}")
+
     return result
 
 
@@ -377,15 +366,12 @@ def _build_lcmsruns_list(expanded_df: pd.DataFrame) -> list:
         seen.add(fp)
         try:
             fields = fpf.parse_file_name(os.path.basename(fp))
-            ms_level = fields.get("ms_level", "ms1").lower()
-            polarity = fields.get("polarity", "pos").lower()
+            ms_level = fields.get("ms_level", "").lower()
+            polarity = fields.get("polarity", "").lower()
             chrom = fpf.canonical_chromatography(fields.get("chromatography", ""))
-            file_type = lrt._classify_file_type(fields)
+            file_type = lrt._classify_file_type(fields, fields.get("owner", ""))
         except Exception:
-            ms_level = "ms1"
-            polarity = str(row.get("polarity", "pos")).lower()
-            chrom = str(row.get("chromatography", ""))
-            file_type = "refstd"
+            raise ValueError(f"Could not parse file name '{fp}'")
 
         runs.append(
             LCMSRun(
@@ -480,12 +466,7 @@ def _frag_list(v) -> list[float]:
 def pick_best_ms2_scan(scans: pd.DataFrame, rt_peak: float) -> pd.Series | None:
     """Return the MS2 scan closest in RT to ``rt_peak``.
 
-    Scans without a valid ``scan_rt`` are ignored.  Scans lacking fragment
-    data are only used if no scan with fragments exists (an association
-    without spectra is useless), so this degrades gracefully:
-    closest-with-frags → closest-any → None.
-
-    Returns None if *scans* is empty or has no valid scan RTs.
+    Scans without a valid ``scan_rt`` are ignored.
     """
     if scans is None or scans.empty or "scan_rt" not in scans.columns:
         return None
@@ -494,48 +475,86 @@ def pick_best_ms2_scan(scans: pd.DataFrame, rt_peak: float) -> pd.Series | None:
     if cand.empty:
         return None
     cand["_rt_diff"] = (pd.to_numeric(cand["scan_rt"], errors="coerce") - float(rt_peak)).abs()
-    with_frags = cand[
-        cand.apply(
-            lambda r: bool(_frag_list(r.get("frag_mzs"))) and bool(_frag_list(r.get("frag_ints"))),
-            axis=1,
-        )
+    return cand.sort_values("_rt_diff", kind="stable").iloc[0]
+
+
+def associate_peak_ms2(peak: dict, expanded_table: pd.DataFrame, ms2_df: pd.DataFrame) -> list[dict]:
+    """Associate the nearest usable MS2 scan from each file for a peak."""
+    targets = expanded_table[
+        (expanded_table["compound_name"] == peak["compound_name"])
+        & (expanded_table["chromatography"] == peak["chromatography"])
+        & (expanded_table["polarity"] == peak["polarity"])
+        & (expanded_table["adduct"] == peak["adduct"])
     ]
-    pool = with_frags if not with_frags.empty else cand
-    return pool.sort_values("_rt_diff", kind="stable").iloc[0]
+    associations = []
+    for _, target in targets.iterrows():
+        uid = str(target["mz_rt_uid"])
+        filename = str(target["filename"])
+        scans = ms2_df[
+            (ms2_df["mz_rt_uid"] == uid) & (ms2_df["filename"] == filename)
+        ] if not ms2_df.empty else pd.DataFrame()
+        scan = pick_best_ms2_scan(scans, peak["rt_peak"])
+        if scan is None:
+            logger.warning("No usable MS2 scan for %s in %s", peak["peak_uid"], filename)
+            continue
+        if not _frag_list(scan.get("frag_mzs")) or not _frag_list(scan.get("frag_ints")):
+            logger.warning("Closest MS2 scan for %s in %s has no fragment data", peak["peak_uid"], filename)
+        precursor_col = "precursor_MZ" if "precursor_MZ" in scans.columns else "precursor_mz"
+        associations.append({
+            "peak_uid": peak["peak_uid"],
+            "scan_rt": float(scan["scan_rt"]),
+            "precursor_mz": float(scan.get(precursor_col, float("nan"))),
+            "precursor_intensity": float(scan.get("precursor_intensity", float("nan"))),
+            "collision_energy": float(scan.get("collision_energy", float("nan"))),
+            "frag_mzs": _frag_list(scan["frag_mzs"]),
+            "frag_ints": _frag_list(scan["frag_ints"]),
+            "filename": filename,
+        })
+    return associations
+
 
 def detect_and_save_peaks(
     data: "wfo.StandardsAnnotationData",
     peak_params: dict | None = None,
-    top_n_ms2: int = 5,
 ) -> None:
-    """For each detected peak, associate the MS2 scan from the same file closest in RT (preferring scans with fragment data).
-    """
-    import warnings
-    from scipy.ndimage import gaussian_filter1d
-    from scipy.signal import find_peaks, peak_widths
-    try:
-        from scipy.signal._peak_finding_utils import PeakPropertyWarning
-    except ImportError:
-        PeakPropertyWarning = RuntimeWarning
+    """Select one MS1 file per compound group and associate MS2 scans from each file.
 
-    from metatlas2.standards_annotation_db import (
-        save_peaks_to_db,
-        save_peak_ms2_to_db,
-    )
+    Detection strategy: candidates are found on lightly smoothed data (noise-robust,
+    stable apexes), then each candidate's base window is re-scanned on RAW data so
+    closely spaced doublets are not collapsed onto the saddle. Reported RT/intensity
+    always come from raw data.
+    """
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import find_peaks
+
+    from metatlas2.standards_annotation_db import save_detected_peaks_to_db
 
     if peak_params is None:
         peak_params = {}
 
-    gaussian_sigma = float(peak_params.get("gaussian_sigma", 2.0))
+    gaussian_sigma = float(peak_params.get("gaussian_sigma", 1.0))
     min_height_frac = float(peak_params.get("min_height_fraction", 0.15))
-    min_prominence_frac = float(peak_params.get("min_prominence_fraction", 0.10))
-    min_distance = int(peak_params.get("min_distance", 5))
-    min_width = float(peak_params.get("min_width", 0))
+    min_prominence_frac = float(peak_params.get("min_prominence_fraction", 0.03))
+    min_distance = int(peak_params.get("min_distance", 2))
+    min_width = float(peak_params.get("min_width", 2))
+    prominence_snr = float(peak_params.get("prominence_snr", 5.0))
+
+    RT_PAD_MIN = 0.5  # hard-coded: rt_min/rt_max = apex +/- 0.5 min
+    APEX_REFINE = 2   # scan points: raw-apex search radius around a smoothed apex
 
     ms1_df = data.ms1_df
     ms2_df = data.ms2_df
     expanded_table = data.expanded_table
     db_path = data.project_db_path
+
+    group_cols = ["compound_name", "chromatography", "polarity"]
+    groups = list(expanded_table.groupby(group_cols, sort=True))
+    for group, targets in groups:
+        filenames = sorted(targets["filename"].astype(str).unique())
+        if len(filenames) > 2:
+            raise ValueError(f"More than two files for {group}: {filenames}")
+        if len(filenames) == 1:
+            logger.warning("Only one file for %s: %s", group, filenames[0])
 
     if ms1_df is None or ms1_df.empty:
         logger.warning("No MS1 data available for peak detection.")
@@ -559,22 +578,9 @@ def detect_and_save_peaks(
             continue
         uid_to_meta[uid] = row.to_dict()
 
-    # Key: (mz_rt_uid, filename) → sub-DataFrame of MS2 scans for that target+file.
-    ms2_index: dict[tuple[str, str], pd.DataFrame] = {}
-    if ms2_df is not None and not ms2_df.empty:
-        if "filename" not in ms2_df.columns:
-            logger.warning(
-                "ms2_df is missing 'filename' column — MS2 associations will be skipped. "
-                "This indicates an extraction engine issue."
-            )
-        else:
-            for (uid, fn), grp in ms2_df.groupby(["mz_rt_uid", "filename"]):
-                ms2_index[(str(uid), str(fn))] = grp.reset_index(drop=True)
-
     all_peaks: list[dict] = []
-    all_ms2_assoc: list[dict] = []
 
-    # Process each MS1 row (one per mz_rt_uid × filename)
+    # Process each MS1 row (one per mz_rt_uid x filename)
     for _, ms1_row in ms1_df.iterrows():
         uid = str(ms1_row.get("mz_rt_uid", ""))
         filename = str(ms1_row.get("filename", ""))
@@ -595,51 +601,76 @@ def detect_and_save_peaks(
         int_arr = np.asarray(ints, dtype=np.float64)
         mz_arr = np.asarray(mzs, dtype=np.float64) if mzs is not None else np.array([])
 
+        # Robust noise estimate: for white noise, std(diff) = noise*sqrt(2), and
+        # 1.4826*MAD ≈ std. If the trace is mostly zeros this underestimates and
+        # gracefully falls back to the fraction-of-max floor below.
+        diffs = np.diff(int_arr)
+        noise = (
+            1.4826 * float(np.median(np.abs(diffs))) / np.sqrt(2.0)
+            if diffs.size
+            else 0.0
+        )
+
         smoothed = gaussian_filter1d(int_arr, sigma=gaussian_sigma)
         max_int = float(np.max(smoothed))
         if max_int <= 0:
             continue
 
+        # Prominence floor: noise-referenced OR fraction-of-max, whichever is larger.
+        prom_floor = max(noise * prominence_snr, max_int * min_prominence_frac)
+        height_thr = max_int * min_height_frac
+
         find_peaks_kwargs: dict = dict(
-            height=max_int * min_height_frac,
-            prominence=max_int * min_prominence_frac,
+            height=height_thr,
+            prominence=prom_floor,
             distance=min_distance,
         )
         if min_width > 0:
             find_peaks_kwargs["width"] = min_width
 
-        peaks_idx, _ = find_peaks(smoothed, **find_peaks_kwargs)
+        # Pass 1: candidates on smoothed data.
+        peaks_idx, props = find_peaks(smoothed, **find_peaks_kwargs)
         if peaks_idx.size == 0:
             continue
 
-        # Sort peaks ascending by RT for peak number assignment
+        # Pass 2: re-detect on RAW data inside each candidate's base window.
+        # A doublet merged by smoothing appears as two raw local maxima here.
+        refined: list[int] = []
+        for p, lb, rb in zip(peaks_idx, props["left_bases"], props["right_bases"]):
+            p, lb, rb = int(p), int(lb), int(rb)
+            seg = int_arr[lb : rb + 1]
+            if seg.size >= 3:
+                sub, _ = find_peaks(
+                    seg,
+                    height=height_thr,
+                    prominence=prom_floor,
+                    distance=min_distance,
+                )
+                if sub.size > 0:
+                    # Raw sub-peak(s) found — use them directly (they are already
+                    # exact raw local maxima; no further refinement needed).
+                    refined.extend((lb + sub).tolist())
+                    continue
+            # No raw sub-peak passed the thresholds: snap the smoothed apex to the
+            # raw maximum within +/- APEX_REFINE points.
+            lo = max(0, p - APEX_REFINE)
+            hi = min(len(int_arr), p + APEX_REFINE + 1)
+            refined.append(lo + int(np.argmax(int_arr[lo:hi])))
+
+        # Overlapping base windows can re-detect the same raw apex; unique() collapses
+        # those duplicates.
+        peaks_idx = np.unique(np.asarray(refined, dtype=np.int64))
         peaks_idx_sorted = peaks_idx[np.argsort(rt_arr[peaks_idx])]
 
         file_peaks: list[dict] = []
         for peak_num, peak_idx in enumerate(peaks_idx_sorted, start=1):
-            rt_peak_smoothed = float(rt_arr[peak_idx])
-            snap_i = int(np.argmin(np.abs(rt_arr - rt_peak_smoothed)))
-            rt_peak = float(rt_arr[snap_i])
-            peak_intensity = float(int_arr[snap_i])
+            # All reported values come from raw data at a raw local maximum.
+            rt_peak = float(rt_arr[peak_idx])
+            peak_intensity = float(int_arr[peak_idx])
 
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", PeakPropertyWarning)
-                    _, _, left_ips, right_ips = peak_widths(
-                        smoothed, [peak_idx], rel_height=0.5
-                    )
-                left_idx = max(0, int(np.floor(left_ips[0])))
-                right_idx = min(len(rt_arr) - 1, int(np.ceil(right_ips[0])))
-            except Exception:
-                left_idx = max(0, peak_idx - 5)
-                right_idx = min(len(rt_arr) - 1, peak_idx + 5)
-
-            rt_min = float(rt_arr[left_idx])
-            rt_max = float(rt_arr[right_idx])
-            width = rt_max - rt_min
-            pad = max(0.05, width * 0.05)
-            rt_min = max(float(rt_arr[0]), rt_min - pad)
-            rt_max = min(float(rt_arr[-1]), rt_max + pad)
+            # Hard-coded +/- 0.5 min window, clamped to the file's RT range.
+            rt_min = max(float(rt_arr[0]), rt_peak - RT_PAD_MIN)
+            rt_max = min(float(rt_arr[-1]), rt_peak + RT_PAD_MIN)
 
             # Compute mz_observed from scan points within the peak RT window
             if mz_arr.size > 0:
@@ -673,7 +704,7 @@ def detect_and_save_peaks(
                 "rt_peak":                rt_peak,
                 "rt_min":                 rt_min,
                 "rt_max":                 rt_max,
-                "peak_intensity":          peak_intensity,
+                "peak_intensity":         peak_intensity,
                 "mz_observed":            mz_observed,
                 "peak_num":               peak_num,
                 "is_manual":              False,
@@ -682,44 +713,35 @@ def detect_and_save_peaks(
 
         all_peaks.extend(file_peaks)
 
-        file_ms2 = ms2_index.get((uid, filename))
-        if file_ms2 is None or file_ms2.empty:
-            continue
-
-        precursor_col = (
-            "precursor_MZ" if "precursor_MZ" in file_ms2.columns else "precursor_mz"
-        )
-
-        for peak in file_peaks:
-            scan = pick_best_ms2_scan(file_ms2, peak["rt_peak"])
-            if scan is None:
-                logger.warning(
-                    f"MS2: no usable scans for uid={uid}, file={filename}, "
-                    f"RT={peak['rt_peak']:.4f}"
-                )
-                continue
-            frag_mzs = _frag_list(scan.get("frag_mzs"))
-            frag_ints = _frag_list(scan.get("frag_ints"))
-            if not frag_mzs or not frag_ints:
-                logger.warning(
-                    f"MS2: closest scan (RT={float(scan['scan_rt']):.4f}) for uid={uid} "
-                    "has no fragment data — no association saved."
-                )
-                continue
-            all_ms2_assoc.append({
-                "peak_uid":            peak["peak_uid"],
-                "scan_rt":             float(scan.get("scan_rt", float("nan"))),
-                "precursor_mz":        float(scan.get(precursor_col, float("nan"))),
-                "precursor_intensity": float(scan.get("precursor_intensity", float("nan"))),
-                "collision_energy":    float(scan.get("collision_energy", float("nan"))),
-                "frag_mzs":            frag_mzs,
-                "frag_ints":           frag_ints,
-                "filename":            filename,
-            })
+    peaks_by_group: dict[tuple, list[dict]] = {}
+    for peak in all_peaks:
+        peaks_by_group.setdefault(tuple(peak[c] for c in group_cols), []).append(peak)
+    sources = []
+    for group, targets in groups:
+        filenames = sorted(targets["filename"].astype(str).unique())
+        group_peaks = peaks_by_group.get(group, [])
+        if group_peaks:
+            winner = min(group_peaks, key=lambda p: (-p["peak_intensity"], p["filename"]))["filename"]
+        else:
+            raw_max = {}
+            for filename in filenames:
+                uids = targets.loc[targets["filename"] == filename, "mz_rt_uid"]
+                rows = ms1_df[ms1_df["mz_rt_uid"].isin(uids)]
+                values = [float(np.max(v)) for v in rows["spec_ints"] if v is not None and len(v)]
+                raw_max[filename] = max(values, default=float("-inf"))
+            if all(value == float("-inf") for value in raw_max.values()):
+                raise ValueError(f"No MS1 intensity data available for {group}: {filenames}")
+            winner = min(filenames, key=lambda f: (-raw_max[f], f))
+            logger.warning("No peaks detected for %s; choosing MS1 file %s by raw intensity", group, winner)
+        sources.append((*group, winner))
+    source_by_group = {tuple(row[:3]): row[3] for row in sources}
+    all_peaks = [
+        p for p in all_peaks
+        if p["filename"] == source_by_group[tuple(p[c] for c in group_cols)]
+    ]
 
     seen_peak_keys: set[tuple] = set()
     deduped_peaks: list[dict] = []
-    deduped_peak_uids: set[str] = set()
 
     for peak in all_peaks:
         key = (
@@ -732,10 +754,23 @@ def detect_and_save_peaks(
             continue
         seen_peak_keys.add(key)
         deduped_peaks.append(peak)
-        deduped_peak_uids.add(peak["peak_uid"])
 
-    # Keep only MS2 associations for deduplicated peaks
-    deduped_ms2 = [r for r in all_ms2_assoc if r["peak_uid"] in deduped_peak_uids]
+    association_cols = group_cols + ["adduct"]
+    target_groups = dict(tuple(expanded_table.groupby(association_cols, sort=False)))
+    ms2_chunks: dict[tuple, list[pd.DataFrame]] = {}
+    if ms2_df is not None and not ms2_df.empty:
+        for uid, scans in ms2_df.groupby("mz_rt_uid", sort=False):
+            meta = uid_to_meta.get(str(uid))
+            if meta is not None:
+                key = tuple(meta[c] for c in association_cols)
+                ms2_chunks.setdefault(key, []).append(scans)
+    ms2_groups = {key: pd.concat(chunks, ignore_index=True) for key, chunks in ms2_chunks.items()}
+    deduped_ms2 = []
+    for peak in deduped_peaks:
+        key = tuple(peak[c] for c in association_cols)
+        deduped_ms2.extend(associate_peak_ms2(
+            peak, target_groups[key], ms2_groups.get(key, pd.DataFrame())
+        ))
 
     n_removed = len(all_peaks) - len(deduped_peaks)
     if n_removed > 0:
@@ -746,10 +781,14 @@ def detect_and_save_peaks(
 
     logger.info(
         f"Peak detection complete: {len(deduped_peaks)} peaks detected, "
-        f"{len(deduped_ms2)} peaks have MS2 associations"
+        f"{len(deduped_ms2)} MS2 associations"
     )
-    save_peaks_to_db(db_path, deduped_peaks)
-    save_peak_ms2_to_db(db_path, deduped_ms2)
+    save_detected_peaks_to_db(db_path, deduped_peaks, deduped_ms2, sources)
+    selected_uids = {
+        str(row["mz_rt_uid"]) for _, row in expanded_table.iterrows()
+        if str(row["filename"]) == source_by_group[tuple(row[c] for c in group_cols)]
+    }
+    data.ms1_df = ms1_df[ms1_df["mz_rt_uid"].astype(str).isin(selected_uids)].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -791,7 +830,7 @@ def run_standards_extraction(
         load_injbl_ms1,
     )
 
-    expanded_table = build_standards_lcmsrun_table(config, raw_data_root)
+    expanded_table = build_standards_lcmsrun_table(config, raw_data_root, output_dir=os.path.dirname(db_path))
     logger.info(
         f"Running extraction on {len(expanded_table)} compound x adduct x file rows"
     )
@@ -811,10 +850,6 @@ def run_standards_extraction(
             f"{group_df['file_path'].nunique()} files)"
         )
 
-        _POL_MAP = {"POS": "positive", "NEG": "negative"}
-        h5_polarity = _POL_MAP.get(polarity.upper(), "positive")
-
-        atlas_wrapper = wfo.StandardsAnnotationAtlas(group_df, h5_polarity)
         lcmsruns = _build_lcmsruns_list(group_df)
 
         if not lcmsruns:
@@ -837,7 +872,7 @@ def run_standards_extraction(
         }
 
         sa_auto_id_obj = wfo.StandardsAnnotationAutoIdentification(
-            standards_annotation_atlas_obj=atlas_wrapper,
+            standards_annotation_atlas_df=group_df,
             standards_annotation_lcmsruns=lcmsruns,
             standards_annotation_params=standards_annotation_params,
         )
@@ -870,16 +905,6 @@ def run_standards_extraction(
         else pd.DataFrame()
     )
 
-    if not final_ms2.empty and "in_feature" in final_ms2.columns:
-        n_before = len(final_ms2)
-        final_ms2 = final_ms2[final_ms2["in_feature"].astype(bool)].reset_index(drop=True)
-        n_after = len(final_ms2)
-        if n_before != n_after:
-            logger.info(
-                f"Filtered MS2 to in-feature scans: {n_before} -> {n_after} rows "
-                f"({n_before - n_after} out-of-window scans removed)"
-            )
-
     logger.info(
         f"Extraction complete: {len(final_ms1)} MS1 rows, {len(final_ms2)} MS2 rows"
     )
@@ -897,11 +922,7 @@ def run_standards_extraction(
 
     save_extraction_to_db(db_path, data)
 
-    # ── InjBl background extraction ───────────────────────────────────────────
-    # Find the closest injection blank file for each target sample file and
-    # extract EIC data for all compound+adduct m/z windows.  This data is
-    # displayed in the GUI alongside the target EIC so the analyst can assess
-    # whether any signal in the target EIC is background.
+    # InjBl background extraction
     if not is_injbl_extraction_complete(db_path):
         logger.info("Searching for InjBl files and extracting background EICs...")
         injbl_map = find_injbl_files_for_targets(expanded_table, raw_data_root)
@@ -929,8 +950,7 @@ def run_standards_extraction(
     if not is_peaks_complete(db_path):
         logger.info("Detecting MS1 peaks and associating best MS2 scans...")
         peak_params = extraction_cfg.get("peak_finding", {})
-        top_n_ms2 = int(extraction_cfg.get("ms2_top_n_per_peak", 5))
-        detect_and_save_peaks(data, peak_params=peak_params, top_n_ms2=top_n_ms2)
+        detect_and_save_peaks(data, peak_params=peak_params)
     else:
         logger.info("Peak detection already complete; skipping.")
 
@@ -982,8 +1002,7 @@ def find_injbl_files_for_targets(
 
     output_rows: list[dict] = []
 
-    # Group by (project_dir, polarity, chromatography)
-    # project_dir is the parent directory of file_path
+    # Group by (project_dir, polarity, chromatography) - project_dir is the parent directory of file_path
     expanded_table = expanded_table.copy()
     expanded_table["_project_dir"] = expanded_table["file_path"].apply(
         lambda fp: str(Path(fp).parent)
@@ -1008,12 +1027,12 @@ def find_injbl_files_for_targets(
                 fields = fpf.parse_file_name(h5_path.name)
             except Exception:
                 continue
-            if lrt._classify_file_type(fields) != "injbl":
+            if lrt._classify_file_type(fields, fields.get("owner", "")) != "injbl":
                 continue
             #if fields.get("polarity", "").upper() != polarity.upper():
             #    continue
-            #if fpf.canonical_chromatography(fields.get("chromatography", "")) != chromatography:
-            #    continue
+            if fpf.canonical_chromatography(fields.get("chromatography", "")) != chromatography:
+                continue
             rn = _run_number_int(h5_path.name)
             if rn is None:
                 continue
@@ -1107,9 +1126,6 @@ def _extract_injbl_ms1(
 
     group_cols = ["polarity", "chromatography"]
     for (polarity, chromatography), group_df in injbl_map.groupby(group_cols):
-        # Build a deduplicated atlas: one row per (compound_uid, adduct).
-        # We use compound_uid as the join key so all InjBl files share the
-        # same atlas entries (no per-file mz_rt_uid needed for extraction).
         et_group = expanded_table[
             (expanded_table["polarity"] == polarity) &
             (expanded_table["chromatography"] == chromatography)
@@ -1121,22 +1137,13 @@ def _extract_injbl_ms1(
             )
             continue
 
-        # Deduplicate: one row per (compound_uid, adduct) — use compound_uid
-        # as the mz_rt_uid for the extraction atlas so there are no per-file
-        # duplicates.
         dedup = (
             et_group
             .drop_duplicates(subset=["compound_uid", "adduct"])
             .copy()
             .reset_index(drop=True)
         )
-        # Temporarily replace mz_rt_uid with compound_uid for the atlas so
-        # the extraction engine uses compound_uid as the join key.
         dedup["mz_rt_uid"] = dedup["compound_uid"]
-
-        _POL_MAP = {"POS": "positive", "NEG": "negative"}
-        h5_polarity = _POL_MAP.get(polarity.upper(), "positive")
-        atlas_wrapper = wfo.StandardsAnnotationAtlas(dedup, h5_polarity)
 
         # Build LCMSRun list from unique InjBl file paths in this group
         unique_injbl = group_df[["injbl_filename", "injbl_file_path"]].drop_duplicates()
@@ -1149,7 +1156,7 @@ def _extract_injbl_ms1(
                 ms_level = fields.get("ms_level", "ms1").lower()
                 pol = fields.get("polarity", "pos").lower()
                 chrom = fpf.canonical_chromatography(fields.get("chromatography", ""))
-                file_type = lrt._classify_file_type(fields)
+                file_type = lrt._classify_file_type(fields, fields.get("owner", ""))
             except Exception:
                 logger.error(
                     f"InjBl filename '{fn}' could not be parsed. "
@@ -1185,13 +1192,11 @@ def _extract_injbl_ms1(
             "max_workers": max_workers,
         }
 
-        # per_file_atlas=False: InjBl files are not in expanded_table so the
-        # extraction engine must NOT filter the atlas per-file.
         sa_obj = wfo.StandardsAnnotationAutoIdentification(
-            standards_annotation_atlas_obj=atlas_wrapper,
+            standards_annotation_atlas_df=dedup,
             standards_annotation_lcmsruns=injbl_runs,
             standards_annotation_params=params,
-            per_file_atlas=False,
+            per_file_atlas=False, # InjBl files are not in expanded_table so the extraction engine must NOT filter the atlas per-file.
         )
 
         try:

@@ -1,42 +1,12 @@
-"""
-metatlas2/standards_annotation_summary.py
-
-Post-annotation summary outputs for the standards-annotation workflow:
-  - Per-compound PDF figures (EIC + TIC + MS2 panels + adduct legend + structure)
-  - Summary Excel table (one row per selected adduct+peak)
-  - Atlas CSV for add-atlases
-  - MSMS refs .tab for add-msms-refs
-
-All data is read from the project DuckDB via:
-  - load_selected_peaks_with_ms2() → sa_analyst_selections JOIN sa_peaks JOIN
-    sa_compounds LEFT JOIN sa_peak_ms2
-
-Column names from load_selected_peaks_with_ms2():
-  From sa_peaks:     peak_uid, compound_name, inchi_key, adduct, polarity,
-                     chromatography, filename, mz_rt_uid, rt_peak, rt_min,
-                     rt_max, peak_intensity, mz_observed, peak_num, is_manual
-  From sa_compounds: mz_theoretical, smiles, inchi, annotation_notes
-  From sa_analyst_selections: analyst_notes
-  From sa_peak_ms2:  ms2_scan_rt, ms2_precursor_mz, ms2_precursor_intensity,
-                     ms2_collision_energy, ms2_frag_mzs, ms2_frag_ints,
-                     ms2_filename
-
-Figure layout (per chrom+pol combination, saved to
-outputs/summary_figures/{chrom}/{pol}/):
-  - Row 0+: MS2 subplots (one per selected adduct peak; blank if no MS2;
-             ≤4 per row; section omitted entirely if 0 panels)
-  - EIC row: EIC (linear) | EIC (log) | Adduct legend | Structure + InChIKey
-  - TIC row: TIC (full extracted range, no clipping)
-  - Table row: Selected peaks summary (bolded header; ppm diff col; Run # and
-               Filename columns included — no separate Source Files row)
-"""
 from __future__ import annotations
 
 import math
+import json
 import os
 import re
 import textwrap
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +21,11 @@ from tqdm.auto import tqdm
 
 import metatlas2.logging_config as lcf
 import metatlas2.standards_annotation_db as sadb
+import metatlas2.file_and_project_format as fpf
+from metatlas2.standards_annotation_tools import STANDARD_CE_LABELS
+from metatlas2.standards_annotation_review import (
+    fix_peak_labels, review_directory, validate_selected_peaks,
+)
 from metatlas2.utils import should_disable_tqdm, safe_float, safe_isnan
 
 logger = lcf.get_logger("standards_annotation_summary")
@@ -107,10 +82,7 @@ def _to_pylist(val) -> list:
             return []
     return []
 
-
-# ---------------------------------------------------------------------------
 # EIC plot
-# ---------------------------------------------------------------------------
 
 def _plot_sa_eic(
     ax,
@@ -136,6 +108,10 @@ def _plot_sa_eic(
             rt_peak = safe_float(sel_row.get("rt_peak"))
             if not safe_isnan(rt_peak):
                 selected_rts.append(rt_peak)
+            for scan in sel_row["ms2_scans"]:
+                scan_rt = safe_float(scan["scan_rt"])
+                if not safe_isnan(scan_rt):
+                    selected_rts.append(scan_rt)
 
     x_min = (min(selected_rts) - 1.0) if selected_rts else None
     x_max = (max(selected_rts) + 1.0) if selected_rts else None
@@ -192,6 +168,20 @@ def _plot_sa_eic(
                         color=color, zorder=6,
                         path_effects=[pe.withStroke(linewidth=2, foreground="white")],
                     )
+                peak_ms1 = adduct_ms1[adduct_ms1["mz_rt_uid"] == sel_row["mz_rt_uid"]]
+                if len(peak_ms1) != 1:
+                    raise ValueError(f"Expected one MS1 EIC for peak {sel_row['peak_uid']}")
+                rts = np.asarray(_to_pylist(peak_ms1.iloc[0]["spec_rts"]), dtype=float)
+                ints = np.asarray(_to_pylist(peak_ms1.iloc[0]["spec_ints"]), dtype=float)
+                if len(rts) == 0 or len(rts) != len(ints):
+                    raise ValueError(f"Invalid MS1 EIC for peak {sel_row['peak_uid']}")
+                for scan in sel_row["ms2_scans"]:
+                    scan_rt = safe_float(scan["scan_rt"])
+                    if safe_isnan(scan_rt):
+                        continue
+                    intensity = float(ints[np.argmin(np.abs(rts - scan_rt))])
+                    y = np.log10(max(intensity, 1)) if log_scale else intensity
+                    ax.plot(scan_rt, y, "^", color=color, markersize=8, zorder=5)
 
     if x_min is not None:
         ax.set_xlim(x_min, x_max)
@@ -204,10 +194,7 @@ def _plot_sa_eic(
     for spine in ax.spines.values():
         spine.set_linewidth(1.0)
 
-
-# ---------------------------------------------------------------------------
 # TIC plot
-# ---------------------------------------------------------------------------
 
 def _plot_tic(
     ax,
@@ -232,10 +219,6 @@ def _plot_tic(
     for spine in ax.spines.values():
         spine.set_linewidth(0.8)
 
-
-# ---------------------------------------------------------------------------
-# Adduct color legend
-# ---------------------------------------------------------------------------
 
 def _plot_adduct_legend(
     ax,
@@ -278,20 +261,6 @@ def _plot_adduct_legend(
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
-
-# ---------------------------------------------------------------------------
-# Structure panel
-# ---------------------------------------------------------------------------
-
-def _plot_structure_with_inchikey(ax, smiles, inchi, inchi_key, compound_name, size=400):
-    """Draw molecular structure (delegates to _plot_structure which includes InChIKey)."""
-    _plot_structure(ax, smiles, inchi, inchi_key, compound_name=compound_name, size=size)
-
-
-# ---------------------------------------------------------------------------
-# Per-compound figure worker
-# ---------------------------------------------------------------------------
-
 def _sa_figure_worker(kwargs: dict) -> str:
     """Worker: generate and save one per-compound summary PDF.
 
@@ -299,8 +268,7 @@ def _sa_figure_worker(kwargs: dict) -> str:
     and have columns: ``compound_name``, ``adduct``, ``polarity``,
     ``chromatography``, ``rt_peak``, ``rt_min``, ``rt_max``,
     ``peak_intensity``, ``mz_observed``, ``mz_theoretical``,
-    ``analyst_notes``, ``filename``, ``ms2_scan_rt``, ``ms2_frag_mzs``,
-    ``ms2_collision_energy``, ``ms2_precursor_mz``.
+    ``analyst_notes``, ``filename``, and a list of ``ms2_scans``.
 
     Filenames are not shown in the table (too long); instead a
     ``Run<n> = <full filename>`` legend is rendered below the table.
@@ -332,33 +300,27 @@ def _sa_figure_worker(kwargs: dict) -> str:
             adduct = str(sel.get("adduct", ""))
             rt_peak = safe_float(sel.get("rt_peak"))
             pn = sel.get("peak_num")
-            mz_theo = safe_float(sel.get("mz_theoretical"))
-            scan_rt = safe_float(sel.get("ms2_scan_rt"))
-            ce_val = safe_float(sel.get("ms2_collision_energy"))
-            frag_mzs = _to_pylist(sel.get("ms2_frag_mzs"))
-            frag_ints = _to_pylist(sel.get("ms2_frag_ints"))
-            has_ms2 = bool(frag_mzs and frag_ints)
-            ms2_panels.append({
-                "adduct": adduct,
-                "peak_num": pn,
-                "rt_peak": rt_peak,
-                "scan_rt": scan_rt,
-                "precursor_mz": mz_theo,
-                "ce": ce_val,
-                "frag_mzs": frag_mzs,
-                "frag_ints": frag_ints,
-                "has_ms2": has_ms2,
-            })
+            for scan in sel["ms2_scans"]:
+                frag_mzs = _to_pylist(scan["frag_mzs"])
+                frag_ints = _to_pylist(scan["frag_ints"])
+                ms2_panels.append({
+                    "adduct": adduct,
+                    "peak_num": pn,
+                    "rt_peak": rt_peak,
+                    "scan_rt": safe_float(scan["scan_rt"]),
+                    "precursor_mz": safe_float(scan["precursor_mz"]),
+                    "ce": fpf.extract_collision_energy_label(scan["filename"]),
+                    "frag_mzs": frag_mzs,
+                    "frag_ints": frag_ints,
+                    "has_ms2": bool(frag_mzs and frag_ints),
+                })
 
     n_ms2_panels = len(ms2_panels)
     n_ms2_rows = 0 if n_ms2_panels == 0 else max(1, math.ceil(n_ms2_panels / 4))
 
-    # Table height: header row + one data row per selection (min 1)
-    n_table_data_rows = max(1, len(ms2_panels))
-    # Each table row ≈ 0.38 inches; header ≈ 0.45 inches
+    n_table_data_rows = max(1, len(selections_df))
     table_height_in = 0.45 + n_table_data_rows * 0.38
 
-    # ── FIX 2 (new): Run# → filename map, one line per unique file ────────────
     run_map_lines: list[str] = []
     if not selections_df.empty:
         seen_pairs: set = set()
@@ -372,24 +334,21 @@ def _sa_figure_worker(kwargs: dict) -> str:
                 continue
             seen_pairs.add(pair)
             run_map_lines.append(f"Run{run_num} = {fn}")
-    # ~0.25 in per line at fontsize 12 + padding (0 if no files)
-    run_map_h_in = 0.25 * len(run_map_lines) + 0.15 if run_map_lines else 0.0
 
-    # Fixed section heights (inches)
-    ms2_row_h   = 3.0   # per MS2 row
-    eic_row_h   = ms2_row_h * 1.5  # EIC/legend/structure is 1.5× an MS2 row
-    tic_row_h   = 2.2
-    gap_ms2_eic = 0.75 if n_ms2_rows > 0 else 0.0
-    gap_eic_tic = 0.75
-    gap_tic_tbl = 0.75
+    run_map_h_in = 0.25 * len(run_map_lines) + 0.15 if run_map_lines else 0.0
+    ms2_row_h = 3.0   # per MS2 row
+    eic_row_h = 4.5
+    tic_row_h = 2.5
+    gap_ms2_eic = 1.5 if n_ms2_rows > 0 else 0.0
+    gap_eic_tic = 1.5
+    gap_tic_tbl = 1.5
     gap_tbl_map = 0.15
 
     total_h = (n_ms2_rows * ms2_row_h + gap_ms2_eic
                + eic_row_h + gap_eic_tic + tic_row_h + gap_tic_tbl
                + table_height_in + gap_tbl_map + run_map_h_in)
-    fig = plt.figure(figsize=(30, total_h))
+    fig = plt.figure(figsize=(25, total_h))
 
-    # Outer grid: MS2 section | gap | everything below
     outer_gs = gridspec.GridSpec(
         3, 1, figure=fig,
         height_ratios=[
@@ -429,6 +388,7 @@ def _sa_figure_worker(kwargs: dict) -> str:
                     pn = panel.get("peak_num", 0)
                     name_part = f"{panel['adduct']} (peak{pn})" if pn else panel["adduct"]
                     title_parts = [name_part]
+                    title_parts.append(panel["ce"])
                     if not safe_isnan(panel["scan_rt"]):
                         title_parts.append(f"RT={panel['scan_rt']:.4f}")
                         if not safe_isnan(panel["precursor_mz"]):
@@ -457,8 +417,7 @@ def _sa_figure_worker(kwargs: dict) -> str:
     _plot_adduct_legend(ax_legend, adduct_list, selections_df)
 
     ax_struct = fig.add_subplot(bottom_gs[eic_row, 3])
-    _plot_structure_with_inchikey(ax_struct, smiles, inchi, inchi_key,
-                                  compound_name=compound_name, size=400)
+    _plot_structure(ax_struct, smiles, inchi, inchi_key, label=compound_name, size=400)
 
     # ── TIC row (bottom row 1) ────────────────────────────────────────────────
     ax_tic = fig.add_subplot(bottom_gs[2, :])
@@ -572,7 +531,7 @@ def make_standards_annotation_figures(
     ``selections_df`` must have columns from ``load_selected_peaks_with_ms2()``:
     ``compound_name``, ``adduct``, ``polarity``, ``chromatography``,
     ``rt_peak``, ``filename``, ``mz_theoretical``, ``smiles``, ``inchi``,
-    ``inchi_key``, ``ms2_scan_rt``, ``ms2_frag_mzs``, ``ms2_frag_ints``, etc.
+    ``inchi_key`` and ``ms2_scans``, among other peak metadata.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -584,6 +543,7 @@ def make_standards_annotation_figures(
     compound_names = list(dict.fromkeys(expanded_table["compound_name"].tolist()))
 
     tasks: list[dict] = []
+    plotted_peak_uids: set[str] = set()
 
     for compound_name in compound_names:
         sub = expanded_table[expanded_table["compound_name"] == compound_name]
@@ -633,6 +593,7 @@ def make_standards_annotation_figures(
 
             if cp_sel.empty:
                 continue
+            plotted_peak_uids.update(cp_sel["peak_uid"].astype(str))
 
             # Filter MS1 to this chrom+pol+CE
             cp_sub = sub[
@@ -660,7 +621,7 @@ def make_standards_annotation_figures(
             name_safe = re.sub(r"[^A-Za-z0-9\-]", "_", _strip_non_chars(str(compound_name)))
             name_safe = re.sub(r"_+", "_", name_safe).strip("_")
             safe_stem = f"{name_safe}__{chrom_safe}_{pol_safe}_{ce_safe}"
-            fig_dir = output_dir / chrom_safe / pol_safe / ce_safe
+            fig_dir = output_dir / chrom_safe / pol_safe
             fig_path = fig_dir / f"{safe_stem}.pdf"
 
             tasks.append({
@@ -679,6 +640,12 @@ def make_standards_annotation_figures(
                 "tic_dicts": tic_dicts,
             })
 
+    missing_peaks = (
+        set(selections_df["peak_uid"].astype(str)) - plotted_peak_uids
+        if not selections_df.empty else set()
+    )
+    if missing_peaks:
+        raise ValueError(f"No summary figure could be scheduled for selected peaks: {sorted(missing_peaks)}")
     if not tasks:
         logger.info("No compounds with selections to generate figures for.")
         return
@@ -687,14 +654,17 @@ def make_standards_annotation_figures(
     pbar = tqdm(total=len(tasks), desc="Generating summary figures", disable=should_disable_tqdm())
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_sa_figure_worker, t): t["compound_name"] for t in tasks}
+        futures = {executor.submit(_sa_figure_worker, t): t for t in tasks}
         for fut in futures:
-            name = futures[fut]
+            task = futures[fut]
+            name = task["compound_name"]
             try:
                 fut.result()
+                if not Path(task["fig_path"]).is_file():
+                    raise RuntimeError(f"Figure was not created: {task['fig_path']}")
                 logger.debug(f"Generated figure for {name}")
             except Exception as exc:
-                logger.error(f"Failed to generate figure for {name}: {exc}")
+                raise RuntimeError(f"Failed to generate summary figure for {name}: {exc}") from exc
             finally:
                 pbar.update(1)
     pbar.close()
@@ -705,14 +675,19 @@ def make_standards_annotation_table(
     selections_df: pd.DataFrame,
     output_dir: Path,
     project_name: str,
+    *,
+    aligned: bool = False,
 ) -> None:
-    """Generate the summary Excel table.
+    """Generate the flat summary CSV table.
 
     ``selections_df`` must have columns from ``load_selected_peaks_with_ms2()``.
+    When ``aligned`` is true, include the aligned RT values and signed peak shift.
+    ``rt_delta`` is computed as ``rt_peak_aligned - rt_peak`` if not already present.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    excel_path = output_dir / f"StandardsAnnotation_Summary_{project_name}.xlsx"
+    suffix = "Aligned_" if aligned else ""
+    csv_path = output_dir / f"StandardsAnnotation_Summary_{suffix}{project_name}.csv"
 
     if selections_df is None or selections_df.empty:
         logger.warning("No selections found; skipping summary table generation.")
@@ -728,193 +703,94 @@ def make_standards_annotation_table(
     df = selections_df.copy()
     df["mz_ppm_error"] = df.apply(_ppm, axis=1)
 
-    df["ms2_rt"] = df["ms2_scan_rt"].apply(safe_float)
-    df["ms2_ce"] = df["ms2_collision_energy"].apply(safe_float)
-    if "ms2_precursor_mz" in df.columns:
-        df["ms2_precursor_mz"] = df["ms2_precursor_mz"].apply(safe_float).round(5)
+    # Derive rt_delta (signed shift) when aligned and not supplied by the input
+    if aligned and "rt_delta" not in df.columns:
+        required = {"rt_peak", "rt_peak_aligned"}
+        absent = required - set(df.columns)
+        if absent:
+            raise ValueError(
+                f"Cannot compute rt_delta; missing columns: {sorted(absent)}"
+            )
+        df["rt_delta"] = df["rt_peak_aligned"] - df["rt_peak"]
 
-    def _list_to_str(lst):
-        if lst is None:
-            return ""
-        lst = _to_pylist(lst)
-        return ", ".join(f"{v:.4f}" if isinstance(v, float) else str(v) for v in lst)
+    ms2_fields = ("RT (min)", "Precursor M/Z", "Precursor Intensity", "CE", "spectrum", "Filename")
 
-    df["ms2_frag_mzs_str"] = df["ms2_frag_mzs"].apply(lambda x: _list_to_str(_to_pylist(x)))
-    df["ms2_frag_ints_str"] = df["ms2_frag_ints"].apply(lambda x: _list_to_str(_to_pylist(x)))
+    def _ms2_col(ce: str, field: str) -> str:
+        return f"{ce} spectrum" if field == "spectrum" else f"{ce} MS2 {field}"
+
+    ce_labels = STANDARD_CE_LABELS
+    ms2_cols = [_ms2_col(ce, field) for ce in ce_labels for field in ms2_fields]
+    for col in ms2_cols:
+        df[col] = None
+
+    for index, row in df.iterrows():
+        seen = set()
+        for scan in row["ms2_scans"]:
+            ce = fpf.extract_collision_energy_label(scan["filename"])
+            if ce not in ce_labels or ce in seen:
+                raise ValueError(
+                    f"Unexpected or duplicate MS2 CE label {ce!r} for peak {row['peak_uid']}"
+                )
+            seen.add(ce)
+            for column, value in {
+                f"{ce} MS2 RT (min)": scan["scan_rt"],
+                f"{ce} MS2 Precursor M/Z": scan["precursor_mz"],
+                f"{ce} MS2 Precursor Intensity": scan["precursor_intensity"],
+                f"{ce} MS2 CE": scan["collision_energy"],
+                f"{ce} spectrum": json.dumps(
+                    [_to_pylist(scan["frag_mzs"]), _to_pylist(scan["frag_ints"])]
+                ),
+                f"{ce} MS2 Filename": scan["filename"],
+            }.items():
+                df.at[index, column] = value
 
     # Source file basename (sa_peaks column: filename)
     df["source_file_str"] = df["filename"].apply(
         lambda fn: os.path.basename(str(fn)) if fn else ""
     )
 
-    # Column order using sa_peaks column names
-    # Indices (0-based):
-    #  0-6:   COMPOUND ANNOTATION
-    #  7-9:   M/Z INFORMATION
-    #  10-12: CHROMATOGRAPHIC PEAK
-    #  13:    INTENSITY
-    #  14-18: MS2 INFORMATION
-    #  19:    NOTES
-    #  20-21: METADATA
     output_cols = [
-        "compound_name", "peak_num", "inchi_key", "adduct", "polarity",
-        "chromatography", "collision_energy_label",
+        "peak_label", "compound_name", "peak_num", "inchi_key", "adduct", "polarity",
+        "chromatography", "collision_energy_label", "source_file_str",
         "mz_theoretical", "mz_observed", "mz_ppm_error",
-        "rt_peak", "rt_min", "rt_max", "peak_intensity",
-        "ms2_rt", "ms2_precursor_mz", "ms2_ce",
-        "ms2_frag_mzs_str", "ms2_frag_ints_str",
-        "analyst_notes",
-        "source_file_str", "annotation_notes",
+        "rt_peak", "rt_min", "rt_max", "peak_intensity", "analyst_notes", "annotation_notes",
+        *ms2_cols,
+        "auto_peak_num",
     ]
     display_names = [
-        "Compound Name", "Peak #", "InChIKey", "Adduct", "Polarity",
-        "Chromatography", "Collision Energy",
+        "Compound Label", "Compound Name", "Peak #", "InChIKey", "Adduct", "Polarity",
+        "Chromatography", "MS1 File Collision Energy", "Source File",
         "Theoretical m/z", "Observed m/z", "m/z ppm error",
-        "RT peak (min)", "RT min (min)", "RT max (min)", "Peak Intensity",
-        "MS2 RT (min)", "MS2 Precursor M/Z", "MS2 CE",
-        "MS2 Fragment m/z", "MS2 Fragment Intensities",
-        "Analyst Notes",
-        "Source File", "Annotation Notes",
+        "RT peak", "RT min", "RT max", "Peak Intensity", "Analyst Notes", "Annotation Notes",
+        *ms2_cols,
+        "GUI Peak Num",
     ]
 
-    _SECTION_SPANS = [
-        (0,  6,  "COMPOUND ANNOTATION"),
-        (7,  9,  "M/Z INFORMATION"),
-        (10, 12, "CHROMATOGRAPHIC PEAK"),
-        (13, 13, "INTENSITY"),
-        (14, 18, "MS2 INFORMATION"),
-        (19, 19, "NOTES"),
-        (20, 21, "METADATA"),
-    ]
+    if aligned:
+        for field, name in (
+            ("rt_peak", "RT peak"),
+            ("rt_min", "RT min"),
+            ("rt_max", "RT max"),
+        ):
+            pos = output_cols.index(field) + 1
+            output_cols.insert(pos, f"{field}_aligned")
+            display_names.insert(pos, f"Aligned {name}")
+        pos = output_cols.index("rt_peak_aligned") + 1
+        output_cols.insert(pos, "rt_delta")
+        display_names.insert(pos, "RT diff")
 
-    _SECTION_COLORS = {
-        "COMPOUND ANNOTATION":  "#DCFFFF",
-        "M/Z INFORMATION":      "#FFDCFF",
-        "CHROMATOGRAPHIC PEAK": "#FFFFDC",
-        "INTENSITY":            "#FFFFDC",
-        "MS2 INFORMATION":      "#FFDCFF",
-        "NOTES":                "#FFFFFF",
-        "METADATA":             "#F0F0F0",
-    }
+    missing = set(output_cols) - set(df.columns)
+    if missing:
+        raise ValueError(f"Cannot write summary table; missing columns: {sorted(missing)}")
 
-    out_df = df[[c for c in output_cols if c in df.columns]].copy()
-    out_df.columns = display_names[: len(out_df.columns)]
-
-    def _col_letter(col_idx: int) -> str:
-        result = ""
-        n = col_idx + 1
-        while n:
-            n, remainder = divmod(n - 1, 26)
-            result = chr(65 + remainder) + result
-        return result
-
-    def _section_for_col(col_idx: int) -> str:
-        return next(
-            (lbl for s, e, lbl in _SECTION_SPANS if s <= col_idx <= e),
-            "METADATA",
-        )
-
-    with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
-        out_df.to_excel(writer, sheet_name="Standards_Annotation",
-                        index=False, header=False, startrow=2)
-        workbook = writer.book
-        worksheet = writer.sheets["Standards_Annotation"]
-
-        nrows = len(out_df) + 2
-        f_header_base = {"bold": True, "align": "center", "valign": "vcenter",
-                         "text_wrap": True, "border": 1}
-
-        section_header_fmts = {}
-        section_data_fmts = {}
-        for label, color in _SECTION_COLORS.items():
-            section_header_fmts[label] = workbook.add_format({**f_header_base, "bg_color": color})
-            section_data_fmts[label] = workbook.add_format({"bg_color": color})
-
-        worksheet.set_row(0, 25)
-        worksheet.set_row(1, 70)
-        worksheet.set_column(0, len(out_df.columns) - 1, 14)
-
-        for start_idx, end_idx, label in _SECTION_SPANS:
-            actual_end = min(end_idx, len(out_df.columns) - 1)
-            if actual_end < start_idx:
-                continue
-            fmt = section_header_fmts[label]
-            if start_idx == actual_end:
-                worksheet.write(0, start_idx, label, fmt)
-            else:
-                worksheet.merge_range(
-                    f"{_col_letter(start_idx)}1:{_col_letter(actual_end)}1",
-                    label, fmt,
-                )
-
-        for col_idx, col_name in enumerate(out_df.columns):
-            fmt = section_header_fmts[_section_for_col(col_idx)]
-            worksheet.write(1, col_idx, col_name, fmt)
-
-        for start_idx, end_idx, label in _SECTION_SPANS:
-            actual_end = min(end_idx, len(out_df.columns) - 1)
-            if actual_end < start_idx:
-                continue
-            fmt = section_data_fmts[label]
-            worksheet.conditional_format(
-                f"{_col_letter(start_idx)}3:{_col_letter(actual_end)}{nrows}",
-                {"type": "no_errors", "format": fmt},
-            )
-
-    logger.info(f"Summary table written to {excel_path}")
+    out_df = df[output_cols].rename(columns=dict(zip(output_cols, display_names)))
+    out_df.to_csv(csv_path, index=False)
+    logger.info(f"Summary table written to {csv_path}")
 
 
 # ---------------------------------------------------------------------------
 # Downstream export functions
 # ---------------------------------------------------------------------------
-
-def export_atlas_csv(
-    db_path: str,
-    output_dir: Path,
-    project_name: str,
-) -> Path:
-    """Export selected peaks as an atlas CSV suitable for ``add-atlases``.
-
-    Columns: ``inchi_key``, ``compound_name``, ``rt_peak``, ``mz``,
-    ``adduct``, ``rt_min``, ``rt_max``, ``mz_tolerance``, ``polarity``,
-    ``chromatography``, ``smiles``, ``inchi``, ``peak_intensity``,
-    ``source_file``, ``analyst_notes``, ``annotation_notes``.
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / f"StandardsAnnotation_Atlas_{project_name}.csv"
-
-    df = sadb.load_selected_peaks_with_ms2(db_path)
-    if df.empty:
-        logger.warning("No analyst selections found; skipping atlas CSV export.")
-        return csv_path
-
-    out = pd.DataFrame({
-        "inchi_key":        df["inchi_key"],
-        "compound_name":    df["compound_name"],
-        "rt_peak":          df["rt_peak"].round(4),
-        "mz":               df["mz_observed"].where(
-                                df["mz_observed"].notna() & (df["mz_observed"] > 0),
-                                df["mz_theoretical"],
-                            ).round(5),
-        "adduct":           df["adduct"],
-        "rt_min":           df["rt_min"].round(4),
-        "rt_max":           df["rt_max"].round(4),
-        "mz_tolerance":     5.0,
-        "polarity":         df["polarity"],
-        "chromatography":   df["chromatography"],
-        "smiles":           df.get("smiles", ""),
-        "inchi":            df.get("inchi", ""),
-        "peak_intensity":   df["peak_intensity"],
-        "source_file":      df["filename"].apply(os.path.basename),
-        "analyst_notes":    df.get("analyst_notes", ""),
-        "annotation_notes": df.get("annotation_notes", ""),
-    })
-
-    out.to_csv(csv_path, index=False)
-    logger.info(f"Atlas CSV written to {csv_path} ({len(out)} rows)")
-    return csv_path
-
 
 def export_msms_refs_tab(
     db_path: str,
@@ -938,21 +814,20 @@ def export_msms_refs_tab(
         logger.warning("No analyst selections found; skipping msms-refs export.")
         return tab_path
 
-    has_ms2 = df["ms2_frag_mzs"].apply(lambda x: bool(_to_pylist(x)))
-    df_ms2 = df[has_ms2].copy()
+    df_ms2 = df.explode("ms2_scans").dropna(subset=["ms2_scans"])
     if df_ms2.empty:
         logger.warning("No selected peaks have MS2 data; skipping msms-refs export.")
         return tab_path
 
     def _spectrum_str(row) -> str:
-        mzs = [float(v) for v in _to_pylist(row.get("ms2_frag_mzs"))]
-        ints = [float(v) for v in _to_pylist(row.get("ms2_frag_ints"))]
+        mzs = [float(v) for v in _to_pylist(row["ms2_scans"]["frag_mzs"])]
+        ints = [float(v) for v in _to_pylist(row["ms2_scans"]["frag_ints"])]
         return repr([mzs, ints])
 
     rows = []
     for i, (_, row) in enumerate(df_ms2.iterrows(), start=1):
         polarity_str = "positive" if str(row.get("polarity", "POS")).upper() == "POS" else "negative"
-        ce = row.get("ms2_collision_energy")
+        ce = row["ms2_scans"]["collision_energy"]
         ce_str = f"{float(ce):.0f}" if ce is not None and not safe_isnan(safe_float(ce)) else ""
         rows.append({
             "database":             database,
@@ -960,7 +835,7 @@ def export_msms_refs_tab(
             "name":                 str(row.get("compound_name", "")),
             "spectrum":             _spectrum_str(row),
             "decimal":              4,
-            "precursor_mz":         f"{safe_float(row.get('ms2_precursor_mz', row.get('mz_theoretical', ''))):.5f}",
+            "precursor_mz":         f"{safe_float(row['ms2_scans']['precursor_mz']):.5f}",
             "polarity":             polarity_str,
             "adduct":               str(row.get("adduct", "")),
             "fragmentation_method": fragmentation_method,
@@ -994,9 +869,7 @@ def run_standards_annotation_summary(
     Loads analyst selections from the project DB via
     ``load_selected_peaks_with_ms2()`` and generates:
       - Per-compound PDF figures (one per chrom+pol with selections)
-      - Summary Excel table
-      - Atlas CSV for ``add-atlases``
-      - MSMS refs ``.tab`` for ``add-msms-refs``
+      - Summary CSV table
     """
     if config is None:
         config = data.config
@@ -1006,14 +879,15 @@ def run_standards_annotation_summary(
 
     from metatlas2.standards_annotation_db import get_project_output_root
     output_root = get_project_output_root(config)
-    figures_dir = output_root / "outputs" / "summary_figures"
-    outputs_dir = output_root / "outputs"
-
     logger.info("Loading analyst selections from project DB...")
-    selections_df = sadb.load_selected_peaks_with_ms2(db_path)
-
-    if selections_df.empty:
-        logger.warning("No analyst selections found in project DB. Summary outputs will be empty.")
+    sadb.validate_annotation_choices(db_path)
+    raw_selections = sadb.load_selected_peaks_with_ms2(db_path)
+    validate_selected_peaks(raw_selections)
+    selections_df = fix_peak_labels(raw_selections)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    outputs_dir = review_directory(output_root, timestamp)
+    outputs_dir.mkdir(parents=True, exist_ok=False)
+    figures_dir = outputs_dir / "summary_figures"
 
     logger.info("Generating per-compound summary figures...")
     make_standards_annotation_figures(
@@ -1023,11 +897,12 @@ def run_standards_annotation_summary(
         max_workers=max_workers,
     )
 
-    logger.info("Generating summary Excel table...")
+    logger.info("Generating summary CSV table...")
     make_standards_annotation_table(
         selections_df=selections_df,
         output_dir=outputs_dir,
         project_name=run_name,
     )
 
-    logger.info(f"Summary outputs written to {outputs_dir}")
+    (outputs_dir / ".summary_complete").touch(exist_ok=False)
+    logger.info(f"Summary outputs written to {outputs_dir}; timestamp: {timestamp}")

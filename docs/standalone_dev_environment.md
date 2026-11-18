@@ -61,7 +61,7 @@ This will automatically:
 
 The notebook `standalone_dev_workflow.ipynb` runs the current production workflow in explicit stages. These are all identical calls to the production metatlas2 version, so see the documentation for [running the pipeline](https://github.com/bkieft-usa/metatlas2/blob/main/docs/run_targeted_analysis.md) and [running the GUI](https://github.com/bkieft-usa/metatlas2/blob/main/docs/manual_curation_and_summary.md).
 
-**NOTE:** Cells 6-8 only need to be run once per standalone session (these build the database and fill it with compounds and atlases). If you want to run the RT alignment/Auto ID/GUI/Summary tools multiple times (e.g., after updating local codebase), you can restart the kernel and skip those cells.
+**NOTE:** The database and compounds are initialized in Cell 6. Project setup resolves atlas tags from the shared master atlas sheet and stores the resulting atlas UIDs in the project snapshot. The sheet and configured service-account credentials must be accessible from the standalone container.
 
 **Cell 1**: Title and execution note
 
@@ -69,34 +69,29 @@ The notebook `standalone_dev_workflow.ipynb` runs the current production workflo
 - Imports workflow modules and helper functions
 - Configures logging for standalone execution
 
-**Cell 3**: Environment setup
+**Cell 3**: Project metadata
+- Sets the project name, RT alignment number, and analysis number
+
+**Cell 4**: Workflow start message
+
+**Cell 5**: Environment setup
 - Sets `METATLAS_DATA_DIR`
 
-**Cell 4**: Project and config paths
-- Sets project name, RT alignment number, analysis number
-- Defines config file locations
-
-**Cell 5**: Load analysis configuration
-
 **Cell 6**: Add compounds to database
-- Calls `add_compounds_to_db(config_path, overwrite_db=True)`
+- Calls `add_compounds_to_db(input_csv, overwrite_db=True)`
 
-**Cell 7**: Create atlases
-- Calls `add_atlases_to_db(config_path)`
+**Cell 7**: Load the tag-based analysis config and set up project paths
+- Calls `set_up_paths(...)`
 
-**Cell 8**: Set atlas UIDs
-- Paste atlas UIDs printed by the previous cell
+**Cell 8**: Reset logging to the project output
 
-**Cell 9**: Set up project paths
-- Updates config atlas UIDs and calls `set_up_paths(...)`
-
-**Cell 10**: Run project setup
+**Cell 9**: Run project setup
 - Calls `wfs.run_project_setup(...)`
 
-**Cell 11**: Run RT alignment
+**Cell 10**: Run RT alignment
 - Calls `wfs.run_rt_alignment(...)`
 
-**Cell 12**: Run auto-identification
+**Cell 11**: Run auto-identification
 - Calls `wfs.run_auto_identification(...)`
 - Produces GUI notebooks for curation
 
@@ -117,11 +112,9 @@ After setup, the standalone environment lives at `~/.metatlas2-dev/`. Output dir
 │       └── metatlas.duckdb
 ├── projects/
 │   └── targeted_outputs/   # Analysis results (generated)
-├── qc_compounds_pos.tsv    # QC compounds used for RT alignment
-├── ema_compounds_pos.tsv   # EMA compounds used for targeted analysis
+├── compounds.csv           # Combined compound table for add-compounds
 ├── ms2_references.json      # MS2 reference spectra
 ├── configs/                # Configuration files
-│   ├── compounds_config.yaml   # Compound paths
 │   ├── atlases_config.yaml     # Atlas definitions
 │   └── analysis_config.yaml    # Workflow parameters
 ├── standalone_dev_workflow.ipynb

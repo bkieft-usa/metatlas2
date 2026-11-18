@@ -117,6 +117,10 @@ def _process_compound_batch(job):
     lower-scoring hits are still visible in the output (they provide context
     about whether the good hit is trustworthy).
 
+    Note: if a candidate reference lacks the scan's precursor m/z (within
+    ``frag_mz_tolerance``) and the scan contains a precursor peak, the precursor is
+    added to a copy of the reference (scaled to the data) before scoring.
+
     Args:
         job: A tuple of
             ``(uid, filename, scans_data, ref_spectra, frag_mz_tolerance,
@@ -142,84 +146,87 @@ def _process_compound_batch(job):
         is a ``dict`` containing score, alignment, and metadata fields.  Scans with
         no candidate references (after the PPM filter) get an empty list.
     """
+
     (uid, filename, scans_data, ref_spectra,
      frag_mz_tolerance, min_score, min_frags,
-     ms2_mz_tolerance_ppm, limit_to_n_hits) = job
-    
+     ms2_mz_tolerance_ppm, limit_to_n_hits, inchi_key) = job
+
+    empty = [[] for _ in range(len(scans_data))]
     if not ref_spectra:
-        return uid, filename, [[] for _ in range(len(scans_data))]
+        return uid, filename, empty, None
 
-    queries = []
-    q_mzs = []
-    valid_scans = []
-
+    queries, q_mzs, valid_scans = [], [], []
     for i, scan in enumerate(scans_data):
-        f_mz = scan['frag_mzs']
-        f_int = scan['frag_ints']
-        p_mz = scan['precursor_MZ']
+        f_mz, f_int, p_mz = scan['frag_mzs'], scan['frag_ints'], scan['precursor_MZ']
         if f_mz is None or len(f_mz) == 0:
             continue
-        mz_arr = np.array(f_mz, dtype=np.float32)
-        int_arr = np.array(f_int, dtype=np.float32)
-        qry = Spectrum(mz=mz_arr, intensities=int_arr, metadata={'precursor_mz': p_mz})
+        qry = Spectrum(mz=np.array(f_mz, dtype=np.float32),
+                       intensities=np.array(f_int, dtype=np.float32),
+                       metadata={'precursor_mz': p_mz})
         queries.append(qry)
         q_mzs.append(p_mz)
         valid_scans.append(i)
 
     if not queries:
-        return uid, filename, [[] for _ in range(len(scans_data))]
+        return uid, filename, empty, None
 
     ref_precursor_mzs = np.array([float(r.get('precursor_mz', 0.0) or 0.0) for r in ref_spectra])
     q_mzs_np = np.array(q_mzs)[:, None]
-    
+
     if ms2_mz_tolerance_ppm is None:
         candidate_mask = np.ones((len(queries), len(ref_spectra)), dtype=bool)
     else:
         tol_matrix = ref_precursor_mzs * (ms2_mz_tolerance_ppm * 1e-6)
         candidate_mask = np.abs(q_mzs_np - ref_precursor_mzs) <= tol_matrix
 
-    # always use the vectorised matrix method
     cosine_hungarian = CosineHungarian(tolerance=frag_mz_tolerance)
     with _suppress_tqdm():
         score_matrix = cosine_hungarian.matrix(references=ref_spectra, queries=queries)
-        scores = score_matrix['score'].T
-        matches = score_matrix['matches'].T
+        scores = np.array(score_matrix['score'].T, dtype=float)
+        matches = np.array(score_matrix['matches'].T, dtype=int)
 
+    precursor_added = False
     all_scan_results = [[] for _ in range(len(scans_data))]
-    
+
     for q_idx in range(len(queries)):
         ref_indices = np.where(candidate_mask[q_idx])[0]
         if ref_indices.size == 0:
             continue
-            
-        # Sort all candidates by score descending; apply limit_to_n_hits cap
-        sorted_ref_indices = ref_indices[np.argsort(-scores[q_idx, ref_indices])]
-        if limit_to_n_hits:
-            sorted_ref_indices = sorted_ref_indices[:limit_to_n_hits]
-            
+
         scan_meta = scans_data[valid_scans[q_idx]]
-        
-        # Cache query arrays for alignment to avoid redundant casting in the inner loop
         q_mz_np = np.array(scan_meta['frag_mzs'], dtype=np.float32)
         q_int_np = np.array(scan_meta['frag_ints'], dtype=np.float32)
 
+        # add missing precursor to candidate refs and re-score just those pairs
+        refs_used: dict[int, Spectrum] = {}
+        for r_idx in ref_indices:
+            aug = _add_precursor_to_ref(
+                ref_spectra[r_idx], q_mz_np, q_int_np,
+                float(scan_meta['precursor_MZ']), frag_mz_tolerance,
+            )
+            if aug is None:
+                continue
+            res = cosine_hungarian.pair(aug, queries[q_idx])
+            scores[q_idx, r_idx] = float(res['score'])
+            matches[q_idx, r_idx] = int(res['matches'])
+            refs_used[r_idx] = aug
+            precursor_added = True
+
+        sorted_ref_indices = ref_indices[np.argsort(-scores[q_idx, ref_indices])]
+        if limit_to_n_hits:
+            sorted_ref_indices = sorted_ref_indices[:limit_to_n_hits]
+
         scan_hits = []
         for r_idx in sorted_ref_indices:
-            ref = ref_spectra[r_idx]
-            
+            ref = refs_used.get(r_idx, ref_spectra[r_idx])
             align_res = _align_spectra_for_plotting(
-                q_mz_np,
-                q_int_np,
-                ref.mz,
-                ref.intensities,
-                frag_mz_tolerance
+                q_mz_np, q_int_np, ref.mz, ref.intensities, frag_mz_tolerance
             )
-
             scan_hits.append({
                 'mz_rt_uid': uid,
                 'database': ref.metadata.get('database', 'unknown'),
                 'ref_id': ref.metadata.get('id', ''),
-                'ref_name': ref.metadata.get('name') or ref.metadata.get('compound_name') or 'Unknown',
+                'ref_name': ref.metadata.get('name') or ref.metadata.get('label') or ref.metadata.get('compound_name') or 'Unknown',
                 'score': float(scores[q_idx, r_idx]),
                 'num_matches': int(matches[q_idx, r_idx]),
                 'mz_theoretical': float(ref_precursor_mzs[r_idx]),
@@ -228,15 +235,16 @@ def _process_compound_batch(job):
                 'qry_intensity_peak': float(scan_meta.get('precursor_intensity', 0.0)),
                 'ref_frags': len(ref.mz),
                 'data_frags': len(scan_meta['frag_mzs']),
+                'precursor_added': r_idx in refs_used,
                 'matched_fragments': align_res['matched_fragments'],
                 'fragment_colors': align_res['fragment_colors'],
                 'query_aligned': align_res['query_aligned'],
                 'ref_aligned': align_res['ref_aligned'],
             })
-        
+
         all_scan_results[valid_scans[q_idx]] = scan_hits
-        
-    return uid, filename, all_scan_results
+
+    return uid, filename, all_scan_results, (inchi_key if precursor_added else None)
 
 def _filter_out_ms2_data(ms2_df, ms1_df, min_score, min_frags):
     """Remove compounds that have no passing MS2 hits and synchronise the MS1 DataFrame.
@@ -397,6 +405,42 @@ def _assign_hits(ms2_df, results_map):
     ms2_df = ms2_df.assign(hits=hits_col)
     return ms2_df
 
+def _add_precursor_to_ref(
+    ref: Spectrum,
+    q_mz: np.ndarray,
+    q_int: np.ndarray,
+    precursor_mz: float,
+    tol: float,
+) -> Spectrum | None:
+    """Return a copy of ``ref`` with the query's precursor peak added, or None.
+
+    Returns None (no change) if the reference already has a peak within ``tol`` of
+    ``precursor_mz``, or if the query has no peak within ``tol`` of its own precursor.
+    The added peak's intensity is the query's precursor-peak intensity expressed
+    relative to the query base peak, rescaled to the reference's base peak.
+    """
+    ref_mz = np.asarray(ref.mz)
+    ref_int = np.asarray(ref.intensities)
+    if ref_mz.size == 0 or np.any(np.abs(ref_mz - precursor_mz) <= tol):
+        return None
+
+    near = np.abs(q_mz - precursor_mz) <= tol
+    if not near.any():
+        return None
+    q_max = float(q_int.max())
+    if q_max <= 0:
+        return None
+
+    q_prec_int = float(q_int[near].max())
+    new_int = q_prec_int / q_max * float(ref_int.max())
+
+    ins = int(np.searchsorted(ref_mz, precursor_mz))  # keep mz sorted (matchms requirement)
+    return Spectrum(
+        mz=np.insert(ref_mz, ins, precursor_mz),
+        intensities=np.insert(ref_int, ins, new_int),
+        metadata=dict(ref.metadata),
+    )
+
 def find_ms2_hits(auto_id_obj):
     """Run the full MS2 hit-detection pipeline and attach results to ``auto_id_obj``.
 
@@ -468,7 +512,8 @@ def find_ms2_hits(auto_id_obj):
             wp.get('ms2_min_score', 0),
             wp.get('ms2_min_matching_frags', 0),
             wp.get('ms2_mz_tolerance_ppm', 5.0),
-            wp.get('limit_to_n_hits', 20)
+            wp.get('limit_to_n_hits', 20),
+            inchi_key
         ))
 
     # Free reference spectra now that all jobs are built
@@ -476,13 +521,24 @@ def find_ms2_hits(auto_id_obj):
 
     logger.info(f"Finding reference hits for {len(jobs)} compound-file groups...")
     results_map = {}
+    precursor_added_keys: set[str] = set()
     max_workers = get_max_workers(auto_id_obj.config.max_workers if auto_id_obj.config else None)
     logger.info(f"Using {max_workers} worker processes for MS2 hit detection.")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(_process_compound_batch, job) for job in jobs]
         for fut in tqdm(as_completed(futures), total=len(futures), desc="Detecting MS2 Hits", disable=should_disable_tqdm()):
-            uid, filename, hits_list = fut.result()
+            uid, filename, hits_list, added_key = fut.result()
             results_map[(uid, filename)] = hits_list
+            if added_key:
+                precursor_added_keys.add(added_key)
+
+    # one log line per inchi_key that had its precursor artificially added to scoring
+    ms2_tol = wp.get('ms2_frag_mz_tolerance', 0.05)
+    for key in sorted(precursor_added_keys):
+        logger.info(
+            f"Precursor m/z not found in reference spectra (±{ms2_tol} Da); "
+            f"added to reference before scoring for inchi_key: {key}"
+        )
 
     ms2_df = _assign_hits(ms2_df, results_map)
     # Free the hit-record dict now that jobs are built

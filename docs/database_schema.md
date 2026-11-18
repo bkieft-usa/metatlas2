@@ -80,7 +80,8 @@ Stores immutable chemical compound metadata. Each compound represents a unique m
 | Column | Type | Description |
 |--------|------|-------------|
 | `compound_uid` | TEXT (PK) | Unique identifier (e.g., `cmp-a1b2c3...`) |
-| `compound_name` | TEXT | Primary compound name |
+| `label` | TEXT | Canonical compound name used for display |
+| `compound_name` | TEXT | Vendor-provided compound name |
 | `inchi_key` | TEXT | InChI Key (molecular structure hash) |
 | `inchi` | TEXT | Full InChI string |
 | `smiles` | TEXT | SMILES structure notation |
@@ -110,7 +111,7 @@ Stores retention time (RT) and mass-to-charge ratio (m/z) reference data for com
 | `mz_rt_uid` | TEXT (PK) | Unique identifier (e.g., `mzrt-x1y2z3...`) |
 | `compound_uid` | TEXT | Links to compounds table |
 | `prev_mz_rt_uid` | TEXT | UID of the parent mzrt entry (for derived/updated entries) |
-| `compound_name` | TEXT | Denormalized for convenience |
+| `label` | TEXT | Canonical compound name from the atlas entry |
 | `inchi_key` | TEXT | Denormalized for convenience |
 | `adduct` | TEXT | Adduct form (e.g., `[M+H]+`, `[M-H]-`) |
 | `rt_space` | TEXT | RT space identifier (e.g., `HF_Aug2019`) |
@@ -406,7 +407,7 @@ Stores manual curation decisions and compound identification results. This is th
 | `compound_uid` | VARCHAR | Compound identifier |
 | `inchi_key` | VARCHAR | InChI key |
 | `adduct` | VARCHAR | Adduct form |
-| `compound_name` | VARCHAR | Compound name |
+| `label` | VARCHAR | Canonical compound name |
 | `passed_autoid` | BOOLEAN | Whether the compound passed auto-identification filters |
 | `passed_curation` | BOOLEAN | Whether the compound passed manual curation |
 | `polarity` | VARCHAR | Ionization polarity |
@@ -475,7 +476,7 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 | **ExperimentalData** | `ms1_data`, `ms2_data` | Container — Aggregates data from multiple experimental tables as DataFrames |
 | **AnalysisGUI** | `manual_curation`, `workflow_runs` | Interactive — Reads curation data, writes analyst decisions back to DB |
 | **AnalysisSummary** | `manual_curation`, `atlases`, `workflow_runs` | Summary — Reads all tables, writes curated atlas and summary outputs |
-| **NewCompoundsConfig** | `compounds` | Config — Orchestrates bulk insert of compounds |
+| **add_compounds_from_files** | `compounds` | Workflow routine — Validates, enriches, and inserts compounds from CSV/TSV |
 | **NewAtlasesConfig** | `atlases`, `compound_mzrt`, `atlas_compound_associations` | Config — Orchestrates atlas creation |
 | **NewMsmsRefsConfig** | `msms_refs` | Config — Orchestrates bulk insert of MS/MS reference spectra |
 
@@ -494,7 +495,7 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 │     compounds        │
 ├──────────────────────┤
 │ PK compound_uid      │◄─────┐
-│    compound_name     │      │
+│    label             │      │
 │    inchi_key         │      │
 │    inchi             │      │
 │    smiles            │      │
@@ -513,7 +514,7 @@ Workflow objects are Python dataclasses defined in `workflow_objects.py` that pr
 ├──────────────────────┤      │
 │ PK mz_rt_uid         │◄──┐  │
 │ FK compound_uid      │   │  │
-│    compound_name     │   │  │
+│    label             │   │  │
 │    inchi_key         │   │  │
 │    adduct            │   │  │
 │    rt_peak/min/max   │   │  │

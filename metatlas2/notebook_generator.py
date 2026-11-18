@@ -38,6 +38,7 @@ def generate_gui_notebooks(
         "polarity": auto_id_obj.auto_ided_atlas_obj.polarity,
         "atlas_category": _cat_val,
         "atlas_name": auto_id_obj.auto_ided_atlas_obj.atlas_name,
+        "atlas_tags": list(auto_id_obj.ta.tags),
         "input_atlas_uid": auto_id_obj.auto_ided_atlas_obj.atlas_uid,
     }
 
@@ -139,7 +140,11 @@ def _make_params_cell(run_params: dict, auto_id_obj: "AutoIdentification") -> nb
     return nbformat.v4.new_code_cell(src)
 
 def _make_header_cell(run_params: dict) -> nbformat.NotebookNode:
-    text = (f"# **`{run_params['project_name']}`**  \n")
+    tags = ", ".join(run_params.get("atlas_tags", []))
+    text = f"# **`{run_params['project_name']}`**  \n"
+    if tags:
+        text += f"Input atlas tags: `{tags}`  \n"
+    text += f"Input atlas UID: `{run_params['input_atlas_uid']}`"
     return nbformat.v4.new_markdown_cell(text)
 
 def _make_imports_cell() -> nbformat.NotebookNode:
@@ -299,7 +304,7 @@ Add a suffix (see **Query Builder Guide** below) to turn a column name into a fi
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `compound_name` | string | Compound display name |
+| `label` | string | Compound display name |
 | `inchi_key` | string | InChI key (standard 27-char) |
 | `adduct` | string | Detected adduct, e.g. `[M+H]+` |
 | `formula` | string | Molecular formula |
@@ -347,7 +352,7 @@ All `compound_file` columns above **except** `filename`, `file_group`,
 
 def _make_query_builder_guide_cell() -> nbformat.NotebookNode:
     """Markdown cell: filter suffix system and custom query instructions."""
-    text = """\
+    text = """
 ---
 ## Query Builder Guide
 
@@ -364,10 +369,10 @@ Append a suffix to a column name to create a filter:
 | `_in` | Value is in list | `'adduct_in': ['[M+H]+', '[M+Na]+']` |
 | `_min` | Column ≥ value | `'best_ms1_intensity_min': 10_000` |
 | `_max` | Column ≤ value | `'best_ms1_ppm_error_max': 5.0` |
-| `_abs_gt` | \|column\| > value | `'log2_fold_change_abs_gt': 1.5` |
-| `_abs_lt` | \|column\| < value | `'log2_fold_change_abs_lt': 0.1` |
-| `_abs_min` | \|column\| ≥ value | `'log2_fold_change_abs_min': 1.0` |
-| `_abs_max` | \|column\| ≤ value | `'log2_fold_change_abs_max': 3.0` |
+| `_abs_gt` | abs(column) > value | `'log2_fold_change_abs_gt': 1.5` |
+| `_abs_lt` | abs(column) < value | `'log2_fold_change_abs_lt': 0.1` |
+| `_abs_min` | abs(column) ≥ value | `'log2_fold_change_abs_min': 1.0` |
+| `_abs_max` | abs(column) ≤ value | `'log2_fold_change_abs_max': 3.0` |
 
 ### Special keys (compound_lfc only)
 
@@ -606,7 +611,7 @@ def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Generate summary figures and Excel table after the GUI has been closed.\n"
+        "# Generate a new timestamped annotation run with figures and a CSV table.\n"
         "sas.run_standards_annotation_summary(\n"
         "    data=data,\n"
         "    config=config,\n"

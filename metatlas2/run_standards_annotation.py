@@ -1,17 +1,3 @@
-"""
-metatlas2/run_standards_annotation.py
-
-CLI entrypoint for the standards-annotation workflow.
-
-Runs background data extraction and generates a pre-filled Jupyter notebook
-that the analyst opens to launch the interactive GUI.
-
-Usage (via metatlas2.sh):
-    metatlas2 standards-annotation --config_path /path/to/config.yaml
-
-Usage (direct Python):
-    python -m metatlas2.run_standards_annotation --config_path /path/to/config.yaml
-"""
 from __future__ import annotations
 
 import argparse
@@ -27,8 +13,8 @@ def run_standards_annotation(config_path: str) -> None:
 
     1. Loads the config YAML.
     2. Sets up the output directory and log file.
-    3. Checks whether extraction has already been completed (resumability).
-    4. Runs data extraction if needed and persists results to the project DB.
+    3. Creates a new project directory and database.
+    4. Runs data extraction and persists results to the project DB.
     5. Generates a pre-filled Jupyter notebook for the analyst to open.
 
     Args:
@@ -41,13 +27,9 @@ def run_standards_annotation(config_path: str) -> None:
         get_project_output_root,
         get_raw_data_root,
         create_project_db,
-        is_extraction_complete,
-        is_peaks_complete,
-        load_extraction_from_db,
     )
     from metatlas2.standards_annotation_tools import (
         run_standards_extraction,
-        detect_and_save_peaks,
     )
     from metatlas2.notebook_generator import generate_standards_annotation_notebook
 
@@ -57,7 +39,14 @@ def run_standards_annotation(config_path: str) -> None:
     # Set up output directory and logging
     output_root = get_project_output_root(config)
     raw_data_root = get_raw_data_root(config)
-    output_root.mkdir(parents=True, exist_ok=True)
+    try:
+        output_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f"Standards annotation output already exists: {output_root}. "
+            "Choose a different standards_run_name in the config or manually delete "
+            "the entire existing project folder before starting again."
+        ) from exc
     log_dir = output_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = str(log_dir / "standards_annotation.log")
@@ -75,45 +64,11 @@ def run_standards_annotation(config_path: str) -> None:
         db_path = get_project_db_path(config)
         run_name = config["project"]["standards_run_name"]
 
-        # ------------------------------------------------------------------
-        # Gate 1: MS1/MS2 extraction
-        # Checks sa_extraction_targets (not sa_ms1) so a run that completed
-        # extraction but crashed before peak detection is correctly resumed.
-        # ------------------------------------------------------------------
-        if is_extraction_complete(db_path):
-            logger.info(
-                f"Extraction already exists for standards annotation run "
-                f"'{run_name}'; loading from DB."
-            )
-            data = load_extraction_from_db(db_path, config)
-        else:
-            logger.info(
-                f"No existing extraction for standards annotation run "
-                f"'{run_name}'. Creating project DB..."
-            )
-            create_project_db(db_path)
-            logger.info("Running data extraction...")
-            data = run_standards_extraction(config, raw_data_root, db_path)
-            logger.info("Data extraction complete.")
-
-        # ------------------------------------------------------------------
-        # Gate 2: Peak detection (independent of extraction gate)
-        # If extraction completed but the process crashed before peak
-        # detection, this gate ensures peaks are detected on resume without
-        # re-running the expensive extraction step.
-        # ------------------------------------------------------------------
-        if not is_peaks_complete(db_path):
-            logger.info(
-                "Peak detection not yet complete for this run. "
-                "Running detect_and_save_peaks..."
-            )
-            extraction_cfg = config.get("extraction", {})
-            peak_params = extraction_cfg.get("peak_finding", {})
-            top_n_ms2 = int(extraction_cfg.get("ms2_top_n_per_peak", 5))
-            detect_and_save_peaks(data, peak_params=peak_params, top_n_ms2=top_n_ms2)
-            logger.info("Peak detection complete.")
-        else:
-            logger.info("Peak detection already complete; skipping.")
+        logger.info(f"Creating project DB for standards annotation run '{run_name}'...")
+        create_project_db(db_path)
+        logger.info("Running data extraction...")
+        data = run_standards_extraction(config, raw_data_root, db_path)
+        logger.info("Data extraction complete.")
 
         nb_path = generate_standards_annotation_notebook(
             data=data,

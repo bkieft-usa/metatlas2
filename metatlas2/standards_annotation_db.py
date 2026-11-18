@@ -14,15 +14,17 @@ Tables:
   sa_ms2                — extracted MS2 data (wide format), keyed by mz_rt_uid+filename+scan_rt
   sa_tic                — TIC per file
   sa_peaks              — detected MS1 peaks (one row per peak per file per adduct)
-  sa_peak_ms2           — best MS2 scan associated with each peak
+  sa_peak_ms2           — best MS2 scan per peak and source file
+  sa_ms1_sources        — selected MS1 file per compound, chromatography, polarity
   sa_analyst_selections — analyst peak selections: (peak_uid, analyst_notes)
   sa_workflow_state     — per-(compound_uid, chromatography) annotation status
-  sa_rt_aligned         — RT-aligned selections (written by reverse-rt-align)
+  sa_no_good_peaks      — explicit no-good-peaks choices by compound/chrom/polarity
 """
 from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -64,9 +66,8 @@ def get_project_output_root(config: dict[str, Any]) -> Path:
             / username
             / run_name
         )
-    # Fallback: next to the config file
-    standards_input = config["project"].get("standards_input_file", ".")
-    return Path(standards_input).parent / "reference_standards_annotation" / username / run_name
+    else:
+        raise FileNotFoundError("METATLAS_DATA_DIR not set; cannot determine project output root")
 
 
 def get_raw_data_root(config: dict[str, Any]) -> str:
@@ -138,8 +139,7 @@ def create_project_db(db_path: str) -> None:
                 inchi            TEXT,
                 adduct           TEXT NOT NULL,
                 polarity         TEXT,
-                mz_theoretical   REAL,
-                annotation_notes TEXT
+                mz_theoretical   REAL
             )
         """)
 
@@ -154,7 +154,8 @@ def create_project_db(db_path: str) -> None:
                 chromatography         TEXT NOT NULL,
                 rt_min                 REAL,
                 rt_max                 REAL,
-                collision_energy_label TEXT DEFAULT ''
+                collision_energy_label TEXT DEFAULT '',
+                annotation_notes       TEXT DEFAULT ''
             )
         """)
 
@@ -237,18 +238,29 @@ def create_project_db(db_path: str) -> None:
         """)
 
         # ------------------------------------------------------------------
-        # sa_peak_ms2 — best MS2 scan per peak
+        # sa_peak_ms2 — best MS2 scan per peak and source file
         # ------------------------------------------------------------------
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sa_peak_ms2 (
-                peak_uid              TEXT PRIMARY KEY REFERENCES sa_peaks(peak_uid),
+                peak_uid              TEXT NOT NULL REFERENCES sa_peaks(peak_uid),
                 scan_rt               REAL,
                 precursor_mz          REAL,
                 precursor_intensity   REAL,
                 collision_energy      REAL,
                 frag_mzs              TEXT,
                 frag_ints             TEXT,
-                filename              TEXT
+                filename              TEXT NOT NULL,
+                PRIMARY KEY (peak_uid, filename)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sa_ms1_sources (
+                compound_name TEXT NOT NULL,
+                chromatography TEXT NOT NULL,
+                polarity TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                PRIMARY KEY (compound_name, chromatography, polarity)
             )
         """)
 
@@ -263,6 +275,28 @@ def create_project_db(db_path: str) -> None:
                 selected_date  TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sa_compound_notes (
+                compound_name TEXT NOT NULL,
+                chromatography TEXT NOT NULL,
+                analyst_notes TEXT NOT NULL,
+                PRIMARY KEY (compound_name, chromatography)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sa_no_good_peaks (
+                compound_name TEXT NOT NULL,
+                chromatography TEXT NOT NULL,
+                polarity TEXT NOT NULL,
+                PRIMARY KEY (compound_name, chromatography, polarity)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sa_gui_checkpoint (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                compound_name TEXT NOT NULL
+            )
+        """)
 
         # ------------------------------------------------------------------
         # sa_workflow_state — per (compound_uid, chromatography) status
@@ -275,26 +309,6 @@ def create_project_db(db_path: str) -> None:
                 annotation_status TEXT DEFAULT 'pending',
                 last_updated      TEXT,
                 PRIMARY KEY (compound_uid, chromatography)
-            )
-        """)
-
-        # ------------------------------------------------------------------
-        # sa_rt_aligned — RT-aligned selections
-        # ------------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sa_rt_aligned (
-                peak_uid          TEXT PRIMARY KEY REFERENCES sa_peaks(peak_uid),
-                rt_peak_aligned   REAL NOT NULL,
-                rt_min_aligned    REAL NOT NULL,
-                rt_max_aligned    REAL NOT NULL,
-                rt_delta          REAL,
-                qc_atlas_uid      TEXT,
-                rt_model_type     TEXT,
-                rt_model_degree   INTEGER,
-                rt_model_r2       REAL,
-                rt_model_rmse     REAL,
-                created_by        TEXT,
-                created_date      TEXT
             )
         """)
 
@@ -348,7 +362,7 @@ def is_extraction_complete(db_path: str) -> bool:
 
 
 def is_peaks_complete(db_path: str) -> bool:
-    """Return True if ``sa_peaks`` already contains rows (peak detection done).
+    """Return True if MS1 source selection and peak detection completed.
 
     Args:
         db_path: Path to the project DuckDB.
@@ -357,7 +371,7 @@ def is_peaks_complete(db_path: str) -> bool:
         return False
     try:
         with duckdb.connect(str(db_path), read_only=True) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM sa_peaks").fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) FROM sa_ms1_sources").fetchone()[0]
         return int(count) > 0
     except Exception:
         return False
@@ -420,13 +434,12 @@ def save_extraction_to_db(
                         str(row.get("adduct", "")),
                         str(row.get("polarity", "")),
                         float(row.get("mz_theoretical", float("nan"))),
-                        str(row.get("annotation_notes", "")),
                     ))
                 if compound_rows:
                     conn.executemany(
                         """
                         INSERT OR IGNORE INTO sa_compounds VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         compound_rows,
@@ -447,12 +460,13 @@ def save_extraction_to_db(
                         float(row.get("rt_min", 0.0)),
                         float(row.get("rt_max", 20.0)),
                         str(row.get("collision_energy_label", "")),
+                        str(row.get("annotation_notes", "")),
                     ))
                 if target_rows:
                     conn.executemany(
                         """
                         INSERT OR IGNORE INTO sa_extraction_targets VALUES (
-                            ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         target_rows,
@@ -565,7 +579,18 @@ def load_extraction_from_db(
     logger.info(f"Loading extraction data from {db_path}")
 
     with duckdb.connect(str(db_path), read_only=True) as conn:
-        ms1_df = conn.execute("SELECT * FROM sa_ms1").df()
+        has_sources = conn.execute("SELECT COUNT(*) FROM sa_ms1_sources").fetchone()[0] > 0
+        if has_sources:
+            ms1_df = conn.execute("""
+                SELECT m.* FROM sa_ms1 m
+                JOIN sa_extraction_targets t ON m.mz_rt_uid = t.mz_rt_uid
+                JOIN sa_compounds c ON t.compound_uid = c.compound_uid
+                JOIN sa_ms1_sources s ON s.compound_name = c.compound_name
+                    AND s.chromatography = t.chromatography
+                    AND s.polarity = c.polarity AND s.filename = t.filename
+            """).df()
+        else:
+            ms1_df = conn.execute("SELECT * FROM sa_ms1").df()
         ms2_df = conn.execute("SELECT * FROM sa_ms2").df()
         tic_raw = conn.execute("SELECT * FROM sa_tic").df()
         # Rebuild expanded_table by joining sa_extraction_targets with sa_compounds
@@ -578,14 +603,14 @@ def load_extraction_from_db(
                 t.rt_min,
                 t.rt_max,
                 t.collision_energy_label,
+                t.annotation_notes,
                 c.compound_name,
                 c.inchi_key,
                 c.smiles,
                 c.inchi,
                 c.adduct,
                 c.polarity,
-                c.mz_theoretical,
-                c.annotation_notes
+                c.mz_theoretical
             FROM sa_extraction_targets t
             JOIN sa_compounds c ON t.compound_uid = c.compound_uid
             ORDER BY c.compound_name, t.chromatography, c.adduct,
@@ -726,11 +751,78 @@ def load_injbl_ms1(db_path: str) -> pd.DataFrame:
 # Peak persistence
 # ---------------------------------------------------------------------------
 
+def _peak_values(p: dict) -> tuple:
+    return (
+        p["peak_uid"], p["compound_uid"], p["compound_name"], p.get("inchi_key", ""),
+        p["adduct"], p["polarity"], p["chromatography"], p["filename"], p["mz_rt_uid"],
+        float(p.get("mz_theoretical") or float("nan")), float(p["rt_peak"]),
+        float(p["rt_min"]), float(p["rt_max"]), float(p["peak_intensity"]),
+        float(p.get("mz_observed") or float("nan")), int(p.get("peak_num", 1)),
+        bool(p.get("is_manual", False)), str(p.get("collision_energy_label", "")),
+    )
+
+
+def _peak_ms2_values(r: dict) -> tuple:
+    def number(key: str) -> float:
+        value = r.get(key)
+        return float(value) if value is not None else float("nan")
+
+    return (
+        r["peak_uid"], number("scan_rt"), number("precursor_mz"),
+        number("precursor_intensity"), number("collision_energy"),
+        json.dumps([float(v) for v in (r.get("frag_mzs") or [])]),
+        json.dumps([float(v) for v in (r.get("frag_ints") or [])]),
+        str(r.get("filename", "")),
+    )
+
+
+def save_detected_peaks_to_db(
+    db_path: str, peaks: list[dict], peak_ms2_rows: list[dict],
+    sources: list[tuple[str, str, str, str]] | None = None,
+) -> None:
+    """Insert a detection result and its MS2 associations in one transaction."""
+    peak_uids = [peak["peak_uid"] for peak in peaks]
+    ms2_uids = [row["peak_uid"] for row in peak_ms2_rows]
+    ms2_keys = [(row["peak_uid"], row["filename"]) for row in peak_ms2_rows]
+    if len(set(peak_uids)) != len(peak_uids) or len(set(ms2_keys)) != len(ms2_keys):
+        raise ValueError("Detected peaks or MS2 associations contain duplicate keys.")
+    if set(ms2_uids) - set(peak_uids):
+        raise ValueError("MS2 associations reference peaks outside this detection result.")
+    if not peaks and not sources:
+        return
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            if sources:
+                conn.executemany("INSERT INTO sa_ms1_sources VALUES (?, ?, ?, ?)", sources)
+            if peaks:
+                conn.executemany(
+                    "INSERT INTO sa_peaks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [_peak_values(peak) for peak in peaks],
+                )
+            if peak_ms2_rows:
+                conn.executemany(
+                    "INSERT INTO sa_peak_ms2 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [_peak_ms2_values(row) for row in peak_ms2_rows],
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            logger.exception(
+                "Could not save detected peaks and MS2 associations; neither was saved. "
+                "Check for existing peaks or duplicate detection results."
+            )
+            raise
+    logger.info(
+        "Saved %d detected peaks and %d MS2 associations", len(peaks), len(peak_ms2_rows)
+    )
+
+
 def save_peaks_to_db(db_path: str, peaks: list[dict]) -> None:
     """Bulk-insert detected MS1 peaks into ``sa_peaks``.
 
     Each dict in *peaks* must have keys matching the ``sa_peaks`` schema.
-    Existing rows with the same ``peak_uid`` are ignored (idempotent).
+    Existing rows with the same ``peak_uid`` are ignored.
 
     Args:
         db_path: Path to the project DuckDB.
@@ -738,29 +830,7 @@ def save_peaks_to_db(db_path: str, peaks: list[dict]) -> None:
     """
     if not peaks:
         return
-    rows = [
-        (
-            p["peak_uid"],
-            p["compound_uid"],
-            p["compound_name"],
-            p.get("inchi_key", ""),
-            p["adduct"],
-            p["polarity"],
-            p["chromatography"],
-            p["filename"],
-            p["mz_rt_uid"],
-            float(p.get("mz_theoretical") or float("nan")),
-            float(p["rt_peak"]),
-            float(p["rt_min"]),
-            float(p["rt_max"]),
-            float(p["peak_intensity"]),
-            float(p.get("mz_observed") or float("nan")),
-            int(p.get("peak_num", 1)),
-            bool(p.get("is_manual", False)),
-            str(p.get("collision_energy_label", "")),
-        )
-        for p in peaks
-    ]
+    rows = [_peak_values(p) for p in peaks]
     with duckdb.connect(str(db_path)) as conn:
         conn.execute("BEGIN TRANSACTION")
         try:
@@ -778,50 +848,6 @@ def save_peaks_to_db(db_path: str, peaks: list[dict]) -> None:
             logger.error(f"Failed to save peaks: {exc}")
             raise
     logger.info(f"Saved {len(rows)} peaks to sa_peaks")
-
-
-def save_peak_ms2_to_db(db_path: str, peak_ms2_rows: list[dict]) -> None:
-    """Bulk-insert best-MS2 associations into ``sa_peak_ms2``.
-
-    Each dict must have ``peak_uid`` plus MS2 scan fields.
-    Existing rows with the same ``peak_uid`` are ignored (idempotent).
-
-    Args:
-        db_path:       Path to the project DuckDB.
-        peak_ms2_rows: List of dicts, one per peak that has an MS2 scan.
-    """
-    if not peak_ms2_rows:
-        return
-    rows = [
-        (
-            r["peak_uid"],
-            float(r.get("scan_rt") or float("nan")),
-            float(r.get("precursor_mz") or float("nan")),
-            float(r.get("precursor_intensity") or float("nan")),
-            float(r.get("collision_energy") or float("nan")),
-            json.dumps([float(v) for v in (r.get("frag_mzs") or [])]),
-            json.dumps([float(v) for v in (r.get("frag_ints") or [])]),
-            str(r.get("filename", "")),
-        )
-        for r in peak_ms2_rows
-    ]
-    with duckdb.connect(str(db_path)) as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO sa_peak_ms2 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                rows,
-            )
-            conn.execute("COMMIT")
-        except Exception as exc:
-            conn.execute("ROLLBACK")
-            logger.error(f"Failed to save peak MS2 associations: {exc}")
-            raise
-    logger.info(f"Saved {len(rows)} peak→MS2 associations to sa_peak_ms2")
 
 
 def load_peaks(db_path: str) -> pd.DataFrame:
@@ -843,8 +869,7 @@ def load_peaks(db_path: str) -> pd.DataFrame:
                 """
             ).df()
     except Exception as exc:
-        logger.warning(f"Could not load peaks from {db_path}: {exc}")
-        return pd.DataFrame()
+        raise RuntimeError(f"Could not load peaks from {db_path}: {exc}") from exc
 
 
 def load_peak_ms2(db_path: str) -> pd.DataFrame:
@@ -867,18 +892,34 @@ def load_peak_ms2(db_path: str) -> pd.DataFrame:
                 )
         return df
     except Exception as exc:
-        logger.warning(f"Could not load peak MS2 from {db_path}: {exc}")
-        return pd.DataFrame()
+        raise RuntimeError(f"Could not load peak MS2 from {db_path}: {exc}") from exc
 
 
-def save_manual_peak_to_db(db_path: str, peak: dict) -> None:
-    """Insert a single manually-added peak into ``sa_peaks``.
+def save_manual_peak_to_db(db_path: str, peak: dict, ms2: list[dict]) -> None:
+    """Atomically insert a manually added peak and its MS2 associations.
 
     Args:
         db_path: Path to the project DuckDB.
         peak:    Peak dict with all ``sa_peaks`` fields.
     """
-    save_peaks_to_db(db_path, [peak])
+    if any(row["peak_uid"] != peak["peak_uid"] for row in ms2):
+        raise ValueError("Manual peak and MS2 association have different peak UIDs.")
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.execute(
+                "INSERT INTO sa_peaks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                _peak_values(peak),
+            )
+            if ms2:
+                conn.executemany(
+                    "INSERT INTO sa_peak_ms2 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [_peak_ms2_values(row) for row in ms2],
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
 
 def delete_manual_peak_from_db(db_path: str, peak_uid: str) -> None:
@@ -906,6 +947,143 @@ def delete_manual_peak_from_db(db_path: str, peak_uid: str) -> None:
 # ---------------------------------------------------------------------------
 # Analyst selection persistence (sa_analyst_selections)
 # ---------------------------------------------------------------------------
+
+def replace_compound_selections(
+    db_path: str,
+    compound_name: str,
+    compound_uids: list[str],
+    selections: list[tuple[str, str]],
+    notes_by_chrom: dict[str, str],
+    chromatographies: list[str],
+    resume_compound: str | None = None,
+    no_good_peaks: list[tuple[str, str]] | None = None,
+) -> None:
+    """Atomically save all adduct selections and workflow state for a compound."""
+    if not compound_uids:
+        raise ValueError("Cannot save selections: compound has no database identities.")
+    if len({uid for uid, _ in selections}) != len(selections):
+        raise ValueError("Cannot save duplicate selected peak UIDs.")
+    prov = get_provenance()
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            placeholders = ", ".join("?" for _ in compound_uids)
+            valid = {
+                row[0]: (row[1], row[2].upper()) for row in conn.execute(
+                    f"SELECT peak_uid, chromatography, polarity FROM sa_peaks WHERE compound_uid IN ({placeholders}) AND compound_name = ?",
+                    [*compound_uids, compound_name],
+                ).fetchall()
+            }
+            missing = {uid for uid, _ in selections} - valid.keys()
+            if missing:
+                raise ValueError(f"Selected peaks not found for this compound: {sorted(missing)}")
+            no_good = set(no_good_peaks or [])
+            groups = {
+                (row[0], row[1].upper()) for row in conn.execute(
+                    """SELECT DISTINCT t.chromatography, c.polarity
+                       FROM sa_extraction_targets t JOIN sa_compounds c USING (compound_uid)
+                       WHERE c.compound_name = ?""", [compound_name],
+                ).fetchall()
+            }
+            if no_good - groups:
+                raise ValueError(f"Invalid no-good-peaks groups: {sorted(no_good - groups)}")
+            conflicts = no_good & {valid[uid] for uid, _ in selections}
+            if conflicts:
+                raise ValueError(f"No-good-peaks choices conflict with selected peaks: {sorted(conflicts)}")
+            conn.execute(
+                f"DELETE FROM sa_analyst_selections WHERE peak_uid IN "
+                f"(SELECT peak_uid FROM sa_peaks WHERE compound_uid IN ({placeholders}))",
+                compound_uids,
+            )
+            if selections:
+                conn.executemany(
+                    "INSERT INTO sa_analyst_selections VALUES (?, ?, ?, ?)",
+                    [(uid, notes, prov["analyst"], prov["timestamp"]) for uid, notes in selections],
+                )
+            conn.execute("DELETE FROM sa_no_good_peaks WHERE compound_name = ?", [compound_name])
+            if no_good:
+                conn.executemany(
+                    "INSERT INTO sa_no_good_peaks VALUES (?, ?, ?)",
+                    [(compound_name, chrom, pol) for chrom, pol in sorted(no_good)],
+                )
+            for chrom in chromatographies:
+                conn.execute(
+                    """INSERT OR REPLACE INTO sa_compound_notes VALUES (?, ?, ?)""",
+                    [compound_name, chrom, notes_by_chrom.get(chrom, "")],
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO sa_gui_checkpoint VALUES (1, ?)",
+                [resume_compound if resume_compound is not None else compound_name],
+            )
+            for uid in compound_uids:
+                for chrom in chromatographies:
+                    conn.execute(
+                        """INSERT INTO sa_workflow_state VALUES (?, ?, 'complete', ?)
+                           ON CONFLICT (compound_uid, chromatography) DO UPDATE SET
+                           annotation_status = excluded.annotation_status,
+                           last_updated = excluded.last_updated""",
+                        [uid, chrom, prov["timestamp"]],
+                    )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def load_gui_checkpoint(db_path: str) -> str | None:
+    """Return the compound at the last saved GUI checkpoint, if one exists."""
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        row = conn.execute(
+            "SELECT compound_name FROM sa_gui_checkpoint WHERE id = 1"
+        ).fetchone()
+    return row[0] if row else None
+
+
+def load_compound_notes(db_path: str, compound_name: str) -> dict[str, str]:
+    """Return saved analyst notes by chromatography for a compound."""
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT chromatography, analyst_notes FROM sa_compound_notes WHERE compound_name = ?",
+            [compound_name],
+        ).fetchall()
+    return dict(rows)
+
+
+def load_no_good_peaks(db_path: str, compound_name: str) -> list[tuple[str, str]]:
+    """Return saved no-good-peaks choices for a compound."""
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        return conn.execute(
+            "SELECT chromatography, polarity FROM sa_no_good_peaks WHERE compound_name = ?",
+            [compound_name],
+        ).fetchall()
+
+
+def validate_annotation_choices(db_path: str) -> None:
+    """Require a peak or an explicit no-good choice for every target group."""
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        missing = conn.execute("""
+            SELECT DISTINCT c.compound_name, t.chromatography, upper(c.polarity) AS polarity
+            FROM sa_extraction_targets t JOIN sa_compounds c USING (compound_uid)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sa_analyst_selections s JOIN sa_peaks p USING (peak_uid)
+                WHERE p.compound_name = c.compound_name
+                  AND p.chromatography = t.chromatography
+                  AND upper(p.polarity) = upper(c.polarity)
+            ) AND NOT EXISTS (
+                SELECT 1 FROM sa_no_good_peaks n
+                WHERE n.compound_name = c.compound_name
+                  AND n.chromatography = t.chromatography
+                  AND n.polarity = upper(c.polarity)
+            )
+            ORDER BY c.compound_name, t.chromatography, polarity
+        """).fetchall()
+    if missing:
+        details = "\n".join(f"  {name} | {chrom} | {pol}" for name, chrom, pol in missing)
+        raise ValueError(
+            "Select a peak or 'No good peaks' for each compound, chromatography, "
+            f"and polarity in the GUI, then save:\n{details}"
+        )
+
 
 def save_analyst_selection(
     db_path: str,
@@ -1005,7 +1183,7 @@ def load_analyst_selections(db_path: str) -> pd.DataFrame:
         db_path: Path to the project DuckDB.
     """
     if not Path(db_path).exists():
-        return pd.DataFrame()
+        raise FileNotFoundError(f"Project database not found: {db_path}")
     try:
         with duckdb.connect(str(db_path), read_only=True) as conn:
             df = conn.execute(
@@ -1019,12 +1197,13 @@ def load_analyst_selections(db_path: str) -> pd.DataFrame:
             ).df()
         return df
     except Exception as exc:
-        logger.warning(f"Could not load analyst selections from {db_path}: {exc}")
-        return pd.DataFrame()
+        raise RuntimeError(f"Could not load analyst selections from {db_path}: {exc}") from exc
 
 
-def load_selected_peaks_with_ms2(db_path: str) -> pd.DataFrame:
-    """Load selected peaks joined with their best MS2 scan (if any).
+def load_selected_peaks_with_ms2(
+    db_path: str, *, connection: duckdb.DuckDBPyConnection | None = None,
+) -> pd.DataFrame:
+    """Load selected peaks with a list of their best MS2 scans.
 
     Returns a DataFrame joining ``sa_analyst_selections``, ``sa_peaks``,
     ``sa_compounds``, and ``sa_peak_ms2`` for export to atlas CSV and
@@ -1034,9 +1213,10 @@ def load_selected_peaks_with_ms2(db_path: str) -> pd.DataFrame:
         db_path: Path to the project DuckDB.
     """
     if not Path(db_path).exists():
-        return pd.DataFrame()
+        raise FileNotFoundError(f"Project database not found: {db_path}")
     try:
-        with duckdb.connect(str(db_path), read_only=True) as conn:
+        with (nullcontext(connection) if connection is not None
+              else duckdb.connect(str(db_path), read_only=True)) as conn:
             df = conn.execute(
                 """
                 SELECT
@@ -1061,173 +1241,40 @@ def load_selected_peaks_with_ms2(db_path: str) -> pd.DataFrame:
                     s.analyst_notes,
                     c.smiles,
                     c.inchi,
-                    c.annotation_notes,
-                    m.scan_rt        AS ms2_scan_rt,
-                    m.precursor_mz   AS ms2_precursor_mz,
-                    m.precursor_intensity AS ms2_precursor_intensity,
-                    m.collision_energy    AS ms2_collision_energy,
-                    m.frag_mzs       AS ms2_frag_mzs,
-                    m.frag_ints      AS ms2_frag_ints,
-                    m.filename       AS ms2_filename
+                    t.annotation_notes
                 FROM sa_analyst_selections s
                 JOIN sa_peaks p ON s.peak_uid = p.peak_uid
                 JOIN sa_compounds c ON p.compound_uid = c.compound_uid
-                LEFT JOIN sa_peak_ms2 m ON p.peak_uid = m.peak_uid
+                JOIN sa_extraction_targets t ON p.mz_rt_uid = t.mz_rt_uid
                 ORDER BY p.compound_name, p.chromatography, p.polarity,
                          p.collision_energy_label, p.adduct, p.filename, p.peak_num
                 """
             ).df()
-        # Deserialise JSON fragment columns
-        for col in ("ms2_frag_mzs", "ms2_frag_ints"):
-            if col in df.columns:
-                df[col] = df[col].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) else (x or [])
-                )
+            scans = conn.execute("""
+                SELECT m.* FROM sa_peak_ms2 m
+                JOIN sa_analyst_selections s ON s.peak_uid = m.peak_uid
+                ORDER BY m.peak_uid, m.filename
+            """).df()
+        scans_by_peak: dict[str, list[dict]] = {}
+        for row in scans.to_dict("records"):
+            for col in ("frag_mzs", "frag_ints"):
+                row[col] = json.loads(row[col])
+            scans_by_peak.setdefault(row["peak_uid"], []).append(row)
+        df["ms2_scans"] = df["peak_uid"].map(lambda uid: scans_by_peak.get(uid, []))
         return df
     except Exception as exc:
-        logger.warning(f"Could not load selected peaks with MS2 from {db_path}: {exc}")
-        return pd.DataFrame()
+        raise RuntimeError(f"Could not load selected peaks with MS2 from {db_path}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
 # RT alignment persistence
 # ---------------------------------------------------------------------------
 
-def save_rt_aligned(db_path: str, rows: list[dict]) -> None:
-    """Bulk upsert RT-aligned rows into ``sa_rt_aligned``.
-
-    Args:
-        db_path: Path to the project DuckDB.
-        rows:    List of dicts, one per aligned peak.
-    """
-    if not rows:
-        logger.info("save_rt_aligned: no rows to save.")
-        return
-
-    prov = get_provenance()
-
-    with duckdb.connect(str(db_path)) as conn:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            for row in rows:
-                r = dict(row)
-                r.setdefault("created_by", prov["analyst"])
-                r.setdefault("created_date", prov["timestamp"])
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO sa_rt_aligned VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    )
-                    """,
-                    [
-                        r.get("peak_uid"),
-                        float(r.get("rt_peak_aligned", 0.0)),
-                        float(r.get("rt_min_aligned", 0.0)),
-                        float(r.get("rt_max_aligned", 0.0)),
-                        float(r.get("rt_delta", 0.0)),
-                        r.get("qc_atlas_uid"),
-                        r.get("rt_model_type"),
-                        r.get("rt_model_degree"),
-                        r.get("rt_model_r2"),
-                        r.get("rt_model_rmse"),
-                        r.get("created_by"),
-                        r.get("created_date"),
-                    ],
-                )
-            conn.execute("COMMIT")
-            logger.info(f"Saved {len(rows)} RT-aligned rows to sa_rt_aligned")
-        except Exception as exc:
-            conn.execute("ROLLBACK")
-            logger.error(f"Failed to save RT-aligned rows: {exc}")
-            raise
-
-
-def load_rt_aligned(db_path: str) -> pd.DataFrame:
-    """Load RT-aligned rows joined with peak and compound metadata.
-
-    Returns ``sa_rt_aligned JOIN sa_peaks JOIN sa_compounds LEFT JOIN sa_peak_ms2``
-    so the result has all columns needed for atlas CSV and Excel table generation.
-
-    Args:
-        db_path: Path to the project DuckDB.
-
-    Returns:
-        DataFrame with all aligned rows and peak metadata, or empty DataFrame.
-    """
-    if not Path(db_path).exists():
-        return pd.DataFrame()
-    try:
-        with duckdb.connect(str(db_path), read_only=True) as conn:
-            df = conn.execute(
-                """
-                SELECT
-                    a.peak_uid,
-                    a.rt_peak_aligned,
-                    a.rt_min_aligned,
-                    a.rt_max_aligned,
-                    a.rt_delta,
-                    a.qc_atlas_uid,
-                    a.rt_model_type,
-                    a.rt_model_degree,
-                    a.rt_model_r2,
-                    a.rt_model_rmse,
-                    p.compound_uid,
-                    p.compound_name,
-                    p.inchi_key,
-                    p.adduct,
-                    p.polarity,
-                    p.chromatography,
-                    p.filename,
-                    p.mz_theoretical,
-                    p.rt_peak        AS rt_peak_measured,
-                    p.rt_min         AS rt_min_measured,
-                    p.rt_max         AS rt_max_measured,
-                    p.peak_intensity,
-                    p.mz_observed,
-                    p.is_manual,
-                    c.smiles,
-                    c.inchi,
-                    c.annotation_notes,
-                    s.analyst_notes,
-                    m.scan_rt        AS ms2_scan_rt,
-                    m.precursor_mz   AS ms2_precursor_mz,
-                    m.collision_energy AS ms2_collision_energy,
-                    m.frag_mzs       AS ms2_frag_mzs,
-                    m.frag_ints      AS ms2_frag_ints
-                FROM sa_rt_aligned a
-                JOIN sa_peaks p ON a.peak_uid = p.peak_uid
-                JOIN sa_compounds c ON p.compound_uid = c.compound_uid
-                LEFT JOIN sa_analyst_selections s ON p.peak_uid = s.peak_uid
-                LEFT JOIN sa_peak_ms2 m ON p.peak_uid = m.peak_uid
-                ORDER BY p.compound_name, p.chromatography, p.polarity,
-                         p.adduct, p.filename, p.peak_num
-                """
-            ).df()
-        for col in ("ms2_frag_mzs", "ms2_frag_ints"):
-            if col in df.columns:
-                df[col] = df[col].apply(
-                    lambda x: json.loads(x) if isinstance(x, str) else (x or [])
-                )
-        return df
-    except Exception as exc:
-        logger.warning(f"Could not load RT-aligned rows from {db_path}: {exc}")
-        return pd.DataFrame()
-
-
-def is_rt_alignment_complete(db_path: str) -> bool:
-    """Return True if ``sa_rt_aligned`` already contains rows.
-
-    Args:
-        db_path: Path to the project DuckDB.
-    """
-    if not Path(db_path).exists():
-        return False
-    try:
-        with duckdb.connect(str(db_path), read_only=True) as conn:
-            count = conn.execute("SELECT COUNT(*) FROM sa_rt_aligned").fetchone()[0]
-        return int(count) > 0
-    except Exception:
-        return False
+def load_extraction_target_filenames(db_path: str) -> list[str]:
+    """Return distinct nonempty source filenames from the project database."""
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        rows = conn.execute("SELECT DISTINCT filename FROM sa_extraction_targets").fetchall()
+    return sorted({str(row[0]).strip() for row in rows if row[0] and str(row[0]).strip()})
 
 
 def load_sa_compounds(db_path: str) -> pd.DataFrame:
@@ -1329,7 +1376,7 @@ def get_first_incomplete_compound(db_path: str) -> tuple[str | None, str | None]
         are complete.
     """
     if not Path(db_path).exists():
-        return None, None
+        raise FileNotFoundError(f"Project database not found: {db_path}")
     try:
         with duckdb.connect(str(db_path), read_only=True) as conn:
             row = conn.execute(
@@ -1343,5 +1390,5 @@ def get_first_incomplete_compound(db_path: str) -> tuple[str | None, str | None]
         if row:
             return row[0], row[1]
         return None, None
-    except Exception:
-        return None, None
+    except Exception as exc:
+        raise RuntimeError(f"Could not load workflow state from {db_path}: {exc}") from exc
