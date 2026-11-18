@@ -50,7 +50,7 @@ def build_dash_app(
 
     # Set up all passing compounds as options for the dropdown
     compound_options = [
-        {"label": f"{i+1}: {row['compound_name']} ({row['adduct']})", "value": i}
+        {"label": f"{i+1}: {row['label']} ({row['adduct']})", "value": i}
         for i, row in manual_curation_df.reset_index(drop=True).iterrows()
     ]
 
@@ -247,7 +247,7 @@ def build_dash_app(
         starting_compound_idx = _find_starting_compound_idx()
         if starting_compound_idx > 0:
             logger.info(f"Resuming analysis at compound {starting_compound_idx+1}: "
-                    f"{manual_curation_df.iloc[starting_compound_idx]['compound_name']}")
+                    f"{manual_curation_df.iloc[starting_compound_idx]['label']}")
         else:
             logger.info("Starting new analysis at compound 1")
     else:
@@ -1031,7 +1031,7 @@ def build_dash_app(
                 traceback.print_exc()
                 async_flush_errors[flush_key] = str(e)
                 # if the flush breaks, log it for export
-                compound_label = f"{row.get('compound_name', 'unknown')} ({row.get('adduct', '?')})"
+                compound_label = f"{row.get('label', 'unknown')} ({row.get('adduct', '?')})"
                 database_flush_errors[compound_label] = str(e)
         
         # Launch async worker thread - don't block UI!
@@ -1041,7 +1041,7 @@ def build_dash_app(
 
         # Return immediately with optimistic state update
         state["last_saved"] = {
-            "name": row["compound_name"],
+            "name": row["label"],
             "adduct": row["adduct"],
             "index": state["compound_idx"]+1,
             "rt_min": state["rt_min"],
@@ -1072,7 +1072,7 @@ def build_dash_app(
         if sub.empty:
             fig = go.Figure()
             fig.update_layout(
-                title=f"No MS1 data available for {row.get('compound_name', 'Unknown')} ({adduct})",
+                title=f"No MS1 data available for {row.get('label', 'Unknown')} ({adduct})",
                 xaxis_title="Retention Time (min)",
                 yaxis_title="Intensity",
                 xaxis_range=[x_window_min, x_window_max],
@@ -1155,13 +1155,13 @@ def build_dash_app(
                     # Build resolved_isomers list (cache this part)
                     for iso in isomers:
                         iso_inchi = iso.get('inchi_key', '')
-                        iso_name = iso.get('compound_name', '')
+                        iso_name = iso.get('label', '')
                         iso_adduct = iso.get('adduct', '')
                         iso_rt = iso.get('rt', None)
                         iso_mz = iso.get('mz', None)
                         mask = (
                             (manual_curation_df["inchi_key"] == iso_inchi) &
-                            (manual_curation_df["compound_name"] == iso_name) &
+                            (manual_curation_df["label"] == iso_name) &
                             (manual_curation_df["adduct"] == iso_adduct)
                         )
                         isomer_match = manual_curation_df[mask]
@@ -1408,7 +1408,7 @@ def build_dash_app(
         )
 
         ms1_title_text = (
-            f"<span style='font-size:1.2em'><b>[{compound_display_idx}] {row['compound_name']} | {adduct} | {inchi_key}</b></span><br>"
+            f"<span style='font-size:1.2em'><b>[{compound_display_idx}] {row['label']} | {adduct} | {inchi_key}</b></span><br>"
             f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  AutoID RT: {row['rt_peak']:.4f}  |  RT Δ: {row['rt_error']:.3f}<br>"
             f"Atlas m/z: {row['atlas_mz']:.4f}  |  AutoID M/Z: {row['mz']:.4f}  |  M/Z ppm Δ: {row['mz_error']:.2f}"
         )
@@ -1571,7 +1571,7 @@ def build_dash_app(
 
         if scans.empty:
             fig = go.Figure()
-            fig.add_annotation(text=f"{row['compound_name']} - No MS2 data",
+            fig.add_annotation(text=f"{row['label']} - No MS2 data",
                                xref="paper", yref="paper", x=0.5, y=0.5,
                                showarrow=False, font=dict(size=14))
             fig.update_layout(margin=dict(l=50, r=20, t=80, b=40), plot_bgcolor="white",
@@ -2396,7 +2396,7 @@ def build_dash_app(
         pending = html.Span(
             [
                 html.I("Pending changes: ", style={"color": "black"}),
-                html.Br(), f"[{current_1based}] {row['compound_name']} ({row['adduct']})",
+                html.Br(), f"[{current_1based}] {row['label']} ({row['adduct']})",
                 html.Br(), f"RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
                 html.Br(), f"MS1: {state['ms1_note']}",
                 html.Br(), f"MS2: {state['ms2_note']}",

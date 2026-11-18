@@ -417,7 +417,7 @@ def _sa_figure_worker(kwargs: dict) -> str:
     _plot_adduct_legend(ax_legend, adduct_list, selections_df)
 
     ax_struct = fig.add_subplot(bottom_gs[eic_row, 3])
-    _plot_structure(ax_struct, smiles, inchi, inchi_key, compound_name=compound_name, size=400)
+    _plot_structure(ax_struct, smiles, inchi, inchi_key, label=compound_name, size=400)
 
     # ── TIC row (bottom row 1) ────────────────────────────────────────────────
     ax_tic = fig.add_subplot(bottom_gs[2, :])
@@ -682,6 +682,7 @@ def make_standards_annotation_table(
 
     ``selections_df`` must have columns from ``load_selected_peaks_with_ms2()``.
     When ``aligned`` is true, include the aligned RT values and signed peak shift.
+    ``rt_delta`` is computed as ``rt_peak_aligned - rt_peak`` if not already present.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -702,23 +703,43 @@ def make_standards_annotation_table(
     df = selections_df.copy()
     df["mz_ppm_error"] = df.apply(_ppm, axis=1)
 
+    # Derive rt_delta (signed shift) when aligned and not supplied by the input
+    if aligned and "rt_delta" not in df.columns:
+        required = {"rt_peak", "rt_peak_aligned"}
+        absent = required - set(df.columns)
+        if absent:
+            raise ValueError(
+                f"Cannot compute rt_delta; missing columns: {sorted(absent)}"
+            )
+        df["rt_delta"] = df["rt_peak_aligned"] - df["rt_peak"]
+
+    ms2_fields = ("RT (min)", "Precursor M/Z", "Precursor Intensity", "CE", "spectrum", "Filename")
+
+    def _ms2_col(ce: str, field: str) -> str:
+        return f"{ce} spectrum" if field == "spectrum" else f"{ce} MS2 {field}"
+
     ce_labels = STANDARD_CE_LABELS
-    for ce in ce_labels:
-        for field in ("RT (min)", "Precursor M/Z", "Precursor Intensity", "CE", "spectrum", "Filename"):
-            df[f"{ce} MS2 {field}" if field != "spectrum" else f"{ce} spectrum"] = None
+    ms2_cols = [_ms2_col(ce, field) for ce in ce_labels for field in ms2_fields]
+    for col in ms2_cols:
+        df[col] = None
+
     for index, row in df.iterrows():
         seen = set()
         for scan in row["ms2_scans"]:
             ce = fpf.extract_collision_energy_label(scan["filename"])
             if ce not in ce_labels or ce in seen:
-                raise ValueError(f"Unexpected or duplicate MS2 CE label {ce!r} for peak {row['peak_uid']}")
+                raise ValueError(
+                    f"Unexpected or duplicate MS2 CE label {ce!r} for peak {row['peak_uid']}"
+                )
             seen.add(ce)
             for column, value in {
                 f"{ce} MS2 RT (min)": scan["scan_rt"],
                 f"{ce} MS2 Precursor M/Z": scan["precursor_mz"],
                 f"{ce} MS2 Precursor Intensity": scan["precursor_intensity"],
                 f"{ce} MS2 CE": scan["collision_energy"],
-                f"{ce} spectrum": json.dumps([_to_pylist(scan["frag_mzs"]), _to_pylist(scan["frag_ints"])]),
+                f"{ce} spectrum": json.dumps(
+                    [_to_pylist(scan["frag_mzs"]), _to_pylist(scan["frag_ints"])]
+                ),
                 f"{ce} MS2 Filename": scan["filename"],
             }.items():
                 df.at[index, column] = value
@@ -733,37 +754,35 @@ def make_standards_annotation_table(
         "chromatography", "collision_energy_label", "source_file_str",
         "mz_theoretical", "mz_observed", "mz_ppm_error",
         "rt_peak", "rt_min", "rt_max", "peak_intensity", "analyst_notes", "annotation_notes",
-        *[f"{ce} MS2 {field}" if field != "spectrum" else f"{ce} spectrum"
-          for ce in ce_labels
-          for field in ("RT (min)", "Precursor M/Z", "Precursor Intensity", "CE", "spectrum", "Filename")],
+        *ms2_cols,
         "auto_peak_num",
     ]
     display_names = [
         "Compound Label", "Compound Name", "Peak #", "InChIKey", "Adduct", "Polarity",
-        "Chromatography", "MS1 File Collision Energy", "Source File", 
+        "Chromatography", "MS1 File Collision Energy", "Source File",
         "Theoretical m/z", "Observed m/z", "m/z ppm error",
-        "RT peak", "RT min", "RT max", "Peak Intensity", "Analyst Notes", "Annotation Notes", 
-        *[f"{ce} MS2 {field}" if field != "spectrum" else f"{ce} spectrum"
-          for ce in ce_labels
-          for field in ("RT (min)", "Precursor M/Z", "Precursor Intensity", "CE", "spectrum", "Filename")],
+        "RT peak", "RT min", "RT max", "Peak Intensity", "Analyst Notes", "Annotation Notes",
+        *ms2_cols,
         "GUI Peak Num",
     ]
+
     if aligned:
         for field, name in (
             ("rt_peak", "RT peak"),
             ("rt_min", "RT min"),
             ("rt_max", "RT max"),
         ):
-            index = output_cols.index(field) + 1
-            output_cols.insert(index, f"{field}_aligned")
-            display_names.insert(index, f"Aligned {name}")
-        index = output_cols.index("rt_peak_aligned") + 1
-        output_cols.insert(index, "rt_delta")
-        display_names.insert(index, "RT diff")
+            pos = output_cols.index(field) + 1
+            output_cols.insert(pos, f"{field}_aligned")
+            display_names.insert(pos, f"Aligned {name}")
+        pos = output_cols.index("rt_peak_aligned") + 1
+        output_cols.insert(pos, "rt_delta")
+        display_names.insert(pos, "RT diff")
 
     missing = set(output_cols) - set(df.columns)
     if missing:
         raise ValueError(f"Cannot write summary table; missing columns: {sorted(missing)}")
+
     out_df = df[output_cols].rename(columns=dict(zip(output_cols, display_names)))
     out_df.to_csv(csv_path, index=False)
     logger.info(f"Summary table written to {csv_path}")
@@ -887,4 +906,3 @@ def run_standards_annotation_summary(
 
     (outputs_dir / ".summary_complete").touch(exist_ok=False)
     logger.info(f"Summary outputs written to {outputs_dir}; timestamp: {timestamp}")
-    print(f"Summary timestamp: {timestamp}\nSummary directory: {outputs_dir}")

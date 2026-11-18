@@ -245,7 +245,7 @@ def _strip_non_chars(text: str) -> str:
 
 def _make_compound_safe_stem(
     cmp_idx_display: int,
-    compound_name: str,
+    label: str,
     polarity: str,
     adduct: str,
     atlas_mz: float | None,
@@ -265,7 +265,7 @@ def _make_compound_safe_stem(
             return "NA"
         return f"{val:.{decimals}f}".replace(".", "p")
 
-    name_clean = re.sub(r"[^A-Za-z0-9\-]", "_", _strip_non_chars(str(compound_name)))
+    name_clean = re.sub(r"[^A-Za-z0-9\-]", "_", _strip_non_chars(str(label)))
     adduct_clean = re.sub(r"[^A-Za-z0-9+\-]", "", str(adduct))
     polarity_clean = "negative" if str(polarity).lower() in ("neg", "negative") else "positive"
     mz_str = _fmt_num(atlas_mz, 4)
@@ -353,7 +353,7 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         first_default = ms1_options[0] if ms1_options else ""
         bad_rows = mc[ms1_bad_mask]
         examples = ", ".join(
-            f"{_display_compound_idx(i)}: {row.get('compound_name', 'unknown')}"
+            f"{_display_compound_idx(i)}: {row.get('label', 'unknown')}"
             for i, row in bad_rows.iterrows()
         )
         details.append(
@@ -364,7 +364,7 @@ def _validate_required_note_selections(summary_obj: "AnalysisSummary") -> None:
         first_default = ms2_options[0] if ms2_options else ""
         bad_rows = mc[ms2_bad_mask]
         examples = ", ".join(
-            f"{_display_compound_idx(i)}: {row.get('compound_name', 'unknown')}"
+            f"{_display_compound_idx(i)}: {row.get('label', 'unknown')}"
             for i, row in bad_rows.iterrows()
         )
         details.append(
@@ -429,7 +429,7 @@ def make_identification_figure(
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name", "Undefined")
+        label = mc_row.get("label", "Undefined")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
         polarity = mc_row.get("polarity", "")
@@ -437,12 +437,12 @@ def make_identification_figure(
         atlas_mz = safe_float(mc_row.get("atlas_mz"))
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
-        safe_name = _make_compound_safe_stem(cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt)
+        safe_name = _make_compound_safe_stem(cmp_idx_display, label, polarity, adduct, atlas_mz, atlas_rt)
         fig_path = output_dir / f"{safe_name}.pdf"
 
         tasks.append({
             "mc_row_dict":   mc_row.to_dict(),
-            "compound_name": compound_name,
+            "label": label,
             "adduct":        adduct,
             "inchi_key":     inchi_key,
             "compound_idx":  cmp_idx,
@@ -466,7 +466,7 @@ def make_identification_figure(
     )
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
-            executor.submit(_identification_figure_worker, task): task["compound_name"]
+            executor.submit(_identification_figure_worker, task): task["label"]
             for task in tasks
         }
         for future in as_completed(future_to_name):
@@ -491,11 +491,11 @@ def _identification_figure_worker(kwargs: dict) -> str:
     fig_path = Path(kwargs["fig_path"])
     cmp_idx = kwargs["compound_idx"]
     cmp_idx_display = _display_compound_idx(cmp_idx)
-    compound_name = kwargs["compound_name"]
+    label = kwargs["label"]
     polarity = mc_row.get("polarity", "")
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
-    safe_stem = kwargs.get("safe_stem", f"{cmp_idx_display:04d}_{compound_name}_{polarity}_{adduct}")
+    safe_stem = kwargs.get("safe_stem", f"{cmp_idx_display:04d}_{label}_{polarity}_{adduct}")
     color_map = kwargs["color_map"]
     ms1_df = kwargs["ms1_df"]
     ms2_df = kwargs["ms2_df"]
@@ -546,7 +546,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
     _plot_structure(
         fig.add_subplot(gs[0, 3]),
         mc_row.get("smiles"), mc_row.get("inchi"), inchi_key,
-        compound_name=compound_name, size=500,
+        label=label, size=500,
     )
 
     logger.debug("Plotting EIC")
@@ -588,7 +588,7 @@ def _identification_figure_worker(kwargs: dict) -> str:
 
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    return compound_name
+    return label
 
 def _plot_ms2(ax, panel_idx: int, top3: list["MS2Hit"], ms2_df: pd.DataFrame) -> None:
     """Populate one MS2 mirror panel."""
@@ -927,7 +927,7 @@ def _plot_compound_info_table(ax, mc_row: pd.Series) -> None:
         polarity = "positive"
 
     rows = [
-        ("Compound", _fmt(mc_row.get("compound_name", "Undefined"))),
+        ("Compound", _fmt(mc_row.get("label", "Undefined"))),
         ("InChIKey", _fmt(mc_row.get("inchi_key", ""))),
         ("Formula", _fmt(mc_row.get("formula"))),
         ("Adduct", _fmt(mc_row.get("adduct"))),
@@ -1118,7 +1118,7 @@ def _plot_structure(
     smiles: str | None,
     inchi: str | None,
     inchi_key: str,
-    compound_name: str = "",
+    label: str = "",
     size: int = 500,
 ) -> None:
     """Draw molecular structure using RDKit's MolToImage (requires libXrender, available in container)."""
@@ -1185,8 +1185,8 @@ def _plot_structure(
 
             # Collect (text, font) pairs for each annotation line
             annotation_segments: list[tuple[str, object]] = []
-            if compound_name:
-                for line in _wrap_text(_strip_non_chars(compound_name), font_size, size):
+            if label:
+                for line in _wrap_text(_strip_non_chars(label), font_size, size):
                     annotation_segments.append((line, font_bold))
             if inchi_key:
                 for line in _wrap_text(inchi_key, font_size, size):
@@ -1209,7 +1209,7 @@ def _plot_structure(
     except Exception as exc:
         logger.warning(f"Could not draw structure for {inchi_key}: {exc}")
 
-    ax.text(0.5, 0.5, f"{_strip_non_chars(compound_name)}\n{inchi_key}", transform=ax.transAxes,
+    ax.text(0.5, 0.5, f"{_strip_non_chars(label)}\n{inchi_key}", transform=ax.transAxes,
             ha="center", va="center", fontsize=12, weight="bold", color="gray")
 
 ###############################################
@@ -1291,7 +1291,7 @@ def make_final_id_sheet(
         disable=should_disable_tqdm(),
     ):
         compound_idx_display = _display_compound_idx(compound_idx)
-        compound_name = mc_row.get("compound_name", "Undefined")
+        label = mc_row.get("label", "Undefined")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
         inchi_key = mc_row.get("inchi_key", "")
         adduct = mc_row.get("adduct", "")
@@ -1307,7 +1307,7 @@ def make_final_id_sheet(
         exact_mass = mass_map.get(inchi_key)
 
         overlapping_compound, overlapping_mz_rt_uids = overlapping_map.get(compound_idx, ("", ""))
-        identified_metabolite = compound_name if not overlapping_compound else overlapping_compound
+        identified_metabolite = label if not overlapping_compound else overlapping_compound
 
         # --- Shared theoretical values ---
         mz_theoretical = float(mc_row.get("atlas_mz", np.nan))
@@ -1387,7 +1387,7 @@ def make_final_id_sheet(
             # COMPOUND ANNOTATION
             "index":                  compound_idx_display,
             "identified_metabolite":  identified_metabolite,
-            "label":                  compound_name,
+            "label":                  label,
             "overlapping_compound":   overlapping_compound,
             "overlapping_inchi_keys": overlapping_mz_rt_uids,
             "formula":                formula,
@@ -1721,7 +1721,7 @@ def _compute_all_overlapping_compounds(
          for ik in mc["inchi_key"]],
         dtype=float,
     )
-    names = mc["compound_name"].tolist()
+    names = mc["label"].tolist()
     adducts = mc["adduct"].tolist()
     inchi_keys = mc["inchi_key"].tolist()
 
@@ -1825,7 +1825,7 @@ def make_eic_thumbnails(
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name", "Undefined")
+        label = mc_row.get("label", "Undefined")
         adduct = mc_row.get("adduct", "")
         polarity = mc_row.get("polarity", "")
         inchi_key = mc_row.get("inchi_key", "")
@@ -1833,7 +1833,7 @@ def make_eic_thumbnails(
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
-        safe_stem = _make_compound_safe_stem(cmp_idx_display, compound_name, polarity,adduct, atlas_mz, atlas_rt)
+        safe_stem = _make_compound_safe_stem(cmp_idx_display, label, polarity,adduct, atlas_mz, atlas_rt)
         path_shared = dir_shared / f"{safe_stem}.pdf"
         path_indep = dir_indep / f"{safe_stem}.pdf"
 
@@ -1873,7 +1873,7 @@ def make_eic_thumbnails(
 
         tasks.append({
             "mc_row_dict": mc_row.to_dict(),
-            "compound_name": compound_name,
+            "label": label,
             "polarity": polarity,
             "adduct": adduct,
             "safe_stem": safe_stem,
@@ -1904,7 +1904,7 @@ def make_eic_thumbnails(
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
-            executor.submit(_compound_pdf_worker, task): task["compound_name"]
+            executor.submit(_compound_pdf_worker, task): task["label"]
             for task in tasks
         }
         for future in as_completed(future_to_name):
@@ -1931,10 +1931,10 @@ def _compound_pdf_worker(kwargs: dict) -> str:
 
     mc_row = pd.Series(kwargs["mc_row_dict"])
     file_items = kwargs["file_items"]
-    compound_name = kwargs["compound_name"]
+    label = kwargs["label"]
     polarity = kwargs["polarity"]
     adduct = kwargs["adduct"]
-    safe_stem = kwargs.get("safe_stem", f"{_display_compound_idx(kwargs['compound_idx']):04d}_{compound_name}_{polarity}_{adduct}")
+    safe_stem = kwargs.get("safe_stem", f"{_display_compound_idx(kwargs['compound_idx']):04d}_{label}_{polarity}_{adduct}")
 
     rt_min = mc_row.get("rt_min", np.nan)
     rt_max_val = mc_row.get("rt_max", np.nan)
@@ -2028,7 +2028,7 @@ def _compound_pdf_worker(kwargs: dict) -> str:
         pdf_shared.close()
         pdf_indep.close()
 
-    return kwargs["compound_name"]
+    return kwargs["label"]
 
 def _short_fname(filename: str) -> str:
     """Return an abbreviated label: the 13th and 16th underscore-separated parts of the stem.
@@ -2407,14 +2407,14 @@ def make_compound_metric_plots(
     compounds: list[dict] = []
     for cmp_idx, mc_row in mc_reset.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name", "Undefined")
+        label = mc_row.get("label", "Undefined")
         adduct        = mc_row.get("adduct", "")
         polarity = mc_row.get("polarity", "")
         atlas_mz      = safe_float(mc_row.get("atlas_mz"))
         atlas_rt      = safe_float(mc_row.get("atlas_rt_peak"))
         mz_rt_uid     = mc_row.get("mz_rt_uid", "")
 
-        title = _make_compound_safe_stem(cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt)
+        title = _make_compound_safe_stem(cmp_idx_display, label, polarity, adduct, atlas_mz, atlas_rt)
 
         # Gather per-file values for this compound
         cmp_rows = per_file_df[per_file_df["mz_rt_uid"] == mz_rt_uid]
@@ -2562,7 +2562,7 @@ def _plot_compound_boxplot(
     metric: str,
     log_scale: bool,
     atlas_ref: float | None,
-    compound_name: str,
+    label: str,
     adduct: str,
     ylabel: str,
     compound_idx: int = 0,
@@ -2583,7 +2583,7 @@ def _plot_compound_boxplot(
     atlas_ref:
         Atlas reference value used only for the ``mz_centroid`` subplot title
         (no reference line is drawn on the plot).
-    compound_name, adduct:
+    label, adduct:
         Used as the subplot title.
     ylabel:
         Y-axis label string.
@@ -2596,7 +2596,7 @@ def _plot_compound_boxplot(
         Mapping of group label → dot color.  When *None* all dots are gray.
     compound_safe_stem:
         When provided, used as the subplot title instead of the default
-        ``{idx}  {compound_name}  {adduct}`` format.
+        ``{idx}  {label}  {adduct}`` format.
     """
     rng = np.random.default_rng(seed=42)
 
@@ -2624,7 +2624,7 @@ def _plot_compound_boxplot(
         data_per_group.append(vals)
 
     def _make_title(wrapped: bool = False) -> str:
-        title_top = compound_safe_stem if compound_safe_stem else f"{_display_compound_idx(compound_idx):04d}  {compound_name}  {adduct}"
+        title_top = compound_safe_stem if compound_safe_stem else f"{_display_compound_idx(compound_idx):04d}  {label}  {adduct}"
         if wrapped:
             title_top = _smart_wrap(title_top, ax, fontsize=13)
         if metric in ("mz_centroid",):
@@ -2759,7 +2759,7 @@ def _plot_compound_boxplot(
 def _boxplot_compound_worker(kwargs: dict) -> str:
     """Worker: generate all metric boxplot PDFs for one compound."""
 
-    compound_name = kwargs["compound_name"]
+    label = kwargs["label"]
     polarity = kwargs["polarity"]
     adduct = kwargs["adduct"]
     inchi_key = kwargs["inchi_key"]
@@ -2773,7 +2773,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
     atlas_mz = safe_float(atlas_ref_dict.get("atlas_mz"))
     atlas_rt = safe_float(atlas_ref_dict.get("atlas_rt_peak"))
     safe_stem = _make_compound_safe_stem(
-        _display_compound_idx(cmp_idx), compound_name, polarity, adduct, atlas_mz, atlas_rt
+        _display_compound_idx(cmp_idx), label, polarity, adduct, atlas_mz, atlas_rt
     )
 
     # Scale figure width with the number of groups so x-axis labels stay readable.
@@ -2788,7 +2788,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
         try:
             _plot_compound_boxplot(
                 ax, cmp_metrics, metric, log_scale,
-                atlas_ref, compound_name, adduct, ylabel,
+                atlas_ref, label, adduct, ylabel,
                 compound_idx=cmp_idx,
                 all_groups=all_groups,
                 group_color_map=group_color_map,
@@ -2799,7 +2799,7 @@ def _boxplot_compound_worker(kwargs: dict) -> str:
         finally:
             plt.close(fig)
 
-    return compound_name
+    return label
 
 def make_boxplots(
     summary_obj: "AnalysisSummary",
@@ -2900,14 +2900,14 @@ def make_boxplots(
     tasks: list[dict] = []
     for cmp_idx, mc_row in manual_curation_df.iterrows():
         cmp_idx_display = _display_compound_idx(cmp_idx)
-        compound_name = mc_row.get("compound_name", "Undefined")
+        label = mc_row.get("label", "Undefined")
         polarity = mc_row.get("polarity", "")
         adduct = mc_row.get("adduct", "")
         inchi_key = mc_row.get("inchi_key", "")
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
 
         tasks.append({
-            "compound_name": compound_name,
+            "label": label,
             "polarity": polarity,
             "adduct": adduct,
             "inchi_key": inchi_key,
@@ -2932,7 +2932,7 @@ def make_boxplots(
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         future_to_name = {
-            executor.submit(_boxplot_compound_worker, task): task["compound_name"]
+            executor.submit(_boxplot_compound_worker, task): task["label"]
             for task in tasks
         }
         for future in as_completed(future_to_name):
@@ -3028,14 +3028,14 @@ def make_best_ms2_hit_fragment_ions_csv(
     ):
         cmp_idx_display = _display_compound_idx(cmp_idx)
         mz_rt_uid = mc_row.get("mz_rt_uid", "")
-        compound_name = mc_row.get("compound_name", "Undefined")
+        label = mc_row.get("label", "Undefined")
         polarity = mc_row.get("polarity", "")
         adduct = mc_row.get("adduct", "")
         atlas_mz = safe_float(mc_row.get("atlas_mz"))
         atlas_rt = safe_float(mc_row.get("atlas_rt_peak"))
 
         compound_id = _make_compound_safe_stem(
-            cmp_idx_display, compound_name, polarity, adduct, atlas_mz, atlas_rt
+            cmp_idx_display, label, polarity, adduct, atlas_mz, atlas_rt
         )
 
         row_data = {"compound_id": compound_id}
@@ -3128,7 +3128,7 @@ def make_data_sheets(
                                              "rt_centroid", "mz_peak", "mz_centroid"])
 
     mc_reset = manual_curation_df.reset_index(drop=True)
-    mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "polarity", "adduct",
+    mc_slim = mc_reset[["mz_rt_uid", "label", "inchi_key", "polarity", "adduct",
                          "atlas_mz", "atlas_rt_peak"]].copy()
     mc_slim["_cmp_idx_display"] = mc_reset.index + 1
     mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
@@ -3137,7 +3137,7 @@ def make_data_sheets(
     mc_slim["compound_id"] = mc_slim.apply(
         lambda r: _make_compound_safe_stem(
             int(r["_cmp_idx_display"]),
-            r["compound_name"],
+            r["label"],
             r["polarity"],
             r["adduct"],
             safe_float(r.get("atlas_mz")),
@@ -3628,14 +3628,14 @@ def make_log_fold_changes_csv(
     #     curation_df = summary_obj.experimental_data.curation_df
     #     if curation_df is not None and not curation_df.empty:
     #         mc_slim = mc_reset = curation_df.reset_index(drop=True)
-    #         mc_slim = mc_reset[["mz_rt_uid", "compound_name", "inchi_key", "adduct",
+    #         mc_slim = mc_reset[["mz_rt_uid", "label", "inchi_key", "adduct",
     #                              "atlas_mz", "atlas_rt_peak"]].copy()
     #         mc_slim["_cmp_idx_display"] = mc_reset.index + 1
     #         mc_slim = mc_slim.drop_duplicates(subset=["mz_rt_uid"])
     #         mc_slim["compound_id"] = mc_slim.apply(
     #             lambda r: _make_compound_safe_stem(
     #                 int(r["_cmp_idx_display"]),
-    #                 r["compound_name"],
+    #                 r["label"],
     #                 r["adduct"],
     #                 safe_float(r.get("atlas_mz")),
     #                 safe_float(r.get("atlas_rt_peak")),

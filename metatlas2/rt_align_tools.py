@@ -238,7 +238,7 @@ def _extract_per_file_peak_rts(
         Nested dict ``{mz_rt_uid: {filename: {"rt_peak": float,
         "intensity_peak": float, "atlas_rt_peak": float,
         "atlas_rt_min": float, "atlas_rt_max": float,
-        "atlas_mz": float, "compound_name": str,
+        "atlas_mz": float, "label": str,
         "inchi_key": str, "adduct": str,
         "compound_uid": str}}}``.
     """
@@ -250,7 +250,7 @@ def _extract_per_file_peak_rts(
         inchi_key      = compound_mzrt.inchi_key
         adduct         = compound_mzrt.adduct
         compound_uid   = compound_mzrt.compound_uid
-        compound_name  = compound_mzrt.compound_name
+        label  = compound_mzrt.label
         atlas_rt_peak  = compound_mzrt.rt_peak
         atlas_rt_min   = compound_mzrt.rt_min
         atlas_rt_max   = compound_mzrt.rt_max
@@ -295,7 +295,7 @@ def _extract_per_file_peak_rts(
                 'atlas_rt_min':   atlas_rt_min,
                 'atlas_rt_max':   atlas_rt_max,
                 'atlas_mz':       atlas_mz,
-                'compound_name':  compound_name,
+                'label':  label,
                 'inchi_key':      inchi_key,
                 'adduct':         adduct,
                 'compound_uid':   compound_uid,
@@ -319,7 +319,7 @@ def _per_file_peak_rts_to_modeling_df(
 
     Returns:
         DataFrame with one row per compound that has data in *filename*,
-        containing ``atlas_rt_peak``, ``exp_rt_peak``, ``compound_name``,
+        containing ``atlas_rt_peak``, ``exp_rt_peak``, ``label``,
         ``inchi_key``, ``adduct``, ``compound_uid``, ``mz_rt_uid``,
         ``intensity_peak`` columns.  Empty DataFrame if no data.
     """
@@ -331,7 +331,7 @@ def _per_file_peak_rts_to_modeling_df(
         rows.append({
             'mz_rt_uid':      mz_rt_uid,
             'compound_uid':   d['compound_uid'],
-            'compound_name':  d['compound_name'],
+            'label':  d['label'],
             'inchi_key':      d['inchi_key'],
             'adduct':         d['adduct'],
             'atlas_rt_peak':  d['atlas_rt_peak'],
@@ -375,7 +375,7 @@ def _composite_peak_rts(
         rows.append({
             'mz_rt_uid':      mz_rt_uid,
             'compound_uid':   first['compound_uid'],
-            'compound_name':  first['compound_name'],
+            'label':  first.get('label', first.get('compound_name', '')),
             'inchi_key':      first['inchi_key'],
             'adduct':         first['adduct'],
             'atlas_rt_peak':  first['atlas_rt_peak'],
@@ -498,7 +498,7 @@ def visualize_rt_alignment_model(rt_align_obj: "RTAlign", save_plot: bool = True
     # Compound number to name mapping (ordered by RT)
     ax_table = fig.add_subplot(gs[1, :])
     ax_table.axis('off')
-    table_data = modeling_results_df[['compound_num', 'compound_name', 'inchi_key', 'adduct', 'atlas_rt_peak', 'residual']].copy()
+    table_data = modeling_results_df[['compound_num', 'label', 'inchi_key', 'adduct', 'atlas_rt_peak', 'residual']].copy()
     table_data['atlas_rt_peak'] = table_data['atlas_rt_peak'].round(3)
     table_data['residual'] = table_data['residual'].round(4)
     table_data.columns = ['#', 'Compound Name', 'InChi Key', 'Adduct', 'Atlas RT (min)', 'Residual (min)']
@@ -903,7 +903,7 @@ def build_rt_alignment_model(
 
     logger.info("Compound RT Statistics (active source):")
     logger.info(
-        f"\n{modeling_results_df[['compound_name', 'inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_peak', 'residual', 'intensity_peak']].to_string()}"
+        f"\n{modeling_results_df[['label', 'inchi_key', 'adduct', 'atlas_rt_peak', 'exp_rt_peak', 'residual', 'intensity_peak']].to_string()}"
     )
 
     # Attach all three candidate models from the active source for DB saving
@@ -941,7 +941,7 @@ def calculate_rt_shifts(rt_align_obj: "RTAlign") -> pd.DataFrame:
         rt_shift = aligned_rt_peak - comp_ref.rt_peak
         all_rt_shifts.append(rt_shift)
         per_compound_rt_shifts.append({
-            'compound_name': comp_ref.compound_name,
+            'label': comp_ref.label,
             'inchi_key': comp_ref.inchi_key,
             'adduct': comp_ref.adduct,
             'mz_rt_uid': mz_rt_uid,

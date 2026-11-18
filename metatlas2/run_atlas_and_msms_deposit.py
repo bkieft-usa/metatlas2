@@ -12,6 +12,7 @@ from metatlas2.standards_annotation_review import TIMESTAMP_PATTERN, review_dire
 def run_atlas_and_msms_deposit(
     config_path: str, annotation_timestamp: str, alignment_timestamp: str,
     dry_run: bool = False, force_add: bool = False,
+    skip_atlas_upload: bool = False, skip_msms_refs_deposit: bool = False,
 ) -> tuple[Path, Path]:
     """Prepare previews and optionally deposit the atlas and references."""
     from metatlas2.deposit_ref_standards_atlas_and_msms_refs import (
@@ -43,6 +44,7 @@ def run_atlas_and_msms_deposit(
     ):
         return deposit_ref_standards_atlas_and_msms_refs(
             summary_path, db_path, run_name, dry_run=dry_run, force_add=force_add,
+            skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
         )
 
 
@@ -54,8 +56,11 @@ if __name__ == "__main__":
     parser.add_argument("--alignment_timestamp", required=True, help="Reverse alignment timestamp.")
     parser.add_argument("--dry_run", action="store_true", help="Write previews without depositing.")
     parser.add_argument("--force_add", action="store_true", help="Append atlas rows even when their InChIKey is already in the sheet.")
+    parser.add_argument("--skip_atlas_upload", action="store_true", help="Skip uploading atlas rows to Google Sheets.")
+    parser.add_argument("--skip_msms_refs_deposit", action="store_true", help="Skip importing MS/MS references into the main database.")
     args = parser.parse_args()
     run_atlas_and_msms_deposit(
         args.config_path, args.annotation_timestamp, args.alignment_timestamp,
         dry_run=args.dry_run, force_add=args.force_add,
+        skip_atlas_upload=args.skip_atlas_upload, skip_msms_refs_deposit=args.skip_msms_refs_deposit,
     )

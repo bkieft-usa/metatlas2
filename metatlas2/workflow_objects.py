@@ -197,7 +197,8 @@ class TargetedAnalysis:
     polarity: str
     atlas_category: AtlasCategory
     atlas_name: str
-    atlas_uid: str
+    atlas_uid: str | None = None
+    tags: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
     chromatography_label: str = field(default="")
     polarity_label: str = field(default="")
@@ -284,7 +285,8 @@ class Metatlas2Config:
                 polarity=ta["polarity"],
                 atlas_category=AtlasCategory(ta["atlas_category"]),
                 atlas_name=ta["atlas_name"],
-                atlas_uid=ta["atlas_uid"],
+                atlas_uid=ta.get("atlas_uid"),
+                tags=list(ta.get("tags") or []),
                 params=dict(ta.get("params") or {}),
                 chromatography_label=ta.get("chromatography_label", ""),
                 polarity_label=ta.get("polarity_label", ""),
@@ -441,94 +443,38 @@ class NewAtlasesConfig:
                 logger.error(f"Failed to create Atlas for {cat_key}/{atlas_name}/{chrom}/{pol}: {e}")
 
         logger.info("Summary of new atlases.")
-        logger.info("**Make sure to add these to your analysis config to use as project input atlases:**")
+        logger.info(
+            "**For tagged project configs, add the atlas rows to the centralized sheet "
+            "and select them with their tags.**"
+        )
         for info in summary:
             logger.info(f"Created new atlas: {info['atlas_name']} (UID: {info['atlas_uid']}) - {info['compound_count']} compounds")
-
-@dataclass
-class NewCompoundsConfig:
-    """Configuration for the ``metatlas2.sh add-compounds`` command.
-
-    Parsed from a YAML file with a ``COMPOUNDS`` top-level key (and an
-    optional ``PARAMS`` key whose contents are currently ignored).
-    Call :meth:`execute` to load all compounds into the main database.
-    """
-
-    compounds: dict[str, dict[str, list[str]]]
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "NewCompoundsConfig":
-        with open(path, 'r') as f:
-            raw = yaml.safe_load(f)
-
-        if 'COMPOUNDS' not in raw:
-            raise ValueError(f"Missing required top-level key 'COMPOUNDS' in {path}")
-
-        compounds: dict[str, dict[str, list[str]]] = {}
-        # PARAMS key is accepted but ignored — all caching is always enabled
-        for chrom, chrom_cfg in raw['COMPOUNDS'].items():
-            if not isinstance(chrom_cfg, dict):
-                raise ValueError(f"Expected a dict under COMPOUNDS.{chrom}")
-            compounds[chrom] = {}
-            for pol, pol_cfg in chrom_cfg.items():
-                if not isinstance(pol_cfg, dict):
-                    raise ValueError(f"Expected a dict under COMPOUNDS.{chrom}.{pol}")
-                if 'PATHS' not in pol_cfg:
-                    raise ValueError(f"Missing PATHS under COMPOUNDS.{chrom}.{pol}")
-                if not isinstance(pol_cfg['PATHS'], list):
-                    raise ValueError(f"PATHS must be a list under COMPOUNDS.{chrom}.{pol}")
-                validated: list[str] = []
-                for p_raw in pol_cfg['PATHS']:
-                    if not p_raw:
-                        continue
-                    p_str = str(p_raw)
-                    if not Path(p_str).exists():
-                        raise FileNotFoundError(
-                            f"Compound input file not found: {p_str} for {chrom}/{pol}"
-                        )
-                    validated.append(p_str)
-                compounds[chrom][pol] = validated
-
-        logger.info(f"Loaded compound configuration from {path}")
-        return cls(compounds=compounds)
-
-    def iter_paths(self):
-        for chrom, pol_dict in self.compounds.items():
-            for pol, paths in pol_dict.items():
-                for file_path in paths:
-                    yield chrom, pol, file_path
-
-    def execute(self, overwrite_db: bool = False) -> None:
-        """Load all compounds defined in this config into the main database.
-
-        This is the entry-point for ``metatlas2.sh add-compounds``.  It replaces
-        the old ``Compound.create_from_config()`` classmethod, keeping pipeline
-        orchestration on the config object rather than on the domain object.
-        """
-        paths = rtg.set_up_paths(config=self)
-        add_compounds_from_files(
-            [file_path for _, _, file_path in self.iter_paths()], paths, overwrite_db,
-        )
-
 
 def add_compounds_from_files(file_paths: list[str], paths: PathsConfig, overwrite_db: bool = False) -> None:
     """Load, enrich and save compounds from atlas-format files."""
     import metatlas2.modelseed_retrieval as msr
     import metatlas2.chebi_retrieval as chr
 
+    loaded_files = [
+        (file_path, ldt.load_compound_input(file_path))
+        for file_path in file_paths
+    ]
     compounds: list[Compound] = []
     dbi.create_metatlas_database(paths["main_db_path"], overwrite=overwrite_db)
-    for file_path in file_paths:
+    for file_path, compounds_df in loaded_files:
         logger.info(f"Processing compound file: {file_path}")
-        compounds_df = ldt.load_compound_input(file_path)
-        compounds_df = pcr.retrieve_pubchem_info(compounds=compounds_df, pubchem_cache_path=paths["pubchem_cache_path"])
+        logger.info("Looking up compound metadata from PubChem")
+        compounds_df = pcr.retrieve_pubchem_info(
+            compounds=compounds_df,
+            pubchem_cache_path=paths["pubchem_cache_path"],
+        )
         compounds_df = msr.retrieve_modelseed_info(compounds=compounds_df, modelseed_cache_path=paths["modelseed_table_path"])
         compounds_df = chr.retrieve_metacyc_info(compounds=compounds_df, chebi_cache_path=paths["chebi_cache_path"])
         for _, row in tqdm(compounds_df.iterrows(), total=len(compounds_df), desc="Processing compounds", disable=should_disable_tqdm()):
             try:
                 compounds.append(Compound.from_atlas_row(row))
             except Exception as e:
-                logger.warning(f"Failed to create Compound for row {row.get('compound_name', 'Unknown')}: {e}")
+                logger.warning(f"Failed to create Compound for row {row.get('label', 'Unknown')}: {e}")
 
     dbi.batch_save_compounds(paths["main_db_path"], compounds)
 
@@ -753,8 +699,9 @@ class Compound:
     """
 
     compound_uid: str
-    compound_name: str
+    label: str
     inchi_key: str
+    compound_name: str = ""
     inchi: str = ""
     smiles: str = ""
     formula: str = ""
@@ -830,6 +777,7 @@ class Compound:
 
         return cls(
             compound_uid=_str('compound_uid'),
+            label=_str('label', _str('compound_name')),
             compound_name=_str('compound_name'),
             inchi_key=_str('inchi_key'),
             inchi=_str('inchi'),
@@ -874,6 +822,7 @@ class Compound:
         """Convert to dictionary for database serialization."""
         return {
             'compound_uid': self.compound_uid,
+            'label': self.label,
             'compound_name': self.compound_name,
             'inchi_key': self.inchi_key,
             'inchi': self.inchi,
@@ -920,7 +869,7 @@ class CompoundMZRT:
     mz_rt_uid: str
     compound_uid: str
     prev_mz_rt_uid: str | None = None
-    compound_name: str = ""
+    label: str = ""
     inchi_key: str = ""
     adduct: str = ""
     rt_space: str = ""
@@ -943,7 +892,7 @@ class CompoundMZRT:
             mz_rt_uid=row.get('mz_rt_uid', ''),
             compound_uid=row.get('compound_uid', ''),
             prev_mz_rt_uid=row.get('prev_mz_rt_uid', None),
-            compound_name=row.get('compound_name', ''),
+            label=row.get('label', ''),
             inchi_key=row.get('inchi_key', ''),
             adduct=row.get('adduct', ''),
             rt_space=row.get('rt_space', 'HF_Aug2019'),
@@ -966,7 +915,7 @@ class CompoundMZRT:
             'mz_rt_uid': self.mz_rt_uid,
             'compound_uid': self.compound_uid,
             'prev_mz_rt_uid': self.prev_mz_rt_uid,
-            'compound_name': self.compound_name,
+            'label': self.label,
             'inchi_key': self.inchi_key,
             'adduct': self.adduct,
             'rt_space': self.rt_space,
@@ -1191,10 +1140,22 @@ class Project:
             overwrite=overwrite_existing
         )
 
+        existing_config = dbi.load_config_from_db(
+            project_db_path=self.paths['project_db_path'],
+            rt_alignment_number=rt_alignment_number,
+            analysis_number=analysis_number,
+        )
+        if existing_config is None:
+            from metatlas2.atlas_sheet import resolve_config_atlas_inputs
+
+            resolve_config_atlas_inputs(config, self.paths["main_db_path"])
+        else:
+            _validate_existing_atlas_selections(config, existing_config)
+
         logger.info(f"Saving config snapshot to database for RTA{rt_alignment_number}/TGA{analysis_number}...")
         dbi.save_config_to_db(
             project_db_path=self.paths['project_db_path'],
-            config=config,
+            config=existing_config or config,
             rt_alignment_number=rt_alignment_number,
             analysis_number=analysis_number,
             paths=self.paths,
@@ -1213,7 +1174,7 @@ class Project:
         logger.info(f"Loading LCMS runs...")
         lcmsruns_list = lrt.get_project_lcmsruns_from_disk(
             self.paths['lcmsruns_directory'],
-            owner=config["general"]["owner"]
+            owner=config.owner
         )
 
         logger.info(f"Saving {len(lcmsruns_list)} LCMS runs metadata to database...")
@@ -1228,6 +1189,54 @@ class Project:
         self.lcmsruns = [LCMSRun(**row) for row in lcmsruns_list]
 
         return
+
+
+def _validate_existing_atlas_selections(
+    requested: Metatlas2Config,
+    stored: Metatlas2Config,
+) -> None:
+    """Prevent reusing a run number with different atlas tag or UID selectors."""
+    def selector(atlas_config: dict[str, Any]) -> tuple[str, tuple[str, ...] | str]:
+        tags = tuple(sorted(atlas_config.get("tags") or []))
+        if tags:
+            return "tags", tags
+        return "uid", str(atlas_config.get("uid") or "")
+
+    def rt_selectors(config: Metatlas2Config) -> dict[str, tuple[tuple[str, tuple[str, ...] | str], str]]:
+        return {
+            fpf.normalize_chromatography(chrom): (
+                selector(atlas_cfg.get("ATLAS", {})),
+                fpf.normalize_polarity(atlas_cfg.get("ATLAS", {}).get("polarity", "")),
+            )
+            for chrom, atlas_cfg in config.rt_alignment_config.items()
+        }
+
+    def targeted_selectors(
+        config: Metatlas2Config,
+    ) -> dict[tuple[str, str, str, str], tuple[str, tuple[str, ...] | str]]:
+        return {
+            (
+                fpf.normalize_chromatography(ta.chromatography),
+                fpf.normalize_polarity(ta.polarity),
+                ta.atlas_category.value,
+                ta.atlas_name.lower(),
+            ): (
+                ("tags", tuple(sorted(ta.tags)))
+                if ta.tags else ("uid", str(ta.atlas_uid or ""))
+            )
+            for ta in config.targeted_analyses
+        }
+
+    if (
+        rt_selectors(requested) != rt_selectors(stored)
+        or targeted_selectors(requested) != targeted_selectors(stored)
+    ):
+        raise ValueError(
+            "The project database already has a config snapshot for this "
+            "RTA/TGA with different atlas selectors. Use a new run number "
+            "to select different atlases."
+        )
+
 
 @dataclass
 class LCMSRun:

@@ -52,7 +52,6 @@ logger = lcf.get_logger("standards_annotation_rt_align")
 # Config helpers
 
 _RT_ALIGNMENT_DEFAULTS: dict[str, Any] = {
-    "qc_atlas_uid": "",
     "model_type": "polynomial",
     "poly_degree": 2,
     "rt_peak_source": "median",
@@ -87,9 +86,9 @@ def _get_rt_alignment_config(config: dict[str, Any]) -> dict[str, dict[str, Any]
 
         RT_ALIGNMENT:
           HILIC:
-            qc_atlas_uid: ...
+            ATLAS: {tags: [QCv7], polarity: POS}
           C18:
-            qc_atlas_uid: ...
+            ATLAS: {uid: ..., polarity: POS}
 
     Each entry gets defaults applied. Keys are matched case-insensitively
     against the chromatography values in the selections DataFrame.
@@ -240,31 +239,40 @@ def load_qc_atlas(config: dict[str, Any], chrom: str) -> Any:
 
     Raises:
         ValueError: If no RT_ALIGNMENT entry exists for *chrom*, or
-                    ``qc_atlas_uid`` is empty / fails to load / has no compounds.
+                    the ATLAS selector is invalid or the atlas has no compounds.
     """
     chrom_cfg = _get_chrom_rt_cfg(config, chrom)
     if chrom_cfg is None:
         raise ValueError(f"No RT_ALIGNMENT config entry for chromatography={chrom!r}.")
 
-    atlas_uid = str(chrom_cfg.get("qc_atlas_uid", "")).strip()
-    if not atlas_uid:
-        raise ValueError(
-            f"RT_ALIGNMENT.{chrom}.qc_atlas_uid is required but not set in the config."
-        )
+    from metatlas2.atlas_sheet import resolve_config_atlas_inputs
+    from metatlas2.load_tools import normalize_atlas_selector
+
+    location = f"RT_ALIGNMENT {chrom} ATLAS"
+    atlas_config = chrom_cfg.get("ATLAS")
+    tags, atlas_uid = normalize_atlas_selector(atlas_config, location)
+    if "polarity" not in atlas_config:
+        raise ValueError(f"{location} missing polarity field")
+    polarity_value = atlas_config["polarity"]
+    if not isinstance(polarity_value, str) or not polarity_value.strip():
+        raise ValueError(f"{location}.polarity must be a non-empty string")
+    polarity = fpf.canonical_polarity(polarity_value.strip())
+    selector = {"tags": tags, "uid": atlas_uid, "polarity": polarity}
+    selector_config = wfo.Metatlas2Config(
+        rt_alignment_config={chrom: {"ATLAS": selector}},
+    )
+    resolve_config_atlas_inputs(selector_config, _main_db_path())
+    atlas_uid = selector["uid"]
 
     logger.info(f"Loading QC atlas uid={atlas_uid} for chromatography={chrom}")
 
-    try:
-        atlas_obj = wfo.Atlas.from_database(_main_db_path(), atlas_uid)
-    except Exception as exc:
-        raise ValueError(
-            f"Failed to load QC atlas '{atlas_uid}' for chrom={chrom}: {exc}"
-        ) from exc
+    atlas_obj = wfo.Atlas.from_database(_main_db_path(), atlas_uid)
 
     n_compounds = len(getattr(atlas_obj, "compound_mzrts", {}) or {})
     if n_compounds == 0:
         raise ValueError(f"QC atlas '{atlas_uid}' (chrom={chrom}) has no compounds.")
 
+    _ci_get(config["rt_alignment"], chrom)["resolved_qc_atlas_uid"] = atlas_uid
     logger.info(f"Loaded QC atlas with {n_compounds} compound rows for chromatography={chrom}")
     return atlas_obj
 
@@ -481,8 +489,9 @@ def make_rt_alignment_summary_plot(
       - Bottom: compound table.
 
     Args:
-        modeling_df: Per-compound DataFrame with ``exp_rt_peak``,
-                     ``atlas_rt_peak``, ``predicted_rt``, ``residual`` columns.
+        modeling_df: Per-compound DataFrame with ``label``, ``inchi_key``,
+                     ``adduct``, ``exp_rt_peak``, ``atlas_rt_peak``,
+                     ``predicted_rt``, and ``residual`` columns.
         model:       Model dict from :func:`build_reverse_rt_model`.
         output_dir:  Directory to save the PDF.
         run_name:    Run name used in the filename.
@@ -561,7 +570,7 @@ def make_rt_alignment_summary_plot(
     ax_table = fig.add_subplot(gs[1, :])
     ax_table.axis("off")
     table_data = df[[
-        "compound_num", "compound_name", "inchi_key", "adduct",
+        "compound_num", "label", "inchi_key", "adduct",
         "exp_rt_peak", "atlas_rt_peak", "residual",
     ]].copy()
     table_data["exp_rt_peak"] = table_data["exp_rt_peak"].round(3)
@@ -648,7 +657,7 @@ def _align_chromatography(
     aligned["rt_model_degree"] = model.get("degree", 0)
     aligned["rt_model_r2"] = model.get("r2", float("nan"))
     aligned["rt_model_rmse"] = model.get("rmse", float("nan"))
-    aligned["qc_atlas_uid"] = str(chrom_cfg.get("qc_atlas_uid", "")).strip()
+    aligned["qc_atlas_uid"] = qc_atlas.atlas_uid
     return aligned, (chrom, modeling_df, model)
 
 def _passthrough_alignment(selections: pd.DataFrame) -> pd.DataFrame:
@@ -675,7 +684,7 @@ def run_reverse_rt_alignment(
     db_path: str,
     output_path: str | Path,
     timestamp: str,
-    tags: str | None = None,
+    tags: str | None = "EMA",
     skip_rt_alignment: bool = False,
 ) -> None:
     """Orchestrate the full reverse RT alignment workflow.
@@ -730,7 +739,6 @@ def run_reverse_rt_alignment(
     alignment_dir = annotation_dir / f"rt_align_{alignment_timestamp}"
     alignment_dir.mkdir(parents=False, exist_ok=False)
     logger.info(f"Alignment timestamp: {alignment_timestamp}; outputs: {alignment_dir}")
-    print(f"Alignment timestamp: {alignment_timestamp}\nAlignment directory: {alignment_dir}")
 
     # --- Align each chromatography (or pass through unchanged) ---
     model_plots: list[tuple[str, pd.DataFrame, dict]] = []

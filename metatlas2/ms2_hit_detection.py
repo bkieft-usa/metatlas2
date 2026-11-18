@@ -226,7 +226,7 @@ def _process_compound_batch(job):
                 'mz_rt_uid': uid,
                 'database': ref.metadata.get('database', 'unknown'),
                 'ref_id': ref.metadata.get('id', ''),
-                'ref_name': ref.metadata.get('name') or ref.metadata.get('compound_name') or 'Unknown',
+                'ref_name': ref.metadata.get('name') or ref.metadata.get('label') or ref.metadata.get('compound_name') or 'Unknown',
                 'score': float(scores[q_idx, r_idx]),
                 'num_matches': int(matches[q_idx, r_idx]),
                 'mz_theoretical': float(ref_precursor_mzs[r_idx]),

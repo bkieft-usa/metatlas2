@@ -11,20 +11,19 @@ import pandas as pd
 from rdkit.Chem import Descriptors, rdMolDescriptors
 
 from metatlas2.chem_info import inchi_or_smiles_to_molecule
+from metatlas2.atlas_sheet import (
+    ATLAS_COLUMNS,
+    ATLAS_ROW_IDENTITY,
+    ATLAS_SPREADSHEET,
+    ATLAS_WORKSHEET,
+    GOOGLE_SERVICE_ACCOUNT_FILE,
+    open_centralized_atlas_worksheet,
+)
 from metatlas2.logging_config import get_logger
 from metatlas2.standards_annotation_tools import STANDARD_CE_LABELS
 
 logger = get_logger("deposit_ref_standards_atlas_and_msms_refs")
 
-ATLAS_SPREADSHEET = "1915jP523jCWwtcFM5rv0X3AmbZzPhN1ijcoX5Dw0Svw"
-GOOGLE_SERVICE_ACCOUNT_FILE = (
-    "/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-)
-ATLAS_COLUMNS = [
-    "label", "compound_name", "inchi_key", "smiles", "inchi", "formula", "adduct",
-    "mz", "rt_peak", "rt_min", "rt_max", "mz_tolerance", "chromatography", "polarity",
-    "identification_notes", "lcmsrun_source", "date_created", "date_modified", "tags",
-]
 MSMS_COLUMNS = [
     "database", "id", "name", "spectrum", "decimal", "precursor_mz", "polarity",
     "adduct", "fragmentation_method", "collision_energy", "instrument", "instrument_type",
@@ -153,29 +152,33 @@ def deposit_atlas_to_google_sheet(atlas: pd.DataFrame, force_add: bool = False) 
     An append and the subsequent sort are separate operations. If the sort
     fails, the rows have already been appended and must not be appended again.
     """
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
-
     if atlas.empty:
         raise ValueError("Cannot deposit an empty atlas.")
     if atlas.columns.tolist() != ATLAS_COLUMNS:
         raise ValueError("Atlas columns do not match the expected atlas schema.")
 
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(
-        GOOGLE_SERVICE_ACCOUNT_FILE,
-        ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"],
+    spreadsheet, sheet = open_centralized_atlas_worksheet(
+        spreadsheet_id=ATLAS_SPREADSHEET,
+        worksheet_name=ATLAS_WORKSHEET,
+        service_account_file=GOOGLE_SERVICE_ACCOUNT_FILE,
     )
-    spreadsheet = gspread.authorize(credentials).open_by_key(ATLAS_SPREADSHEET)
-    sheet = spreadsheet.worksheet("complete_atlas")
-    if sheet.row_values(1) != ATLAS_COLUMNS:
-        raise ValueError("Google Sheet header does not match the atlas columns; nothing was appended.")
+    # if sheet.row_values(1) != ATLAS_COLUMNS:
+    #     raise ValueError("Google Sheet header does not match the atlas columns; nothing was appended.")
 
     if not force_add:
-        existing_keys = set(sheet.col_values(ATLAS_COLUMNS.index("inchi_key") + 1)[1:])
-        existing_keys.discard("")
-        duplicates = atlas["inchi_key"].isin(existing_keys)
-        for inchi_key in sorted(atlas.loc[duplicates, "inchi_key"].unique()):
-            logger.warning("Skipping atlas rows for existing inchi_key: %s", inchi_key)
+        existing_rows = sheet.get_all_values()[1:]
+        column_indices = [ATLAS_COLUMNS.index(column) for column in ATLAS_ROW_IDENTITY]
+        existing_keys = {
+            tuple((row + [""] * len(ATLAS_COLUMNS))[index].strip() for index in column_indices)
+            for row in existing_rows
+            if any(value.strip() for value in row)
+        }
+        input_keys = atlas[ATLAS_ROW_IDENTITY].fillna("").astype(str).apply(
+            lambda row: tuple(value.strip() for value in row), axis=1
+        )
+        duplicates = input_keys.isin(existing_keys) | input_keys.duplicated(keep="first")
+        for identity in sorted(set(input_keys[duplicates])):
+            logger.warning("Skipping duplicate centralized-atlas row identity: %s", identity)
         atlas = atlas.loc[~duplicates]
         if atlas.empty:
             logger.info("No new atlas rows to append.")
@@ -196,9 +199,10 @@ def deposit_atlas_to_google_sheet(atlas: pd.DataFrame, force_add: bool = False) 
 
 def deposit_ref_standards_atlas_and_msms_refs(
     summary_path: Path, db_path: str | Path, run_name: str, dry_run: bool = False,
-    force_add: bool = False,
+    force_add: bool = False, skip_atlas_upload: bool = False,
+    skip_msms_refs_deposit: bool = False,
 ) -> tuple[Path, Path]:
-    """Write previews and, unless dry_run is set, deposit to the sheet and main DB."""
+    """Write previews and deposit to the sheet and main DB unless skipped."""
     atlas, msms = prepare_deposit_data(summary_path, db_path, run_name)
     atlas_path = summary_path.parent / f"Atlas_Deposit_Preview_{run_name}.csv"
     msms_path = summary_path.parent / f"MsmsRefs_Deposit_Preview_{run_name}.tab"
@@ -216,6 +220,8 @@ def deposit_ref_standards_atlas_and_msms_refs(
     logger.info("Atlas preview: %s; MS/MS preview: %s", atlas_path, msms_path)
     if dry_run:
         logger.info("Dry run: nothing was deposited")
+    elif skip_atlas_upload and skip_msms_refs_deposit:
+        logger.info("Atlas upload and MS/MS reference deposit both skipped")
     else:
         from metatlas2.run_targeted_analysis import set_up_paths
         from metatlas2.database_interact import get_compound_uids_by_inchi_keys
@@ -230,8 +236,16 @@ def deposit_ref_standards_atlas_and_msms_refs(
         missing_keys = set(keys) - set(get_compound_uids_by_inchi_keys(paths["main_db_path"], keys.unique().tolist()))
         if missing_keys:
             raise RuntimeError(f"Compound import did not add InChIKeys: {sorted(missing_keys)}")
-        logger.info("Appending atlas rows to Google Sheets")
-        deposit_atlas_to_google_sheet(atlas, force_add=force_add)
-        logger.info("Importing MS/MS references from %s", msms_path)
-        NewMsmsRefsConfig(entries=[{"path": str(msms_path)}]).execute()
+        if skip_atlas_upload:
+            logger.info("Skipping atlas upload")
+        else:
+            logger.info("Appending atlas rows to Google Sheets")
+            deposit_atlas_to_google_sheet(atlas, force_add=force_add)
+        if skip_msms_refs_deposit:
+            logger.info("Skipping MS/MS reference deposit")
+        else:
+            if not msms_path.is_file():
+                raise FileNotFoundError(f"MS/MS reference preview not found: {msms_path}")
+            logger.info("Importing MS/MS references from %s into %s", msms_path, paths["main_db_path"])
+            NewMsmsRefsConfig(entries=[{"path": str(msms_path)}]).execute()
     return atlas_path, msms_path

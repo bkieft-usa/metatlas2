@@ -421,7 +421,7 @@ def run_analysis_summary(
         GUI step.  Defaults to ``False`` (normal notebook behaviour).
     database_flush_errors:
         Dict returned by ``run_analysis_gui()`` mapping
-        ``"compound_name (adduct)"`` strings to error messages for any
+        ``"label (adduct)"`` strings to error messages for any
         compound whose curation data could not be flushed to the project
         database.  When non-empty (or non-None), this function raises a
         ``RuntimeError`` immediately rather than generating summary outputs

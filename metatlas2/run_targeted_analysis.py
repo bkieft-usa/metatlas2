@@ -258,7 +258,7 @@ def main():
     import metatlas2.workflows as wfs
     import metatlas2.logging_config as lcf
 
-    config = ldt.load_metatlas2_config(args.config)
+    config = ldt.load_metatlas2_config(args.config, analysis_subset=args.analysis_subset)
 
     paths = set_up_paths(
         config=config,

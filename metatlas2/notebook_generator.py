@@ -38,6 +38,7 @@ def generate_gui_notebooks(
         "polarity": auto_id_obj.auto_ided_atlas_obj.polarity,
         "atlas_category": _cat_val,
         "atlas_name": auto_id_obj.auto_ided_atlas_obj.atlas_name,
+        "atlas_tags": list(auto_id_obj.ta.tags),
         "input_atlas_uid": auto_id_obj.auto_ided_atlas_obj.atlas_uid,
     }
 
@@ -139,7 +140,11 @@ def _make_params_cell(run_params: dict, auto_id_obj: "AutoIdentification") -> nb
     return nbformat.v4.new_code_cell(src)
 
 def _make_header_cell(run_params: dict) -> nbformat.NotebookNode:
-    text = (f"# **`{run_params['project_name']}`**  \n")
+    tags = ", ".join(run_params.get("atlas_tags", []))
+    text = f"# **`{run_params['project_name']}`**  \n"
+    if tags:
+        text += f"Input atlas tags: `{tags}`  \n"
+    text += f"Input atlas UID: `{run_params['input_atlas_uid']}`"
     return nbformat.v4.new_markdown_cell(text)
 
 def _make_imports_cell() -> nbformat.NotebookNode:
@@ -299,7 +304,7 @@ Add a suffix (see **Query Builder Guide** below) to turn a column name into a fi
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `compound_name` | string | Compound display name |
+| `label` | string | Compound display name |
 | `inchi_key` | string | InChI key (standard 27-char) |
 | `adduct` | string | Detected adduct, e.g. `[M+H]+` |
 | `formula` | string | Molecular formula |

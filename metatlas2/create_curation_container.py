@@ -52,7 +52,7 @@ def create_manual_curation_obj(auto_id_obj) -> None:
             'compound_uid': atlas_row.get('compound_uid', ''),
             'inchi_key': atlas_row.get('inchi_key', ''),
             'adduct': atlas_row.get('adduct', ''),
-            'compound_name': atlas_row.get('compound_name', ''),
+            'label': atlas_row.get('label', ''),
             'passed_autoid': False,
             'passed_curation': False,
             'polarity': atlas_row.get('polarity', ''),
@@ -293,12 +293,12 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
         atlas_obj: An ``Atlas`` instance that exposes a ``to_dataframe()`` method
             returning a :class:`pandas.DataFrame` with columns ``mz_rt_uid``,
             ``mz``, ``mono_isotopic_molecular_weight``, ``inchi_key``,
-            ``adduct``, ``compound_name``, and ``rt_peak``.
+            ``adduct``, ``label``, and ``rt_peak``.
 
     Returns:
         A ``dict`` mapping each ``mz_rt_uid`` to a (possibly empty) list of
         isomer records, each containing keys ``mz_rt_uid``, ``inchi_key``,
-        ``adduct``, ``compound_name``, ``rt``, and ``mz``.
+        ``adduct``, ``label``, ``rt``, and ``mz``.
     """
     atlas_df = atlas_obj.to_dataframe().reset_index(drop=True)
     n = len(atlas_df)
@@ -322,7 +322,7 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
             isomer_dict[uids[i]] = [
                 {
                     "mz_rt_uid": row.mz_rt_uid, "inchi_key": row.inchi_key,
-                    "adduct": row.adduct, "compound_name": row.compound_name,
+                    "adduct": row.adduct, "label": row.label,
                     "rt": row.rt_peak, "mz": row.mz,
                 } for row in matches.itertuples()
             ]

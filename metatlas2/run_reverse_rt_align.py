@@ -86,4 +86,4 @@ if __name__ == "__main__":
         required=False
     )
     args = parser.parse_args()
-    run_reverse_rt_align(args.config_path, args.timestamp, args.tags, args.skip_rt_alignment)
+    run_reverse_rt_align(args.config_path, args.annotation_timestamp, args.tags, args.skip_rt_alignment)
