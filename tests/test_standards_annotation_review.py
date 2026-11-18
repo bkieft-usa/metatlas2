@@ -29,7 +29,7 @@ from metatlas2.workflow_objects import NewMsmsRefsConfig
 
 def mock_alignment_model(monkeypatch):
     monkeypatch.setattr(align, "get_qc_runs_for_chrom", lambda *_args, **_kwargs: [object()])
-    monkeypatch.setattr(align, "load_qc_atlas", lambda *_: SimpleNamespace(to_dataframe=lambda: pd.DataFrame([{"x": 1}])))
+    monkeypatch.setattr(align, "load_qc_atlas", lambda *_: SimpleNamespace(atlas_uid="qc-uid", to_dataframe=lambda: pd.DataFrame([{"x": 1}])))
     monkeypatch.setattr(align, "extract_qc_ms1", lambda *_: pd.DataFrame([{"x": 1}]))
     monkeypatch.setattr(align, "build_reverse_rt_model", lambda *_: {
         "model_type": "polynomial", "r2": 1.0, "rmse": 0.0,
@@ -594,7 +594,7 @@ def test_alignment_does_not_create_missing_project(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "get_project_output_root", lambda _: root)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: str(root / "run.duckdb"))
     with pytest.raises(FileNotFoundError, match="project database not found"):
-        run_reverse_rt_align("config.yaml", "20260101T120000_000000Z")
+        run_reverse_rt_align("config.yaml", "20260101T120000_000000Z", tags="EMA")
     assert not root.exists()
 
 
@@ -653,6 +653,51 @@ def test_review_rounds_and_multiple_alignments_use_current_selections(project, t
     assert result["Peak #"].tolist() == [1]
     assert result["Compound Label"].tolist() == ["A"]
     assert csv.read_bytes() == original_csv
+
+
+@pytest.mark.parametrize("use_tags", [True, False])
+def test_reverse_alignment_snapshots_resolved_atlas(project, tmp_path, monkeypatch, use_tags):
+    from metatlas2 import atlas_sheet
+
+    selector = {"tags": ["QC"], "polarity": "POS"} if use_tags else {"uid": "qc-uid", "polarity": "POS"}
+    config = {
+        "project": {"standards_run_name": "run", "owner": "jgi"},
+        "rt_alignment": {"C18": {"ATLAS": selector}},
+    }
+    monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
+    monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
+    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
+    atlas = SimpleNamespace(
+        atlas_uid="qc-uid", chromatography="C18", polarity="POS",
+        atlas_category=align.wfo.AtlasCategory.QC, compound_mzrts={"c": object()},
+        to_dataframe=lambda: pd.DataFrame([{"x": 1}]),
+    )
+    monkeypatch.setattr(align.wfo.Atlas, "from_database", classmethod(lambda cls, db, uid: atlas))
+    if use_tags:
+        monkeypatch.setattr(atlas_sheet, "read_centralized_atlas_sheet", lambda: pd.DataFrame())
+        monkeypatch.setattr(atlas_sheet, "select_centralized_atlas_rows", lambda *_args, **_kwargs: pd.DataFrame())
+        monkeypatch.setattr(atlas_sheet, "_create_or_reuse_atlas", lambda *_args, **_kwargs: "qc-uid")
+    load_qc_atlas = align.load_qc_atlas
+    mock_alignment_model(monkeypatch)
+    monkeypatch.setattr(align, "load_qc_atlas", load_qc_atlas)
+    make_table = summary.make_standards_annotation_table
+    captured = []
+    def capture_table(data, *args, **kwargs):
+        captured.append(data.copy())
+        return make_table(data, *args, **kwargs)
+    summary.run_standards_annotation_summary(SimpleNamespace(config=config, project_db_path=project))
+    annotation = next((tmp_path / "outputs").glob("annotation_run_*/.summary_complete")).parent
+    timestamp = annotation.name.removeprefix("annotation_run_")
+    monkeypatch.setattr(summary, "make_standards_annotation_table", capture_table)
+
+    align.run_reverse_rt_alignment("config", project, tmp_path / "outputs", timestamp)
+
+    snapshot = next(annotation.glob("rt_align_*/rt_alignment/alignment_config.json"))
+    chrom = json.loads(snapshot.read_text())["rt_alignment"]["C18"]
+    assert chrom["ATLAS"] == selector
+    assert chrom["resolved_qc_atlas_uid"] == "qc-uid"
+    assert captured[-1]["qc_atlas_uid"].tolist() == ["qc-uid", "qc-uid"]
 
 
 def test_failed_summary_has_no_completion_marker(project, tmp_path, monkeypatch):
@@ -781,12 +826,12 @@ def test_real_model_applies_to_current_selections(project, tmp_path, monkeypatch
     monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     monkeypatch.setattr(align, "get_qc_runs_for_chrom", lambda *_args, **_kwargs: [object()])
-    monkeypatch.setattr(align, "load_qc_atlas", lambda *_: SimpleNamespace(to_dataframe=lambda: pd.DataFrame([{"x": 1}])))
+    monkeypatch.setattr(align, "load_qc_atlas", lambda *_: SimpleNamespace(atlas_uid="qc-uid", to_dataframe=lambda: pd.DataFrame([{"x": 1}])))
     monkeypatch.setattr(align, "extract_qc_ms1", lambda *_: pd.DataFrame([{"x": 1}]))
     modeling = pd.DataFrame({
         "exp_rt_peak": [1., 2., 3.], "atlas_rt_peak": [1.5, 2.5, 3.5],
         "predicted_rt": [1.5, 2.5, 3.5], "residual": [0., 0., 0.],
-        "compound_name": ["A", "B", "C"], "inchi_key": ["a", "b", "c"],
+        "label": ["A", "B", "C"], "inchi_key": ["a", "b", "c"],
         "adduct": ["[M+H]+"] * 3,
     })
     monkeypatch.setattr(align, "build_reverse_rt_model", lambda *_: {
@@ -894,6 +939,7 @@ def test_alignment_summary_preserves_rows_and_adds_aligned_rts(project, tmp_path
     for name in ("RT peak", "RT min", "RT max"):
         columns.insert(columns.index(name) + 1, f"Aligned {name}")
     columns.insert(columns.index("Aligned RT peak") + 1, "RT diff")
+    columns.append("tags")
     assert aligned.columns.tolist() == columns
     pd.testing.assert_frame_equal(aligned[measured.columns], measured)
     offsets = aligned["Chromatography"].map({"C18": .5, "HILIC": -1.})
@@ -909,15 +955,35 @@ def test_alignment_summary_preserves_rows_and_adds_aligned_rts(project, tmp_path
     assert len(list((run / "rt_alignment").glob("*.pdf"))) == 2
 
 
-def test_reverse_model_from_real_qc_hdf5(pos_atlas, lcmsrun):
+@pytest.mark.parametrize("source", ["median", "file"])
+def test_reverse_model_from_real_qc_hdf5(pos_atlas, lcmsrun, tmp_path, monkeypatch, source):
+    from matplotlib.axes import Axes
+
     config = {"extraction": {"max_workers": 1},
               "rt_alignment": {"HILIC": {"model_type": "median_offset",
-                                          "min_compounds_for_modeling": 2}}}
+                                          "min_compounds_for_modeling": 2,
+                                          "rt_peak_source": lcmsrun.filename if source == "file" else source}}}
     ms1 = align.extract_qc_ms1([lcmsrun], pos_atlas.to_dataframe(), config, "HILIC")
     assert set(ms1["mz_rt_uid"]) == set(pos_atlas.compound_mzrts)
     model = align.build_reverse_rt_model(ms1, pos_atlas, config, "HILIC")
     assert len(model["modeling_df"]) == 2
     assert model["offset"] == pytest.approx(.1, abs=1e-5)
+    captured = {}
+    original_table = Axes.table
+
+    def capture_table(ax, *args, **kwargs):
+        captured.update(kwargs)
+        return original_table(ax, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "table", capture_table)
+    pdf = Path(align.make_rt_alignment_summary_plot(model["modeling_df"], model, tmp_path, "run"))
+    assert pdf.read_bytes().startswith(b"%PDF")
+    assert list(captured["colLabels"])[1] == "Compound Name"
+    expected = model["modeling_df"].sort_values("exp_rt_peak")
+    assert list(captured["cellText"][:, 1]) == [
+        pos_atlas.compound_mzrts[uid].label for uid in expected["mz_rt_uid"]
+    ]
+    assert list(captured["cellText"][:, 0]) == [1, 2]
     selected = pd.DataFrame({"rt_peak": [2., 4.], "rt_min": [1.9, 3.8], "rt_max": [2.2, 4.3]})
     result = align.apply_reverse_rt_model(selected, model)
     assert result["rt_peak_aligned"].tolist() == pytest.approx([2.1, 4.1], abs=1e-5)
@@ -970,6 +1036,11 @@ def test_missing_model_never_publishes_alignment(project, tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monkeypatch, dry_run):
+    import metatlas2.database_interact as dbi
+
+    monkeypatch.setenv("METATLAS_DATA_DIR", str(tmp_path))
+    main_db = tmp_path / "databases" / "main_db" / "metatlas.duckdb"
+    dbi.create_metatlas_database(str(main_db))
     template = ("20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
                 "USHXG03401_POS_MS2_RefStd-1_FA-CoA_1_Rg70to1050-{}norm-RxnMix-S1_Run{}.h5")
     filenames = [template.format("CE102040", 135), template.format("CE205060", 136)]
@@ -997,12 +1068,9 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
     warnings = []
     upload = Mock()
     monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", upload)
-    monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", lambda **_: {"main_db_path": "main"})
     monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", Mock())
     monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys",
                         lambda _path, keys: dict.fromkeys(keys, "uid"))
-    import_refs = Mock()
-    monkeypatch.setattr(NewMsmsRefsConfig, "execute", import_refs)
     monkeypatch.setattr(deposit.logger, "warning", lambda message, *args: warnings.append(message % args))
     summary.run_standards_annotation_summary(SimpleNamespace(config=config, project_db_path=project))
     annotation_dir = next((tmp_path / "outputs").glob("annotation_run_*/.summary_complete")).parent
@@ -1038,12 +1106,20 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
     assert msms["formula"].tolist() == ["C2H6O", "C2H6O"]
     assert any("No CE102040 spectrum" in message for message in warnings)
     assert any("No CE205060 spectrum" in message for message in warnings)
+    with duckdb.connect(str(main_db), read_only=True) as conn:
+        refs = conn.execute(
+            "SELECT database, ref_id, inchi_key, precursor_mz, collision_energy, mz, intensities "
+            "FROM msms_refs ORDER BY ref_id"
+        ).fetchall()
     if dry_run:
         upload.assert_not_called()
-        import_refs.assert_not_called()
+        assert refs == []
     else:
         upload.assert_called_once()
-        import_refs.assert_called_once()
+        assert refs == [
+            ("standards_annotation", "run_0001", "key", 100.0, 10.0, [50.0], [300.0]),
+            ("standards_annotation", "run_0002", "key", 101.0, 11.0, [51.0], [301.0]),
+        ]
         pd.testing.assert_frame_equal(
             upload.call_args.args[0].reset_index(drop=True), atlas, check_dtype=False,
         )
@@ -1056,7 +1132,11 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
 
 @pytest.mark.parametrize("dry_run", [True, False])
 @pytest.mark.parametrize("force_add", [True, False])
-def test_deposit_command_passes_flags(project, tmp_path, monkeypatch, dry_run, force_add):
+@pytest.mark.parametrize("skip_atlas_upload", [True, False])
+@pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
+def test_deposit_command_passes_flags(
+    project, tmp_path, monkeypatch, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit,
+):
     timestamp = "20260101T120000_000000Z"
     alignment_timestamp = "20260101T120001_000000Z"
     alignment_dir = tmp_path / "outputs" / f"annotation_run_{timestamp}" / f"rt_align_{alignment_timestamp}"
@@ -1076,6 +1156,10 @@ def test_deposit_command_passes_flags(project, tmp_path, monkeypatch, dry_run, f
         args.append("--dry_run")
     if force_add:
         args.append("--force_add")
+    if skip_atlas_upload:
+        args.append("--skip_atlas_upload")
+    if skip_msms_refs_deposit:
+        args.append("--skip_msms_refs_deposit")
     monkeypatch.setattr(sys, "argv", args)
 
     runpy.run_path(
@@ -1083,7 +1167,61 @@ def test_deposit_command_passes_flags(project, tmp_path, monkeypatch, dry_run, f
         run_name="__main__",
     )
 
-    do_deposit.assert_called_once_with(summary_path, project, "run", dry_run=dry_run, force_add=force_add)
+    do_deposit.assert_called_once_with(
+        summary_path, project, "run", dry_run=dry_run, force_add=force_add,
+        skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
+    )
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("skip_atlas_upload", [True, False])
+@pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
+def test_deposit_skip_flags(tmp_path, monkeypatch, dry_run, skip_atlas_upload, skip_msms_refs_deposit):
+    atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    paths = Mock(return_value={"main_db_path": "main"})
+    compounds = Mock()
+    upload = Mock()
+    import_refs = Mock()
+    monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", paths)
+    monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", compounds)
+    monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys", lambda *_: {"key": "uid"})
+    monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", upload)
+    monkeypatch.setattr(NewMsmsRefsConfig, "execute", import_refs)
+
+    atlas_path, msms_path = deposit.deposit_ref_standards_atlas_and_msms_refs(
+        tmp_path / "summary.csv", "db", "run", dry_run=dry_run,
+        skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
+    )
+
+    assert atlas_path.is_file() and msms_path.is_file()
+    active = not dry_run and not (skip_atlas_upload and skip_msms_refs_deposit)
+    assert paths.call_count == compounds.call_count == int(active)
+    assert upload.call_count == int(not dry_run and not skip_atlas_upload)
+    assert import_refs.call_count == int(not dry_run and not skip_msms_refs_deposit)
+
+
+def test_deposit_retry_skips_completed_atlas_upload(tmp_path, monkeypatch):
+    atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", lambda **_: {"main_db_path": "main"})
+    monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", Mock())
+    monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys", lambda *_: {"key": "uid"})
+    upload = Mock()
+    import_refs = Mock(side_effect=[RuntimeError("import failed"), None])
+    monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", upload)
+    monkeypatch.setattr(NewMsmsRefsConfig, "execute", import_refs)
+
+    with pytest.raises(RuntimeError, match="import failed"):
+        deposit.deposit_ref_standards_atlas_and_msms_refs(tmp_path / "summary.csv", "db", "run")
+    for name in ("Atlas_Deposit_Preview_run.csv", "MsmsRefs_Deposit_Preview_run.tab"):
+        (tmp_path / name).rename(tmp_path / f"previous_{name}")
+
+    deposit.deposit_ref_standards_atlas_and_msms_refs(
+        tmp_path / "summary.csv", "db", "run", skip_atlas_upload=True,
+    )
+    upload.assert_called_once()
+    assert import_refs.call_count == 2
 
 
 def test_deposit_upload_failure_preserves_previews(tmp_path, monkeypatch):
@@ -1106,24 +1244,46 @@ def test_deposit_upload_failure_preserves_previews(tmp_path, monkeypatch):
     assert (tmp_path / "MsmsRefs_Deposit_Preview_run.tab").is_file()
 
 
+def test_deposit_missing_msms_preview_raises(tmp_path, monkeypatch):
+    atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", lambda **_: {"main_db_path": "main"})
+    monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", Mock())
+    monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys", lambda *_: {"key": "uid"})
+    import_refs = Mock()
+    monkeypatch.setattr(NewMsmsRefsConfig, "execute", import_refs)
+    msms_path = tmp_path / "MsmsRefs_Deposit_Preview_run.tab"
+    monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", lambda *_args, **_kwargs: msms_path.unlink())
+
+    with pytest.raises(FileNotFoundError, match="MS/MS reference preview not found"):
+        deposit.deposit_ref_standards_atlas_and_msms_refs(tmp_path / "summary.csv", "db", "run")
+
+    import_refs.assert_not_called()
+    assert (tmp_path / "Atlas_Deposit_Preview_run.csv").is_file()
+
+
 @pytest.mark.parametrize("force_add,expected_keys", [
-    (False, ["new", "new", ""]),
-    (True, ["existing", "new", "existing", "new", ""]),
+    (False, ["new", "new"]),
+    (True, ["existing", "new", "existing", "new", "new"]),
 ])
-def test_deposit_sheet_skips_existing_keys(monkeypatch, force_add, expected_keys):
+def test_deposit_sheet_skips_duplicate_row_identities(monkeypatch, force_add, expected_keys):
     atlas = pd.DataFrame([[""] * len(deposit.ATLAS_COLUMNS) for _ in range(5)], columns=deposit.ATLAS_COLUMNS)
     atlas["inchi_key"] = ["existing", "new", "existing", "new", ""]
+    atlas["adduct"] = ["[M+H]+", "[M+H]+", "[M+H]+", "[M+H]+", "[M+Na]+"]
+    atlas["chromatography"] = "HILICZ"
+    atlas["polarity"] = "positive"
+    atlas.loc[4, "inchi_key"] = "new"
     sheet = Mock(id=123)
     sheet.row_values.return_value = deposit.ATLAS_COLUMNS
-    sheet.col_values.return_value = ["inchi_key", "existing", ""]
+    existing_row = [""] * len(deposit.ATLAS_COLUMNS)
+    existing_row[deposit.ATLAS_COLUMNS.index("inchi_key")] = "existing"
+    existing_row[deposit.ATLAS_COLUMNS.index("adduct")] = "[M+H]+"
+    existing_row[deposit.ATLAS_COLUMNS.index("chromatography")] = "HILICZ"
+    existing_row[deposit.ATLAS_COLUMNS.index("polarity")] = "positive"
+    sheet.get_all_values.return_value = [deposit.ATLAS_COLUMNS, existing_row]
     spreadsheet = Mock()
     spreadsheet.worksheet.return_value = sheet
-    credentials = SimpleNamespace(from_json_keyfile_name=Mock())
-    monkeypatch.setitem(sys.modules, "gspread", SimpleNamespace(authorize=Mock(
-        return_value=SimpleNamespace(open_by_key=Mock(return_value=spreadsheet)))))
-    monkeypatch.setitem(sys.modules, "oauth2client", SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "oauth2client.service_account",
-                        SimpleNamespace(ServiceAccountCredentials=credentials))
+    monkeypatch.setattr(deposit, "open_centralized_atlas_worksheet", lambda **_: (spreadsheet, sheet))
     warning = Mock()
     monkeypatch.setattr(deposit.logger, "warning", warning)
 
@@ -1131,24 +1291,28 @@ def test_deposit_sheet_skips_existing_keys(monkeypatch, force_add, expected_keys
 
     appended = sheet.append_rows.call_args.args[0]
     assert [row[2] for row in appended] == expected_keys
-    assert sheet.col_values.call_count == (0 if force_add else 1)
-    assert warning.call_count == (0 if force_add else 1)
+    assert sheet.get_all_values.call_count == (0 if force_add else 1)
+    assert warning.call_count == (0 if force_add else 2)
     spreadsheet.batch_update.assert_called_once()
 
 
 def test_deposit_sheet_all_existing_does_not_append_or_sort(monkeypatch):
     atlas = pd.DataFrame([[""] * len(deposit.ATLAS_COLUMNS)], columns=deposit.ATLAS_COLUMNS)
     atlas["inchi_key"] = "existing"
+    atlas["adduct"] = "[M+H]+"
+    atlas["chromatography"] = "HILICZ"
+    atlas["polarity"] = "positive"
     sheet = Mock()
     sheet.row_values.return_value = deposit.ATLAS_COLUMNS
-    sheet.col_values.return_value = ["inchi_key", "existing"]
+    existing_row = [""] * len(deposit.ATLAS_COLUMNS)
+    existing_row[deposit.ATLAS_COLUMNS.index("inchi_key")] = "existing"
+    existing_row[deposit.ATLAS_COLUMNS.index("adduct")] = "[M+H]+"
+    existing_row[deposit.ATLAS_COLUMNS.index("chromatography")] = "HILICZ"
+    existing_row[deposit.ATLAS_COLUMNS.index("polarity")] = "positive"
+    sheet.get_all_values.return_value = [deposit.ATLAS_COLUMNS, existing_row]
     spreadsheet = Mock()
     spreadsheet.worksheet.return_value = sheet
-    monkeypatch.setitem(sys.modules, "gspread", SimpleNamespace(authorize=Mock(
-        return_value=SimpleNamespace(open_by_key=Mock(return_value=spreadsheet)))))
-    monkeypatch.setitem(sys.modules, "oauth2client", SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "oauth2client.service_account", SimpleNamespace(
-        ServiceAccountCredentials=SimpleNamespace(from_json_keyfile_name=Mock())))
+    monkeypatch.setattr(deposit, "open_centralized_atlas_worksheet", lambda **_: (spreadsheet, sheet))
     deposit.deposit_atlas_to_google_sheet(atlas)
     sheet.append_rows.assert_not_called()
     spreadsheet.batch_update.assert_not_called()
@@ -1181,7 +1345,9 @@ def test_deposit_imports_all_references_and_only_new_compounds(tmp_path, monkeyp
     sheet = Mock()
     monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", sheet)
     from metatlas2.workflow_objects import Compound
-    dbi.batch_save_compounds(str(main_db), [Compound(compound_uid="", compound_name="original", inchi_key="existing")])
+    dbi.batch_save_compounds(str(main_db), [
+        Compound(compound_uid="", label="Original label", compound_name="original", inchi_key="existing")
+    ])
     dbi.batch_save_msms_refs(str(main_db), [{
         "inchi_key": "existing", "ref_id": "previous", "mz": [50.0], "intensities": [300.0],
     }])
@@ -1189,9 +1355,14 @@ def test_deposit_imports_all_references_and_only_new_compounds(tmp_path, monkeyp
     deposit.deposit_ref_standards_atlas_and_msms_refs(tmp_path / "summary.csv", "project", "run")
 
     with duckdb.connect(str(main_db), read_only=True) as conn:
-        compounds = conn.execute("SELECT inchi_key, compound_name FROM compounds ORDER BY inchi_key").fetchall()
+        compounds = conn.execute(
+            "SELECT inchi_key, label, compound_name FROM compounds ORDER BY inchi_key"
+        ).fetchall()
         refs = conn.execute("SELECT inchi_key, ref_id, mz, intensities FROM msms_refs ORDER BY ref_id").fetchall()
-    assert compounds == [("existing", "original"), ("new", "two")]
+    assert compounds == [
+        ("existing", "Original label", "original"),
+        ("new", "two", "two"),
+    ]
     assert refs == [("existing", "previous", [50.0], [300.0]),
                     ("existing", "run_0", [50.0], [300.0]),
                     ("new", "run_1", [50.0], [300.0]), ("new", "run_2", [50.0], [300.0])]
@@ -1400,7 +1571,11 @@ def test_deposit_reports_empty_spectrum_and_does_not_replace_previews(tmp_path, 
 @pytest.mark.parametrize("runtime", ["docker", "shifter"])
 @pytest.mark.parametrize("dry_run", [True, False])
 @pytest.mark.parametrize("force_add", [True, False])
-def test_deposit_shell_dispatches_arguments(runtime, tmp_path, dry_run, force_add):
+@pytest.mark.parametrize("skip_atlas_upload", [True, False])
+@pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
+def test_deposit_shell_dispatches_arguments(
+    runtime, tmp_path, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit,
+):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for executable in ("dirname", "basename", "id"):
@@ -1422,6 +1597,10 @@ def test_deposit_shell_dispatches_arguments(runtime, tmp_path, dry_run, force_ad
         command.append("--dry_run")
     if force_add:
         command.append("--force_add")
+    if skip_atlas_upload:
+        command.append("--skip_atlas_upload")
+    if skip_msms_refs_deposit:
+        command.append("--skip_msms_refs_deposit")
     result = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
     args = calls.read_text().splitlines()
     expected = [
@@ -1433,6 +1612,10 @@ def test_deposit_shell_dispatches_arguments(runtime, tmp_path, dry_run, force_ad
         expected.append("--dry_run")
     if force_add:
         expected.append("--force_add")
+    if skip_atlas_upload:
+        expected.append("--skip_atlas_upload")
+    if skip_msms_refs_deposit:
+        expected.append("--skip_msms_refs_deposit")
     assert args[-len(expected):] == expected
     if runtime == "docker":
         assert f"{tmp_path}:{tmp_path}:ro" in args

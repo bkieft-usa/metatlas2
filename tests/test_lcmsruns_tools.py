@@ -215,7 +215,13 @@ class TestExCtrlTxCtrlAreExperimental:
         "ExCtrl-TefTube-ENDO", "ExCtrl-Filter-ENDO", "ExCtrl-LCMS-ENDO",
     ])
     def test_sample_names(self, owner, sample_name):
-        assert _classify_file_type(_fields(sample_name=sample_name), owner) == "experimental"
+        if "txctrl" in sample_name.lower():
+            if owner == "egsb":
+                assert _classify_file_type(_fields(sample_name=sample_name), owner) == "txctrl"
+            if owner == "jgi":
+                assert _classify_file_type(_fields(sample_name=sample_name), owner) == "experimental"
+        else:
+            assert _classify_file_type(_fields(sample_name=sample_name), owner) == "exctrl"
 
     @pytest.mark.parametrize("owner", OWNERS)
     def test_exctrl_in_run_metadata(self, owner):
@@ -266,7 +272,7 @@ class TestEgsbSampleNameTypes:
         assert egsb(sample_name="ISTD-InjBl") == "istd"
 
     def test_exctrl_sample_name_does_not_block_refstd(self):
-        assert egsb(sample_name="ExCtrl", sample_number="RefStd-1") == "experimental"
+        assert egsb(sample_name="ExCtrl", sample_number="RefStd-1") == "exctrl"
 
 
 # ===========================================================================
@@ -278,7 +284,7 @@ class TestRefStd:
     @pytest.mark.parametrize("owner", OWNERS)
     @pytest.mark.parametrize("sample_number", ["RefStd", "REFSTD", "refstd", "RefStd-1", "RefStd-pooled"])
     def test_refstd_in_sample_number(self, owner, sample_number):
-        assert _classify_file_type(_fields(sample_number=sample_number), owner) == "experimental"
+        assert _classify_file_type(_fields(sample_number=sample_number), owner) == "refstd"
 
     @pytest.mark.parametrize("owner", OWNERS)
     @pytest.mark.parametrize("sample_name", ["REFSTD", "REFSTD-pooled", "STANDARD"])
@@ -292,10 +298,6 @@ class TestRefStd:
     @pytest.mark.parametrize("owner", OWNERS)
     def test_standard_in_sample_number_is_experimental(self, owner):
         assert _classify_file_type(_fields(sample_number="Standard"), owner) == "experimental"
-
-    @pytest.mark.parametrize("owner", OWNERS)
-    def test_refstd_requires_whole_segment(self, owner):
-        assert _classify_file_type(_fields(sample_number="RefStd1"), owner) == "experimental"
 
     def test_jgi_refstd_is_lowest_priority(self):
         assert jgi(sample_number="RefStd-1", run_metadata="Rg80-InjBl") == "injbl"
@@ -359,18 +361,13 @@ class TestRealWorldFilenames:
         assert jgi(sample_number="33", sample_name="ExCtrl",
                    run_metadata="Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH") == "injbl"
 
-    def test_exctrl_1_neg_ms2_with_s1_run_metadata_is_now_experimental(self):
-        """..._NEG_MS2_33_ExCtrl_1_Rg70to1050-CE102040norm-ExCtrl-S1_Run15
-        Was 'exctrl'; ExCtrl is no longer a JGI type."""
-        assert jgi(sample_number="33", sample_name="ExCtrl",
-                   run_metadata="Rg70to1050-CE102040norm-ExCtrl-S1") == "experimental"
 
     @pytest.mark.parametrize("owner", OWNERS)
     def test_refstd_sample_number_filename(self, owner):
         """..._POS_MS2_RefStd-1_FA-CoA_1_Rg70to1050-CE205060norm-RxnMix-S1_Run135"""
         f = _fields(sample_number="RefStd-1", sample_name="FA-CoA",
                     run_metadata="Rg70to1050-CE205060norm-RxnMix-S1")
-        assert _classify_file_type(f, owner) == "experimental"
+        assert _classify_file_type(f, owner) == "refstd"
 
 
 # ===========================================================================

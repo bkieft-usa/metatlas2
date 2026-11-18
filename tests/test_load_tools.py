@@ -27,7 +27,7 @@ _OTHER_INCHI_KEY  = "AAAABBBBCCCCDD-UHFFFAOYSA-N"
 _LABELED_IK   = "UGQMRVRMYYASKQ-KQYNXXCUSA-N"   # 13C-labeled version
 _UNLABELED_IK = "UGQMRVRMYYASKQ-SHKQESLVSA-N"   # unlabeled version
 
-_REQUIRED_COLS = ["inchi_key", "compound_name", "rt_peak", "mz", "adduct"]
+_REQUIRED_COLS = ["inchi_key", "label", "rt_peak", "mz", "adduct"]
 
 
 def _make_tsv(rows: list[dict]) -> str:
@@ -47,13 +47,13 @@ def _write_tmp(tmp_path, content: str, suffix: str = ".tsv") -> str:
 
 def _base_row(
     inchi_key: str,
-    compound_name: str,
+    label: str,
     rt_peak: float,
     idx: int = 0,
 ) -> dict:
     return {
         "inchi_key":     inchi_key,
-        "compound_name": compound_name,
+        "label": label,
         "rt_peak":       rt_peak,
         "mz":            100.0 + idx,
         "adduct":        "[M+H]+",
@@ -291,11 +291,11 @@ class TestLoadAtlasInputDefaults:
         path = _write_tmp(tmp_path, content, suffix=".csv")
         df = ldt.load_atlas_input(path)
         assert len(df) == 1
-        assert df.iloc[0]["compound_name"] == "cpd_csv"
+        assert df.iloc[0]["label"] == "cpd_csv"
 
     def test_missing_required_column_raises(self, tmp_path):
         """A TSV missing a required column must raise ValueError."""
-        rows = [{"inchi_key": _OTHER_INCHI_KEY, "compound_name": "cpd_x",
+        rows = [{"inchi_key": _OTHER_INCHI_KEY, "label": "cpd_x",
                  "mz": 100.0, "adduct": "[M+H]+"}]  # rt_peak omitted
         path = _write_tmp(tmp_path, _make_tsv(rows))
         with pytest.raises(ValueError, match="rt_peak"):

@@ -218,7 +218,7 @@ class TestComputeAllOverlappingCompounds:
     def _make_mc(self, rows: list[dict]) -> pd.DataFrame:
         """Build a minimal manual_curation_df from a list of row dicts."""
         defaults = {
-            "compound_name": "compound",
+            "label": "compound",
             "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N",
             "atlas_mz": 136.062,
             "rt_min": 1.0,
@@ -230,15 +230,15 @@ class TestComputeAllOverlappingCompounds:
         return {ik: mass for ik in mc["inchi_key"].unique()}
 
     def test_single_compound_no_overlap(self):
-        mc = self._make_mc([{"compound_name": "adenine", "adduct": "[M+H]+"}])
+        mc = self._make_mc([{"label": "adenine", "adduct": "[M+H]+"}])
         result = _compute_all_overlapping_compounds(mc, self._mass_map(mc))
         assert result[0] == ("", "")
 
     def test_two_distinct_compounds_no_overlap(self):
         mc = self._make_mc([
-            {"compound_name": "adenine", "adduct": "[M+H]+", "atlas_mz": 136.062, "rt_min": 1.0, "rt_max": 3.0,
+            {"label": "adenine", "adduct": "[M+H]+", "atlas_mz": 136.062, "rt_min": 1.0, "rt_max": 3.0,
              "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N"},
-            {"compound_name": "riboflavin","adduct": "[M+H]+", "atlas_mz": 377.146, "rt_min": 4.0, "rt_max": 6.0,
+            {"label": "riboflavin","adduct": "[M+H]+", "atlas_mz": 377.146, "rt_min": 4.0, "rt_max": 6.0,
              "inchi_key": "AUNGANRZJHBGPY-SCRDCRAPSA-N"},
         ])
         mass_map = {
@@ -251,9 +251,9 @@ class TestComputeAllOverlappingCompounds:
 
     def test_two_compounds_same_mz_overlapping_rt_detected(self):
         mc = self._make_mc([
-            {"compound_name": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
+            {"label": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
              "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N"},
-            {"compound_name": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
+            {"label": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
              "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N"},
         ])
         mass_map = {
@@ -267,9 +267,9 @@ class TestComputeAllOverlappingCompounds:
 
     def test_non_overlapping_rt_not_flagged(self):
         mc = self._make_mc([
-            {"compound_name": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 1.0, "rt_max": 3.0,
+            {"label": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 1.0, "rt_max": 3.0,
              "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N"},
-            {"compound_name": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 5.0, "rt_max": 7.0,
+            {"label": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 5.0, "rt_max": 7.0,
              "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N"},
         ])
         mass_map = {
@@ -282,18 +282,18 @@ class TestComputeAllOverlappingCompounds:
 
     def test_result_keys_cover_all_compounds(self):
         mc = self._make_mc([
-            {"compound_name": "a", "adduct": "[M+H]+", "atlas_mz": 100.0, "rt_min": 1.0, "rt_max": 2.0},
-            {"compound_name": "b", "adduct": "[M+H]+", "atlas_mz": 200.0, "rt_min": 3.0, "rt_max": 4.0},
-            {"compound_name": "c", "adduct": "[M+H]+", "atlas_mz": 300.0, "rt_min": 5.0, "rt_max": 6.0},
+            {"label": "a", "adduct": "[M+H]+", "atlas_mz": 100.0, "rt_min": 1.0, "rt_max": 2.0},
+            {"label": "b", "adduct": "[M+H]+", "atlas_mz": 200.0, "rt_min": 3.0, "rt_max": 4.0},
+            {"label": "c", "adduct": "[M+H]+", "atlas_mz": 300.0, "rt_min": 5.0, "rt_max": 6.0},
         ])
         result = _compute_all_overlapping_compounds(mc, {})
         assert set(result.keys()) == {0, 1, 2}
 
     def test_overlapping_names_joined_with_double_slash(self):
         mc = self._make_mc([
-            {"compound_name": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
+            {"label": "leucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 8.5, "rt_max": 10.5,
              "inchi_key": "ROHFNLRQFUQHCH-UHFFFAOYSA-N"},
-            {"compound_name": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
+            {"label": "isoleucine", "adduct": "[M+H]+", "atlas_mz": 132.102, "rt_min": 9.0, "rt_max": 11.0,
              "inchi_key": "AGPKZVBTJJNPAG-WHFBIAKZSA-N"},
         ])
         mass_map = {
@@ -707,7 +707,7 @@ def test_export_filenames_with_metadata_matches_summary_headers(tmp_path, monkey
         lambda project_db_path: runs,
     )
     curation = pd.DataFrame([{
-        "mz_rt_uid": "uid", "compound_name": "compound", "inchi_key": "key",
+        "mz_rt_uid": "uid", "label": "compound", "inchi_key": "key",
         "polarity": "positive", "adduct": "M+H", "atlas_mz": 100, "atlas_rt_peak": 1,
     }])
     metrics = pd.DataFrame([{
@@ -728,19 +728,19 @@ def test_export_filenames_with_metadata_matches_summary_headers(tmp_path, monkey
 
     export_filenames_with_metadata(obj)
     make_data_sheets(obj, output_dir=tmp_path)
-    result = pd.read_csv(tmp_path / "POS_filenames_with_metadata.csv", keep_default_na=False)
+    result = pd.read_csv(tmp_path / "POS_additional_info" / "POS_filenames_with_metadata.csv", keep_default_na=False)
     assert result.columns.tolist() == [
         "filename", "file_type", "boxplot_group", "group", "file",
         "short_groupname", "sample_treatment", "short_filename", "short_samplename",
     ]
     assert result["filename"].tolist() == filenames[:3]
     assert result["file_type"].tolist() == ["istd", "experimental", "qc"]
-    assert result["boxplot_group"].tolist() == ["Plant_ISTD", "Plant", "Plant_QC"]
+    assert result["boxplot_group"].tolist() == ["ISTD", "Plant", "Plant (QC)"]
     sheet = pd.read_csv(tmp_path / "POS_data_sheets/POS_peak_height.csv", header=None)
     assert result.loc[0, sheet.iloc[:6, 0].tolist()].tolist() == sheet.iloc[:6, 1].tolist()
     assert "7_8_ISTD" in result.loc[0, "group"]
 
-    output = tmp_path / "POS_filenames_with_metadata.csv"
+    output = tmp_path / "POS_additional_info" / "POS_filenames_with_metadata.csv"
     output.write_text("existing\n")
     export_filenames_with_metadata(obj)
     assert output.read_text() == "existing\n"
@@ -825,12 +825,12 @@ class TestFileGroupFromFilenameJGI:
     def test_injbl_run_metadata_exctrl_sample_name_returns_INJBL(self):
         fname = _make_fname("33", "ExCtrl", "1",
                             "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH", "Run16")
-        assert self._group(fname) == "INJBL"
+        assert self._group(fname) == "ExCtrl (InjBl)"
 
     def test_injbl_run_metadata_second_replicate_returns_INJBL(self):
         fname = _make_fname("34", "ExCtrl", "2",
                             "Rg70to1050-CE102040norm-ExCtrl-InjBL-MeOH", "Run52")
-        assert self._group(fname) == "INJBL"
+        assert self._group(fname) == "ExCtrl (InjBl)"
 
     # --- Experimental: no keyword → group = sample_name ---
 

@@ -331,12 +331,12 @@ class TestBuildIsomerDict:
         c1 = _make_compound_mzrt(
             mz=132.102, rt_peak=9.72, rt_min=8.97, rt_max=10.47,
             inchi_key=f"{shared_inchi_prefix}-WHFBIAKZSA-N",
-            compound_name="isoleucine",
+            label="isoleucine",
         )
         c2 = _make_compound_mzrt(
             mz=132.102, rt_peak=9.34, rt_min=8.59, rt_max=10.09,
             inchi_key=f"{shared_inchi_prefix}-YFKPBYRVSA-N",  # same prefix, different stereo
-            compound_name="norleucine",
+            label="norleucine",
         )
         atlas = _make_atlas([c1, c2])
         result = _build_isomer_dict(atlas)
@@ -349,12 +349,12 @@ class TestBuildIsomerDict:
         c1 = _make_compound_mzrt(
             mz=132.102, rt_peak=9.72, rt_min=8.97, rt_max=10.47,
             inchi_key="AGPKZVBTJJNPAG-WHFBIAKZSA-N",
-            compound_name="isoleucine",
+            label="isoleucine",
         )
         c2 = _make_compound_mzrt(
             mz=132.1023, rt_peak=9.34, rt_min=8.59, rt_max=10.09,  # Δmz ≈ 0.3 mDa
             inchi_key="ROHFNLRQFUQHCH-UHFFFAOYSA-N",
-            compound_name="leucine",
+            label="leucine",
         )
         atlas = _make_atlas([c1, c2])
         result = _build_isomer_dict(atlas)
@@ -370,17 +370,17 @@ class TestBuildIsomerDict:
         c1 = _make_compound_mzrt(
             mz=132.102, rt_peak=9.72, rt_min=8.97, rt_max=10.47,
             inchi_key=f"{shared_prefix}-WHFBIAKZSA-N",
-            compound_name="isoleucine",
+            label="isoleucine",
         )
         c2 = _make_compound_mzrt(
             mz=132.102, rt_peak=9.34, rt_min=8.59, rt_max=10.09,
             inchi_key=f"{shared_prefix}-YFKPBYRVSA-N",
-            compound_name="norleucine",
+            label="norleucine",
         )
         atlas = _make_atlas([c1, c2])
         result = _build_isomer_dict(atlas)
         for iso in result[c1.mz_rt_uid]:
-            for key in ("mz_rt_uid", "inchi_key", "adduct", "compound_name", "rt", "mz"):
+            for key in ("mz_rt_uid", "inchi_key", "adduct", "label", "rt", "mz"):
                 assert key in iso
 
 
@@ -457,7 +457,7 @@ class TestCreateManualCurationObj:
         create_manual_curation_obj(obj)
         df = obj.experimental_data.curation_df
         expected_cols = {
-            "mz_rt_uid", "compound_name", "inchi_key", "adduct",
+            "mz_rt_uid", "label", "inchi_key", "adduct",
             "passed_autoid", "passed_curation",
             "atlas_mz", "atlas_rt_peak", "atlas_rt_min", "atlas_rt_max",
             "mz", "rt_peak", "rt_min", "rt_max",
