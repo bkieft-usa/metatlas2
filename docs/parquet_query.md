@@ -143,7 +143,7 @@ One row per compound × raw file. Use `grain: "compound_file"` to query per-samp
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `compound_name` | string | Compound display name |
+| `label` | string | Compound display name |
 | `inchi_key` | string | InChI key (standard 27-char) |
 | `adduct` | string | Detected adduct, e.g. `[M+H]+` |
 | `formula` | string | Molecular formula |

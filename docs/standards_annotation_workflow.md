@@ -38,7 +38,7 @@ compound names and structures across rows for the same compound.
 
 | Column | What to enter |
 |---|---|
-| `compound_name` | The name used in review and the final atlas. |
+| `compound_name` | The name used in review and exported as `Compound Name`; the separate `Compound Label` field becomes the canonical atlas `label`. |
 | `smiles`, `inchi`, `inchi_key` | Supply a valid SMILES or InChI where possible. If only an InChIKey is available, the workflow attempts a PubChem lookup. Missing InChI/InChIKey can be derived from a structure. |
 | `project_name` | The experiment folder name, not a full path. The workflow searches `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/*.h5`. |
 | `group_name` | The sample name parsed from the HDF5 filename, matched case-insensitively. It is not a substring search. |
@@ -85,7 +85,9 @@ EXTRACTION:
 
 RT_ALIGNMENT:
   C18:
-    qc_atlas_uid: replace_with_c18_qc_atlas_uid
+    ATLAS:
+      tags: [QCv7]  # Alternatively, use uid: <existing_qc_atlas_uid>
+      polarity: POS
     model_type: polynomial
     poly_degree: 2
     rt_peak_source: median
@@ -98,8 +100,18 @@ RT_ALIGNMENT:
 
 Replace the example values with those appropriate to the experiment. Add an
 `RT_ALIGNMENT` entry for **every** selected chromatography, for example
-`HILIC` as well as `C18`; use the corresponding QC atlas UID in the main
-database. Chromatography keys are case-insensitive.
+`HILIC` as well as `C18`. For each `ATLAS`, specify exactly one of `tags`
+(a nonempty list of tags or a single tag) or `uid` (an existing QC atlas UID
+in the main database), and set its `polarity`. Tags select matching rows from
+the shared master atlas sheet for that chromatography and polarity; at least
+one tag must match. Tag selection requires sheet access and creates or reuses
+a main-database QC atlas. UID selection does not require sheet access and
+validates the atlas chromatography, polarity, and category. Chromatography
+keys are case-insensitive. The alignment config snapshot records the resolved
+UID as `resolved_qc_atlas_uid` alongside the original selector.
+Replace the former `qc_atlas_uid` setting with `ATLAS.uid` and `ATLAS.polarity`
+when updating an older config. These settings are only needed when alignment
+is not skipped.
 
 * `owner` selects the raw data directory and defaults to `jgi`.
   `include_polarities` defaults to both `POS` and `NEG`. `include_adducts`
@@ -294,9 +306,18 @@ without `--dry_run`. This recreates both files, imports compounds, appends the
 atlas, and imports MS/MS references. The full previews are used for both
 database imports, including rows skipped from the sheet.
 
+If one deposit step has already completed, move or remove both previews before
+retrying with `--skip_atlas_upload` to skip the Google Sheets upload or
+`--skip_msms_refs_deposit` to skip the MS/MS reference import. Both flags
+default to false and can be combined; previews are still created. Compound
+import and InChIKey validation still run when either deposit step is enabled.
+Check the sheet and main database after a failure before deciding which step
+to skip, since a failed operation may have partially completed.
+
 For a real deposit, the service account key must be accessible at
 `/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json`
-and have edit access to the production `lbl_metabolomics_atlas` spreadsheet.
+and have edit access to the production `lbl_metabolomics_atlas` spreadsheet
+unless atlas upload is skipped.
 The `complete_atlas` worksheet header must match the expected schema. Existing
 InChIKeys are warned about and skipped; pass `--force_add` to append them
 anyway. Multiple input rows with a new InChIKey are all appended. The entire
@@ -309,7 +330,9 @@ to avoid duplicate rows. Confirm the new rows and values in the sheet.
 The command uses the existing compound enrichment workflow and skips compounds
 already present by InChIKey. It imports spectra into `msms_refs` in
 `$METATLAS_DATA_DIR/databases/main_db/metatlas.duckdb`, not the project DB.
-Generated rows use `database=standards_annotation`.
+Generated rows use `database=standards_annotation`. If the MS/MS preview is
+missing at import time, the command fails after the sheet deposit; inspect the
+sheet before retrying.
 
 Check stdout and the deposit log in the project's `logs` directory for
 inserted and skipped counts and warnings. The importer skips invalid/empty spectra and removes fragment peaks

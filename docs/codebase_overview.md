@@ -54,6 +54,7 @@ This comprehensive guide covers:
 | `run_targeted_analysis.py` | CLI entry point — parses args, builds `paths` dict, dispatches to `workflows.py` |
 | `workflows.py` | Orchestration layer — one `run_*` function per workflow phase |
 | `workflow_objects.py` | Dataclasses that carry state between workflow functions |
+| `atlas_sheet.py` | Reads the shared master atlas sheet, filters exact tag tokens by chromatography/polarity, and resolves selectors to reusable main-database atlas snapshots |
 | `database_interact.py` (`dbi`) | All DuckDB reads and writes |
 | `load_tools.py` (`ldt`) | Config/file loading, YAML validation, and CSV serialization |
 | `lcmsruns_tools.py` (`lrt`) | Raw file discovery and LCMS run filtering |
@@ -87,15 +88,15 @@ This comprehensive guide covers:
 
 ## Adding to the central metatlas knowledge store
 
-### 1. Create new Compounds in the main database — `NewCompoundsConfig.execute()`
+### 1. Create new Compounds in the main database — `add_compounds_to_db()`
 
 | Call | What it does |
 |---|---|
-| `NewCompoundsConfig.from_yaml(config_path)` | Parses the compounds YAML config, validates all file paths |
-| `rtg.set_up_paths(config)` | Builds the `paths` dict pointing at the main DB and PubChem cache |
+| `add_compounds_to_db(input_csv)` | Loads one CSV/TSV directly |
+| `rtg.set_up_paths(config=None)` | Builds the `paths` dict pointing at the main DB and enrichment caches |
 | `dbi.create_metatlas_database(main_db_path)` | Creates the DuckDB schema if it does not already exist |
 | `ldt.load_compound_input(file_path)` | Reads a compound CSV/TSV into a DataFrame |
-| `pcr.retrieve_pubchem_info(compounds_df, ...)` | Enriches the DataFrame with PubChem identifiers, using a local JSON cache to avoid redundant API calls |
+| `pcr.retrieve_pubchem_info(compounds_df, ...)` | Looks up PubChem data only if the input lacks a `smiles` or `inchi` column |
 | `Compound.from_atlas_row(row)` | Converts each DataFrame row into a `Compound` dataclass |
 | `dbi.batch_save_compounds(main_db_path, compounds)` | Bulk-inserts the compound list into the main database |
 
@@ -138,7 +139,8 @@ Sets up the project directory structure and loads LCMS run file metadata into th
 | `Project()` | Instantiates an empty project container dataclass |
 | `Project.setup(project_name, config, paths, overwrite_existing)` | Orchestrates all setup sub-steps below |
 | `dbi.create_project_database(project_db_path, rt_align_path, overwrite)` | Creates the project-scoped DuckDB file; returns early if it already exists and overwrite is False |
-| `dbi.save_config_to_db(...)` | Persists the full config YAML and paths JSON to the `project_config` table so later stages (GUI, summary) can reconstruct them without the original YAML file |
+| `resolve_config_atlas_inputs(...)` | Filters the shared master atlas sheet for tag selectors and creates/reuses main-database Atlas records; validates direct UID selectors against the main database. Resolved UIDs and original tags are persisted in the project config snapshot |
+| `dbi.save_config_to_db(...)` | Persists the resolved config YAML and paths JSON to the `project_config` table so later stages (GUI, summary) can reconstruct them without the original YAML file |
 | `dbi.save_project_to_main_db(...)` | Registers the project in the main database `projects` table for cross-project discovery |
 | `lrt.get_project_lcmsruns_from_disk(lcmsruns_directory)` | Walks the raw data directory to discover `.raw`, `.mzML`, and `.h5` files, inferring file type, chromatography, polarity, and MS level from filenames |
 | `dbi.save_lcmsruns_to_db(project_db_path, project_name, lcmsruns_list, overwrite)` | Writes the run metadata list to the `lcmsruns` table in the project database |
@@ -150,12 +152,12 @@ Sets up the project directory structure and loads LCMS run file metadata into th
 
 ### Phase 2 — RT Alignment: `wfs.run_rt_alignment(...)`
 
-Creates an RT alignment model from QC files based on an alignment template atlas, then applies the model to all atlases in the config file.
+Creates an RT alignment model from QC files based on a tag-selected alignment template atlas, then applies the model to all atlases in the config file.
 
 | Call | What it does |
 |---|---|
 | `RTAlign()` | Instantiates the RT alignment class object |
-| `RTAlign.setup(project_name, rt_alignment_number, analysis_number, skip_alignment)` | Loads config and paths from the project DB; reads chromatography and QC atlas UID from config; checks for existing aligned atlases and sets `run_alignment = False` if `use_existing_rt_alignment` is True or if `--skip-rt-align` was passed |
+| `RTAlign.setup(project_name, rt_alignment_number, analysis_number, skip_alignment)` | Loads config and paths from the project DB; reads the already-resolved QC atlas UID from the persisted config; checks for existing aligned atlases and sets `run_alignment = False` if `use_existing_rt_alignment` is True or if `--skip-rt-align` was passed |
 | `dbi.get_lcmsruns_from_db(project_db_path)` | Fetches all `LCMSRun` rows from the project database |
 | `lrt.filter_lcmsruns_list(lcmsruns, include_file_type, exclude_file_type, chromatography, ms_level="ms1")` | Filters runs to those used for alignment (typically QC files); result stored in `RTAlign.aligner_lcmsruns` |
 | `Atlas.from_database(main_db_path, align_atlas_uid)` | Loads the reference QC atlas from the main database into `RTAlign.align_atlas_obj` |
@@ -250,7 +252,6 @@ Launched by the analyst from the curation notebook. This creates summary files, 
 | `AnalysisSummary` | Pre-loads all analysis tables and holds pre/post-curation atlases for summary generation |
 | `TargetedAnalysis` | Dataclass representing one `CHROMATOGRAPHY/POLARITY/ANALYSIS_TYPE/ANALYSIS_NAME` entry from the config |
 | `Metatlas2Config` | Parsed and validated representation of the full `analysis.yaml` config |
-| `NewCompoundsConfig` | Config object for `add-compounds`; calls `execute()` to load compounds into the main DB |
 | `NewAtlasesConfig` | Config object for `add-atlases`; calls `execute()` to create atlases in the main DB |
 | `NewMsmsRefsConfig` | Config object for `add-msms-refs`; calls `execute()` to import MS/MS reference spectra |
 | `AtlasStage` | Enum of atlas lifecycle stages: `RT_ALIGNED`, `AUTO_IDED`, `MANUALLY_CURATED` |

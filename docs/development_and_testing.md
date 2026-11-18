@@ -93,11 +93,11 @@ The system tests create a complete but minimal environment in `tmp_path`:
 | `metatlas_data_dir` | Patches `METATLAS_DATA_DIR` env var to point at `data_dir` |
 | `main_db_path` | Path to `databases/main_db/metatlas.duckdb` |
 | `adenine_tsv` | A two-compound TSV file (adenine + riboflavin) |
-| `compounds_yaml` | A `create_compounds.yaml` pointing at `adenine_tsv` |
+| `compounds_csv` | A single CSV containing adenine and riboflavin |
 | `atlas_tsv` | A two-compound atlas TSV file |
 | `atlases_yaml` | A `create_atlases.yaml` pointing at `atlas_tsv` |
 | `analysis_yaml` | A minimal `analysis.yaml` with the four-level `TARGETED_ANALYSES` structure |
-| `seeded_analysis_yaml` | An `analysis_yaml` whose atlas UIDs match a real seeded database |
+| `seeded_analysis_yaml` | A tag-based `analysis_yaml`; project tests resolve synthetic sheet rows without external access |
 
 ---
 
@@ -110,9 +110,12 @@ Tests for `metatlas2.sh add-compounds` (`add_compounds_to_db.py`):
 | Test | What it checks |
 |---|---|
 | `test_add_compounds_creates_main_database` | Running add-compounds creates the main DuckDB file |
-| `test_add_compounds_persists_compounds_to_db` | Compounds from the TSV are queryable from the database |
-| `test_add_compounds_correct_compound_count` | Exact compound count matches the input TSV |
+| `test_add_compounds_persists_compounds_to_db` | Compounds from the CSV are queryable from the database |
+| `test_add_compounds_accepts_csv_and_uses_supplied_structures` | A CSV is imported directly without PubChem lookup when structure columns are present |
+| `test_add_compounds_looks_up_structures_when_a_column_is_absent` | PubChem lookup runs when an InChI or SMILES column is absent |
+| `test_add_compounds_correct_compound_count` | Exact compound count matches the input CSV |
 | `test_add_compounds_idempotent_on_rerun` | Running twice does not duplicate rows |
+| `test_add_compounds_rejects_yaml_input` | YAML configs are no longer accepted by add-compounds |
 
 ### `TestAddAtlases`
 
@@ -217,5 +220,5 @@ def _fake_pubchem_info(compounds, **kwargs):
     return compounds  # return input unchanged
 
 with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
-    add_compounds_to_db(str(compounds_yaml), overwrite_db=True)
+    add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 ```

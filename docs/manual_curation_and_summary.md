@@ -280,7 +280,7 @@ Each box represents one compound; points are coloured by run type (ISTD, QC, EXC
 | Column | Description |
 |---|---|
 | `compound_index` | 1-based integer matching the compound's position in the curation table |
-| `compound_name` | Compound name |
+| `label` | Canonical compound name |
 | `adduct` | Ion adduct |
 | `file_name` | Basename of the file containing the best-scoring MS2 hit |
 | `rt_peak` | Retention time of the best-scoring MS2 scan (min) |

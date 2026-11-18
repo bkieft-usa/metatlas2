@@ -145,10 +145,7 @@ cp ~/metatlas2/configs/example_configs/analyses/jgi_default_hilicz_config.yaml \
 Edit the copy:
 
 1. **`GENERAL.owner`** — set to your owner string (e.g. `jgi`); must match your raw data directory name
-2. **Atlas UIDs** — the `uid:` values under `RT_ALIGNMENT` and `TARGETED_ANALYSES` must match atlases that exist in the downloaded main database. The UIDs in the example configs in the repo contains valid atlases that can be used. Or, query available atlases with a command like this:
-   ```bash
-   metatlas2.sh get-atlases query --chromatography HILICZ --polarity POS
-   ```
+2. **Atlas selector** — set exactly one of `ATLAS.tags` or `ATLAS.uid` under `RT_ALIGNMENT` and `TARGETED_ANALYSES`. Tags must match rows in the shared master atlas sheet, which must be accessible using configured service-account credentials. For custom atlases, first add the atlas with `metatlas2.sh add-atlases` and use the resulting UID; UID selectors are validated in the main database and do not require sheet access. RT alignment also requires an explicit `ATLAS.polarity`.
 3. **`upload_to_gdrive: false`** — keep this `false` unless you have Google Drive credentials configured on your local machine.
 
 The config file can live anywhere on your filesystem — `metatlas2.sh` will add a read-only bind-mount for its directory automatically if it is outside `$METATLAS_DATA_DIR` (you pass the full path to the config in the initial command line call).
@@ -293,11 +290,11 @@ Check that your `.h5` files are at `$METATLAS_DATA_DIR/raw_data/<owner>/<project
 ### `Main database not found`
 The Zenodo download may have failed. Check your internet connection and that `ZENODO_MAIN_DB_DOI` is set in `scripts/metatlas2.sh`. You can also manually place `metatlas.duckdb` at `$METATLAS_DATA_DIR/databases/main_db/metatlas.duckdb`.
 
-### Atlas UID not found in database
-The atlas UIDs in your config YAML must exist in the downloaded main database. Query available atlases:
-```bash
-metatlas2.sh get-atlases query --chromatography HILICZ
-```
+### Atlas tag selector has no matches
+Check that the tags in `ATLAS.tags` exactly match tags in the shared master atlas sheet, and that chromatography and polarity match the intended entries. Also confirm that the master sheet and service-account credentials are available to the workflow.
+
+### Atlas UID is invalid or incompatible
+Confirm that the UID exists in the main database and that its chromatography, polarity, and category match the config entry. Custom atlases must be added with `metatlas2.sh add-atlases` before running the analysis.
 
 ### GUI not accessible at `localhost:8050`
 - Confirm the pipeline completed (the GUI is launched from the curation notebook, not from `metatlas2.sh run`)

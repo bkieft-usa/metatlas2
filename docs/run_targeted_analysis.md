@@ -14,9 +14,12 @@ The script can be run directly (`run` subcommand) or submitted as a Slurm batch 
 
 Complete the one-time environment setup described in [initial_setup.md](initial_setup.md) before running this workflow. If you are running **outside NERSC** (local laptop or non-NERSC HPC), see [run_anywhere.md](run_anywhere.md) for the full setup guide. Additionally:
 
-- The main metatlas database contains the compounds and atlases for your project. Run `metatlas2.sh add-compounds` and `metatlas2.sh add-atlases` first (see [add_compounds_to_db.md](add_compounds_to_db.md) and [add_atlases_to_db.md](add_atlases_to_db.md)). Note: metatlas2 comes with the JGI production atlases and compounds (QC, ISTD, and EMA) pre-built, so if you use those sets then adding compounds or atlases is required.
+- The main metatlas database contains the compounds referenced by the master atlas sheet. New compounds still need to be added with `metatlas2.sh add-compounds` (see [add_compounds_to_db.md](add_compounds_to_db.md)); analysis atlas records are generated from the shared Google Sheet when the project is set up.
+- Each `ATLAS` section must specify exactly one selector: `tags` to use matching rows from the shared master atlas Google Sheet, or `uid` to reuse an atlas already in the main database. Tag-based configs need sheet access and configured service-account credentials; UID-based configs do not.
 - LCMS run data files in `.h5` format are present at the expected path under `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/`. See [Raw data file placement](#raw-data-file-placement) below. Note: you may want to check first that there were no failed file conversions - in the raw data directory for your project, there should be equal numbers of .raw, .h5, and .mzML files and no files with the suffix .failed or .progress.
-- Atlas UIDs referenced in the input analysis configuration file (e.g., `analysis.yaml`) must exist in the main database. The workflow will warn you if the atlas UIDs input in the config are not present in the database.
+- For tag selectors, the configured tags must select at least one row for each chromatography/polarity combination. Project setup filters the sheet, creates or reuses a normal atlas record in the main database, and saves the selected tags and resulting UID in the project config snapshot. For UID selectors, setup verifies that the atlas exists and matches the configured chromatography, polarity, and category. Downstream workflow stages use the resolved UID, so later sheet edits do not change an existing project.
+
+Custom atlases that are not in the shared sheet can be added first with `metatlas2.sh add-atlases`; use the resulting atlas UID in the analysis config. The UID is validated against the main database during project setup.
 
 ---
 
@@ -178,7 +181,8 @@ GUI:
 RT_ALIGNMENT:
   <CHROMATOGRAPHY>:
     ATLAS:
-      uid: <atlas_uid_for_rt_alignment>
+      tags: [<qc_tag>, <optional_second_tag>] # or: uid: <existing_qc_atlas_uid>
+      polarity: <POS_or_NEG>
     PARAMS:
       ...
 
@@ -188,12 +192,14 @@ TARGETED_ANALYSES:
       <ANALYSIS_TYPE>:
         <ANALYSIS_NAME>:
           ATLAS:
-            uid: <atlas_uid_for_targeted_analysis>
+            tags: [<tag>, <optional_second_tag>] # or: uid: <existing_atlas_uid>
           PARAMS:
             ...
 ```
 
 > **Note:** The `TARGETED_ANALYSES` section uses a **four-level hierarchy**: chromatography → polarity → analysis type → analysis name. The analysis name (e.g. `EMA`, `ISTDsEtc`) allows multiple named variants of the same analysis type to coexist (e.g. different filtering parameters for the same atlas, or multiple different reference atlases such as `EMA` and `NLDM`). The `--analysis-subset` flag uses the format `CHROM-POLARITY-ANALYSIS_TYPE-ANALYSIS_NAME` (e.g. `HILIC-POS-ISTD-ISTDsEtc`).
+
+Each `ATLAS` mapping must contain exactly one of `tags` or `uid`. Atlas tag selectors use exact tokens. If more than one tag is listed, rows matching **any** listed tag are selected (OR semantics); the configured chromatography and polarity further restrict the selection. For RT alignment, polarity is specified explicitly under `RT_ALIGNMENT.<CHROMATOGRAPHY>.ATLAS`. Setup records the selected tag(s) and resolved atlas UID in the project config snapshot. The curation notebook displays tags when used and always displays the input UID.
 
 ---
 
@@ -224,13 +230,14 @@ TARGETED_ANALYSES:
 
 ### `RT_ALIGNMENT` section
 
-One entry per chromatographic method. The atlas UID must be a QC atlas already in the main database (e.g. created by `add_atlases_to_db.py`).
+One entry per chromatographic method. The tag selector must identify the QC compounds from the master atlas sheet, and polarity is required.
 
 ```yaml
 RT_ALIGNMENT:
   HILICZ:
     ATLAS:
-      uid: atl-ref-qc-hilicz-pos-cdf8c6709c6e4953b75917e72e851130 # This comes from running add_atlases_to_db.py
+      tags: [QCv7]
+      polarity: POS
     PARAMS:
       include_lcmsruns:
         - QC
@@ -276,7 +283,7 @@ RT_ALIGNMENT:
 
 ### `TARGETED_ANALYSES` section
 
-One entry per `CHROMATOGRAPHY / POLARITY / ANALYSIS_TYPE / ANALYSIS_NAME` combination. Atlas UIDs should match atlases already present in the main database.
+One entry per `CHROMATOGRAPHY / POLARITY / ANALYSIS_TYPE / ANALYSIS_NAME` combination. Under `ATLAS`, specify exactly one of `tags` or `uid`. Tags select corresponding compounds from the master atlas sheet; the resulting atlas is saved to the main database and referenced by UID downstream. A UID selects an existing main-database atlas directly.
 
 ```yaml
 TARGETED_ANALYSES:
@@ -285,7 +292,7 @@ TARGETED_ANALYSES:
       ISTD:
         ISTDsEtc:
           ATLAS:
-            uid: atl-ref-istd-hilicz-pos-8b5ff31b79704f728c046a40623ace2b # This comes from running add_atlases_to_db.py
+            tags: [ISTDsEtc]
           PARAMS:
             include_lcmsruns:
             exclude_lcmsruns:
@@ -319,6 +326,13 @@ TARGETED_ANALYSES:
             create_curation_notebooks: true
             upload_to_gdrive: false
             skip_outputs:
+```
+
+To use a custom atlas already added to the main database, replace `tags` with its UID:
+
+```yaml
+ATLAS:
+  uid: <atlas-uid>
 ```
 
 #### `TARGETED_ANALYSES` PARAMS reference
@@ -407,11 +421,10 @@ The category names used in `include_lcmsruns` and `exclude_lcmsruns` are case-in
 
 ```bash
 # 1. Add the compounds you're trying to identify to the database, if necessary (usually not used unless new reference standards are curated)
-metatlas2.sh add-compounds --config_path /path/to/create_compounds.yaml
+metatlas2.sh add-compounds --input_csv /path/to/compounds.csv
 
-# 2. Add reference atlases to the database, if necessary
-metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml
-#    → note the atlas UIDs printed in the log and add them to analysis.yaml
+# 2. For tag selectors, confirm the tags select the intended rows in the shared master sheet.
+#    For a custom atlas, first add it with `metatlas2.sh add-atlases` and set `ATLAS.uid`.
 
 # 3. Run the full pre-curation workflow
 metatlas2.sh run \
