@@ -7,12 +7,12 @@
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] jupyter [--port PORT]
-#   metatlas2 [--image TAG] [--dev] add-compounds --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-compounds --input_csv FILE [--overwrite_db]
 #   metatlas2 [--image TAG] [--dev] add-atlases --config_path FILE
 #   metatlas2 [--image TAG] [--dev] add-msms-refs --config_path FILE
 #   metatlas2 [--image TAG] [--dev] standards-annotation --config_path FILE
-#   metatlas2 [--image TAG] [--dev] reverse-rt-align --config_path FILE --annotation_timestamp TIMESTAMP [--tags TAG1;TAG2;...]
-#   metatlas2 [--image TAG] [--dev] atlas-msms-deposit --config_path FILE --annotation_timestamp TIMESTAMP --alignment_timestamp TIMESTAMP [--dry_run] [--force_add]
+#   metatlas2 [--image TAG] [--dev] reverse-rt-align --config_path FILE --annotation_timestamp TIMESTAMP [--tags TAG1;TAG2;...] [--skip_rt_alignment]
+#   metatlas2 [--image TAG] [--dev] atlas-msms-deposit --config_path FILE --annotation_timestamp TIMESTAMP --alignment_timestamp TIMESTAMP [--dry_run] [--force_add] [--skip_atlas_upload] [--skip_msms_refs_deposit]
 #   metatlas2 [--image TAG] [--dev] get-atlases fetch --atlas_uids UID1,UID2 [--output_path PATH]
 #   metatlas2 [--image TAG] [--dev] get-atlases query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
 #   metatlas2 [--image TAG] [--dev] get-db-table --table-name NAME [--output_path PATH] [--database_path PATH]
@@ -49,16 +49,64 @@
 set -euo pipefail
 
 ZENODO_MAIN_DB_DOI="https://doi.org/10.5281/zenodo.22968291"
+ZENODO_DEV_DATA_DOI="https://doi.org/10.5281/zenodo.23697968"
 
 IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
 IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
 DEV_MODE=false
 STANDALONE_MODE=false
+UPDATE_DATA=false
+JUPYTER_PORT="${METATLAS2_JUPYTER_PORT:-8889}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PASSTHROUGH_ARGS=()
-UPDATE_DATA=false
-JUPYTER_PORT="${METATLAS2_JUPYTER_PORT:-8889}"
+
+# ---------------------------------------------------------------------------
+# Helpers (defined once, shared by every runtime / subcommand)
+# ---------------------------------------------------------------------------
+die() { printf '%s\n' "$@" >&2; exit 1; }
+
+# _parse_arg --key ARGS...  -> value of "--key VAL" or "--key=VAL" (empty if absent)
+_parse_arg() {
+    local key="$1" val=""; shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "${key}="*) val="${1#*=}"; break ;;
+            "${key}")   val="${2:-}"; break ;;
+        esac
+        shift
+    done
+    echo "${val}"
+}
+
+# _has_flag --flag ARGS...  -> success if the flag is present
+_has_flag() {
+    local flag="$1" arg; shift
+    for arg in "$@"; do [[ "${arg}" == "${flag}" ]] && return 0; done
+    return 1
+}
+
+# _py_str VAL -> Python literal: None if VAL is empty, else 'VAL'
+_py_str() { if [[ -n "$1" ]]; then echo "'$1'"; else echo "None"; fi; }
+
+# _stamp_stale STAMP_FILE DOI -> success if stamp is missing or differs from DOI
+_stamp_stale() {
+    [[ ! -f "$1" ]] || [[ "$(cat "$1" 2>/dev/null || echo unknown)" != "$2" ]]
+}
+
+# _zenodo_get DIR DOI [FOLLOW_UP_CMD] -> download a Zenodo record into DIR via the image
+_zenodo_get() {
+    docker run --rm \
+        --entrypoint /bin/bash \
+        -v "$1:/data" \
+        -w /data \
+        "${IMAGE_FULL}" \
+        -c "/app/.venv/bin/zenodo_get -d '$2'${3:+ && $3}"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --image)        IMAGE_TAG="$2"; shift 2 ;;
@@ -72,65 +120,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
+SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
+IMAGE_FULL="${IMAGE_REPO}:${IMAGE_TAG}"
+MODE="prod"; [[ "${DEV_MODE}" == "true" ]] && MODE="dev"
+
 # Runtime detection: shifter (NERSC) takes priority, then docker.
 if command -v shifter &>/dev/null; then
     RUNTIME="shifter"
 elif command -v docker &>/dev/null; then
     RUNTIME="docker"
 else
-    echo "Error: neither 'shifter' nor 'docker' found on PATH." >&2
-    echo "Install Docker (https://docs.docker.com/get-docker/) or run on a system with Shifter." >&2
-    exit 1
+    die "Error: neither 'shifter' nor 'docker' found on PATH." \
+        "Install Docker (https://docs.docker.com/get-docker/) or run on a system with Shifter."
 fi
 
-IMAGE_FULL="${IMAGE_REPO}:${IMAGE_TAG}"
-
-# Validate required environment variables (skip for standalone mode)
-if [[ "${STANDALONE_MODE}" == "false" ]]; then
-    if [[ -z "${METATLAS_DATA_DIR:-}" ]]; then
-        echo "Error: METATLAS_DATA_DIR is not set." >&2
-        echo "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc (or ~/.bash_profile on macOS) and re-source it." >&2
-        exit 1
-    fi
-fi
-
-EXTRA_CONFIG_MOUNT=""
-if [[ "${RUNTIME}" == "docker" && "${STANDALONE_MODE}" == "false" ]]; then
-    CONFIG_PATH=""
-    for i in "${!PASSTHROUGH_ARGS[@]}"; do
-        if [[ "${PASSTHROUGH_ARGS[$i]}" == "--config" || ( "${PASSTHROUGH_ARGS[0]:-}" == "atlas-msms-deposit" && "${PASSTHROUGH_ARGS[$i]}" == "--config_path" ) ]]; then
-            CONFIG_PATH="${PASSTHROUGH_ARGS[$i+1]:-}"
-            break
-        elif [[ "${PASSTHROUGH_ARGS[0]:-}" == "atlas-msms-deposit" && "${PASSTHROUGH_ARGS[$i]}" == --config_path=* ]]; then
-            CONFIG_PATH="${PASSTHROUGH_ARGS[$i]#*=}"
-            break
-        fi
-    done
-
-    if [[ -n "${CONFIG_PATH}" ]]; then
-        # Resolve to absolute path
-        CONFIG_ABS="$(cd "$(dirname "${CONFIG_PATH}")" 2>/dev/null && pwd)/$(basename "${CONFIG_PATH}")" || CONFIG_ABS="${CONFIG_PATH}"
-        if [[ "${PASSTHROUGH_ARGS[0]:-}" == "atlas-msms-deposit" ]]; then
-            if [[ "${PASSTHROUGH_ARGS[$i]}" == "--config_path" ]]; then
-                PASSTHROUGH_ARGS[$((i+1))]="${CONFIG_ABS}"
-            else
-                PASSTHROUGH_ARGS[$i]="--config_path=${CONFIG_ABS}"
-            fi
-        fi
-        DATA_ABS="$(cd "${METATLAS_DATA_DIR}" && pwd)"
-        if [[ "${CONFIG_ABS}" != "${DATA_ABS}" && "${CONFIG_ABS}" != "${DATA_ABS}/"* ]]; then
-            # Config is outside $METATLAS_DATA_DIR — add a read-only mount of its directory.
-            CONFIG_DIR="$(dirname "${CONFIG_ABS}")"
-            EXTRA_CONFIG_MOUNT="${CONFIG_DIR}"
-            echo "Note: config file is outside \$METATLAS_DATA_DIR; adding read-only mount for ${CONFIG_DIR}"
-        fi
-    fi
-fi
-
-# Standalone mode setup
+# ---------------------------------------------------------------------------
+# Standalone mode (always Docker + Compose)
+# ---------------------------------------------------------------------------
 if [[ "${STANDALONE_MODE}" == "true" ]]; then
     STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    ZENODO_DOI="https://doi.org/10.5281/zenodo.23697968"
+    STANDALONE_PORT="${STANDALONE_PORT:-8889}"
     TARBALL_NAME="metatlas2-dev-data.tar.gz"
     VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
 
@@ -139,53 +149,25 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
     echo "=========================================="
     echo ""
 
-    # Check for docker and docker compose
-    if ! command -v docker &>/dev/null; then
-        echo "Error: 'docker' is required but not found on PATH." >&2
-        echo "Install Docker Desktop: https://docs.docker.com/get-docker/" >&2
-        exit 1
-    fi
-    if ! docker compose version &>/dev/null; then
-        echo "Error: 'docker compose' (v2) is required." >&2
-        echo "Update Docker Desktop or install the compose plugin." >&2
-        exit 1
-    fi
+    command -v docker &>/dev/null || die \
+        "Error: 'docker' is required but not found on PATH." \
+        "Install Docker Desktop: https://docs.docker.com/get-docker/"
+    docker compose version &>/dev/null || die \
+        "Error: 'docker compose' (v2) is required." \
+        "Update Docker Desktop or install the compose plugin."
 
-    # Data download
-    NEEDS_DOWNLOAD=false
-    if [[ ! -d "${STANDALONE_DIR}" ]]; then
-        NEEDS_DOWNLOAD=true
-    elif [[ "${UPDATE_DATA}" == "true" ]]; then
-        NEEDS_DOWNLOAD=true
-    elif [[ ! -f "${VERSION_FILE}" ]]; then
-        NEEDS_DOWNLOAD=true
-    else
-        CURRENT_VERSION=$(cat "${VERSION_FILE}" 2>/dev/null || echo "unknown")
-        [[ "${CURRENT_VERSION}" != "${ZENODO_DOI}" ]] && NEEDS_DOWNLOAD=true
+    if [[ ! -d "${STANDALONE_DIR}" || "${UPDATE_DATA}" == "true" ]] \
+        || _stamp_stale "${VERSION_FILE}" "${ZENODO_DEV_DATA_DOI}"; then
+        echo "Downloading dev data from Zenodo..."
+        rm -rf "${STANDALONE_DIR}"
+        mkdir -p "${STANDALONE_DIR}"
+        _zenodo_get "${STANDALONE_DIR}" "${ZENODO_DEV_DATA_DOI}" \
+            "tar -xzf '${TARBALL_NAME}' --strip-components=1 && rm '${TARBALL_NAME}'"
+        echo "${ZENODO_DEV_DATA_DOI}" > "${VERSION_FILE}"
+        echo "Dev data setup complete"
+        echo ""
     fi
 
-    if [[ "${NEEDS_DOWNLOAD}" == "true" ]]; then
-            echo "Downloading dev data from Zenodo..."
-            if [[ -d "${STANDALONE_DIR}" ]]; then
-                rm -rf "${STANDALONE_DIR}"
-            fi
-            mkdir -p "${STANDALONE_DIR}"
-
-            docker run --rm \
-                --entrypoint /bin/bash \
-                -v "${STANDALONE_DIR}:/data" \
-                -w /data \
-                "${IMAGE_FULL}" \
-                -c "/app/.venv/bin/zenodo_get -d '${ZENODO_DOI}' && \
-                    tar -xzf '${TARBALL_NAME}' --strip-components=1 && \
-                    rm '${TARBALL_NAME}'"
-
-            echo "${ZENODO_DOI}" > "${VERSION_FILE}"
-            echo "Dev data setup complete"
-            echo ""
-        fi
-
-    # Clean previous outputs
     PROJECTS_DIR="${STANDALONE_DIR}/projects/targeted_outputs"
     if [[ -d "${PROJECTS_DIR}" ]]; then
         echo "Cleaning up previous workflow outputs..."
@@ -195,16 +177,15 @@ if [[ "${STANDALONE_MODE}" == "true" ]]; then
 
     echo "Copying fresh notebook to ${STANDALONE_DIR}..."
     mkdir -p "${STANDALONE_DIR}/notebooks"
-    cp "${REPO_DIR}/local/local_workflow.ipynb" "${STANDALONE_DIR}/notebooks/local_workflow.ipynb"
-    cp "${REPO_DIR}/local/parquet_query.ipynb" "${STANDALONE_DIR}/notebooks/parquet_query.ipynb"
+    cp "${REPO_DIR}/local/local_workflow.ipynb" "${REPO_DIR}/local/parquet_query.ipynb" \
+        "${STANDALONE_DIR}/notebooks/"
     echo ""
 
-    # Pull latest image
     echo "Pulling latest container image..."
     docker pull "${IMAGE_FULL}"
     echo ""
 
-    # Write a fresh Jupyter config inside a temp dir
+    # Fresh Jupyter config in a temp dir
     JUPYTER_CONFIG_TMPDIR=$(mktemp -d)
     trap "rm -rf '${JUPYTER_CONFIG_TMPDIR}'" EXIT
     cat > "${JUPYTER_CONFIG_TMPDIR}/jupyter_server_config.py" <<'EOF'
@@ -216,7 +197,6 @@ c.ServerApp.open_browser = False
 c.ServerApp.allow_root = True
 EOF
 
-    # Launch via Docker Compose
     echo "=========================================="
     echo "Launching JupyterLab..."
     echo ""
@@ -224,7 +204,7 @@ EOF
     echo "Repo dir: ${REPO_DIR} (live edits enabled)"
     echo ""
     echo "Open your browser at:"
-    echo "   http://localhost:${STANDALONE_PORT:-8889}/lab"
+    echo "   http://localhost:${STANDALONE_PORT}/lab"
     echo ""
     echo "Press Ctrl+C to stop"
     echo "=========================================="
@@ -234,32 +214,86 @@ EOF
     STANDALONE_DIR="${STANDALONE_DIR}" \
     JUPYTER_CONFIG_TMPDIR="${JUPYTER_CONFIG_TMPDIR}" \
     METATLAS2_IMAGE_TAG="${IMAGE_TAG}" \
-    STANDALONE_PORT="${STANDALONE_PORT:-8889}" \
+    STANDALONE_PORT="${STANDALONE_PORT}" \
         docker compose \
             -f "${REPO_DIR}/local/docker-compose.standalone.yml" \
             up --remove-orphans
-
     exit 0
 fi
 
-SUBCOMMAND="${PASSTHROUGH_ARGS[0]:-}"
+# ---------------------------------------------------------------------------
+# Validation (non-standalone)
+# ---------------------------------------------------------------------------
+[[ -n "${METATLAS_DATA_DIR:-}" ]] || die \
+    "Error: METATLAS_DATA_DIR is not set." \
+    "Add 'export METATLAS_DATA_DIR=/path/to/data' to ~/.bashrc (or ~/.bash_profile on macOS) and re-source it."
 
+if [[ "${SUBCOMMAND}" == "jupyter" && "${RUNTIME}" == "shifter" ]]; then
+    die "Error: 'jupyter' is only supported in Docker mode." \
+        "On NERSC, use JupyterHub directly to open curation notebooks."
+fi
+if [[ "${SUBCOMMAND}" == "submit" && "${RUNTIME}" == "docker" ]]; then
+    die "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems."
+fi
+
+# Dev mode prepends the repo to PYTHONPATH
+PYTHONPATH_VALUE="/app"
+[[ "${DEV_MODE}" == "true" ]] && PYTHONPATH_VALUE="${REPO_DIR}:/app"
+
+# ---------------------------------------------------------------------------
+# Docker only: locate the config file; absolutize it for atlas-msms-deposit;
+# add a read-only mount if it lives outside $METATLAS_DATA_DIR.
+# ---------------------------------------------------------------------------
+EXTRA_CONFIG_MOUNT=""
+if [[ "${RUNTIME}" == "docker" ]]; then
+    IS_DEPOSIT=false
+    [[ "${SUBCOMMAND}" == "atlas-msms-deposit" ]] && IS_DEPOSIT=true
+
+    CONFIG_PATH="" CONFIG_IDX="" CONFIG_INLINE=false
+    for i in "${!PASSTHROUGH_ARGS[@]}"; do
+        arg="${PASSTHROUGH_ARGS[$i]}"
+        if [[ "${arg}" == "--config" || ( "${IS_DEPOSIT}" == "true" && "${arg}" == "--config_path" ) ]]; then
+            CONFIG_PATH="${PASSTHROUGH_ARGS[$i+1]:-}"; CONFIG_IDX=$((i+1)); break
+        elif [[ "${IS_DEPOSIT}" == "true" && "${arg}" == --config_path=* ]]; then
+            CONFIG_PATH="${arg#*=}"; CONFIG_IDX=$i; CONFIG_INLINE=true; break
+        fi
+    done
+
+    if [[ -n "${CONFIG_PATH}" ]]; then
+        if config_dir="$(cd "$(dirname "${CONFIG_PATH}")" 2>/dev/null && pwd)"; then
+            CONFIG_ABS="${config_dir}/$(basename "${CONFIG_PATH}")"
+        else
+            CONFIG_ABS="${CONFIG_PATH}"
+        fi
+        if [[ "${IS_DEPOSIT}" == "true" ]]; then
+            if [[ "${CONFIG_INLINE}" == "true" ]]; then
+                PASSTHROUGH_ARGS[CONFIG_IDX]="--config_path=${CONFIG_ABS}"
+            else
+                PASSTHROUGH_ARGS[CONFIG_IDX]="${CONFIG_ABS}"
+            fi
+        fi
+        DATA_ABS="$(cd "${METATLAS_DATA_DIR}" && pwd)"
+        if [[ "${CONFIG_ABS}" != "${DATA_ABS}" && "${CONFIG_ABS}" != "${DATA_ABS}/"* ]]; then
+            EXTRA_CONFIG_MOUNT="$(dirname "${CONFIG_ABS}")"
+            echo "Note: config file is outside \$METATLAS_DATA_DIR; adding read-only mount for ${EXTRA_CONFIG_MOUNT}"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Runtime-specific argument arrays
+# ---------------------------------------------------------------------------
 if [[ "${RUNTIME}" == "shifter" ]]; then
     # Shifter (NERSC/Perlmutter): global filesystems are auto-mounted.
-
     SHIFTER_ARGS=(
         "--image=docker:${IMAGE_FULL}"
         "--env=METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
         "--env=METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
         "--env=HOME=${HOME}"
         "--env=JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
-        "--env=PYTHONPATH=/app"
+        "--env=PYTHONPATH=${PYTHONPATH_VALUE}"
     )
-
-    if [[ "${DEV_MODE}" == "true" ]]; then
-        SHIFTER_ARGS+=("--env=PYTHONPATH=${REPO_DIR}:/app")
-        echo "Dev mode enabled: using local repo scripts at ${REPO_DIR}/scripts"
-    fi
+    [[ "${DEV_MODE}" == "true" ]] && echo "Dev mode enabled: using local repo scripts at ${REPO_DIR}/scripts"
 
     if [[ "${IMAGE_TAG}" != "latest" ]]; then
         KERNEL_DIR="${HOME}/.local/share/jupyter/kernels/metatlas2-${IMAGE_TAG}"
@@ -268,167 +302,24 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
             "${SCRIPT_DIR}/install_kernels.sh" --tag "${IMAGE_TAG}"
         fi
     fi
-
-    if [[ "${SUBCOMMAND}" == "jupyter" ]]; then
-        echo "Error: 'jupyter' is only supported in Docker mode." >&2
-        echo "On NERSC, use JupyterHub directly to open curation notebooks." >&2
-        exit 1
-
-    elif [[ "${SUBCOMMAND}" == "submit" ]]; then
-        TMPSCRIPT="$(mktemp /tmp/metatlas2_XXXXXX.sh)"
-        # shellcheck disable=SC2064
-        trap "rm -f '${TMPSCRIPT}'" EXIT
-
-        shifter "${SHIFTER_ARGS[@]}" --entrypoint \
-            "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
-
-        sbatch "${TMPSCRIPT}"
-
-    elif [[ "${SUBCOMMAND}" == "atlas-msms-deposit" ]]; then
-        shifter "${SHIFTER_ARGS[@]}" /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${PASSTHROUGH_ARGS[@]:1}"
-
-    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" || "${SUBCOMMAND}" == "standards-annotation" || "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
-        if [[ "${DEV_MODE}" == "true" ]]; then
-            echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev)..."
-        else
-            echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=prod)..."
-        fi
-
-        _parse_arg() {
-            local key="$1"; shift
-            local val=""
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    "${key}="*)  val="${1#*=}"; break ;;
-                    "${key}")    val="${2:-}"; break ;;
-                esac
-                shift
-            done
-            echo "${val}"
-        }
-        _has_flag() {
-            local flag="$1"; shift
-            for arg in "$@"; do [[ "$arg" == "$flag" ]] && return 0; done
-            return 1
-        }
-        # _py_str VAL — emit a Python expression: None if VAL is empty, else 'VAL'
-        _py_str() { [[ -n "$1" ]] && echo "'$1'" || echo "None"; }
-        SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
-
-        if [[ "${SUBCOMMAND}" == "standards-annotation" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${CONFIG_PATH}')"
-        elif [[ "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            TIMESTAMP="$(_parse_arg --annotation_timestamp "${SUB_ARGS[@]}")"
-            TAGS="$(_parse_arg --tags "${SUB_ARGS[@]}")"
-            SKIP_ALIGNMENT=false
-            if [[ ! "${TIMESTAMP}" =~ ^[0-9]{8}T[0-9]{6}_[0-9]{6}Z$ ]]; then
-                echo "Error: reverse-rt-align requires --annotation_timestamp from a completed summary." >&2
-                exit 1
-            fi
-            if _has_flag --skip_rt_alignment "${SUB_ARGS[@]}"; then
-                echo "Skipping reverse RT alignment and just creating a new run with the specified tags." >&2
-                SKIP_ALIGNMENT=true
-            fi
-            if [[ -z "${TAGS}" ]]; then
-                TAGS="EMA"
-            fi
-            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}', '${TIMESTAMP}', '${TAGS}', '${SKIP_ALIGNMENT}')"
-        elif [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
-            PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${CONFIG_PATH}', overwrite_db=${OVERWRITE_PY})"
-        elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('${CONFIG_PATH}')"
-        elif [[ "${SUBCOMMAND}" == "add-msms-refs" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('${CONFIG_PATH}')"
-        elif [[ "${SUBCOMMAND}" == "get-db-table" ]]; then
-            TABLE_NAME="$(_parse_arg --table-name "${SUB_ARGS[@]}")"
-            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
-            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.get_db_table import export_table_to_csv; export_table_to_csv('${TABLE_NAME}', output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
-        else  # get-atlases
-            GET_SUBCOMMAND="${SUB_ARGS[0]:-}"
-            ATLAS_UIDS="$(_parse_arg --atlas_uids "${SUB_ARGS[@]}")"
-            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
-            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
-            CHROMATOGRAPHY="$(_parse_arg --chromatography "${SUB_ARGS[@]}")"
-            POLARITY="$(_parse_arg --polarity "${SUB_ARGS[@]}")"
-            ATLAS_CATEGORY="$(_parse_arg --atlas_category "${SUB_ARGS[@]}")"
-            ATLAS_NAME_KEY="$(_parse_arg --atlas_name_key "${SUB_ARGS[@]}")"
-            CREATED_BY="$(_parse_arg --created_by "${SUB_ARGS[@]}")"
-            if [[ "${GET_SUBCOMMAND}" == "fetch" ]]; then
-                PY_CALL="from metatlas2.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('${ATLAS_UIDS}'), output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
-            else
-                PY_CALL="from metatlas2.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_py_str "${DATABASE_PATH}"), chromatography=$(_py_str "${CHROMATOGRAPHY}"), polarity=$(_py_str "${POLARITY}"), atlas_category=$(_py_str "${ATLAS_CATEGORY}"), atlas_name_key=$(_py_str "${ATLAS_NAME_KEY}"), created_by=$(_py_str "${CREATED_BY}"))"
-            fi
-        fi
-
-        shifter "${SHIFTER_ARGS[@]}" \
-            /app/.venv/bin/python -c "${PY_CALL}"
-
-    else # run main targeted pipeline
-        LOG_TO_STDOUT=false
-        for arg in "${PASSTHROUGH_ARGS[@]}"; do
-            [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
-        done
-        if [[ "${LOG_TO_STDOUT}" == "false" && "${SUBCOMMAND}" == "run" ]]; then
-            if [[ "${DEV_MODE}" == "true" ]]; then
-                echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=dev, runtime=shifter)..."
-            else
-                echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=prod, runtime=shifter)..."
-            fi
-        fi
-
-        shifter "${SHIFTER_ARGS[@]}" --entrypoint \
-            "${PASSTHROUGH_ARGS[@]}"
-    fi
-
 else
-    # Docker (local macOS / non-NERSC HPC): explicit volume mounts needed.
-
-    # Ensure the main metatlas DuckDB is present and up-to-date.
-    # Download from Zenodo if missing or if the local version stamp differs
-    # from ZENODO_MAIN_DB_DOI.  Skipped when ZENODO_MAIN_DB_DOI is unset
-    # (e.g. during development before the first Zenodo upload).
+    # Docker (local macOS / non-NERSC HPC): ensure main DuckDB is present and current.
     if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "atlas-msms-deposit" ]]; then
         MAIN_DB_DIR="${METATLAS_DATA_DIR}/databases/main_db"
         MAIN_DB_PATH="${MAIN_DB_DIR}/metatlas.duckdb"
-        MAIN_DB_VERSION_FILE="${MAIN_DB_DIR}/.zenodo_version"
 
-        NEEDS_DB_DOWNLOAD=false
-        if [[ ! -f "${MAIN_DB_PATH}" ]]; then
-            NEEDS_DB_DOWNLOAD=true
-        elif [[ ! -f "${MAIN_DB_VERSION_FILE}" ]]; then
-            NEEDS_DB_DOWNLOAD=true
-        else
-            CURRENT_DB_VERSION=$(cat "${MAIN_DB_VERSION_FILE}" 2>/dev/null || echo "unknown")
-            [[ "${CURRENT_DB_VERSION}" != "${ZENODO_MAIN_DB_DOI}" ]] && NEEDS_DB_DOWNLOAD=true
-        fi
-
-        if [[ "${NEEDS_DB_DOWNLOAD}" == "true" ]]; then
+        if [[ ! -f "${MAIN_DB_PATH}" ]] || _stamp_stale "${MAIN_DB_DIR}/.zenodo_version" "${ZENODO_MAIN_DB_DOI}"; then
             echo "Downloading metatlas main database from Zenodo..."
             echo "  DOI: ${ZENODO_MAIN_DB_DOI}"
             echo "  Destination: ${MAIN_DB_PATH}"
             mkdir -p "${MAIN_DB_DIR}"
+            _zenodo_get "${MAIN_DB_DIR}" "${ZENODO_MAIN_DB_DOI}"
 
-            docker run --rm \
-                --entrypoint /bin/bash \
-                -v "${MAIN_DB_DIR}:/db" \
-                -w /db \
-                "${IMAGE_FULL}" \
-                -c "/app/.venv/bin/zenodo_get -d '${ZENODO_MAIN_DB_DOI}'"
+            [[ -f "${MAIN_DB_PATH}" ]] || die \
+                "Error: Download completed but metatlas.duckdb not found in ${MAIN_DB_DIR}." \
+                "Check that the Zenodo deposit contains a file named 'metatlas.duckdb'."
 
-            if [[ ! -f "${MAIN_DB_PATH}" ]]; then
-                echo "Error: Download completed but metatlas.duckdb not found in ${MAIN_DB_DIR}." >&2
-                echo "Check that the Zenodo deposit contains a file named 'metatlas.duckdb'." >&2
-                exit 1
-            fi
-
-            echo "${ZENODO_MAIN_DB_DOI}" > "${MAIN_DB_VERSION_FILE}"
+            echo "${ZENODO_MAIN_DB_DOI}" > "${MAIN_DB_DIR}/.zenodo_version"
             echo "Main database download complete."
             echo ""
         else
@@ -442,35 +333,94 @@ else
         "-e" "METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
         "-e" "HOME=${HOME}"
         "-e" "USER=${USER:-$(id -un)}"
-        "-e" "PYTHONPATH=/app"
+        "-e" "PYTHONPATH=${PYTHONPATH_VALUE}"
         "-e" "NUMBA_CACHE_DIR=${METATLAS_DATA_DIR}/.numba_cache"
         "-e" "MPLCONFIGDIR=${METATLAS_DATA_DIR}/.matplotlib_cache"
         "-v" "${METATLAS_DATA_DIR}:${METATLAS_DATA_DIR}"
         "--user" "$(id -u):$(id -g)"
     )
-
-    # Only forward JUPYTERHUB_SERVICE_PREFIX when it is actually set (i.e. on JupyterHub).
-    if [[ -n "${JUPYTERHUB_SERVICE_PREFIX:-}" ]]; then
+    # Forward JUPYTERHUB_SERVICE_PREFIX only when set (i.e. on JupyterHub).
+    [[ -n "${JUPYTERHUB_SERVICE_PREFIX:-}" ]] && \
         DOCKER_ARGS+=("-e" "JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX}")
-    fi
-
-    # Mount the config directory if it lives outside $METATLAS_DATA_DIR.
-    if [[ -n "${EXTRA_CONFIG_MOUNT}" ]]; then
+    # Config directory outside $METATLAS_DATA_DIR.
+    [[ -n "${EXTRA_CONFIG_MOUNT}" ]] && \
         DOCKER_ARGS+=("-v" "${EXTRA_CONFIG_MOUNT}:${EXTRA_CONFIG_MOUNT}:ro")
-    fi
-
-    # Mount rclone config if present (for Google Drive upload on non-NERSC systems).
-    if [[ -d "${HOME}/.config/rclone" ]]; then
+    # rclone config (Google Drive upload on non-NERSC systems).
+    [[ -d "${HOME}/.config/rclone" ]] && \
         DOCKER_ARGS+=("-v" "${HOME}/.config/rclone:${HOME}/.config/rclone:ro")
-    fi
-
     if [[ "${DEV_MODE}" == "true" ]]; then
-        DOCKER_ARGS+=("-e" "PYTHONPATH=${REPO_DIR}:/app")
         DOCKER_ARGS+=("-v" "${REPO_DIR}:${REPO_DIR}:ro")
         echo "Dev mode enabled: using local repo at ${REPO_DIR}"
     fi
+fi
 
-    if [[ "${SUBCOMMAND}" == "jupyter" ]]; then
+# run_in_container CMD... — run CMD with the image's default entrypoint
+run_in_container() {
+    if [[ "${RUNTIME}" == "shifter" ]]; then
+        shifter "${SHIFTER_ARGS[@]}" "$@"
+    else
+        docker run "${DOCKER_ARGS[@]}" "${IMAGE_FULL}" "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Python call builders for the lightweight "routine" subcommands
+# ---------------------------------------------------------------------------
+_arg() { _parse_arg "$1" "${SUB_ARGS[@]}"; }   # value of --key in SUB_ARGS
+_opt() { _py_str "$(_arg "$1")"; }             # same, as a Python literal (None if empty)
+
+build_py_call() {
+    local cfg timestamp tags skip ow
+    case "${SUBCOMMAND}" in
+        standards-annotation)
+            cfg="$(_arg --config_path)"
+            PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${cfg}')"
+            ;;
+        reverse-rt-align)
+            cfg="$(_arg --config_path)"
+            timestamp="$(_arg --annotation_timestamp)"
+            tags="$(_arg --tags)"; tags="${tags:-EMA}"
+            [[ "${timestamp}" =~ ^[0-9]{8}T[0-9]{6}_[0-9]{6}Z$ ]] || \
+                die "Error: reverse-rt-align requires --annotation_timestamp from a completed summary."
+
+            skip="False"
+            if _has_flag --skip_rt_alignment "${SUB_ARGS[@]}"; then
+                echo "Skipping reverse RT alignment and just creating a new run with the specified tags." >&2
+                skip="True"
+            fi
+            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${cfg}', '${timestamp}', '${tags}', ${skip})"
+            ;;
+        add-compounds)
+            cfg="$(_arg --input_csv)"
+            [[ -n "${cfg}" ]] || die "Error: add-compounds requires --input_csv FILE."
+            ow="False"
+            if _has_flag --overwrite_db "${SUB_ARGS[@]}"; then ow="True"; fi
+            PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${cfg}', overwrite_db=${ow})"
+            ;;
+        add-atlases)
+            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('$(_arg --config_path)')"
+            ;;
+        add-msms-refs)
+            PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('$(_arg --config_path)')"
+            ;;
+        get-db-table)
+            PY_CALL="from metatlas2.get_db_table import export_table_to_csv; export_table_to_csv('$(_arg --table-name)', output_path=$(_opt --output_path), database_path=$(_opt --database_path))"
+            ;;
+        get-atlases)
+            if [[ "${SUB_ARGS[0]:-}" == "fetch" ]]; then
+                PY_CALL="from metatlas2.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('$(_arg --atlas_uids)'), output_path=$(_opt --output_path), database_path=$(_opt --database_path))"
+            else
+                PY_CALL="from metatlas2.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_opt --database_path), chromatography=$(_opt --chromatography), polarity=$(_opt --polarity), atlas_category=$(_opt --atlas_category), atlas_name_key=$(_opt --atlas_name_key), created_by=$(_opt --created_by))"
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+case "${SUBCOMMAND}" in
+    jupyter)  # Docker only (Shifter rejected above)
         echo "=========================================="
         echo "Metatlas2 JupyterLab (portable mode)"
         echo "=========================================="
@@ -508,117 +458,46 @@ else
                     --ServerApp.root_dir='${METATLAS_DATA_DIR}' \
                     --MultiKernelManager.default_kernel_name=metatlas2
             "
+        ;;
 
-    elif [[ "${SUBCOMMAND}" == "submit" ]]; then
-        echo "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems." >&2
-        exit 1
+    submit)  # Shifter only (Docker rejected above)
+        TMPSCRIPT="$(mktemp /tmp/metatlas2_XXXXXX.sh)"
+        # shellcheck disable=SC2064
+        trap "rm -f '${TMPSCRIPT}'" EXIT
+        shifter "${SHIFTER_ARGS[@]}" --entrypoint \
+            "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
+        sbatch "${TMPSCRIPT}"
+        ;;
 
-    elif [[ "${SUBCOMMAND}" == "atlas-msms-deposit" ]]; then
-        ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-        DEPOSIT_DRY_RUN=false
-        for arg in "${PASSTHROUGH_ARGS[@]:1}"; do
-            [[ "${arg}" == "--dry_run" ]] && DEPOSIT_DRY_RUN=true
-        done
-        if [[ "${DEPOSIT_DRY_RUN}" == "false" && -f "${ATLAS_KEY}" ]]; then
-            DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
+    atlas-msms-deposit)
+        if [[ "${RUNTIME}" == "docker" ]]; then
+            ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
+            if [[ -f "${ATLAS_KEY}" ]] && ! _has_flag --dry_run "${SUB_ARGS[@]}" && ! _has_flag --skip_atlas_upload "${SUB_ARGS[@]}"; then
+                DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
+            fi
         fi
-        docker run "${DOCKER_ARGS[@]}" "${IMAGE_FULL}" /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${PASSTHROUGH_ARGS[@]:1}"
+        run_in_container /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${SUB_ARGS[@]}"
+        ;;
 
-    elif [[ "${SUBCOMMAND}" == "add-compounds" || "${SUBCOMMAND}" == "add-atlases" || "${SUBCOMMAND}" == "add-msms-refs" || "${SUBCOMMAND}" == "get-atlases" || "${SUBCOMMAND}" == "get-db-table" || "${SUBCOMMAND}" == "standards-annotation" || "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
-        if [[ "${DEV_MODE}" == "true" ]]; then
-            echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=dev, runtime=docker)..."
+    add-compounds|add-atlases|add-msms-refs|get-atlases|get-db-table|standards-annotation|reverse-rt-align)
+        echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=${MODE}, runtime=${RUNTIME})..."
+        build_py_call
+        run_in_container /app/.venv/bin/python -c "${PY_CALL}"
+        ;;
+
+    *)  # main targeted pipeline
+        if [[ "${SUBCOMMAND}" == "run" ]] && ! _has_flag --log-to-stdout "${PASSTHROUGH_ARGS[@]}"; then
+            echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=${MODE}, runtime=${RUNTIME})..."
+        fi
+        if [[ "${RUNTIME}" == "shifter" ]]; then
+            shifter "${SHIFTER_ARGS[@]}" --entrypoint "${PASSTHROUGH_ARGS[@]}"
         else
-            echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=prod, runtime=docker)..."
+            docker run "${DOCKER_ARGS[@]}" \
+                -p "127.0.0.1:8050-8069:8050-8069" \
+                --entrypoint /app/.venv/bin/python \
+                "${IMAGE_FULL}" \
+                -m metatlas2.run_targeted_analysis \
+                "${PASSTHROUGH_ARGS[@]}"
         fi
-
-        _parse_arg() {
-            local key="$1"; shift
-            local val=""
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    "${key}="*)  val="${1#*=}"; break ;;
-                    "${key}")    val="${2:-}"; break ;;
-                esac
-                shift
-            done
-            echo "${val}"
-        }
-        SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
-
-        if [[ "${SUBCOMMAND}" == "standards-annotation" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${CONFIG_PATH}')"
-        elif [[ "${SUBCOMMAND}" == "reverse-rt-align" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            TIMESTAMP="$(_parse_arg --annotation_timestamp "${SUB_ARGS[@]}")"
-            TAGS="$(_parse_arg --tags "${SUB_ARGS[@]}")"
-            SKIP_ALIGNMENT=false
-            if [[ ! "${TIMESTAMP}" =~ ^[0-9]{8}T[0-9]{6}_[0-9]{6}Z$ ]]; then
-                echo "Error: reverse-rt-align requires --annotation_timestamp from a completed summary." >&2
-                exit 1
-            fi
-            if [[ -z "${TAGS}" ]]; then
-                TAGS="EMA"
-            fi
-            if _has_flag --skip_rt_alignment "${SUB_ARGS[@]}"; then
-                echo "Skipping reverse RT alignment and just creating a new run with the specified tags." >&2
-                SKIP_ALIGNMENT=true
-            fi
-            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${CONFIG_PATH}', '${TIMESTAMP}', '${TAGS}', '${SKIP_ALIGNMENT}')"
-        elif [[ "${SUBCOMMAND}" == "add-compounds" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            _has_flag --overwrite_db "${SUB_ARGS[@]}" && OVERWRITE_PY="True" || OVERWRITE_PY="False"
-            PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${CONFIG_PATH}', overwrite_db=${OVERWRITE_PY})"
-        elif [[ "${SUBCOMMAND}" == "add-atlases" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('${CONFIG_PATH}')"
-        elif [[ "${SUBCOMMAND}" == "add-msms-refs" ]]; then
-            CONFIG_PATH="$(_parse_arg --config_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('${CONFIG_PATH}')"
-        elif [[ "${SUBCOMMAND}" == "get-db-table" ]]; then
-            TABLE_NAME="$(_parse_arg --table-name "${SUB_ARGS[@]}")"
-            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
-            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
-            PY_CALL="from metatlas2.get_db_table import export_table_to_csv; export_table_to_csv('${TABLE_NAME}', output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
-        else  # get-atlases
-            GET_SUBCOMMAND="${SUB_ARGS[0]:-}"
-            ATLAS_UIDS="$(_parse_arg --atlas_uids "${SUB_ARGS[@]}")"
-            OUTPUT_PATH="$(_parse_arg --output_path "${SUB_ARGS[@]}")"
-            DATABASE_PATH="$(_parse_arg --database_path "${SUB_ARGS[@]}")"
-            CHROMATOGRAPHY="$(_parse_arg --chromatography "${SUB_ARGS[@]}")"
-            POLARITY="$(_parse_arg --polarity "${SUB_ARGS[@]}")"
-            ATLAS_CATEGORY="$(_parse_arg --atlas_category "${SUB_ARGS[@]}")"
-            ATLAS_NAME_KEY="$(_parse_arg --atlas_name_key "${SUB_ARGS[@]}")"
-            CREATED_BY="$(_parse_arg --created_by "${SUB_ARGS[@]}")"
-            if [[ "${GET_SUBCOMMAND}" == "fetch" ]]; then
-                PY_CALL="from metatlas2.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('${ATLAS_UIDS}'), output_path=$(_py_str "${OUTPUT_PATH}"), database_path=$(_py_str "${DATABASE_PATH}"))"
-            else
-                PY_CALL="from metatlas2.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_py_str "${DATABASE_PATH}"), chromatography=$(_py_str "${CHROMATOGRAPHY}"), polarity=$(_py_str "${POLARITY}"), atlas_category=$(_py_str "${ATLAS_CATEGORY}"), atlas_name_key=$(_py_str "${ATLAS_NAME_KEY}"), created_by=$(_py_str "${CREATED_BY}"))"
-            fi
-        fi
-
-        docker run "${DOCKER_ARGS[@]}" \
-            "${IMAGE_FULL}" \
-            /app/.venv/bin/python -c "${PY_CALL}"
-
-    else # run main targeted pipeline
-        LOG_TO_STDOUT=false
-        for arg in "${PASSTHROUGH_ARGS[@]}"; do
-            [[ "$arg" == "--log-to-stdout" ]] && LOG_TO_STDOUT=true && break
-        done
-        if [[ "${LOG_TO_STDOUT}" == "false" && "${SUBCOMMAND}" == "run" ]]; then
-            if [[ "${DEV_MODE}" == "true" ]]; then
-                echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=dev, runtime=docker)..."
-            else
-                echo "=-------- Launching metatlas2 container (tag=${IMAGE_TAG}, mode=prod, runtime=docker)..."
-            fi
-        fi
-
-        docker run "${DOCKER_ARGS[@]}" \
-            -p "127.0.0.1:8050-8069:8050-8069" \
-            --entrypoint /app/.venv/bin/python \
-            "${IMAGE_FULL}" \
-            -m metatlas2.run_targeted_analysis \
-            "${PASSTHROUGH_ARGS[@]}"
-    fi
-fi
+        ;;
+esac
