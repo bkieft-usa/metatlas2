@@ -723,7 +723,7 @@ def run_reverse_rt_alignment(
     output_path: str | Path,
     timestamp: str,
     skip_rt_alignment: bool = False,
-) -> Path:
+) -> tuple[Path, str]:
     """Orchestrate the full reverse RT alignment workflow.
 
     Steps:
@@ -740,6 +740,9 @@ def run_reverse_rt_alignment(
         timestamp:   Approved annotation run timestamp.
         skip_rt_alignment: If True, do not build or apply any RT model; just
             copy the input RTs to the aligned columns.
+
+    Returns:
+        The alignment output directory and its timestamp.
     """
     from metatlas2.load_tools import load_standards_config
     from metatlas2.standards_annotation_db import (
