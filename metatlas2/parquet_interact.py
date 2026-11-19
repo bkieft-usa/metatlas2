@@ -634,6 +634,9 @@ def _build_compound_lfc_table(
         elif "mz_rt_uid" in long_df.columns and "mz_rt_uid" in mc_slim.columns:
             long_df = long_df.merge(mc_slim, on="mz_rt_uid", how="left", suffixes=("", "_mc"))
         elif "inchi_key" in long_df.columns and "inchi_key" in mc_slim.columns:
+            mc_slim = mc_slim.loc[
+                mc_slim["inchi_key"].fillna("").astype(str).str.strip() != ""
+            ]
             long_df = long_df.merge(mc_slim, on="inchi_key", how="left", suffixes=("", "_mc"))
         else:
             logger.warning(

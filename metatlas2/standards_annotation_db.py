@@ -1266,6 +1266,16 @@ def load_selected_peaks_with_ms2(
         raise RuntimeError(f"Could not load selected peaks with MS2 from {db_path}: {exc}") from exc
 
 
+def load_isomer_check_targets(db_path: str) -> pd.DataFrame:
+    """Load theoretical m/z for all targets, including unselected adducts."""
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        return conn.execute("""
+            SELECT DISTINCT c.compound_name, c.polarity, t.chromatography, c.mz_theoretical
+            FROM sa_compounds c
+            JOIN sa_extraction_targets t ON c.compound_uid = t.compound_uid
+        """).df()
+
+
 # ---------------------------------------------------------------------------
 # RT alignment persistence
 # ---------------------------------------------------------------------------

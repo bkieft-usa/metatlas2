@@ -19,6 +19,7 @@ def run_atlas_and_msms_deposit(
         deposit_ref_standards_atlas_and_msms_refs,
     )
     from metatlas2.load_tools import load_standards_config
+    from metatlas2.gdrive_upload import upload_standards_outputs
     from metatlas2.standards_annotation_db import get_project_db_path, get_project_output_root
 
     config = load_standards_config(str(Path(config_path).resolve()))
@@ -45,6 +46,10 @@ def run_atlas_and_msms_deposit(
         return deposit_ref_standards_atlas_and_msms_refs(
             summary_path, db_path, run_name, dry_run=dry_run, force_add=force_add,
             skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
+            chem_source=config["project"].get("chem_source", ""),
+            on_previews_created=lambda atlas, msms: upload_standards_outputs(
+                config, alignment_dir.parent, [atlas, msms],
+            ),
         )
 
 
@@ -55,7 +60,7 @@ if __name__ == "__main__":
                         required=True, help="Annotation summary timestamp.")
     parser.add_argument("--alignment_timestamp", required=True, help="Reverse alignment timestamp.")
     parser.add_argument("--dry_run", action="store_true", help="Write previews without depositing.")
-    parser.add_argument("--force_add", action="store_true", help="Append atlas rows even when their InChIKey is already in the sheet.")
+    parser.add_argument("--force_add", action="store_true", help="Add atlas rows and MS/MS references even when their identities already exist.")
     parser.add_argument("--skip_atlas_upload", action="store_true", help="Skip uploading atlas rows to Google Sheets.")
     parser.add_argument("--skip_msms_refs_deposit", action="store_true", help="Skip importing MS/MS references into the main database.")
     args = parser.parse_args()

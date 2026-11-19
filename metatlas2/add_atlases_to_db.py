@@ -6,6 +6,7 @@ import metatlas2.logging_config as lcf
 
 def add_atlases_to_db(
     config_path: str,
+    custom: bool = False,
 ) -> None:
     """
     Creates atlases from config file paths and saves them to the database.
@@ -21,4 +22,4 @@ def add_atlases_to_db(
     ):
         logger = lcf.get_logger('workflow_objects')
         logger.info("Adding atlases from config file to database...")
-        NewAtlasesConfig.from_yaml(config_path).execute()
+        NewAtlasesConfig.from_yaml(config_path).execute(custom=custom)

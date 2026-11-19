@@ -14,12 +14,14 @@ import metatlas2.lcmsruns_tools as lrt
 import metatlas2.logging_config as lcf
 import metatlas2.extract_data_from_h5 as edh
 import metatlas2.workflow_objects as wfo
+from metatlas2.standards_annotation_checks import validate_neutral_inchi_key
 from metatlas2.chem_info import (
     DEFAULT_ADDUCTS,
     calc_exact_mass_from_smiles_or_inchi,
     get_precursor_mz,
     load_adducts_dict,
     resolve_inchi_and_inchi_key,
+    smiles_to_inchi,
 )
 
 logger = lcf.get_logger("standards_annotation_tools")
@@ -216,6 +218,14 @@ def build_standards_lcmsrun_table(
 
         # Derive InChI and InChIKey from SMILES/InChI when not provided in CSV
         smiles, inchi, inchi_key = resolve_inchi_and_inchi_key(smiles, inchi, inchi_key)
+        validate_neutral_inchi_key(str(row.get("compound_name", "unknown")), inchi, inchi_key)
+        if smiles:
+            try:
+                smiles_inchi = smiles_to_inchi(smiles)
+            except ValueError as exc:
+                raise ValueError(f"Invalid SMILES for '{row.get('compound_name', 'unknown')}': {exc}") from exc
+            if smiles_inchi != inchi:
+                validate_neutral_inchi_key(str(row.get("compound_name", "unknown")), smiles_inchi, inchi_key)
 
         exact_masses.append(mass)
         smiles_resolved.append(smiles)

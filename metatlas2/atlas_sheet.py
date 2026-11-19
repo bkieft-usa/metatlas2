@@ -23,7 +23,7 @@ GOOGLE_SERVICE_ACCOUNT_FILE = (
 ATLAS_COLUMNS = [
     "label", "compound_name", "inchi_key", "smiles", "inchi", "formula", "adduct",
     "mz", "rt_peak", "rt_min", "rt_max", "mz_tolerance", "chromatography", "polarity",
-    "identification_notes", "lcmsrun_source", "date_created", "date_modified", "tags",
+    "identification_notes", "chem_source", "lcmsrun_source", "date_created", "date_modified", "tags",
 ]
 ATLAS_ROW_IDENTITY = ["label", "inchi_key", "adduct", "chromatography", "polarity"]
 _NUMERIC_COLUMNS = ["mz", "rt_peak", "rt_min", "rt_max", "mz_tolerance"]

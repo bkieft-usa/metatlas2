@@ -544,8 +544,18 @@ def generate_standards_annotation_notebook(
         _sa_nb_imports_cell(),
         _sa_nb_run_params_cell(run_params),
         _sa_nb_data_cell(),
+        nbformat.v4.new_markdown_cell("## Step 1: Annotation GUI"),
         _sa_nb_gui_cell(),
+        nbformat.v4.new_markdown_cell("## Step 2: Annotation Summary"),
         _sa_nb_summary_cell(),
+        nbformat.v4.new_markdown_cell("## Step 3: Reverse RT Alignment"),
+        _sa_nb_alignment_params_cell(),
+        _sa_nb_alignment_cell(),
+        nbformat.v4.new_markdown_cell(
+            "## Step 4: Upload and Deposit Atlas and MSMS Refs"
+        ),
+        _sa_nb_deposit_params_cell(),
+        _sa_nb_deposit_cell(),
     ]
 
     nb_filename = f"StandardsAnnotation_{run_name}.ipynb"
@@ -567,14 +577,15 @@ def _sa_nb_header_cell(project_name: str) -> "nbformat.NotebookNode":
 def _sa_nb_imports_cell() -> "nbformat.NotebookNode":
     src = (
         "import logging\n"
-        "import metatlas2.standards_annotation_db as sadb\n"
-        "import metatlas2.standards_annotation_gui as sag\n"
-        "import metatlas2.standards_annotation_summary as sas\n"
-        "import metatlas2.standards_annotation_tools as sat\n"
-        "import metatlas2.load_tools as ldt\n"
-        "import metatlas2.logging_config as lcf\n"
-        "lcf.setup_logging(log_level=logging.INFO, log_to_stdout=True)\n"
-        "logger = lcf.get_logger('standards_annotation')"
+        "from metatlas2.standards_annotation_db import load_extraction_from_db\n"
+        "from metatlas2.standards_annotation_gui import build_standards_annotation_gui\n"
+        "from metatlas2.standards_annotation_summary import run_standards_annotation_summary\n"
+        "from metatlas2.run_reverse_rt_align import run_reverse_rt_align\n"
+        "from metatlas2.run_atlas_and_msms_deposit import run_atlas_and_msms_deposit\n"
+        "from metatlas2.load_tools import load_standards_config\n"
+        "from metatlas2.logging_config import get_logger, setup_logging\n"
+        "setup_logging(log_level=logging.INFO, log_to_stdout=True)\n"
+        "logger = get_logger('standards_annotation')"
     )
     return nbformat.v4.new_code_cell(src)
 
@@ -583,25 +594,22 @@ def _sa_nb_run_params_cell(run_params: dict) -> "nbformat.NotebookNode":
     src = "# Project-specific identifiers — generated automatically, do not edit.\n"
     src += "RUN_PARAMS = {\n"
     for key, val in run_params.items():
-        if isinstance(val, str):
-            src += f"    '{key}': '{val}',\n"
-        else:
-            src += f"    '{key}': {val!r},\n"
+        src += f"    {key!r}: {val!r},\n"
     src += "}"
     return nbformat.v4.new_code_cell(src)
 
 def _sa_nb_data_cell() -> "nbformat.NotebookNode":
     src = (
         "# Load extracted data from the project DB.\n"
-        "config = ldt.load_standards_config(RUN_PARAMS['config_path'])\n"
-        "data = sadb.load_extraction_from_db(RUN_PARAMS['project_db_path'], config)"
+        "config = load_standards_config(RUN_PARAMS['config_path'])\n"
+        "data = load_extraction_from_db(RUN_PARAMS['project_db_path'], config)"
     )
     return nbformat.v4.new_code_cell(src)
 
 def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
     src = (
         "# Launch the annotation GUI. Click 'Save & Exit' when done.\n"
-        "sag.build_standards_annotation_gui(\n"
+        "build_standards_annotation_gui(\n"
         "    data=data,\n"
         "    config=config"
         ")"
@@ -612,9 +620,57 @@ def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
 def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
     src = (
         "# Generate a new timestamped annotation run with figures and a CSV table.\n"
-        "sas.run_standards_annotation_summary(\n"
+        "run_standards_annotation_summary(\n"
         "    data=data,\n"
         "    config=config,\n"
+        ")"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_alignment_params_cell() -> "nbformat.NotebookNode":
+    src = (
+        "# Set the approved summary timestamp before running alignment.\n"
+        "ANNOTATION_TIMESTAMP = ''\n"
+        "SKIP_RT_ALIGNMENT = False"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_alignment_cell() -> "nbformat.NotebookNode":
+    src = (
+        "run_reverse_rt_align(\n"
+        "    config_path=RUN_PARAMS['config_path'],\n"
+        "    timestamp=ANNOTATION_TIMESTAMP,\n"
+        "    skip_rt_alignment=SKIP_RT_ALIGNMENT,\n"
+        ")"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_deposit_params_cell() -> "nbformat.NotebookNode":
+    src = (
+        "# Set the approved alignment timestamp before running deposit.\n"
+        "# Review the dry-run previews before setting DRY_RUN = False.\n"
+        "ALIGNMENT_TIMESTAMP = ''\n"
+        "DRY_RUN = True\n"
+        "FORCE_ADD = False\n"
+        "SKIP_ATLAS_UPLOAD = False\n"
+        "SKIP_MSMS_REFS_DEPOSIT = False"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_deposit_cell() -> "nbformat.NotebookNode":
+    src = (
+        "run_atlas_and_msms_deposit(\n"
+        "    config_path=RUN_PARAMS['config_path'],\n"
+        "    annotation_timestamp=ANNOTATION_TIMESTAMP,\n"
+        "    alignment_timestamp=ALIGNMENT_TIMESTAMP,\n"
+        "    dry_run=DRY_RUN,\n"
+        "    force_add=FORCE_ADD,\n"
+        "    skip_atlas_upload=SKIP_ATLAS_UPLOAD,\n"
+        "    skip_msms_refs_deposit=SKIP_MSMS_REFS_DEPOSIT,\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)

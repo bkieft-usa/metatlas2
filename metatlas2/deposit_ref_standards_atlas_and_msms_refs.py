@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from metatlas2.atlas_sheet import (
     open_centralized_atlas_worksheet,
 )
 from metatlas2.logging_config import get_logger
+from metatlas2.file_and_project_format import msms_reference_file_metadata
 from metatlas2.standards_annotation_tools import STANDARD_CE_LABELS
 
 logger = get_logger("deposit_ref_standards_atlas_and_msms_refs")
@@ -32,9 +35,9 @@ MSMS_COLUMNS = [
 SUMMARY_COLUMNS = [
     "Compound Label", "Compound Name", "InChIKey", "Adduct", "Polarity",
     "Chromatography", "Source File", "Theoretical m/z", "Aligned RT peak",
-    "Aligned RT min", "Aligned RT max", "Analyst Notes", "Annotation Notes",
+    "Aligned RT min", "Aligned RT max", "Analyst Notes", "Annotation Notes", "tags",
     *[f"{ce} {field}" for ce in STANDARD_CE_LABELS
-      for field in ("spectrum", "MS2 Precursor M/Z", "MS2 CE")],
+      for field in ("spectrum", "MS2 Precursor M/Z", "MS2 CE", "MS2 Filename")],
 ]
 
 
@@ -68,6 +71,7 @@ def _spectrum(value: str, ce: str, row_number: int) -> list[list[float]] | None:
 
 def prepare_deposit_data(
     summary_path: Path, db_path: str | Path, run_name: str,
+    *, chem_source: str = "", measured_energies: dict[str, float | None] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build sheet and importer-format data from the explicitly reviewed summary.
 
@@ -114,7 +118,7 @@ def prepare_deposit_data(
         if polarity is None:
             raise ValueError(f"Invalid polarity in aligned summary row {row_number}: {row['Polarity']!r}")
         notes = "; ".join(note.strip() for note in (row["Analyst Notes"], row["Annotation Notes"]) if note.strip())
-        tags = row.get("tags", "EMA")
+        tags = row["tags"]
         atlas_rows.append({
             "label": row["Compound Label"], "compound_name": row["Compound Name"],
             "inchi_key": row["InChIKey"], "smiles": smiles, "inchi": inchi, "formula": formula,
@@ -123,7 +127,7 @@ def prepare_deposit_data(
             "rt_min": _number(row["Aligned RT min"], "Aligned RT min", row_number),
             "rt_max": _number(row["Aligned RT max"], "Aligned RT max", row_number),
             "mz_tolerance": 5.0, "chromatography": row["Chromatography"], "polarity": polarity,
-            "identification_notes": notes, "lcmsrun_source": row["Source File"],
+            "identification_notes": notes, "chem_source": chem_source, "lcmsrun_source": row["Source File"],
             "date_created": str(date), "date_modified": str(date), "tags": tags,
         })
         for ce in STANDARD_CE_LABELS:
@@ -134,13 +138,21 @@ def prepare_deposit_data(
             collision_energy = row[f"{ce} MS2 CE"]
             if not precursor or not collision_energy:
                 logger.warning("Missing precursor m/z or collision energy for %s in aligned summary row %s", ce, row_number)
+            filename = row[f"{ce} MS2 Filename"]
+            instrument, ramp = msms_reference_file_metadata(filename)
+            if ramp != f"ramp-{ce.removeprefix('CE')}norm":
+                raise ValueError(f"MS2 filename CE does not match {ce} in aligned summary row {row_number}: {filename!r}")
+            ref_id = uuid.uuid4().hex
+            numeric_energy = _number(collision_energy, f"{ce} MS2 CE", row_number) if collision_energy else None
+            if measured_energies is not None:
+                measured_energies[ref_id] = numeric_energy
             msms_rows.append({
-                "database": "standards_annotation", "id": f"{run_name}_{len(msms_rows) + 1:04d}",
-                "name": row["Compound Name"], "spectrum": json.dumps(spectrum), "decimal": 4,
+                "database": "metatlas", "id": ref_id,
+                "name": row["Compound Label"], "spectrum": json.dumps(spectrum), "decimal": 4,
                 "precursor_mz": _number(precursor, f"{ce} MS2 Precursor M/Z", row_number) if precursor else "",
                 "polarity": polarity, "adduct": row["Adduct"], "fragmentation_method": "HCD",
-                "collision_energy": _number(collision_energy, f"{ce} MS2 CE", row_number) if collision_energy else "",
-                "instrument": "Unknown", "instrument_type": "Unknown", "formula": formula,
+                "collision_energy": ramp,
+                "instrument": instrument, "instrument_type": "Orbitrap", "formula": formula,
                 "exact_mass": exact_mass, "inchi_key": row["InChIKey"], "inchi": inchi, "smiles": smiles,
             })
     return pd.DataFrame(atlas_rows, columns=ATLAS_COLUMNS), pd.DataFrame(msms_rows, columns=MSMS_COLUMNS)
@@ -162,8 +174,8 @@ def deposit_atlas_to_google_sheet(atlas: pd.DataFrame, force_add: bool = False) 
         worksheet_name=ATLAS_WORKSHEET,
         service_account_file=GOOGLE_SERVICE_ACCOUNT_FILE,
     )
-    # if sheet.row_values(1) != ATLAS_COLUMNS:
-    #     raise ValueError("Google Sheet header does not match the atlas columns; nothing was appended.")
+    if sheet.row_values(1) != ATLAS_COLUMNS:
+        raise ValueError("Google Sheet header does not match the atlas columns; nothing was appended.")
 
     if not force_add:
         existing_rows = sheet.get_all_values()[1:]
@@ -201,9 +213,14 @@ def deposit_ref_standards_atlas_and_msms_refs(
     summary_path: Path, db_path: str | Path, run_name: str, dry_run: bool = False,
     force_add: bool = False, skip_atlas_upload: bool = False,
     skip_msms_refs_deposit: bool = False,
+    on_previews_created: Callable[[Path, Path], None] | None = None,
+    *, chem_source: str = "",
 ) -> tuple[Path, Path]:
     """Write previews and deposit to the sheet and main DB unless skipped."""
-    atlas, msms = prepare_deposit_data(summary_path, db_path, run_name)
+    measured_energies: dict[str, float | None] = {}
+    atlas, msms = prepare_deposit_data(
+        summary_path, db_path, run_name, chem_source=chem_source, measured_energies=measured_energies,
+    )
     atlas_path = summary_path.parent / f"Atlas_Deposit_Preview_{run_name}.csv"
     msms_path = summary_path.parent / f"MsmsRefs_Deposit_Preview_{run_name}.tab"
     created: list[Path] = []
@@ -218,6 +235,8 @@ def deposit_ref_standards_atlas_and_msms_refs(
         raise
     logger.info("Prepared %s atlas rows and %s MS/MS spectra", len(atlas), len(msms))
     logger.info("Atlas preview: %s; MS/MS preview: %s", atlas_path, msms_path)
+    if on_previews_created is not None:
+        on_previews_created(atlas_path, msms_path)
     if dry_run:
         logger.info("Dry run: nothing was deposited")
     elif skip_atlas_upload and skip_msms_refs_deposit:
@@ -247,5 +266,7 @@ def deposit_ref_standards_atlas_and_msms_refs(
             if not msms_path.is_file():
                 raise FileNotFoundError(f"MS/MS reference preview not found: {msms_path}")
             logger.info("Importing MS/MS references from %s into %s", msms_path, paths["main_db_path"])
-            NewMsmsRefsConfig(entries=[{"path": str(msms_path)}]).execute()
+            NewMsmsRefsConfig(entries=[{
+                "path": str(msms_path), "collision_energy_by_ref_id": measured_energies,
+            }]).execute(skip_existing_inchi_adduct=not force_add)
     return atlas_path, msms_path

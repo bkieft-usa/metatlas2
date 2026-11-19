@@ -609,11 +609,6 @@ def make_rt_alignment_summary_plot(
     return str(pdf_path)
 
 
-def _normalize_tags(tags: str | None) -> str:
-    """Clean a semicolon-separated tag string: strip blanks, drop empties."""
-    return ";".join(t.strip() for t in (tags or "").split(";") if t.strip())
-
-
 def _append_tags_column(csv_path: Path, tags: str) -> None:
     """Add 'tags' as the final column of an existing CSV (values left untouched)."""
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
@@ -684,9 +679,8 @@ def run_reverse_rt_alignment(
     db_path: str,
     output_path: str | Path,
     timestamp: str,
-    tags: str | None = "EMA",
     skip_rt_alignment: bool = False,
-) -> None:
+) -> Path:
     """Orchestrate the full reverse RT alignment workflow.
 
     Steps:
@@ -701,7 +695,6 @@ def run_reverse_rt_alignment(
         db_path:     Path to the project database.
         output_path: Output path; its parent holds the review directories.
         timestamp:   Approved annotation run timestamp.
-        tags:        Semicolon-separated tags written to the ``tags`` column.
         skip_rt_alignment: If True, do not build or apply any RT model; just
             copy the input RTs to the aligned columns.
     """
@@ -715,7 +708,7 @@ def run_reverse_rt_alignment(
     config = load_standards_config(str(Path(config_path).resolve()))
     run_name = config["project"]["standards_run_name"]
     polarities = list(config["project"].get("include_polarities") or []) or None
-    tags_value = _normalize_tags(tags)
+    tags_value = ";".join(config.get("tags", {"atlas": ["EMA"]})["atlas"])
     if tags_value == "EMA":
         logger.warning("Tag is set to default ('EMA') only. Do you need to create any more specific tag?")
     logger.info(f"Reverse RT alignment starting for run_name={run_name}, timestamp={timestamp}, tags={tags_value}")
@@ -799,3 +792,4 @@ def run_reverse_rt_alignment(
             raise
 
     logger.info(f"Reverse RT alignment complete. Outputs: {alignment_dir}")
+    return alignment_dir

@@ -153,7 +153,8 @@ def create_new_atlas_from_dataframe(
     chromatography: str = None,
     polarity: str = None,
     atlas_file_path: str = None,
-    main_db_path: str = None
+    main_db_path: str = None,
+    use_input_compound_uids: bool = False,
 ) -> "Atlas":
     
     from metatlas2.workflow_objects import Atlas, CompoundMZRT
@@ -170,7 +171,10 @@ def create_new_atlas_from_dataframe(
         raise ValueError(f"Atlas input dataframe is missing required columns: {missing_cols}. Found columns: {atlas_df.columns.tolist()}")
 
     # inchi_key and adduct are attributes, not unique identifiers; mz_rt_uid is the unique key for all compounds
-    inchi_keys = atlas_df['inchi_key'].dropna().unique().tolist()
+    inchi_keys = [
+        key for key in atlas_df['inchi_key'].dropna().unique().tolist()
+        if str(key).strip()
+    ]
     compound_lookup = get_compound_uids_by_inchi_keys(main_db_path, inchi_keys)
 
     # Use mz_rt_uid as the unique key for each CompoundMZRT
@@ -178,10 +182,18 @@ def create_new_atlas_from_dataframe(
     for _, row in atlas_df.iterrows():
         inchi_key = row.get('inchi_key', '')
         adduct = str(row.get('adduct', None))
-        if not inchi_key or inchi_key not in compound_lookup:
+        row_compound_uid = row.get('compound_uid', '')
+        if (
+            use_input_compound_uids
+            and pd.notna(row_compound_uid)
+            and str(row_compound_uid).strip()
+        ):
+            compound_uid = str(row_compound_uid).strip()
+        elif not inchi_key or inchi_key not in compound_lookup:
             logger.warning(f"Compound with inchi_key {inchi_key} missing from metatlas database, skipping. (Note: mz_rt_uid is the unique identifier for all compounds.)")
             continue
-        compound_uid = compound_lookup[inchi_key]
+        else:
+            compound_uid = compound_lookup[inchi_key]
         label = str(row.get('label', row.get('compound_name', 'Unknown Compound')))
         rt_peak = row.get('rt_peak', None)
         rt_min = row.get('rt_min', rt_peak - 0.5)
@@ -237,6 +249,99 @@ def create_new_atlas_from_dataframe(
         source=atlas_file_path,
     )
     return atlas_obj
+
+
+def prepare_custom_atlas_compounds(
+    atlas_df: pd.DataFrame,
+    main_db_path: str,
+) -> tuple[pd.DataFrame, list["Compound"]]:
+    """Resolve known keys and prepare unique database records for keyless rows."""
+    from metatlas2.workflow_objects import Compound
+
+    atlas_df = atlas_df.copy()
+    if "inchi_key" not in atlas_df.columns:
+        atlas_df["inchi_key"] = ""
+    atlas_df["inchi_key"] = atlas_df["inchi_key"].fillna("").astype(str).str.strip()
+
+    keys = [key for key in atlas_df["inchi_key"].unique().tolist() if key]
+    compound_lookup = get_compound_uids_by_inchi_keys(
+        main_db_path,
+        keys,
+        log_if_empty=False,
+    )
+    provenance = get_provenance()
+    custom_compounds: list[Compound] = []
+    compound_uids: list[str] = []
+
+    for _, row in atlas_df.iterrows():
+        inchi_key = row["inchi_key"]
+        compound_uid = compound_lookup.get(inchi_key) if inchi_key else None
+        if compound_uid:
+            compound_uids.append(compound_uid)
+            continue
+
+        if inchi_key:
+            logger.warning(
+                "InChIKey %s was not found in the compounds table; "
+                "creating a keyless custom compound for %s.",
+                inchi_key,
+                row["label"],
+            )
+
+        compound_uid = _generate_uid("compound")
+        compound_row = row.copy()
+        compound_row["compound_uid"] = compound_uid
+        compound_row["inchi_key"] = ""
+        compound = Compound.from_atlas_row(compound_row)
+        compound.created_by = provenance["analyst"]
+        compound.created_date = provenance["timestamp"]
+        custom_compounds.append(compound)
+        compound_uids.append(compound_uid)
+        atlas_df.at[row.name, "inchi_key"] = ""
+
+    atlas_df["compound_uid"] = compound_uids
+    return atlas_df, custom_compounds
+
+
+def batch_save_custom_compounds(db_path: str, compounds: list["Compound"]) -> int:
+    """Insert uniquely identified custom compounds without InChIKeys."""
+    if not compounds:
+        return 0
+
+    if any(not compound.compound_uid or compound.inchi_key for compound in compounds):
+        raise ValueError("Custom compounds must have a compound UID and a blank InChIKey.")
+
+    records = [
+        (
+            compound.compound_uid,
+            compound.label,
+            compound.compound_name,
+            "",
+            compound.inchi,
+            compound.smiles,
+            compound.formula,
+            compound.mono_isotopic_molecular_weight,
+            compound.iupac_name,
+            compound.pubchem_cid,
+            compound.created_by,
+            compound.created_date,
+        )
+        for compound in compounds
+    ]
+    with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+        conn.executemany(
+            """
+                INSERT INTO compounds (
+                    compound_uid, label, compound_name, inchi_key, inchi, smiles,
+                    formula, mono_isotopic_molecular_weight, iupac_name, pubchem_cid,
+                    created_by, created_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            records,
+        )
+    logger.info("Inserted %d custom compounds with blank InChIKeys.", len(records))
+    return len(records)
+
 
 def enrich_atlas_df_with_compound_metadata(atlas_df: pd.DataFrame, main_db_path: str) -> pd.DataFrame:
     """Fill missing compound metadata fields on atlas rows from main DB compounds."""
@@ -2233,7 +2338,12 @@ def get_atlas_uid_from_stage(
     return atlas_info
 
 
-def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str = None) -> None:
+def save_atlas_to_database(
+    atlas_obj: "Atlas",
+    db_path: str,
+    main_db_path: str = None,
+    custom_compounds: list["Compound"] | None = None,
+) -> None:
     """
     Save an Atlas object to the database using the unified schema.
 
@@ -2255,6 +2365,31 @@ def save_atlas_to_database(atlas_obj: "Atlas", db_path: str, main_db_path: str =
                       the main database so compound existence can be verified.
                       Leave as ``None`` when saving directly to the main DB.
     """
+    if custom_compounds:
+        if main_db_path:
+            raise ValueError("Custom compounds can only be saved with a main-database atlas.")
+        batch_save_custom_compounds(db_path, custom_compounds)
+        try:
+            save_atlas_to_database(atlas_obj, db_path)
+        except Exception:
+            compound_uids = [compound.compound_uid for compound in custom_compounds]
+            placeholders = ", ".join(["?"] * len(compound_uids))
+            with get_db_connection(db_path, max_retries=10, initial_retry_delay=0.5) as conn:
+                conn.execute(
+                    f"""
+                        DELETE FROM compounds
+                        WHERE compound_uid IN ({placeholders})
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM atlas_compound_associations aca
+                              WHERE aca.compound_uid = compounds.compound_uid
+                          )
+                    """,
+                    compound_uids,
+                )
+            raise
+        return
+
     logger.info(f"Saving atlas {atlas_obj.atlas_name} to database at {db_path}...")
     prov = get_provenance()
     compound_uids = [c.compound_uid for c in atlas_obj.compound_mzrts.values()]
@@ -2392,7 +2527,12 @@ def _verify_compounds_exist_in_db(compound_uids: list, conn: duckdb.DuckDBPyConn
     logger.info("All compounds verified to exist in the database.")
     return True
 
-def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
+def get_compound_uids_by_inchi_keys(
+    db_path: str,
+    inchi_keys: list,
+    *,
+    log_if_empty: bool = True,
+) -> dict:
     """Return {inchi_key: compound_uid} for all inchi_keys found in the database."""
     if not inchi_keys:
         return {}
@@ -2402,8 +2542,9 @@ def get_compound_uids_by_inchi_keys(db_path: str, inchi_keys: list) -> dict:
             f"SELECT inchi_key, compound_uid FROM compounds WHERE inchi_key IN ({placeholders})",
             inchi_keys
         ).fetchall()
-        if not rows:
+        if not rows and log_if_empty:
             logger.error(f"No compounds found in database {db_path} for provided inchi_keys.")
+        if not rows:
             return {}
         return {row[0]: row[1] for row in rows}
 
@@ -2433,7 +2574,13 @@ def get_compound_metadata(
         return pd.DataFrame()
 
     # Deduplicate while preserving order
-    unique_keys = list(dict.fromkeys(inchi_keys))
+    unique_keys = list(dict.fromkeys(
+        str(key).strip()
+        for key in inchi_keys
+        if pd.notna(key) and str(key).strip()
+    ))
+    if not unique_keys:
+        return pd.DataFrame()
 
     try:
         with get_db_connection(db_path, read_only=True) as conn:
@@ -2977,9 +3124,10 @@ def _apply_cross_polarity_curation(
     opp_lookup = {}
     for _, row in opposite_polarity_df.iterrows():
         name = row.get("label", "")
-        if not name:
+        inchi_key = row.get("inchi_key", "")
+        if not name or pd.isna(inchi_key) or not str(inchi_key).strip():
             continue
-        key = (name, row["inchi_key"])
+        key = (name, inchi_key)
         if key not in opp_lookup:
             opp_lookup[key] = row
 
@@ -2988,9 +3136,10 @@ def _apply_cross_polarity_curation(
     
     for idx, row in obj.experimental_data.curation_df.iterrows():
         name = row.get("label", "")
-        if not name:
+        inchi_key = row.get("inchi_key", "")
+        if not name or pd.isna(inchi_key) or not str(inchi_key).strip():
             continue
-        key = (name, row["inchi_key"])
+        key = (name, inchi_key)
         if key not in opp_lookup:
             continue
 

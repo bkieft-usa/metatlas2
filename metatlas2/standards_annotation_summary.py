@@ -5,6 +5,7 @@ import json
 import os
 import re
 import textwrap
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -796,10 +797,7 @@ def export_msms_refs_tab(
     db_path: str,
     output_dir: Path,
     project_name: str,
-    instrument: str = "Unknown",
-    instrument_type: str = "Unknown",
     fragmentation_method: str = "HCD",
-    database: str = "standards_annotation",
 ) -> Path:
     """Export selected peaks with MS2 data as a metatlas ``.tab`` file.
 
@@ -814,7 +812,7 @@ def export_msms_refs_tab(
         logger.warning("No analyst selections found; skipping msms-refs export.")
         return tab_path
 
-    df_ms2 = df.explode("ms2_scans").dropna(subset=["ms2_scans"])
+    df_ms2 = fix_peak_labels(df).explode("ms2_scans").dropna(subset=["ms2_scans"])
     if df_ms2.empty:
         logger.warning("No selected peaks have MS2 data; skipping msms-refs export.")
         return tab_path
@@ -825,14 +823,13 @@ def export_msms_refs_tab(
         return repr([mzs, ints])
 
     rows = []
-    for i, (_, row) in enumerate(df_ms2.iterrows(), start=1):
+    for _, row in df_ms2.iterrows():
         polarity_str = "positive" if str(row.get("polarity", "POS")).upper() == "POS" else "negative"
-        ce = row["ms2_scans"]["collision_energy"]
-        ce_str = f"{float(ce):.0f}" if ce is not None and not safe_isnan(safe_float(ce)) else ""
+        instrument, ce_str = fpf.msms_reference_file_metadata(row["ms2_scans"]["filename"])
         rows.append({
-            "database":             database,
-            "id":                   f"{project_name}_{i:04d}",
-            "name":                 str(row.get("compound_name", "")),
+            "database":             "metatlas",
+            "id":                   uuid.uuid4().hex,
+            "name":                 str(row["peak_label"]),
             "spectrum":             _spectrum_str(row),
             "decimal":              4,
             "precursor_mz":         f"{safe_float(row['ms2_scans']['precursor_mz']):.5f}",
@@ -841,7 +838,7 @@ def export_msms_refs_tab(
             "fragmentation_method": fragmentation_method,
             "collision_energy":     ce_str,
             "instrument":           instrument,
-            "instrument_type":      instrument_type,
+            "instrument_type":      "Orbitrap",
             "formula":              "",
             "exact_mass":           "",
             "inchi_key":            str(row.get("inchi_key", "")),
@@ -884,6 +881,9 @@ def run_standards_annotation_summary(
     raw_selections = sadb.load_selected_peaks_with_ms2(db_path)
     validate_selected_peaks(raw_selections)
     selections_df = fix_peak_labels(raw_selections)
+    from metatlas2.standards_annotation_checks import check_isomer_adducts, check_retention_times
+    check_isomer_adducts(selections_df, sadb.load_isomer_check_targets(db_path))
+    check_retention_times(selections_df)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     outputs_dir = review_directory(output_root, timestamp)
     outputs_dir.mkdir(parents=True, exist_ok=False)
@@ -906,3 +906,6 @@ def run_standards_annotation_summary(
 
     (outputs_dir / ".summary_complete").touch(exist_ok=False)
     logger.info(f"Summary outputs written to {outputs_dir}; timestamp: {timestamp}")
+    from metatlas2.gdrive_upload import upload_standards_outputs
+    url = upload_standards_outputs(config, outputs_dir, [outputs_dir])
+    print(f"Standards annotation review folder: {url}")

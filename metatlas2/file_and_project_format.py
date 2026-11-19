@@ -391,3 +391,15 @@ def extract_collision_energy_label(filename: str) -> str:
         return m.group(0) if m else ""
     except Exception:
         return ""
+
+
+def msms_reference_file_metadata(filename: str) -> tuple[str, str]:
+    """Return the instrument and ramp collision energy from an MS2 filename."""
+    basename = os.path.basename(filename)
+    if not FILE_PATTERN.fullmatch(basename):
+        raise ValueError(f"MS2 filename does not match the expected format: {filename!r}")
+    fields = parse_file_name(basename)
+    matches = re.findall(r"CE(102040norm|205060norm)(?![A-Za-z0-9])", fields["run_metadata"])
+    if len(matches) != 1:
+        raise ValueError(f"Expected one supported normalized CE ramp in MS2 filename: {filename!r}")
+    return fields["instrument"], f"ramp-{matches[0]}"

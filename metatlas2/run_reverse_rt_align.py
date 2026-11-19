@@ -6,7 +6,7 @@ from pathlib import Path
 
 import metatlas2.logging_config as lcf
 
-def run_reverse_rt_align(config_path: str, timestamp: str, tags: str, skip_rt_alignment: bool = False) -> None:
+def run_reverse_rt_align(config_path: str, timestamp: str, skip_rt_alignment: bool = False) -> None:
     """Main entrypoint for the reverse RT alignment workflow.
 
     Steps:
@@ -18,7 +18,6 @@ def run_reverse_rt_align(config_path: str, timestamp: str, tags: str, skip_rt_al
         config_path: Absolute or relative path to the standards-annotation
                      YAML config file.
         timestamp:   Timestamp of the approved summary session.
-        tags:        Semicolon-separated list of tags to apply to the new reverse RT alignment.
     """
     from metatlas2.load_tools import load_standards_config
     from metatlas2.standards_annotation_db import (
@@ -26,6 +25,7 @@ def run_reverse_rt_align(config_path: str, timestamp: str, tags: str, skip_rt_al
         get_project_output_root,
     )
     from metatlas2.standards_annotation_rt_align import run_reverse_rt_alignment
+    from metatlas2.gdrive_upload import upload_standards_outputs
 
     config_path = str(Path(config_path).resolve())
     config = load_standards_config(config_path)
@@ -52,7 +52,10 @@ def run_reverse_rt_align(config_path: str, timestamp: str, tags: str, skip_rt_al
         logger.info(f"Reverse RT alignment starting for config: {config_path}")
 
         output_path = output_root / "outputs"
-        run_reverse_rt_alignment(config_path, db_path, output_path, timestamp, tags, skip_rt_alignment)
+        alignment_dir = run_reverse_rt_alignment(
+            config_path, db_path, output_path, timestamp, skip_rt_alignment=skip_rt_alignment,
+        )
+        upload_standards_outputs(config, alignment_dir.parent, [alignment_dir])
 
         logger.info("Reverse RT alignment complete.")
 
@@ -74,16 +77,10 @@ if __name__ == "__main__":
         help="Path to the standards_annotation YAML config file.",
     )
     parser.add_argument(
-        "--tags",
-        default="EMA",
-        required=False,
-        help="Semicolon-separated list of tags to apply to the new reverse RT alignment.",
-    )
-    parser.add_argument(
         "--skip_rt_alignment",
         action="store_true",
         help="Skip the reverse RT alignment step and only create a new run with the specified tags.",
         required=False
     )
     args = parser.parse_args()
-    run_reverse_rt_align(args.config_path, args.annotation_timestamp, args.tags, args.skip_rt_alignment)
+    run_reverse_rt_align(args.config_path, args.annotation_timestamp, args.skip_rt_alignment)

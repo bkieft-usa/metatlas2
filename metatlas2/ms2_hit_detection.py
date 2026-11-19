@@ -469,13 +469,19 @@ def find_ms2_hits(auto_id_obj):
         logger.warning("No MS2 data found. Skipping hit detection.")
         return
 
-    unique_ms2_inchi_keys = ms2_df['inchi_key'].dropna().unique()
+    unique_ms2_inchi_keys = [
+        str(key).strip()
+        for key in ms2_df['inchi_key'].dropna().unique()
+        if str(key).strip()
+    ]
     groups = ms2_df.groupby(['mz_rt_uid', 'filename'])
 
     msms_refs_path = getattr(auto_id_obj.config, 'msms_refs_path', None) or None
     main_db_path = auto_id_obj.paths.get('main_db_path')
 
-    if msms_refs_path:
+    if not unique_ms2_inchi_keys:
+        refs_by_inchi_key = {}
+    elif msms_refs_path:
         # Analyst override: load from a specific .jsonl file on disk
         logger.info(f"MSMS refs override: loading from file {msms_refs_path}")
         refs_by_inchi_key = ldt.load_msms_refs_file(
@@ -503,6 +509,7 @@ def find_ms2_hits(auto_id_obj):
     jobs = []
     for (uid, filename), group in groups:
         inchi_key = group['inchi_key'].iloc[0] if 'inchi_key' in group.columns else ""
+        inchi_key = "" if pd.isna(inchi_key) else str(inchi_key).strip()
         ref_subset = refs_by_inchi_key.get(inchi_key, [])
         scans_data = group[['frag_mzs', 'frag_ints', 'precursor_MZ', 'precursor_intensity']].to_dict('records')
         
