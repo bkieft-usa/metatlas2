@@ -304,3 +304,29 @@ class TestLoadAtlasInputDefaults:
     def test_file_not_found_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             ldt.load_atlas_input(str(tmp_path / "nonexistent.tsv"))
+
+
+class TestCustomAtlasInput:
+    def test_missing_inchi_key_column_is_allowed_only_when_requested(self, tmp_path):
+        path = _write_tmp(
+            tmp_path,
+            "label\trt_peak\tmz\tadduct\ncustom compound\t1.5\t123.4\t[M+H]+\n",
+        )
+
+        with pytest.raises(ValueError, match="inchi_key"):
+            ldt.load_atlas_input(path)
+
+        df = ldt.load_atlas_input(path, allow_missing_inchi_key=True)
+        assert df.loc[0, "inchi_key"] == ""
+        assert df.loc[0, "label"] == "custom compound"
+
+    def test_blank_keys_do_not_group_unrelated_isotopologues(self, tmp_path):
+        path = _write_tmp(
+            tmp_path,
+            "label\tinchi_key\trt_peak\tmz\tadduct\n"
+            "Compound unlabeled\t\t2.0\t100\t[M+H]+\n"
+            "Compound 13C-labeled\t\t2.0\t200\t[M+H]+\n",
+        )
+
+        df = ldt.load_atlas_input(path, atlas_category="QC", allow_missing_inchi_key=True)
+        assert list(df["label"]) == ["Compound unlabeled", "Compound 13C-labeled"]

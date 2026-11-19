@@ -27,6 +27,13 @@ from metatlas2.run_standards_annotation import run_standards_annotation
 from metatlas2.workflow_objects import NewMsmsRefsConfig
 
 
+@pytest.fixture(autouse=True)
+def mock_standards_drive_upload(monkeypatch):
+    upload = Mock(return_value="https://drive.google.com/drive/folders/review")
+    monkeypatch.setattr("metatlas2.gdrive_upload.upload_standards_outputs", upload)
+    return upload
+
+
 def mock_alignment_model(monkeypatch):
     monkeypatch.setattr(align, "get_qc_runs_for_chrom", lambda *_args, **_kwargs: [object()])
     monkeypatch.setattr(align, "load_qc_atlas", lambda *_: SimpleNamespace(atlas_uid="qc-uid", to_dataframe=lambda: pd.DataFrame([{"x": 1}])))
@@ -163,7 +170,7 @@ def test_annotation_notes_round_trip_per_chromatography(tmp_path):
         "C18": "C18 input note", "HILIC": "HILIC input note"}
 
 
-def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_path, monkeypatch):
+def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_path, monkeypatch, mock_standards_drive_upload, capsys):
     with duckdb.connect(project) as conn:
         conn.execute(
             "INSERT INTO sa_compounds VALUES ('neg', 'A', 'key', '', '', '[M-H]-', 'NEG', 100)"
@@ -190,6 +197,8 @@ def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_p
     summary.run_standards_annotation_summary(data)
     csv = next(tmp_path.glob("outputs/annotation_run_*/StandardsAnnotation_Summary_run.csv"))
     assert pd.read_csv(csv)["Compound Label"].tolist() == ["A"]
+    mock_standards_drive_upload.assert_called_once_with(data.config, csv.parent, [csv.parent])
+    assert "https://drive.google.com/drive/folders/review" in capsys.readouterr().out
     with pytest.raises(ValueError, match="conflict"):
         db.replace_compound_selections(
             project, "A", ["c", "neg"], [("p1", "")], {}, ["C18"],
@@ -594,8 +603,51 @@ def test_alignment_does_not_create_missing_project(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "get_project_output_root", lambda _: root)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: str(root / "run.duckdb"))
     with pytest.raises(FileNotFoundError, match="project database not found"):
-        run_reverse_rt_align("config.yaml", "20260101T120000_000000Z", tags="EMA")
+        run_reverse_rt_align("config.yaml", "20260101T120000_000000Z")
     assert not root.exists()
+
+
+def test_standards_config_loads_and_validates_deposit_tags(tmp_path):
+    from metatlas2.load_tools import load_standards_config
+
+    input_file = tmp_path / "input.csv"
+    input_file.touch()
+    config = tmp_path / "config.yaml"
+    prefix = f"PROJECT:\n  standards_run_name: run\n  standards_input_file: {input_file}\n"
+    config.write_text(prefix + "TAGS:\n  atlas: [' EMA ', specific, specific]\n")
+    assert load_standards_config(str(config))["tags"]["atlas"] == ["EMA", "specific"]
+    config.write_text(prefix + "TAGS:\n  atlas: ['one;two']\n")
+    with pytest.raises(ValueError, match="semicolons"):
+        load_standards_config(str(config))
+
+
+def test_standards_config_validates_chem_source(tmp_path):
+    from metatlas2.load_tools import load_standards_config
+
+    input_file = tmp_path / "input.csv"
+    input_file.touch()
+    config = tmp_path / "config.yaml"
+    prefix = f"PROJECT:\n  standards_run_name: run\n  standards_input_file: {input_file}\n"
+    config.write_text(prefix + "  chem_source: 'Vendor 123'\n")
+    assert load_standards_config(str(config))["project"]["chem_source"] == "Vendor 123"
+    config.write_text(prefix + "  chem_source: 123\n")
+    with pytest.raises(ValueError, match="PROJECT.chem_source must be a string"):
+        load_standards_config(str(config))
+
+
+@pytest.mark.parametrize("skip", [False, True])
+def test_reverse_alignment_command_uploads_output(project, tmp_path, monkeypatch, mock_standards_drive_upload, skip):
+    config = {"project": {"standards_run_name": "run"}}
+    annotation = tmp_path / "outputs" / "annotation_run_20260101T120000_000000Z"
+    alignment = annotation / "rt_align_20260101T120001_000000Z"
+    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
+    monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
+    run = Mock(return_value=alignment)
+    monkeypatch.setattr(align, "run_reverse_rt_alignment", run)
+    run_reverse_rt_align("config.yaml", "20260101T120000_000000Z", skip_rt_alignment=skip)
+    assert run.call_args.kwargs == {"skip_rt_alignment": skip}
+    mock_standards_drive_upload.assert_called_once_with(config, annotation, [alignment])
 
 
 def test_database_helpers_load_state(project):
@@ -606,7 +658,8 @@ def test_database_helpers_load_state(project):
 
 
 def test_review_rounds_and_multiple_alignments_use_current_selections(project, tmp_path, monkeypatch):
-    config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
+    config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}},
+              "tags": {"atlas": ["EMA", "test"]}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
     data = SimpleNamespace(config=config, project_db_path=project)
@@ -629,6 +682,7 @@ def test_review_rounds_and_multiple_alignments_use_current_selections(project, t
     first_run = next(dirs[-1].glob("rt_align_*"))
     csv = first_run / "StandardsAnnotation_Summary_Aligned_run.csv"
     first = pd.read_csv(csv)
+    assert first["tags"].tolist() == ["EMA;test", "EMA;test"]
     assert first["Peak #"].tolist() == [1, 2]
     assert first["Compound Label"].tolist() == ["A (peak1)", "A (peak2)"]
     original_csv = csv.read_bytes()
@@ -1046,13 +1100,14 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
     filenames = [template.format("CE102040", 135), template.format("CE205060", 136)]
     with duckdb.connect(project) as conn:
         conn.execute("UPDATE sa_compounds SET smiles='CCO' WHERE compound_uid='c'")
+        conn.execute("UPDATE sa_peaks SET mz_observed=99 WHERE peak_uid='p1'")
         for i, filename in enumerate(filenames):
             conn.execute(
                 "INSERT INTO sa_peak_ms2 VALUES ('p1', ?, ?, ?, ?, ?, ?, ?)",
                 [1.0, 100 + i, 200 + i, 10 + i, json.dumps([50 + i]),
                  json.dumps([300 + i]), filename],
             )
-    config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
+    config = {"project": {"standards_run_name": "run", "owner": "jgi", "chem_source": "Vendor 123"}, "rt_alignment": {"C18": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
@@ -1075,7 +1130,7 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
     summary.run_standards_annotation_summary(SimpleNamespace(config=config, project_db_path=project))
     annotation_dir = next((tmp_path / "outputs").glob("annotation_run_*/.summary_complete")).parent
     timestamp = annotation_dir.name.removeprefix("annotation_run_")
-    align.run_reverse_rt_alignment("config", project, tmp_path / "outputs", timestamp, tags="EMA")
+    align.run_reverse_rt_alignment("config", project, tmp_path / "outputs", timestamp)
     alignment_dir = next(annotation_dir.glob("rt_align_*"))
     alignment_timestamp = alignment_dir.name.removeprefix("rt_align_")
     reviewed = pd.read_csv(alignment_dir / "StandardsAnnotation_Summary_Aligned_run.csv")
@@ -1090,16 +1145,24 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
     assert atlas["rt_min"].tolist() == reviewed["Aligned RT min"].tolist()
     assert atlas["rt_max"].tolist() == reviewed["Aligned RT max"].tolist()
     assert atlas["mz"].tolist() == reviewed["Theoretical m/z"].tolist()
+    assert reviewed.loc[0, "Observed m/z"] != atlas.loc[0, "mz"]
     assert atlas["mz_tolerance"].tolist() == [5, 5]
     assert atlas["tags"].tolist() == ["EMA", "EMA"]
     assert atlas["polarity"].tolist() == ["positive", "positive"]
     assert atlas["identification_notes"].tolist() == ["note; annotation", "note; annotation"]
     assert atlas["formula"].tolist() == ["C2H6O", "C2H6O"]
+    assert atlas["chem_source"].tolist() == ["Vendor 123", "Vendor 123"]
     assert atlas["lcmsrun_source"].tolist() == reviewed["Source File"].tolist()
     assert atlas["date_created"].str.fullmatch(r"\d{8}").all()
     assert atlas["date_created"].equals(atlas["date_modified"])
     assert msms.columns.tolist() == deposit.MSMS_COLUMNS
-    assert msms["collision_energy"].tolist() == [10, 11]
+    assert msms["database"].tolist() == ["metatlas", "metatlas"]
+    assert msms["id"].str.fullmatch(r"[0-9a-f]{32}").all()
+    assert msms["id"].is_unique
+    assert msms["name"].tolist() == [reviewed.loc[0, "Compound Label"]] * 2
+    assert msms["collision_energy"].tolist() == ["ramp-102040norm", "ramp-205060norm"]
+    assert msms["instrument"].tolist() == ["EXP120B", "EXP120B"]
+    assert msms["instrument_type"].tolist() == ["Orbitrap", "Orbitrap"]
     assert msms["precursor_mz"].tolist() == [100, 101]
     assert [json.loads(value) for value in msms["spectrum"]] == [[[50.0], [300.0]], [[51.0], [301.0]]]
     assert NewMsmsRefsConfig._parse_spectrum_column(msms.loc[0, "spectrum"]) == ([50.0], [300.0])
@@ -1116,10 +1179,10 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
         assert refs == []
     else:
         upload.assert_called_once()
-        assert refs == [
-            ("standards_annotation", "run_0001", "key", 100.0, 10.0, [50.0], [300.0]),
-            ("standards_annotation", "run_0002", "key", 101.0, 11.0, [51.0], [301.0]),
-        ]
+        assert sorted(refs) == sorted([
+            ("metatlas", msms.loc[0, "id"], "key", 100.0, 10.0, [50.0], [300.0]),
+            ("metatlas", msms.loc[1, "id"], "key", 101.0, 11.0, [51.0], [301.0]),
+        ])
         pd.testing.assert_frame_equal(
             upload.call_args.args[0].reset_index(drop=True), atlas, check_dtype=False,
         )
@@ -1135,7 +1198,7 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
 @pytest.mark.parametrize("skip_atlas_upload", [True, False])
 @pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
 def test_deposit_command_passes_flags(
-    project, tmp_path, monkeypatch, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit,
+    project, tmp_path, monkeypatch, mock_standards_drive_upload, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit,
 ):
     timestamp = "20260101T120000_000000Z"
     alignment_timestamp = "20260101T120001_000000Z"
@@ -1167,9 +1230,16 @@ def test_deposit_command_passes_flags(
         run_name="__main__",
     )
 
-    do_deposit.assert_called_once_with(
-        summary_path, project, "run", dry_run=dry_run, force_add=force_add,
-        skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
+    args, kwargs = do_deposit.call_args
+    assert args == (summary_path, project, "run")
+    assert {key: kwargs[key] for key in ("dry_run", "force_add", "skip_atlas_upload", "skip_msms_refs_deposit")} == {
+        "dry_run": dry_run, "force_add": force_add, "skip_atlas_upload": skip_atlas_upload,
+        "skip_msms_refs_deposit": skip_msms_refs_deposit,
+    }
+    kwargs["on_previews_created"](alignment_dir / "atlas.csv", alignment_dir / "msms.tab")
+    mock_standards_drive_upload.assert_called_once_with(
+        {"project": {"standards_run_name": "run"}}, alignment_dir.parent,
+        [alignment_dir / "atlas.csv", alignment_dir / "msms.tab"],
     )
 
 
@@ -1178,7 +1248,7 @@ def test_deposit_command_passes_flags(
 @pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
 def test_deposit_skip_flags(tmp_path, monkeypatch, dry_run, skip_atlas_upload, skip_msms_refs_deposit):
     atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
-    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_, **__: (atlas, pd.DataFrame()))
     paths = Mock(return_value={"main_db_path": "main"})
     compounds = Mock()
     upload = Mock()
@@ -1203,7 +1273,7 @@ def test_deposit_skip_flags(tmp_path, monkeypatch, dry_run, skip_atlas_upload, s
 
 def test_deposit_retry_skips_completed_atlas_upload(tmp_path, monkeypatch):
     atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
-    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_, **__: (atlas, pd.DataFrame()))
     monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", lambda **_: {"main_db_path": "main"})
     monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", Mock())
     monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys", lambda *_: {"key": "uid"})
@@ -1226,7 +1296,7 @@ def test_deposit_retry_skips_completed_atlas_upload(tmp_path, monkeypatch):
 
 def test_deposit_upload_failure_preserves_previews(tmp_path, monkeypatch):
     atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
-    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_, **__: (atlas, pd.DataFrame()))
     upload = Mock(side_effect=RuntimeError("upload failed"))
     monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", upload)
     monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", lambda **_: {"main_db_path": "main"})
@@ -1246,7 +1316,7 @@ def test_deposit_upload_failure_preserves_previews(tmp_path, monkeypatch):
 
 def test_deposit_missing_msms_preview_raises(tmp_path, monkeypatch):
     atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
-    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, pd.DataFrame()))
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_, **__: (atlas, pd.DataFrame()))
     monkeypatch.setattr("metatlas2.run_targeted_analysis.set_up_paths", lambda **_: {"main_db_path": "main"})
     monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", Mock())
     monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys", lambda *_: {"key": "uid"})
@@ -1272,6 +1342,7 @@ def test_deposit_sheet_skips_duplicate_row_identities(monkeypatch, force_add, ex
     atlas["adduct"] = ["[M+H]+", "[M+H]+", "[M+H]+", "[M+H]+", "[M+Na]+"]
     atlas["chromatography"] = "HILICZ"
     atlas["polarity"] = "positive"
+    atlas["chem_source"] = "Vendor 123"
     atlas.loc[4, "inchi_key"] = "new"
     sheet = Mock(id=123)
     sheet.row_values.return_value = deposit.ATLAS_COLUMNS
@@ -1291,6 +1362,7 @@ def test_deposit_sheet_skips_duplicate_row_identities(monkeypatch, force_add, ex
 
     appended = sheet.append_rows.call_args.args[0]
     assert [row[2] for row in appended] == expected_keys
+    assert all(row[15:17] == ["Vendor 123", ""] for row in appended)
     assert sheet.get_all_values.call_count == (0 if force_add else 1)
     assert warning.call_count == (0 if force_add else 2)
     spreadsheet.batch_update.assert_called_once()
@@ -1318,7 +1390,22 @@ def test_deposit_sheet_all_existing_does_not_append_or_sort(monkeypatch):
     spreadsheet.batch_update.assert_not_called()
 
 
-def test_deposit_imports_all_references_and_only_new_compounds(tmp_path, monkeypatch):
+@pytest.mark.parametrize("force_add", [True, False])
+def test_deposit_sheet_rejects_mismatched_header(monkeypatch, force_add):
+    atlas = pd.DataFrame([[""] * len(deposit.ATLAS_COLUMNS)], columns=deposit.ATLAS_COLUMNS)
+    sheet = Mock()
+    sheet.row_values.return_value = [column for column in deposit.ATLAS_COLUMNS if column != "chem_source"]
+    spreadsheet = Mock()
+    monkeypatch.setattr(deposit, "open_centralized_atlas_worksheet", lambda **_: (spreadsheet, sheet))
+
+    with pytest.raises(ValueError, match="header does not match"):
+        deposit.deposit_atlas_to_google_sheet(atlas, force_add=force_add)
+    sheet.append_rows.assert_not_called()
+    spreadsheet.batch_update.assert_not_called()
+
+
+@pytest.mark.parametrize("force_add", [False, True])
+def test_deposit_skips_existing_msms_pairs_and_only_imports_new_compounds(tmp_path, monkeypatch, force_add):
     import metatlas2.database_interact as dbi
     import metatlas2.pubchem_retrieval as pcr
     import metatlas2.modelseed_retrieval as msr
@@ -1337,11 +1424,16 @@ def test_deposit_imports_all_references_and_only_new_compounds(tmp_path, monkeyp
     ], columns=deposit.ATLAS_COLUMNS).fillna("")
     msms = pd.DataFrame([
         {"database": "standards_annotation", "id": f"run_{i}", "name": "one",
-         "inchi_key": key, "spectrum": "[[50, 105], [300, 400]]", "precursor_mz": 100,
+         "inchi_key": key, "adduct": adduct, "spectrum": "[[50, 105], [300, 400]]", "precursor_mz": 100,
          "polarity": "positive", "exact_mass": 46}
-        for i, key in enumerate(["existing", "new", "new"])
+        for i, (key, adduct) in enumerate([
+            ("existing", "[M+H]+"), ("existing", "[M+Na]+"), ("new", "[M+H]+"), ("new", "[M+H]+"),
+        ])
     ], columns=deposit.MSMS_COLUMNS).fillna("")
-    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (atlas, msms))
+    def prepare(*_, measured_energies, chem_source):
+        measured_energies.update({ref_id: 10.0 + i for i, ref_id in enumerate(msms["id"])})
+        return atlas, msms
+    monkeypatch.setattr(deposit, "prepare_deposit_data", prepare)
     sheet = Mock()
     monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", sheet)
     from metatlas2.workflow_objects import Compound
@@ -1349,23 +1441,39 @@ def test_deposit_imports_all_references_and_only_new_compounds(tmp_path, monkeyp
         Compound(compound_uid="", label="Original label", compound_name="original", inchi_key="existing")
     ])
     dbi.batch_save_msms_refs(str(main_db), [{
-        "inchi_key": "existing", "ref_id": "previous", "mz": [50.0], "intensities": [300.0],
+        "database": "another_source", "inchi_key": "existing", "adduct": "[M+H]+",
+        "ref_id": "previous", "mz": [50.0], "intensities": [300.0],
     }])
+    warning = Mock()
+    monkeypatch.setattr("metatlas2.workflow_objects.logger.warning", warning)
 
-    deposit.deposit_ref_standards_atlas_and_msms_refs(tmp_path / "summary.csv", "project", "run")
+    _, msms_path = deposit.deposit_ref_standards_atlas_and_msms_refs(
+        tmp_path / "summary.csv", "project", "run", force_add=force_add,
+    )
 
     with duckdb.connect(str(main_db), read_only=True) as conn:
         compounds = conn.execute(
             "SELECT inchi_key, label, compound_name FROM compounds ORDER BY inchi_key"
         ).fetchall()
-        refs = conn.execute("SELECT inchi_key, ref_id, mz, intensities FROM msms_refs ORDER BY ref_id").fetchall()
+        refs = conn.execute(
+            "SELECT inchi_key, adduct, ref_id, collision_energy, mz, intensities FROM msms_refs ORDER BY ref_id"
+        ).fetchall()
     assert compounds == [
         ("existing", "Original label", "original"),
         ("new", "two", "two"),
     ]
-    assert refs == [("existing", "previous", [50.0], [300.0]),
-                    ("existing", "run_0", [50.0], [300.0]),
-                    ("new", "run_1", [50.0], [300.0]), ("new", "run_2", [50.0], [300.0])]
+    expected = [("existing", "[M+H]+", "previous", None, [50.0], [300.0])]
+    if force_add:
+        expected.append(("existing", "[M+H]+", "run_0", 10.0, [50.0], [300.0]))
+    expected.extend([
+        ("existing", "[M+Na]+", "run_1", 11.0, [50.0], [300.0]),
+        ("new", "[M+H]+", "run_2", 12.0, [50.0], [300.0]),
+        ("new", "[M+H]+", "run_3", 13.0, [50.0], [300.0]),
+    ])
+    assert refs == expected
+    assert pd.read_csv(msms_path, sep="\t")["id"].tolist() == msms["id"].tolist()
+    duplicate_warnings = [call for call in warning.call_args_list if "existing InChIKey and adduct" in call.args[0]]
+    assert len(duplicate_warnings) == int(not force_add)
     sheet.assert_called_once()
 
 
@@ -1376,6 +1484,7 @@ def test_deposit_rejects_bad_spectrum(project, tmp_path):
         "Adduct": "[M+H]+", "Polarity": "POS", "Chromatography": "C18",
         "Theoretical m/z": "100", "Aligned RT peak": "1", "Aligned RT min": ".9",
         "Aligned RT max": "1.1", "CE102040 spectrum": "[[1], []]",
+        "tags": "EMA",
     })
     path = tmp_path / "reviewed.csv"
     pd.DataFrame([source]).to_csv(path, index=False)
@@ -1396,14 +1505,77 @@ def test_deposit_negative_polarity_and_inchi_structure(project, tmp_path):
         "Theoretical m/z": "100", "Aligned RT peak": "1", "Aligned RT min": ".9",
         "Aligned RT max": "1.1", "CE205060 spectrum": "[[51], [301]]",
         "CE205060 MS2 Precursor M/Z": "100", "CE205060 MS2 CE": "20",
+        "CE205060 MS2 Filename": (
+            "20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
+            "USHXG03401_NEG_MS2_RefStd-1_FA-CoA_1_Rg70to1050-CE205060norm-RxnMix-S1_Run136.h5"
+        ),
+        "tags": "EMA",
     })
     path = tmp_path / "reviewed.csv"
     pd.DataFrame([source]).to_csv(path, index=False)
     atlas, msms = deposit.prepare_deposit_data(path, project, "run")
+    assert atlas.loc[0, "chem_source"] == ""
     assert atlas.loc[0, "polarity"] == msms.loc[0, "polarity"] == "negative"
     assert atlas.loc[0, "chromatography"] == "HILIC"
     assert atlas.loc[0, "formula"] == msms.loc[0, "formula"] == "C2H6O"
     assert len(msms) == 1
+
+
+def test_standalone_msms_export_uses_selected_scan_metadata(project, tmp_path):
+    filename = ("20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
+                "USHXG03401_POS_MS2_RefStd-1_FA-CoA_1_Rg70to1050-CE205060norm-RxnMix-S1_Run136.h5")
+    with duckdb.connect(project) as conn:
+        conn.execute(
+            "INSERT INTO sa_peak_ms2 VALUES ('p1', ?, ?, ?, ?, ?, ?, ?)",
+            [1.0, 100, 200, 30, json.dumps([50]), json.dumps([300]), filename],
+        )
+    tab = summary.export_msms_refs_tab(project, tmp_path, "run")
+    refs = pd.read_csv(tab, sep="\t")
+    assert refs["name"].tolist() == ["A (peak1)"]
+    assert refs["database"].tolist() == ["metatlas"]
+    assert refs["id"].str.fullmatch(r"[0-9a-f]{32}").all()
+    assert refs["collision_energy"].tolist() == ["ramp-205060norm"]
+    assert refs["instrument"].tolist() == ["EXP120B"]
+    assert refs["instrument_type"].tolist() == ["Orbitrap"]
+
+
+@pytest.mark.parametrize("filename", [
+    "invalid.h5",
+    "20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
+    "USHXG03401_NEG_MS2_RefStd-1_FA-CoA_1_Rg70to1050-CE205060-RxnMix-S1_Run136.h5",
+    "20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
+    "USHXG03401_NEG_MS2_RefStd-1_FA-CoA_1_Rg70to1050-CE102040norm-RxnMix-S1_Run136.h5",
+])
+def test_deposit_rejects_bad_or_mismatched_ms2_filename(project, tmp_path, filename):
+    source = {column: "" for column in deposit.SUMMARY_COLUMNS}
+    source.update({
+        "Compound Label": "A", "Compound Name": "A", "InChIKey": "key",
+        "Adduct": "[M+H]+", "Polarity": "POS", "Chromatography": "C18",
+        "Theoretical m/z": "100", "Aligned RT peak": "1", "Aligned RT min": ".9",
+        "Aligned RT max": "1.1", "CE205060 spectrum": "[[51], [301]]",
+        "CE205060 MS2 Precursor M/Z": "100", "CE205060 MS2 CE": "20",
+        "CE205060 MS2 Filename": filename, "tags": "EMA",
+    })
+    path = tmp_path / "reviewed.csv"
+    pd.DataFrame([source]).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="filename"):
+        deposit.prepare_deposit_data(path, project, "run")
+
+
+def test_drive_failure_blocks_deposit_and_preserves_previews(tmp_path, monkeypatch):
+    atlas = pd.DataFrame([{"label": "A", "inchi_key": "key"}])
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_, **__: (atlas, pd.DataFrame()))
+    sheet = Mock()
+    monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", sheet)
+    def fail_upload(*_):
+        raise RuntimeError("Drive unavailable")
+    with pytest.raises(RuntimeError, match="Drive unavailable"):
+        deposit.deposit_ref_standards_atlas_and_msms_refs(
+            tmp_path / "summary.csv", "db", "run", on_previews_created=fail_upload,
+        )
+    sheet.assert_not_called()
+    assert (tmp_path / "Atlas_Deposit_Preview_run.csv").is_file()
+    assert (tmp_path / "MsmsRefs_Deposit_Preview_run.tab").is_file()
 
 
 def test_deposit_reports_empty_spectrum_and_does_not_replace_previews(tmp_path, monkeypatch):
@@ -1411,7 +1583,7 @@ def test_deposit_reports_empty_spectrum_and_does_not_replace_previews(tmp_path, 
     monkeypatch.setattr(deposit.logger, "warning", lambda message, *args: warnings.append(message % args))
     assert deposit._spectrum("[[], []]", "CE102040", 2) is None
     assert any("Empty CE102040 spectrum" in message for message in warnings)
-    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_: (pd.DataFrame(), pd.DataFrame()))
+    monkeypatch.setattr(deposit, "prepare_deposit_data", lambda *_, **__: (pd.DataFrame(), pd.DataFrame()))
     existing = tmp_path / "MsmsRefs_Deposit_Preview_run.tab"
     existing.write_text("existing")
     with pytest.raises(FileExistsError):
@@ -1620,3 +1792,62 @@ def test_deposit_shell_dispatches_arguments(
     if runtime == "docker":
         assert f"{tmp_path}:{tmp_path}:ro" in args
         assert "Downloading" not in result.stdout
+
+
+@pytest.mark.parametrize("runtime", ["docker", "shifter"])
+@pytest.mark.parametrize("skip", [False, True])
+def test_reverse_shell_dispatches_arguments(runtime, skip, tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for executable in ("dirname", "basename", "id", "cat"):
+        (bin_dir / executable).symlink_to(shutil.which(executable))
+    calls = tmp_path / "calls"
+    shim = bin_dir / runtime
+    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$TEST_CALLS"\n')
+    shim.chmod(0o755)
+    data = tmp_path / "data"
+    db_dir = data / "databases" / "main_db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "metatlas.duckdb").touch()
+    (db_dir / ".zenodo_version").write_text("https://doi.org/10.5281/zenodo.22968291\n")
+    config = tmp_path / "config with spaces.yaml"
+    config.touch()
+    env = dict(os.environ, PATH=str(bin_dir), METATLAS_DATA_DIR=str(data), TEST_CALLS=str(calls))
+    script = Path(__file__).resolve().parents[1] / "scripts" / "metatlas2.sh"
+    command = ["/bin/bash", str(script), "reverse-rt-align", "--config_path", str(config),
+               "--annotation_timestamp", "20260101T120000_000000Z"]
+    if skip:
+        command.append("--skip_rt_alignment")
+    subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+    expected = ["/app/.venv/bin/python", "-m", "metatlas2.run_reverse_rt_align",
+                "--config_path", str(config), "--annotation_timestamp", "20260101T120000_000000Z"]
+    if skip:
+        expected.append("--skip_rt_alignment")
+    assert calls.read_text().splitlines()[-len(expected):] == expected
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_docker_jupyter_mounts_external_standards_config(tmp_path, inline):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for executable in ("dirname", "basename", "id", "cat"):
+        (bin_dir / executable).symlink_to(shutil.which(executable))
+    calls = tmp_path / "calls"
+    docker = bin_dir / "docker"
+    docker.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$TEST_CALLS"\n')
+    docker.chmod(0o755)
+    data = tmp_path / "data"
+    db_dir = data / "databases" / "main_db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "metatlas.duckdb").touch()
+    (db_dir / ".zenodo_version").write_text("https://doi.org/10.5281/zenodo.22968291\n")
+    config = tmp_path / "config with spaces.yaml"
+    config.touch()
+    env = dict(os.environ, PATH=str(bin_dir), METATLAS_DATA_DIR=str(data), TEST_CALLS=str(calls))
+    script = Path(__file__).resolve().parents[1] / "scripts" / "metatlas2.sh"
+    args = [f"--config_path={config}"] if inline else ["--config_path", str(config)]
+    subprocess.run(["/bin/bash", str(script), "jupyter", *args], env=env, capture_output=True, text=True, check=True)
+    docker_args = calls.read_text().splitlines()
+    assert f"{tmp_path}:{tmp_path}:ro" in docker_args
+    key = Path("/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json")
+    assert (f"{key}:{key}:ro" in docker_args) == key.is_file()
