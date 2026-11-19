@@ -235,6 +235,17 @@ Open the generated notebook in JupyterHub with its `metatlas2 (latest)` kernel a
 the cells up through the GUI cell. The notebook reloads the project database;
 its generated `RUN_PARAMS` should not need editing.
 
+For an existing notebook generated before the notebook-only workflow, update
+its imports to use the implementation modules:
+
+```python
+from metatlas2.standards_annotation_rt_align import run_reverse_rt_align
+from metatlas2.deposit_ref_standards_atlas_and_msms_refs import run_atlas_and_msms_deposit
+```
+
+Existing notebooks can also pass `upload_to_gdrive=False` to each summary,
+alignment, or deposit call to skip that stage's Drive upload.
+
 1. For each compound, examine each chromatography and polarity: EICs and
    candidate markers, the target-compound TIC, blank, and **Show MS2 Scans**
    where available. Use the linear/log control as needed. Checklist labels
@@ -266,9 +277,11 @@ outputs/annotation_run_<annotation_timestamp>/
   .summary_complete
 ```
 
-The cell uploads the entire annotation directory to Google Drive and prints
-the link to that `annotation_run_<annotation_timestamp>` folder. Send this
-link to the supervisor and review the CSV and PDFs before proceeding.
+By default, the cell uploads the entire annotation directory to Google Drive
+and logs the link to that `annotation_run_<annotation_timestamp>` folder.
+Set `UPLOAD_SUMMARY_TO_GDRIVE = False` in the summary parameters cell to
+skip this upload. Share the outputs with the supervisor and review the CSV
+and PDFs before proceeding.
 The CSV contains one row per selected peak, notes, MS1 source, and separate
 CE102040/CE205060 MS2 fields. Spectra are `[[m/z values], [intensities]]`;
 missing scans leave empty fields. Selected peaks are numbered by measured RT
@@ -326,7 +339,8 @@ outputs; approve the particular alignment to deposit. If intentionally
 skipping alignment is appropriate, set `SKIP_RT_ALIGNMENT = True` in the
 alignment parameters cell and rerun it; aligned RTs then equal measured RTs
 and no model plots are produced. The
-alignment directory is uploaded into the same Drive annotation folder.
+alignment directory is uploaded into the same Drive annotation folder by
+default; set `UPLOAD_ALIGNMENT_TO_GDRIVE = False` to skip this upload.
 Alignment does not itself write an atlas to the main database.
 
 ## 8. Preview and deposit the atlas and references
@@ -337,9 +351,11 @@ the **approved** alignment timestamp, without the directory prefix. Keep
 Run the deposit parameters cell and then the deposit cell. `DRY_RUN` defaults
 to `True`.
 
-The dry run writes the following next to the chosen aligned summary and
-uploads them to the same Drive alignment folder, without depositing to the
-sheet or changing the main database:
+The dry run writes the following next to the chosen aligned summary and,
+by default, uploads them to the same Drive alignment folder, without
+depositing to the sheet or changing the main database. Set
+`UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE = False` to skip the preview
+upload independently of the sheet and database deposit options:
 
 * `Atlas_Deposit_Preview_<standards_run_name>.csv`: aligned RTs,
   theoretical m/z, 5 ppm m/z tolerance, tags from the aligned summary,
