@@ -47,10 +47,11 @@ def test_standards_notebook_passes_reviewed_timestamps_and_options(tmp_path):
         if cell.cell_type == "markdown" and cell.source.startswith("## Step ")
     ]
     assert step_headers == [
-        "## Step 1: Annotation GUI",
-        "## Step 2: Annotation Summary",
-        "## Step 3: Reverse RT Alignment",
-        "## Step 4: Upload and Deposit Atlas and MSMS Refs",
+        "## Step 0: Load Data",
+        "## Step 1: Peak Selection GUI",
+        "## Step 2: Annotation Summary (run after completing peak selection in GUI)",
+        "## Step 3: Reverse RT Alignment (run after peak selections are reviewed)",
+        "## Step 4: Upload and Deposit Atlas and MSMS Refs (run after peak selections and alignment are approved)",
     ]
 
     imports = ast.parse(notebook.cells[1].source)
@@ -66,8 +67,8 @@ def test_standards_notebook_passes_reviewed_timestamps_and_options(tmp_path):
         ("metatlas2.load_tools", "load_standards_config"),
         ("metatlas2.logging_config", "setup_logging"),
         ("metatlas2.logging_config", "get_logger"),
-        ("metatlas2.run_reverse_rt_align", "run_reverse_rt_align"),
-        ("metatlas2.run_atlas_and_msms_deposit", "run_atlas_and_msms_deposit"),
+        ("metatlas2.standards_annotation_rt_align", "run_reverse_rt_align"),
+        ("metatlas2.deposit_ref_standards_atlas_and_msms_refs", "run_atlas_and_msms_deposit"),
     } == imported_functions
 
     def command_index(name):
@@ -99,17 +100,22 @@ def test_standards_notebook_passes_reviewed_timestamps_and_options(tmp_path):
     exec(notebook.cells[2].source, namespace)
     assert "ANNOTATION_TIMESTAMP" not in namespace
     assert "ALIGNMENT_TIMESTAMP" not in namespace
-    exec(notebook.cells[3].source, namespace)
+    exec(notebook.cells[command_index("load_extraction_from_db")].source, namespace)
     exec(notebook.cells[command_index("build_standards_annotation_gui")].source, namespace)
+    summary_params = next(cell for cell in notebook.cells if "UPLOAD_SUMMARY_TO_GDRIVE = " in cell.source)
+    exec(summary_params.source, namespace)
+    assert namespace["UPLOAD_SUMMARY_TO_GDRIVE"] is True
+    namespace["UPLOAD_SUMMARY_TO_GDRIVE"] = False
     exec(notebook.cells[summary_index].source, namespace)
     load_config.assert_called_once_with(config_path)
     load_data.assert_called_once_with(str(tmp_path / "project.duckdb"), {"configured": True})
     gui.assert_called_once_with(data="loaded data", config={"configured": True})
-    summary.assert_called_once_with(data="loaded data", config={"configured": True})
+    summary.assert_called_once_with(data="loaded data", config={"configured": True}, upload_to_gdrive=False)
 
     exec(alignment_params.source, namespace)
     assert namespace["ANNOTATION_TIMESTAMP"] == ""
     assert namespace["SKIP_RT_ALIGNMENT"] is False
+    assert namespace["UPLOAD_ALIGNMENT_TO_GDRIVE"] is True
     assert "ALIGNMENT_TIMESTAMP" not in namespace
     assert "DRY_RUN" not in namespace
     exec(deposit_params.source, namespace)
@@ -118,6 +124,7 @@ def test_standards_notebook_passes_reviewed_timestamps_and_options(tmp_path):
     assert namespace["FORCE_ADD"] is False
     assert namespace["SKIP_ATLAS_UPLOAD"] is False
     assert namespace["SKIP_MSMS_REFS_DEPOSIT"] is False
+    assert namespace["UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE"] is True
 
     namespace.update(
         ANNOTATION_TIMESTAMP="20260101T120000_000000Z",
@@ -127,11 +134,14 @@ def test_standards_notebook_passes_reviewed_timestamps_and_options(tmp_path):
         FORCE_ADD=True,
         SKIP_ATLAS_UPLOAD=True,
         SKIP_MSMS_REFS_DEPOSIT=True,
+        UPLOAD_ALIGNMENT_TO_GDRIVE=False,
+        UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE=False,
     )
     exec(notebook.cells[alignment_index].source, namespace)
     exec(notebook.cells[deposit_index].source, namespace)
     align.assert_called_once_with(
         config_path=config_path, timestamp="20260101T120000_000000Z", skip_rt_alignment=True,
+        upload_to_gdrive=False,
     )
     deposit.assert_called_once_with(
         config_path=config_path,
@@ -141,4 +151,5 @@ def test_standards_notebook_passes_reviewed_timestamps_and_options(tmp_path):
         force_add=True,
         skip_atlas_upload=True,
         skip_msms_refs_deposit=True,
+        upload_to_gdrive=False,
     )

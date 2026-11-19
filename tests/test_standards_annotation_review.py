@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import runpy
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -21,8 +19,8 @@ from metatlas2 import standards_annotation_rt_align as align
 from metatlas2 import standards_annotation_summary as summary
 from metatlas2 import standards_annotation_tools as tools
 from metatlas2 import deposit_ref_standards_atlas_and_msms_refs as deposit
-from metatlas2.run_atlas_and_msms_deposit import run_atlas_and_msms_deposit
-from metatlas2.run_reverse_rt_align import run_reverse_rt_align
+from metatlas2.deposit_ref_standards_atlas_and_msms_refs import run_atlas_and_msms_deposit
+from metatlas2.standards_annotation_rt_align import run_reverse_rt_align
 from metatlas2.run_standards_annotation import run_standards_annotation
 from metatlas2.workflow_objects import NewMsmsRefsConfig
 
@@ -170,7 +168,8 @@ def test_annotation_notes_round_trip_per_chromatography(tmp_path):
         "C18": "C18 input note", "HILIC": "HILIC input note"}
 
 
-def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_path, monkeypatch, mock_standards_drive_upload, capsys):
+@pytest.mark.parametrize("upload_to_gdrive", [False, True])
+def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_path, monkeypatch, mock_standards_drive_upload, upload_to_gdrive):
     with duckdb.connect(project) as conn:
         conn.execute(
             "INSERT INTO sa_compounds VALUES ('neg', 'A', 'key', '', '', '[M-H]-', 'NEG', 100)"
@@ -185,7 +184,7 @@ def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_p
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
     with pytest.raises(ValueError, match=r"A \| C18 \| NEG"):
-        summary.run_standards_annotation_summary(data)
+        summary.run_standards_annotation_summary(data, upload_to_gdrive=upload_to_gdrive)
     assert not (tmp_path / "outputs").exists()
 
     db.replace_compound_selections(
@@ -194,11 +193,13 @@ def test_no_good_choices_persist_and_summary_requires_every_group(project, tmp_p
     )
     assert set(db.load_no_good_peaks(project, "A")) == {("C18", "NEG"), ("HILIC", "POS")}
     db.validate_annotation_choices(project)
-    summary.run_standards_annotation_summary(data)
+    summary.run_standards_annotation_summary(data, upload_to_gdrive=upload_to_gdrive)
     csv = next(tmp_path.glob("outputs/annotation_run_*/StandardsAnnotation_Summary_run.csv"))
     assert pd.read_csv(csv)["Compound Label"].tolist() == ["A"]
-    mock_standards_drive_upload.assert_called_once_with(data.config, csv.parent, [csv.parent])
-    assert "https://drive.google.com/drive/folders/review" in capsys.readouterr().out
+    if upload_to_gdrive:
+        mock_standards_drive_upload.assert_called_once_with(data.config, csv.parent, [csv.parent])
+    else:
+        mock_standards_drive_upload.assert_not_called()
     with pytest.raises(ValueError, match="conflict"):
         db.replace_compound_selections(
             project, "A", ["c", "neg"], [("p1", "")], {}, ["C18"],
@@ -636,7 +637,8 @@ def test_standards_config_validates_chem_source(tmp_path):
 
 
 @pytest.mark.parametrize("skip", [False, True])
-def test_reverse_alignment_command_uploads_output(project, tmp_path, monkeypatch, mock_standards_drive_upload, skip):
+@pytest.mark.parametrize("upload_to_gdrive", [False, True])
+def test_reverse_alignment_uploads_output(project, tmp_path, monkeypatch, mock_standards_drive_upload, skip, upload_to_gdrive):
     config = {"project": {"standards_run_name": "run"}}
     annotation = tmp_path / "outputs" / "annotation_run_20260101T120000_000000Z"
     alignment = annotation / "rt_align_20260101T120001_000000Z"
@@ -645,9 +647,13 @@ def test_reverse_alignment_command_uploads_output(project, tmp_path, monkeypatch
     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
     run = Mock(return_value=alignment)
     monkeypatch.setattr(align, "run_reverse_rt_alignment", run)
-    run_reverse_rt_align("config.yaml", "20260101T120000_000000Z", skip_rt_alignment=skip)
+    run_reverse_rt_align("config.yaml", "20260101T120000_000000Z", skip_rt_alignment=skip,
+                         upload_to_gdrive=upload_to_gdrive)
     assert run.call_args.kwargs == {"skip_rt_alignment": skip}
-    mock_standards_drive_upload.assert_called_once_with(config, annotation, [alignment])
+    if upload_to_gdrive:
+        mock_standards_drive_upload.assert_called_once_with(config, annotation, [alignment])
+    else:
+        mock_standards_drive_upload.assert_not_called()
 
 
 def test_database_helpers_load_state(project):
@@ -1197,8 +1203,9 @@ def test_deposit_prepares_reviewed_alignment_and_spectra(project, tmp_path, monk
 @pytest.mark.parametrize("force_add", [True, False])
 @pytest.mark.parametrize("skip_atlas_upload", [True, False])
 @pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
-def test_deposit_command_passes_flags(
-    project, tmp_path, monkeypatch, mock_standards_drive_upload, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit,
+@pytest.mark.parametrize("upload_to_gdrive", [False, True])
+def test_deposit_passes_flags(
+    project, tmp_path, monkeypatch, mock_standards_drive_upload, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit, upload_to_gdrive,
 ):
     timestamp = "20260101T120000_000000Z"
     alignment_timestamp = "20260101T120001_000000Z"
@@ -1213,21 +1220,10 @@ def test_deposit_command_passes_flags(
     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
     do_deposit = Mock(return_value=(tmp_path / "atlas.csv", tmp_path / "msms.tab"))
     monkeypatch.setattr(deposit, "deposit_ref_standards_atlas_and_msms_refs", do_deposit)
-    args = ["metatlas2.run_atlas_and_msms_deposit", "--config_path", "config",
-            "--annotation_timestamp", timestamp, "--alignment_timestamp", alignment_timestamp]
-    if dry_run:
-        args.append("--dry_run")
-    if force_add:
-        args.append("--force_add")
-    if skip_atlas_upload:
-        args.append("--skip_atlas_upload")
-    if skip_msms_refs_deposit:
-        args.append("--skip_msms_refs_deposit")
-    monkeypatch.setattr(sys, "argv", args)
-
-    runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "metatlas2" / "run_atlas_and_msms_deposit.py"),
-        run_name="__main__",
+    run_atlas_and_msms_deposit(
+        "config", timestamp, alignment_timestamp, dry_run=dry_run, force_add=force_add,
+        skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
+        upload_to_gdrive=upload_to_gdrive,
     )
 
     args, kwargs = do_deposit.call_args
@@ -1236,11 +1232,15 @@ def test_deposit_command_passes_flags(
         "dry_run": dry_run, "force_add": force_add, "skip_atlas_upload": skip_atlas_upload,
         "skip_msms_refs_deposit": skip_msms_refs_deposit,
     }
-    kwargs["on_previews_created"](alignment_dir / "atlas.csv", alignment_dir / "msms.tab")
-    mock_standards_drive_upload.assert_called_once_with(
-        {"project": {"standards_run_name": "run"}}, alignment_dir.parent,
-        [alignment_dir / "atlas.csv", alignment_dir / "msms.tab"],
-    )
+    if upload_to_gdrive:
+        kwargs["on_previews_created"](alignment_dir / "atlas.csv", alignment_dir / "msms.tab")
+        mock_standards_drive_upload.assert_called_once_with(
+            {"project": {"standards_run_name": "run"}}, alignment_dir.parent,
+            [alignment_dir / "atlas.csv", alignment_dir / "msms.tab"],
+        )
+    else:
+        assert kwargs["on_previews_created"] is None
+        mock_standards_drive_upload.assert_not_called()
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
@@ -1738,92 +1738,6 @@ def test_deposit_reports_empty_spectrum_and_does_not_replace_previews(tmp_path, 
 #     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
 #     with pytest.raises(ValueError, match="timestamp"):
 #         run_atlas_and_msms_deposit("config", timestamp, alignment_timestamp)
-
-
-@pytest.mark.parametrize("runtime", ["docker", "shifter"])
-@pytest.mark.parametrize("dry_run", [True, False])
-@pytest.mark.parametrize("force_add", [True, False])
-@pytest.mark.parametrize("skip_atlas_upload", [True, False])
-@pytest.mark.parametrize("skip_msms_refs_deposit", [True, False])
-def test_deposit_shell_dispatches_arguments(
-    runtime, tmp_path, dry_run, force_add, skip_atlas_upload, skip_msms_refs_deposit,
-):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for executable in ("dirname", "basename", "id"):
-        (bin_dir / executable).symlink_to(shutil.which(executable))
-    calls = tmp_path / "calls"
-    shim = bin_dir / runtime
-    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$TEST_CALLS"\n')
-    shim.chmod(0o755)
-    data = tmp_path / "data"
-    data.mkdir()
-    config = tmp_path / "config with spaces.yaml"
-    config.write_text("")
-    env = dict(os.environ, PATH=str(bin_dir), METATLAS_DATA_DIR=str(data), TEST_CALLS=str(calls))
-    script = Path(__file__).resolve().parents[1] / "scripts" / "metatlas2.sh"
-    command = ["/bin/bash", str(script), "atlas-msms-deposit", "--config_path", str(config),
-               "--annotation_timestamp", "20260101T120000_000000Z",
-               "--alignment_timestamp", "20260101T120001_000000Z"]
-    if dry_run:
-        command.append("--dry_run")
-    if force_add:
-        command.append("--force_add")
-    if skip_atlas_upload:
-        command.append("--skip_atlas_upload")
-    if skip_msms_refs_deposit:
-        command.append("--skip_msms_refs_deposit")
-    result = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
-    args = calls.read_text().splitlines()
-    expected = [
-        "/app/.venv/bin/python", "-m", "metatlas2.run_atlas_and_msms_deposit",
-        "--config_path", str(config), "--annotation_timestamp", "20260101T120000_000000Z",
-        "--alignment_timestamp", "20260101T120001_000000Z",
-    ]
-    if dry_run:
-        expected.append("--dry_run")
-    if force_add:
-        expected.append("--force_add")
-    if skip_atlas_upload:
-        expected.append("--skip_atlas_upload")
-    if skip_msms_refs_deposit:
-        expected.append("--skip_msms_refs_deposit")
-    assert args[-len(expected):] == expected
-    if runtime == "docker":
-        assert f"{tmp_path}:{tmp_path}:ro" in args
-        assert "Downloading" not in result.stdout
-
-
-@pytest.mark.parametrize("runtime", ["docker", "shifter"])
-@pytest.mark.parametrize("skip", [False, True])
-def test_reverse_shell_dispatches_arguments(runtime, skip, tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for executable in ("dirname", "basename", "id", "cat"):
-        (bin_dir / executable).symlink_to(shutil.which(executable))
-    calls = tmp_path / "calls"
-    shim = bin_dir / runtime
-    shim.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$TEST_CALLS"\n')
-    shim.chmod(0o755)
-    data = tmp_path / "data"
-    db_dir = data / "databases" / "main_db"
-    db_dir.mkdir(parents=True)
-    (db_dir / "metatlas.duckdb").touch()
-    (db_dir / ".zenodo_version").write_text("https://doi.org/10.5281/zenodo.22968291\n")
-    config = tmp_path / "config with spaces.yaml"
-    config.touch()
-    env = dict(os.environ, PATH=str(bin_dir), METATLAS_DATA_DIR=str(data), TEST_CALLS=str(calls))
-    script = Path(__file__).resolve().parents[1] / "scripts" / "metatlas2.sh"
-    command = ["/bin/bash", str(script), "reverse-rt-align", "--config_path", str(config),
-               "--annotation_timestamp", "20260101T120000_000000Z"]
-    if skip:
-        command.append("--skip_rt_alignment")
-    subprocess.run(command, env=env, capture_output=True, text=True, check=True)
-    expected = ["/app/.venv/bin/python", "-m", "metatlas2.run_reverse_rt_align",
-                "--config_path", str(config), "--annotation_timestamp", "20260101T120000_000000Z"]
-    if skip:
-        expected.append("--skip_rt_alignment")
-    assert calls.read_text().splitlines()[-len(expected):] == expected
 
 
 @pytest.mark.parametrize("inline", [False, True])
