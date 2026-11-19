@@ -22,6 +22,12 @@ Complete the one-time environment setup described in [initial_setup.md](initial_
 metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml
 ```
 
+For analyst-defined compounds without database InChIKeys, add `--custom`:
+
+```bash
+metatlas2.sh add-atlases --config_path /path/to/create_atlases.yaml --custom
+```
+
 The `metatlas2.sh` wrapper runs the command inside a Shifter (NERSC) or Docker (local) container. Shifter auto-mounts all NERSC GPFS filesystems read-write, so the script can write to `metatlas.duckdb`.
 
 ### Arguments
@@ -29,6 +35,7 @@ The `metatlas2.sh` wrapper runs the command inside a Shifter (NERSC) or Docker (
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--config_path` | Yes | — | Path to the atlas YAML config file (e.g. `configs/create_atlases.yaml`). |
+| `--custom` | No | Off | Allow atlas rows without a database-matching InChIKey. Rows with recognized keys continue to reference their existing compounds; missing or unrecognized keys are stored as unique custom compounds with blank InChIKeys. |
 
 ### Related subcommands
 
@@ -127,11 +134,19 @@ Each file must be a **tab-separated (TSV)** or **comma-separated (CSV)** table. 
 
 | Column | Description |
 |---|---|
-| `inchi_key` | Standard InChIKey identifier (e.g. `BPGDAMSIGCZZLK-UHFFFAOYSA-N`). |
+| `inchi_key` | Standard InChIKey identifier (e.g. `BPGDAMSIGCZZLK-UHFFFAOYSA-N`). Required unless `--custom` is used. |
 | `label` | Canonical compound name used for display. |
 | `rt_peak` | Expected retention time at peak apex (minutes). |
 | `mz` | Expected precursor m/z value. |
 | `adduct` | Ion adduct (e.g. `[M+H]+`, `[M-H]-`, `[M+NH4]+`). |
+
+With `--custom`, the `inchi_key` column may be omitted or cells may be blank.
+Nonblank keys found in the compounds table are still linked to those existing
+compounds. A nonblank key that is not found is treated as keyless; each such
+row receives its own compound record and UID. The other required atlas columns,
+including `label`, remain required. Key-based metadata and MS/MS reference
+lookups are skipped for rows with blank InChIKeys, while UID-based workflow
+processing continues normally.
 
 The optional `compound_name` column stores vendor-provided naming and does not
 replace `label`. Legacy files with only `compound_name` use it as the label.

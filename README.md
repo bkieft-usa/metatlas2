@@ -67,6 +67,11 @@ See **[add_compounds_to_db.md](docs/add_compounds_to_db.md)**, **[add_atlases_to
 
 See **[run_anywhere.md](docs/run_anywhere.md)** for complete details.
 
+### Managing centralized atlas tags
+
+See **[update_centralized_atlas_tags.md](docs/update_centralized_atlas_tags.md)** for
+instructions on managing tags in the shared Google Sheet.
+
 ### Standalone Development Mode
 
 See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for complete details.
@@ -87,6 +92,7 @@ See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for 
 |----------|-------------|
 | **[add_compounds_to_db.md](docs/add_compounds_to_db.md)** | Add compounds to the central database with PubChem metadata retrieval |
 | **[add_atlases_to_db.md](docs/add_atlases_to_db.md)** | Create and manage reference atlases for targeted analysis |
+| **[update_centralized_atlas_tags.md](docs/update_centralized_atlas_tags.md)** | Retrieve and update tags in the centralized atlas Google Sheet |
 | **[run_targeted_analysis.md](docs/run_targeted_analysis.md)** | Main workflow execution: project setup, RT alignment, and auto identification |
 | **[manual_curation_and_summary.md](docs/manual_curation_and_summary.md)** | Interactive GUI for manual peak curation and summary generation |
 | **[standards_annotation_workflow.md](docs/standards_annotation_workflow.md)** | Analyst guide to standards annotation, review, alignment, and atlas/MS/MS deposition |
