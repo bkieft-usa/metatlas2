@@ -640,16 +640,22 @@ def test_standards_config_validates_chem_source(tmp_path):
 @pytest.mark.parametrize("upload_to_gdrive", [False, True])
 def test_reverse_alignment_uploads_output(project, tmp_path, monkeypatch, mock_standards_drive_upload, skip, upload_to_gdrive):
     config = {"project": {"standards_run_name": "run"}}
-    annotation = tmp_path / "outputs" / "annotation_run_20260101T120000_000000Z"
-    alignment = annotation / "rt_align_20260101T120001_000000Z"
+    annotation_timestamp = "20260101T120000_000000Z"
+    alignment_timestamp = "20260101T120001_000000Z"
+    annotation = tmp_path / "outputs" / f"annotation_run_{annotation_timestamp}"
+    alignment = annotation / f"rt_align_{alignment_timestamp}"
     monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
-    run = Mock(return_value=alignment)
+    run = Mock(return_value=(alignment, alignment_timestamp))
     monkeypatch.setattr(align, "run_reverse_rt_alignment", run)
-    run_reverse_rt_align("config.yaml", "20260101T120000_000000Z", skip_rt_alignment=skip,
+    display = Mock()
+    monkeypatch.setattr(align, "display", display)
+    run_reverse_rt_align("config.yaml", annotation_timestamp, skip_rt_alignment=skip,
                          upload_to_gdrive=upload_to_gdrive)
     assert run.call_args.kwargs == {"skip_rt_alignment": skip}
+    assert annotation_timestamp in display.call_args_list[0].args[0].data
+    assert alignment_timestamp in display.call_args_list[1].args[0].data
     if upload_to_gdrive:
         mock_standards_drive_upload.assert_called_once_with(config, annotation, [alignment])
     else:
@@ -684,8 +690,10 @@ def test_review_rounds_and_multiple_alignments_use_current_selections(project, t
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     mock_alignment_model(monkeypatch)
     out = tmp_path / "outputs"
-    align.run_reverse_rt_alignment("config", project, out, timestamp)
+    alignment_dir, alignment_timestamp = align.run_reverse_rt_alignment("config", project, out, timestamp)
     first_run = next(dirs[-1].glob("rt_align_*"))
+    assert alignment_dir == first_run
+    assert first_run.name == f"rt_align_{alignment_timestamp}"
     csv = first_run / "StandardsAnnotation_Summary_Aligned_run.csv"
     first = pd.read_csv(csv)
     assert first["tags"].tolist() == ["EMA;test", "EMA;test"]
