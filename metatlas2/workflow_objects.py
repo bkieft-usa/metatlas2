@@ -657,7 +657,7 @@ class NewMsmsRefsConfig:
                     if energy_overrides is None and row.get('collision_energy', '').startswith('ramp-'):
                         logger.warning(
                             "Row %s: ramp collision energy cannot be stored in the numeric database column; "
-                            "import through atlas-msms-deposit to retain measured energy.", row_num,
+                            "import through the standards annotation deposit notebook to retain measured energy.", row_num,
                         )
                     try:
                         # Optional database filter

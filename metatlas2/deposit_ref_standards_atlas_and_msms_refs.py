@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import uuid
 from collections.abc import Callable
@@ -22,10 +23,59 @@ from metatlas2.atlas_sheet import (
     open_centralized_atlas_worksheet,
 )
 from metatlas2.logging_config import get_logger
+import metatlas2.logging_config as lcf
 from metatlas2.file_and_project_format import msms_reference_file_metadata
+from metatlas2.standards_annotation_review import TIMESTAMP_PATTERN, review_directory
 from metatlas2.standards_annotation_tools import STANDARD_CE_LABELS
 
 logger = get_logger("deposit_ref_standards_atlas_and_msms_refs")
+
+
+def run_atlas_and_msms_deposit(
+    config_path: str, annotation_timestamp: str, alignment_timestamp: str,
+    dry_run: bool = False, force_add: bool = False,
+    skip_atlas_upload: bool = False, skip_msms_refs_deposit: bool = False,
+    upload_to_gdrive: bool = True,
+) -> tuple[Path, Path]:
+    """Prepare previews and optionally upload them and deposit the reviewed standards."""
+    from metatlas2.gdrive_upload import upload_standards_outputs
+    from metatlas2.load_tools import load_standards_config
+    from metatlas2.standards_annotation_db import get_project_db_path, get_project_output_root
+
+    config = load_standards_config(str(Path(config_path).resolve()))
+    output_root = get_project_output_root(config)
+    db_path = get_project_db_path(config)
+    if not output_root.is_dir() or not Path(db_path).is_file():
+        raise FileNotFoundError(f"Standards annotation project database not found: {db_path}")
+    if not TIMESTAMP_PATTERN.fullmatch(alignment_timestamp):
+        raise ValueError("Invalid alignment timestamp; use the timestamp printed by reverse alignment.")
+    run_name = config["project"]["standards_run_name"]
+    alignment_dir = review_directory(output_root, annotation_timestamp) / f"rt_align_{alignment_timestamp}"
+    summary_path = alignment_dir / f"StandardsAnnotation_Summary_Aligned_{run_name}.csv"
+    if not summary_path.is_file():
+        raise FileNotFoundError(f"Aligned summary not found: {summary_path}")
+
+    log_dir = output_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with lcf.temporary_logging(
+        log_level=logging.INFO,
+        log_file=str(log_dir / "atlas_and_msms_deposit.log"),
+        log_to_stdout=True,
+        reconfigure_existing=False,
+    ):
+        on_previews_created: Callable[[Path, Path], None] | None = None
+        if upload_to_gdrive:
+            def upload_previews(atlas: Path, msms: Path) -> None:
+                upload_standards_outputs(config, alignment_dir.parent, [atlas, msms])
+            on_previews_created = upload_previews
+
+        return deposit_ref_standards_atlas_and_msms_refs(
+            summary_path, db_path, run_name, dry_run=dry_run, force_add=force_add,
+            skip_atlas_upload=skip_atlas_upload, skip_msms_refs_deposit=skip_msms_refs_deposit,
+            chem_source=config["project"].get("chem_source", ""),
+            on_previews_created=on_previews_created,
+        )
+
 
 MSMS_COLUMNS = [
     "database", "id", "name", "spectrum", "decimal", "precursor_mz", "polarity",

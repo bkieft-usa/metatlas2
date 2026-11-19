@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from IPython.display import display, HTML
 
 import matplotlib
 matplotlib.use("Agg")
@@ -860,6 +861,7 @@ def run_standards_annotation_summary(
     data: "StandardsAnnotationData",
     config: dict[str, Any] | None = None,
     max_workers: int = 4,
+    upload_to_gdrive: bool = True,
 ) -> None:
     """Generate all post-annotation summary outputs.
 
@@ -867,6 +869,8 @@ def run_standards_annotation_summary(
     ``load_selected_peaks_with_ms2()`` and generates:
       - Per-compound PDF figures (one per chrom+pol with selections)
       - Summary CSV table
+
+    Set ``upload_to_gdrive`` to False to keep the outputs local.
     """
     if config is None:
         config = data.config
@@ -905,7 +909,9 @@ def run_standards_annotation_summary(
     )
 
     (outputs_dir / ".summary_complete").touch(exist_ok=False)
-    logger.info(f"Summary outputs written to {outputs_dir}; timestamp: {timestamp}")
-    from metatlas2.gdrive_upload import upload_standards_outputs
-    url = upload_standards_outputs(config, outputs_dir, [outputs_dir])
-    print(f"Standards annotation review folder: {url}")
+    logger.info(f"Summary outputs written to {outputs_dir}")
+    if upload_to_gdrive:
+        from metatlas2.gdrive_upload import upload_standards_outputs
+        upload_standards_outputs(config, outputs_dir, [outputs_dir])
+
+    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>Annotation timestamp: {timestamp}</div>"))

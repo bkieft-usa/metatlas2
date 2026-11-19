@@ -89,6 +89,22 @@ _SPECIAL_HANDLERS = {
     "lfc_directional_min": "_handle_lfc_directional_min",
 }
 
+def _num_series(df, col):
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce")
+    return pd.Series(pd.NA, index=df.index, dtype="Float64")
+
+def _numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([pd.NA] * len(df), index=df.index, dtype="Float64")
+    return pd.to_numeric(df[col], errors="coerce").astype("Float64")
+
+def _str_col(df, col, default=""):
+    """Return a string Series for *col*, or a Series of *default* when the column is absent."""
+    if col in df.columns:
+        return df[col]
+    return pd.Series(default, index=df.index, dtype="object")
+
 def _build_schema_map_df(str_cols: list[str], float_cols: list[str], table_name: str) -> pd.DataFrame:
     """Schema map for a single dataset grain (compound_file or compound_lfc).
 
@@ -456,8 +472,8 @@ def _build_compound_per_file_table(
     if "best_ms2_spectrum_rt_mz" not in merged.columns:
         merged["best_ms2_spectrum_rt_mz"] = ""
 
-    atlas_mz_num = pd.to_numeric(merged.get("atlas_mz"), errors="coerce")
-    best_ms2_mz_num = pd.to_numeric(merged.get("best_ms2_mz"), errors="coerce")
+    atlas_mz_num = _num_series(merged, "atlas_mz")
+    best_ms2_mz_num = _num_series(merged, "best_ms2_mz")
     valid_mz = atlas_mz_num.notna() & (atlas_mz_num != 0) & best_ms2_mz_num.notna()
     merged["best_ms2_mz_ppm_error"] = np.where(
         valid_mz,
@@ -650,18 +666,6 @@ def _build_compound_lfc_table(
             if mc_col in long_df.columns:
                 long_df[col] = long_df[col].where(long_df[col].notna() & (long_df[col].astype(str) != ""), long_df[mc_col])
                 long_df.drop(columns=[mc_col], inplace=True, errors="ignore")
-
-        def _numeric_col(df, col):
-            """Return a numeric Series for *col*, or an all-NaN Series when the column is absent."""
-            if col in df.columns:
-                return pd.to_numeric(df[col], errors="coerce")
-            return pd.Series(np.nan, index=df.index, dtype="float64")
-
-        def _str_col(df, col, default=""):
-            """Return a string Series for *col*, or a Series of *default* when the column is absent."""
-            if col in df.columns:
-                return df[col]
-            return pd.Series(default, index=df.index, dtype="object")
 
         # Best-MS2 payload and errors.
         best_ms2_df = _build_best_ms2_summary_df(summary_obj)

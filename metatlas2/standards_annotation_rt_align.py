@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from IPython.display import display, HTML
 
 import matplotlib
 matplotlib.use("Agg")
@@ -48,6 +50,47 @@ from metatlas2.standards_annotation_review import (
 )
 
 logger = lcf.get_logger("standards_annotation_rt_align")
+
+
+def run_reverse_rt_align(
+    config_path: str, 
+    timestamp: str, 
+    skip_rt_alignment: bool = False,
+    upload_to_gdrive: bool = True,
+) -> None:
+    """Run reverse alignment for a project and optionally upload its outputs."""
+    from metatlas2.gdrive_upload import upload_standards_outputs
+    from metatlas2.load_tools import load_standards_config
+    from metatlas2.standards_annotation_db import get_project_db_path, get_project_output_root
+
+    config_path = str(Path(config_path).resolve())
+    config = load_standards_config(config_path)
+    output_root = get_project_output_root(config)
+    db_path = get_project_db_path(config)
+    if not output_root.is_dir() or not Path(db_path).is_file():
+        raise FileNotFoundError(
+            f"Standards annotation project database not found: {db_path}. "
+            "Run standards-annotation and generate a summary first."
+        )
+    log_dir = output_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with lcf.temporary_logging(
+        log_level=logging.INFO,
+        log_file=str(log_dir / "reverse_rt_align.log"),
+        log_to_stdout=True,
+        reconfigure_existing=False,
+    ):
+        logger.info("Reverse RT alignment starting for config: %s", config_path)
+        alignment_dir, alignment_timestamp = run_reverse_rt_alignment(
+            config_path, db_path, output_root / "outputs", timestamp,
+            skip_rt_alignment=skip_rt_alignment,
+        )
+        if upload_to_gdrive:
+            upload_standards_outputs(config, alignment_dir.parent, [alignment_dir])
+
+    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>Annotation timestamp: {timestamp}</div>"))
+    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>Alignment timestamp: {alignment_timestamp}</div>"))
+
 
 # Config helpers
 
@@ -731,7 +774,6 @@ def run_reverse_rt_alignment(
     alignment_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     alignment_dir = annotation_dir / f"rt_align_{alignment_timestamp}"
     alignment_dir.mkdir(parents=False, exist_ok=False)
-    logger.info(f"Alignment timestamp: {alignment_timestamp}; outputs: {alignment_dir}")
 
     # --- Align each chromatography (or pass through unchanged) ---
     model_plots: list[tuple[str, pd.DataFrame, dict]] = []
@@ -792,4 +834,4 @@ def run_reverse_rt_alignment(
             raise
 
     logger.info(f"Reverse RT alignment complete. Outputs: {alignment_dir}")
-    return alignment_dir
+    return alignment_dir, alignment_timestamp

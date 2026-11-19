@@ -11,8 +11,6 @@
 #   metatlas2 [--image TAG] [--dev] add-atlases --config_path FILE [--custom]
 #   metatlas2 [--image TAG] [--dev] add-msms-refs --config_path FILE
 #   metatlas2 [--image TAG] [--dev] standards-annotation --config_path FILE
-#   metatlas2 [--image TAG] [--dev] reverse-rt-align --config_path FILE --annotation_timestamp TIMESTAMP [--skip_rt_alignment]
-#   metatlas2 [--image TAG] [--dev] atlas-msms-deposit --config_path FILE --annotation_timestamp TIMESTAMP --alignment_timestamp TIMESTAMP [--dry_run] [--force_add] [--skip_atlas_upload] [--skip_msms_refs_deposit]
 #   metatlas2 [--image TAG] [--dev] get-atlases fetch --atlas_uids UID1,UID2 [--output_path PATH]
 #   metatlas2 [--image TAG] [--dev] get-atlases query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
 #   metatlas2 [--image TAG] [--dev] get-db-table --table-name NAME [--output_path PATH] [--database_path PATH]
@@ -251,7 +249,7 @@ TAG_INPUT_MOUNT=""
 if [[ "${RUNTIME}" == "docker" ]]; then
     IS_STANDARDS=false
     case "${SUBCOMMAND}" in
-        standards-annotation|reverse-rt-align|atlas-msms-deposit|jupyter) IS_STANDARDS=true ;;
+        standards-annotation|jupyter) IS_STANDARDS=true ;;
     esac
 
     CONFIG_PATH="" CONFIG_IDX="" CONFIG_INLINE=false
@@ -336,7 +334,7 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
     fi
 else
     # Docker (local macOS / non-NERSC HPC): ensure main DuckDB is present and current.
-    if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "atlas-msms-deposit" && "${SUBCOMMAND}" != "update-tags" ]]; then
+    if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "update-tags" ]]; then
         MAIN_DB_DIR="${METATLAS_DATA_DIR}/databases/main_db"
         MAIN_DB_PATH="${MAIN_DB_DIR}/metatlas.duckdb"
 
@@ -501,24 +499,6 @@ case "${SUBCOMMAND}" in
         shifter "${SHIFTER_ARGS[@]}" --entrypoint \
             "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
         sbatch "${TMPSCRIPT}"
-        ;;
-
-    atlas-msms-deposit)
-        if [[ "${RUNTIME}" == "docker" ]]; then
-            ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-            if [[ -f "${ATLAS_KEY}" ]] && ! _has_flag --dry_run "${SUB_ARGS[@]}" && ! _has_flag --skip_atlas_upload "${SUB_ARGS[@]}"; then
-                DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
-            fi
-        fi
-        run_in_container /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${SUB_ARGS[@]}"
-        ;;
-
-    reverse-rt-align)
-        if [[ "${RUNTIME}" == "docker" ]]; then
-            ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-            [[ ! -f "${ATLAS_KEY}" ]] || DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
-        fi
-        run_in_container /app/.venv/bin/python -m metatlas2.run_reverse_rt_align "${SUB_ARGS[@]}"
         ;;
 
     add-compounds|add-atlases|add-msms-refs|get-atlases|get-db-table|standards-annotation)

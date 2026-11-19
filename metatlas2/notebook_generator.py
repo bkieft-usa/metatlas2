@@ -543,17 +543,17 @@ def generate_standards_annotation_notebook(
         _sa_nb_header_cell(run_name),
         _sa_nb_imports_cell(),
         _sa_nb_run_params_cell(run_params),
+        nbformat.v4.new_markdown_cell("## Step 0: Load Data"),
         _sa_nb_data_cell(),
-        nbformat.v4.new_markdown_cell("## Step 1: Annotation GUI"),
+        nbformat.v4.new_markdown_cell("## Step 1: Peak Selection GUI"),
         _sa_nb_gui_cell(),
-        nbformat.v4.new_markdown_cell("## Step 2: Annotation Summary"),
+        nbformat.v4.new_markdown_cell("## Step 2: Annotation Summary (run after completing peak selection in GUI)"),
+        _sa_nb_summary_params_cell(),
         _sa_nb_summary_cell(),
-        nbformat.v4.new_markdown_cell("## Step 3: Reverse RT Alignment"),
+        nbformat.v4.new_markdown_cell("## Step 3: Reverse RT Alignment (run after peak selections are reviewed)"),
         _sa_nb_alignment_params_cell(),
         _sa_nb_alignment_cell(),
-        nbformat.v4.new_markdown_cell(
-            "## Step 4: Upload and Deposit Atlas and MSMS Refs"
-        ),
+        nbformat.v4.new_markdown_cell("## Step 4: Upload and Deposit Atlas and MSMS Refs (run after peak selections and alignment are approved)"),
         _sa_nb_deposit_params_cell(),
         _sa_nb_deposit_cell(),
     ]
@@ -580,8 +580,8 @@ def _sa_nb_imports_cell() -> "nbformat.NotebookNode":
         "from metatlas2.standards_annotation_db import load_extraction_from_db\n"
         "from metatlas2.standards_annotation_gui import build_standards_annotation_gui\n"
         "from metatlas2.standards_annotation_summary import run_standards_annotation_summary\n"
-        "from metatlas2.run_reverse_rt_align import run_reverse_rt_align\n"
-        "from metatlas2.run_atlas_and_msms_deposit import run_atlas_and_msms_deposit\n"
+        "from metatlas2.standards_annotation_rt_align import run_reverse_rt_align\n"
+        "from metatlas2.deposit_ref_standards_atlas_and_msms_refs import run_atlas_and_msms_deposit\n"
         "from metatlas2.load_tools import load_standards_config\n"
         "from metatlas2.logging_config import get_logger, setup_logging\n"
         "setup_logging(log_level=logging.INFO, log_to_stdout=True)\n"
@@ -600,7 +600,7 @@ def _sa_nb_run_params_cell(run_params: dict) -> "nbformat.NotebookNode":
 
 def _sa_nb_data_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Load extracted data from the project DB.\n"
+        "# Load configuration file and extracted data from the project DB.\n"
         "config = load_standards_config(RUN_PARAMS['config_path'])\n"
         "data = load_extraction_from_db(RUN_PARAMS['project_db_path'], config)"
     )
@@ -608,7 +608,7 @@ def _sa_nb_data_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Launch the annotation GUI. Click 'Save & Exit' when done.\n"
+        "# Launch the annotation GUI. Click 'Save & Exit' when done to ensure all changes are saved.\n"
         "build_standards_annotation_gui(\n"
         "    data=data,\n"
         "    config=config"
@@ -617,12 +617,19 @@ def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
     return nbformat.v4.new_code_cell(src)
 
 
+def _sa_nb_summary_params_cell() -> "nbformat.NotebookNode":
+    src = (
+        "UPLOAD_SUMMARY_TO_GDRIVE = True # If True, upload the summary report (figures, summary table) to Google Drive after generating it."
+    )
+    return nbformat.v4.new_code_cell(src)
+
 def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Generate a new timestamped annotation run with figures and a CSV table.\n"
+        "# Generate a new timestamped annotation summary with figures and table to review.\n"
         "run_standards_annotation_summary(\n"
         "    data=data,\n"
         "    config=config,\n"
+        "    upload_to_gdrive=UPLOAD_SUMMARY_TO_GDRIVE\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)
@@ -630,19 +637,21 @@ def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_alignment_params_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Set the approved summary timestamp before running alignment.\n"
-        "ANNOTATION_TIMESTAMP = ''\n"
-        "SKIP_RT_ALIGNMENT = False"
+        "ANNOTATION_TIMESTAMP = '' # Required: Set the approved summary timestamp before running alignment.\n"
+        "UPLOAD_ALIGNMENT_TO_GDRIVE = True # If True, upload the alignment results (model, aligned data table) to Google Drive.\n"
+        "SKIP_RT_ALIGNMENT = False # If True, do not align measured retention times to QC atlas space."
     )
     return nbformat.v4.new_code_cell(src)
 
 
 def _sa_nb_alignment_cell() -> "nbformat.NotebookNode":
     src = (
+        "# Run reverse RT alignment to align measured RTs to historical (QC) RT space with above parameters.\n"
         "run_reverse_rt_align(\n"
         "    config_path=RUN_PARAMS['config_path'],\n"
         "    timestamp=ANNOTATION_TIMESTAMP,\n"
         "    skip_rt_alignment=SKIP_RT_ALIGNMENT,\n"
+        "    upload_to_gdrive=UPLOAD_ALIGNMENT_TO_GDRIVE,\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)
@@ -650,19 +659,20 @@ def _sa_nb_alignment_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_deposit_params_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Set the approved alignment timestamp before running deposit.\n"
-        "# Review the dry-run previews before setting DRY_RUN = False.\n"
-        "ALIGNMENT_TIMESTAMP = ''\n"
-        "DRY_RUN = True\n"
-        "FORCE_ADD = False\n"
-        "SKIP_ATLAS_UPLOAD = False\n"
-        "SKIP_MSMS_REFS_DEPOSIT = False"
+        "ANNOTATION_TIMESTAMP = '' # Required: Set the approved annotation timestamp before running deposit.\n"
+        "ALIGNMENT_TIMESTAMP = '' # Required: Set the approved alignment timestamp before running deposit. Must be an alignment within the above annotation run.\n"
+        "UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE = True # If True, upload the atlas and MSMS references to Google Drive for preview.\n"
+        "DRY_RUN = True # If True, generate but do not upload/deposit the atlas table and MSMS references (useful for final review).\n"
+        "FORCE_ADD = False # If True, force add new peaks and MSMS references even if they already exist for a given InChIKey+adduct.\n"
+        "SKIP_ATLAS_UPLOAD = False # If True, the generated atlas will not be uploaded and added to the centralized atlas Google Sheet.\n"
+        "SKIP_MSMS_REFS_DEPOSIT = False # If True, the generated MSMS references will not be deposited to the Metatlas database."
     )
     return nbformat.v4.new_code_cell(src)
 
 
 def _sa_nb_deposit_cell() -> "nbformat.NotebookNode":
     src = (
+        "# Run the atlas and MSMS references deposit workflow with above parameters.\n"
         "run_atlas_and_msms_deposit(\n"
         "    config_path=RUN_PARAMS['config_path'],\n"
         "    annotation_timestamp=ANNOTATION_TIMESTAMP,\n"
@@ -671,6 +681,7 @@ def _sa_nb_deposit_cell() -> "nbformat.NotebookNode":
         "    force_add=FORCE_ADD,\n"
         "    skip_atlas_upload=SKIP_ATLAS_UPLOAD,\n"
         "    skip_msms_refs_deposit=SKIP_MSMS_REFS_DEPOSIT,\n"
+        "    upload_to_gdrive=UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)
