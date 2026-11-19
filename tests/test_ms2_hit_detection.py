@@ -16,6 +16,9 @@ Tested functions
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -29,6 +32,7 @@ from metatlas2.ms2_hit_detection import (
     _filter_out_ms2_data,
     _no_match_alignment,
     _process_compound_batch,
+    find_ms2_hits,
 )
 
 from conftest import ADENINE_MZ, ADENINE_RT
@@ -120,6 +124,60 @@ def _ms1_df(uid: str) -> pd.DataFrame:
         "spec_mzs":   [ADENINE_MZ],
         "in_feature": [True],
     }])
+
+
+def test_keyless_ms2_scans_skip_reference_lookup(monkeypatch):
+    import metatlas2.ms2_hit_detection as ms2_detection
+
+    def unexpected_lookup(*_args, **_kwargs):
+        raise AssertionError("Keyless scans must not look up MS/MS references.")
+
+    monkeypatch.setattr(ms2_detection.ldt, "load_msms_refs_from_db", unexpected_lookup)
+    monkeypatch.setattr(ms2_detection.ldt, "load_msms_refs_file", unexpected_lookup)
+    monkeypatch.setattr(ms2_detection, "ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr(ms2_detection, "get_max_workers", lambda _workers: 1)
+
+    dataset = SimpleNamespace(
+        ms2_df=pd.DataFrame([{
+            "mz_rt_uid": "keyless-mzrt",
+            "filename": "sample.h5",
+            "inchi_key": "",
+            "adduct": "[M+H]+",
+            "scan_rt": 1.0,
+            "frag_mzs": [50.0],
+            "frag_ints": [100.0],
+            "precursor_MZ": 100.0,
+            "precursor_intensity": 1000.0,
+            "collision_energy": 20.0,
+            "in_feature": True,
+            "hits": [],
+        }]),
+        ms1_df=pd.DataFrame(),
+    )
+    auto_id_obj = SimpleNamespace(
+        experimental_data=dataset,
+        ta=SimpleNamespace(
+            polarity="POS",
+            params={
+                "ms2_min_score": 0,
+                "ms2_min_matching_frags": 0,
+                "keep_top_scan_per_compound_file": False,
+            },
+        ),
+        polarity="POS",
+        config=SimpleNamespace(
+            msms_refs_path=None,
+            msms_refs_db_filter=None,
+            max_workers=1,
+        ),
+        paths={"main_db_path": None},
+    )
+
+    find_ms2_hits(auto_id_obj)
+
+    assert len(dataset.ms2_df) == 1
+    assert dataset.ms2_df.loc[0, "inchi_key"] == ""
+    assert dataset.ms2_df.loc[0, "hits"] == []
 
 
 # ===========================================================================

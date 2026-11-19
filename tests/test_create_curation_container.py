@@ -344,6 +344,22 @@ class TestBuildIsomerDict:
         assert any(iso["mz_rt_uid"] == c2.mz_rt_uid for iso in result[c1.mz_rt_uid])
         assert any(iso["mz_rt_uid"] == c1.mz_rt_uid for iso in result[c2.mz_rt_uid])
 
+    def test_blank_inchi_keys_do_not_match_as_isomers(self):
+        c1 = _make_compound_mzrt(
+            mz=100.0, rt_peak=1.0, rt_min=0.5, rt_max=1.5,
+            inchi_key="", label="custom one",
+        )
+        c2 = _make_compound_mzrt(
+            mz=200.0, rt_peak=2.0, rt_min=1.5, rt_max=2.5,
+            inchi_key="", label="custom two",
+        )
+        atlas = _make_atlas([c1, c2])
+
+        result = _build_isomer_dict(atlas)
+
+        assert result[c1.mz_rt_uid] == []
+        assert result[c2.mz_rt_uid] == []
+
     def test_similar_mz_detected_as_isomer(self):
         """Two entries within 5 mDa of each other are flagged as isomers."""
         c1 = _make_compound_mzrt(

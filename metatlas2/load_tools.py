@@ -702,6 +702,7 @@ def _inchi_key_prefix(inchi_key: str) -> str:
 def load_atlas_input(
     file_path: str,
     atlas_category: "str | None" = None,
+    allow_missing_inchi_key: bool = False,
 ) -> pd.DataFrame:
     """Load atlas input file, validate required columns, and sort rows.
 
@@ -732,8 +733,14 @@ def load_atlas_input(
 
     if 'label' not in df.columns and 'compound_name' in df.columns:
         df['label'] = df['compound_name']
-    required_columns = ['inchi_key', 'label', 'rt_peak', 'mz', 'adduct']
+    required_columns = ['label', 'rt_peak', 'mz', 'adduct']
+    if not allow_missing_inchi_key:
+        required_columns.insert(0, 'inchi_key')
     check_missing_columns(df, required_columns)
+    if allow_missing_inchi_key:
+        if 'inchi_key' not in df.columns:
+            df['inchi_key'] = ''
+        df['inchi_key'] = df['inchi_key'].fillna('').astype(str).str.strip()
 
     # Add default values for optional columns
     if 'rt_min' not in df.columns:
@@ -773,7 +780,7 @@ def sort_atlas_input_dataframe(
         grp = df.groupby(group_cols)['_is_labeled']
         has_labeled   = grp.transform('any')
         has_unlabeled = grp.transform(lambda s: (~s).any())
-        mixed_group   = has_labeled & has_unlabeled
+        mixed_group   = has_labeled & has_unlabeled & df['_ik_prefix'].ne('')
 
         df['_labeled_priority'] = 0
         df.loc[mixed_group & ~df['_is_labeled'], '_labeled_priority'] = 1
@@ -964,6 +971,8 @@ def load_standards_config(config_path: str) -> dict[str, Any]:
         raise FileNotFoundError(
             f"standards_input_file not found: {project['standards_input_file']}"
         )
+    if "chem_source" in project and not isinstance(project["chem_source"], str):
+        raise ValueError("PROJECT.chem_source must be a string.")
 
     # Apply defaults for optional sections
     config.setdefault("extraction", {})
@@ -976,6 +985,12 @@ def load_standards_config(config_path: str) -> dict[str, Any]:
     config["extraction"].setdefault("max_workers", 4)
 
     config.setdefault("gui", {})
+    tags = config.setdefault("tags", {"atlas": ["EMA"]})
+    if not isinstance(tags, dict) or "atlas" not in tags:
+        raise ValueError("TAGS must be a mapping containing 'atlas'.")
+    tags["atlas"] = normalize_atlas_tags(tags["atlas"], "TAGS.atlas")
+    if any(";" in tag for tag in tags["atlas"]):
+        raise ValueError("TAGS.atlas entries cannot contain semicolons.")
 
     logger.info(f"Loaded standards annotation config from {config_path}")
     return config

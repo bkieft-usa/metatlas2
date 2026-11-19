@@ -1,7 +1,8 @@
 PROJECT:
-  standards_run_name: McGuiness_SorghSwg_11032026
+  standards_run_name: McGuiness_SorghSwg
   standards_input_file: /global/cfs/cdirs/metatlas/tools/metatlas2/configs/example_configs/standards_annotation/example_standards_input.csv
   owner: jgi
+  chem_source: ""
 
   include_polarities:
     - POS
@@ -41,6 +42,12 @@ EXTRACTION:
 GUI:
   gui_width: 35
   gui_height: 20
+
+TAGS:
+  atlas: [EMA, McGuiness]
+
+GDRIVE:
+  root_folder_id: 0B-ZDcHbPi-aqZzE5V3hOZFc0dms
 
 RT_ALIGNMENT:
   HILIC:

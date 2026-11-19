@@ -38,6 +38,18 @@ def _row(**overrides) -> dict[str, str]:
     return row
 
 
+def test_read_sheet_preserves_chem_source_with_reordered_columns(monkeypatch):
+    row = _row(chem_source="Vendor 123", lcmsrun_source="run.h5")
+    header = list(reversed(atlas_sheet.ATLAS_COLUMNS))
+    sheet = SimpleNamespace(get_all_values=lambda: [header, [row[column] for column in header]])
+    monkeypatch.setattr(atlas_sheet, "open_centralized_atlas_worksheet", lambda **_: (None, sheet))
+
+    result = atlas_sheet.read_centralized_atlas_sheet()
+
+    assert result.loc[0, "chem_source"] == "Vendor 123"
+    assert result.loc[0, "lcmsrun_source"] == "run.h5"
+
+
 def test_select_centralized_atlas_rows_uses_exact_tag_tokens_and_or_semantics():
     rows = pd.DataFrame([
         _row(tags="EMA; ISTD"),

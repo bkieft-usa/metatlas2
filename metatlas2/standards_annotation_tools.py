@@ -14,12 +14,14 @@ import metatlas2.lcmsruns_tools as lrt
 import metatlas2.logging_config as lcf
 import metatlas2.extract_data_from_h5 as edh
 import metatlas2.workflow_objects as wfo
+from metatlas2.standards_annotation_checks import validate_neutral_inchi_key
 from metatlas2.chem_info import (
     DEFAULT_ADDUCTS,
     calc_exact_mass_from_smiles_or_inchi,
     get_precursor_mz,
     load_adducts_dict,
     resolve_inchi_and_inchi_key,
+    smiles_to_inchi,
 )
 
 logger = lcf.get_logger("standards_annotation_tools")
@@ -216,6 +218,14 @@ def build_standards_lcmsrun_table(
 
         # Derive InChI and InChIKey from SMILES/InChI when not provided in CSV
         smiles, inchi, inchi_key = resolve_inchi_and_inchi_key(smiles, inchi, inchi_key)
+        validate_neutral_inchi_key(str(row.get("compound_name", "unknown")), inchi, inchi_key)
+        if smiles:
+            try:
+                smiles_inchi = smiles_to_inchi(smiles)
+            except ValueError as exc:
+                raise ValueError(f"Invalid SMILES for '{row.get('compound_name', 'unknown')}': {exc}") from exc
+            if smiles_inchi != inchi:
+                validate_neutral_inchi_key(str(row.get("compound_name", "unknown")), smiles_inchi, inchi_key)
 
         exact_masses.append(mass)
         smiles_resolved.append(smiles)
@@ -495,10 +505,10 @@ def associate_peak_ms2(peak: dict, expanded_table: pd.DataFrame, ms2_df: pd.Data
         ] if not ms2_df.empty else pd.DataFrame()
         scan = pick_best_ms2_scan(scans, peak["rt_peak"])
         if scan is None:
-            logger.warning("No usable MS2 scan for %s in %s", peak["peak_uid"], filename)
+            logger.warning(f"No usable MS2 scan in {peak['polarity']} mode for {peak['compound_name']} ({peak['adduct']}) in {filename}")
             continue
         if not _frag_list(scan.get("frag_mzs")) or not _frag_list(scan.get("frag_ints")):
-            logger.warning("Closest MS2 scan for %s in %s has no fragment data", peak["peak_uid"], filename)
+            logger.warning(f"Closest MS2 scan in {peak['polarity']} mode for {peak['compound_name']} ({peak['adduct']}) in {filename} has no fragment data")
         precursor_col = "precursor_MZ" if "precursor_MZ" in scans.columns else "precursor_mz"
         associations.append({
             "peak_uid": peak["peak_uid"],
@@ -554,7 +564,7 @@ def detect_and_save_peaks(
         if len(filenames) > 2:
             raise ValueError(f"More than two files for {group}: {filenames}")
         if len(filenames) == 1:
-            logger.warning("Only one file for %s: %s", group, filenames[0])
+            logger.warning(f"Only one file for {group}: {filenames[0]}")
 
     if ms1_df is None or ms1_df.empty:
         logger.warning("No MS1 data available for peak detection.")

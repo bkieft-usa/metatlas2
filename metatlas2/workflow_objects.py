@@ -394,7 +394,7 @@ class NewAtlasesConfig:
                     for atlas_name, entry in name_dict.items():
                         yield chrom, pol, cat_key, atlas_name, entry
 
-    def execute(self) -> None:
+    def execute(self, *, custom: bool = False) -> None:
         """Create all atlases defined in this config and save them to the main database.
 
         This is the entry-point for ``metatlas2.sh add-atlases``.  It replaces
@@ -420,7 +420,14 @@ class NewAtlasesConfig:
                 atlas_compounds_df = ldt.load_atlas_input(
                     entry.path,
                     atlas_category=entry.atlas_category.value,
+                    allow_missing_inchi_key=custom,
                 )
+                custom_compounds = []
+                if custom:
+                    atlas_compounds_df, custom_compounds = dbi.prepare_custom_atlas_compounds(
+                        atlas_compounds_df,
+                        main_db_path,
+                    )
                 atlas_obj = dbi.create_new_atlas_from_dataframe(
                     atlas_df=atlas_compounds_df,
                     atlas_description=entry.desc,
@@ -429,9 +436,14 @@ class NewAtlasesConfig:
                     chromatography=chrom,
                     polarity=pol,
                     atlas_file_path=entry.path,
-                    main_db_path=main_db_path
+                    main_db_path=main_db_path,
+                    use_input_compound_uids=custom,
                 )
-                dbi.save_atlas_to_database(atlas_obj, main_db_path)
+                dbi.save_atlas_to_database(
+                    atlas_obj,
+                    main_db_path,
+                    custom_compounds=custom_compounds,
+                )
                 logger.info(f"Successfully created atlas: {atlas_obj.atlas_uid}")
                 atlases.append(atlas_obj)
                 summary.append({
@@ -575,7 +587,7 @@ class NewMsmsRefsConfig:
             return None
         return v
 
-    def execute(self) -> None:
+    def execute(self, *, skip_existing_inchi_adduct: bool = False) -> None:
         """Read each source ``.tab`` file and bulk-insert spectra into the main DB."""
 
         paths = rtg.set_up_paths(config=self)
@@ -588,6 +600,7 @@ class NewMsmsRefsConfig:
         for entry in self.entries:
             source_path = Path(entry['path'])
             db_filter = entry.get('database_filter')
+            energy_overrides = entry.get('collision_energy_by_ref_id')
 
             if not source_path.exists():
                 logger.error(f"MSMS refs source file not found: {source_path}. Skipping.")
@@ -599,9 +612,26 @@ class NewMsmsRefsConfig:
                 + "..."
             )
 
-            # 1. Pre-calculate total lines for an accurate tqdm progress bar
-            with source_path.open('r') as f:
-                total_rows = sum(1 for _ in f) - 1
+            existing_pairs = set()
+            if skip_existing_inchi_adduct:
+                # Snapshot existing pairs before inserting any spectra from this file.
+                with source_path.open('r', newline='') as f:
+                    reader = csv.DictReader(f, delimiter='\t')
+                    input_keys = set()
+                    total_rows = 0
+                    for row in reader:
+                        total_rows += 1
+                        input_keys.add(row.get('inchi_key', '').strip())
+                if input_keys:
+                    with dbi.get_db_connection(main_db_path, read_only=True) as conn:
+                        existing_pairs = set(conn.execute(
+                            "SELECT DISTINCT inchi_key, NULLIF(TRIM(adduct), '') FROM msms_refs "
+                            "WHERE inchi_key IN (SELECT unnest(?))",
+                            [list(input_keys)],
+                        ).fetchall())
+            else:
+                with source_path.open('r') as f:
+                    total_rows = sum(1 for _ in f) - 1
 
             records: list[dict] = []
             n_skipped = 0
@@ -616,6 +646,19 @@ class NewMsmsRefsConfig:
                     total=total_rows, 
                     desc=f"Importing {source_path.name}"
                 ):
+                    if energy_overrides is not None and row.get('id') not in energy_overrides:
+                        raise ValueError(f"Missing measured collision energy for MS/MS reference in row {row_num}.")
+                    if skip_existing_inchi_adduct:
+                        identity = (row.get('inchi_key', '').strip(), self._str_or_none(row.get('adduct', '')))
+                        if identity in existing_pairs:
+                            logger.warning("Skipping MS/MS reference with existing InChIKey and adduct: %s", identity)
+                            n_skipped += 1
+                            continue
+                    if energy_overrides is None and row.get('collision_energy', '').startswith('ramp-'):
+                        logger.warning(
+                            "Row %s: ramp collision energy cannot be stored in the numeric database column; "
+                            "import through the standards annotation deposit notebook to retain measured energy.", row_num,
+                        )
                     try:
                         # Optional database filter
                         if db_filter and row.get('database') != db_filter:
@@ -652,7 +695,10 @@ class NewMsmsRefsConfig:
                             'polarity': self._str_or_none(row.get('polarity', '')),
                             'adduct': self._str_or_none(row.get('adduct', '')),
                             'fragmentation_method': self._str_or_none(row.get('fragmentation_method', '')),
-                            'collision_energy': self._parse_float_or_none(row.get('collision_energy', '')),
+                            'collision_energy': (
+                                energy_overrides[row['id']] if energy_overrides is not None
+                                else self._parse_float_or_none(row.get('collision_energy', ''))
+                            ),
                             'instrument': self._str_or_none(row.get('instrument', '')),
                             'instrument_type': self._str_or_none(row.get('instrument_type', '')),
                             'formula': self._str_or_none(row.get('formula', '')),

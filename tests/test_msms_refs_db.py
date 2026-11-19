@@ -388,6 +388,31 @@ class TestNewMsmsRefsConfig:
             ).fetchone()[0]
         assert count == 3
 
+    @pytest.mark.parametrize("existing_adduct", [None, ""])
+    def test_execute_skips_all_existing_pairs_with_blank_adduct(self, tmp_path, monkeypatch, existing_adduct):
+        db_path = _make_db(tmp_path)
+        existing = _sample_records(1)
+        existing[0]["adduct"] = existing_adduct
+        dbi.batch_save_msms_refs(db_path, existing)
+        tab_path = tmp_path / "refs.tab"
+        _write_tab(tab_path, [_tab_record(ref_id="one"), _tab_record(ref_id="two")])
+        monkeypatch.setattr(
+            "metatlas2.run_targeted_analysis.set_up_paths",
+            lambda config, **kw: {"main_db_path": db_path},
+        )
+        warnings = []
+        monkeypatch.setattr(
+            "metatlas2.workflow_objects.logger.warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+
+        NewMsmsRefsConfig(entries=[{"path": str(tab_path)}]).execute(skip_existing_inchi_adduct=True)
+
+        with dbi.get_db_connection(db_path, read_only=True) as conn:
+            assert conn.execute("SELECT ref_id FROM msms_refs").fetchall() == [("ref_0000",)]
+        assert len(warnings) == 2
+        assert all("existing InChIKey and adduct" in message for message in warnings)
+
     def test_execute_ref_id_and_mass_mapping(self, tmp_path, monkeypatch):
         """execute() maps 'id' → ref_id and 'exact_mass' → mono_isotopic_molecular_weight."""
         db_path = _make_db(tmp_path)

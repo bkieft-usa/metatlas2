@@ -1317,6 +1317,98 @@ class TestAddAtlases:
         assert atlas.atlas_uid == uid
         assert len(atlas.compound_mzrts) == 2
 
+    def test_custom_atlas_accepts_missing_and_unrecognized_keys(
+        self,
+        tmp_path: Path,
+        main_db_path: Path,
+        metatlas_data_dir: Path,
+    ) -> None:
+        import duckdb
+        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.atlas_sheet import _validate_database_atlas_uid
+        from metatlas2.database_interact import get_compound_metadata
+        from metatlas2.load_tools import save_atlas_data_to_csv
+        from metatlas2.workflow_objects import Atlas
+
+        atlas_path = tmp_path / "custom_atlas.tsv"
+        pd.DataFrame([
+            {
+                "label": "Known compound",
+                "inchi_key": "GFFGJBXGBJISGV-UHFFFAOYSA-N",
+                "rt_peak": 1.0,
+                "mz": 100.0,
+                "adduct": "[M+H]+",
+            },
+            {
+                "label": "No key",
+                "rt_peak": 2.0,
+                "mz": 200.0,
+                "adduct": "[M+H]+",
+            },
+            {
+                "label": "Unrecognized key",
+                "inchi_key": "NOT-A-REAL-INCHI-KEY",
+                "rt_peak": 3.0,
+                "mz": 300.0,
+                "adduct": "[M+H]+",
+            },
+        ]).to_csv(atlas_path, sep="\t", index=False)
+        config_path = tmp_path / "custom_atlases.yaml"
+        config_path.write_text(textwrap.dedent(f"""\
+            ATLASES:
+              HILICZ:
+                POS:
+                  REF:
+                    Custom:
+                      path: {atlas_path}
+                      desc: Custom atlas
+        """))
+
+        add_atlases_to_db(str(config_path), custom=True)
+
+        with duckdb.connect(str(main_db_path), read_only=True) as conn:
+            atlas_uid = conn.execute(
+                "SELECT atlas_uid FROM atlases WHERE atlas_name = 'Custom'"
+            ).fetchone()[0]
+            atlas_rows = conn.execute(
+                """
+                    SELECT c.compound_uid, c.inchi_key, mzrt.label
+                    FROM atlas_compound_associations aca
+                    JOIN compounds c ON c.compound_uid = aca.compound_uid
+                    JOIN compound_mzrt mzrt ON mzrt.mz_rt_uid = aca.mz_rt_uid
+                    WHERE aca.atlas_uid = ?
+                    ORDER BY aca.association_order
+                """,
+                [atlas_uid],
+            ).fetchall()
+
+        assert len(atlas_rows) == 3
+        assert len({row[0] for row in atlas_rows}) == 3
+        assert [row[1] for row in atlas_rows] == [
+            "GFFGJBXGBJISGV-UHFFFAOYSA-N",
+            "",
+            "",
+        ]
+        assert [row[2] for row in atlas_rows] == [
+            "Known compound",
+            "No key",
+            "Unrecognized key",
+        ]
+        assert get_compound_metadata(str(main_db_path), ["", None]).empty
+        _validate_database_atlas_uid(
+            atlas_uid,
+            chromatography="HILICZ",
+            polarity="POS",
+            atlas_category="REF",
+            main_db_path=str(main_db_path),
+        )
+
+        atlas = Atlas.from_database(str(main_db_path), atlas_uid)
+        save_atlas_data_to_csv(atlas, str(tmp_path), "custom", str(main_db_path))
+        exported = pd.read_csv(next(tmp_path.glob("CompoundAtlas_*.csv")))
+        assert len(exported) == 3
+        assert set(exported["label"]) == {"Known compound", "No key", "Unrecognized key"}
+
     def test_add_atlases_config_missing_atlases_key_raises(
         self,
         tmp_path: Path,

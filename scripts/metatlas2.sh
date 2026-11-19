@@ -6,16 +6,16 @@
 # Usage:
 #   metatlas2 [--image TAG] [--dev] run    --config FILE --project NAME ...
 #   metatlas2 [--image TAG] [--dev] submit --config FILE --project NAME ...
-#   metatlas2 [--image TAG] [--dev] jupyter [--port PORT]
+#   metatlas2 [--image TAG] [--dev] jupyter [--port PORT] [--config_path FILE]
 #   metatlas2 [--image TAG] [--dev] add-compounds --input_csv FILE [--overwrite_db]
-#   metatlas2 [--image TAG] [--dev] add-atlases --config_path FILE
+#   metatlas2 [--image TAG] [--dev] add-atlases --config_path FILE [--custom]
 #   metatlas2 [--image TAG] [--dev] add-msms-refs --config_path FILE
 #   metatlas2 [--image TAG] [--dev] standards-annotation --config_path FILE
-#   metatlas2 [--image TAG] [--dev] reverse-rt-align --config_path FILE --annotation_timestamp TIMESTAMP [--tags TAG1;TAG2;...] [--skip_rt_alignment]
-#   metatlas2 [--image TAG] [--dev] atlas-msms-deposit --config_path FILE --annotation_timestamp TIMESTAMP --alignment_timestamp TIMESTAMP [--dry_run] [--force_add] [--skip_atlas_upload] [--skip_msms_refs_deposit]
 #   metatlas2 [--image TAG] [--dev] get-atlases fetch --atlas_uids UID1,UID2 [--output_path PATH]
 #   metatlas2 [--image TAG] [--dev] get-atlases query [--chromatography X] [--polarity X] [--analysis_type X] [--analysis_name X] [--created_by X]
 #   metatlas2 [--image TAG] [--dev] get-db-table --table-name NAME [--output_path PATH] [--database_path PATH]
+#   metatlas2 [--image TAG] [--dev] update-tags {add|remove|retag} --input-csv FILE
+#   metatlas2 [--image TAG] [--dev] update-tags retrieve
 #   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):
@@ -241,20 +241,23 @@ PYTHONPATH_VALUE="/app"
 [[ "${DEV_MODE}" == "true" ]] && PYTHONPATH_VALUE="${REPO_DIR}:/app"
 
 # ---------------------------------------------------------------------------
-# Docker only: locate the config file; absolutize it for atlas-msms-deposit;
+# Docker only: locate and absolutize standards config files (including Jupyter);
 # add a read-only mount if it lives outside $METATLAS_DATA_DIR.
 # ---------------------------------------------------------------------------
 EXTRA_CONFIG_MOUNT=""
+TAG_INPUT_MOUNT=""
 if [[ "${RUNTIME}" == "docker" ]]; then
-    IS_DEPOSIT=false
-    [[ "${SUBCOMMAND}" == "atlas-msms-deposit" ]] && IS_DEPOSIT=true
+    IS_STANDARDS=false
+    case "${SUBCOMMAND}" in
+        standards-annotation|jupyter) IS_STANDARDS=true ;;
+    esac
 
     CONFIG_PATH="" CONFIG_IDX="" CONFIG_INLINE=false
     for i in "${!PASSTHROUGH_ARGS[@]}"; do
         arg="${PASSTHROUGH_ARGS[$i]}"
-        if [[ "${arg}" == "--config" || ( "${IS_DEPOSIT}" == "true" && "${arg}" == "--config_path" ) ]]; then
+        if [[ "${arg}" == "--config" || ( "${IS_STANDARDS}" == "true" && "${arg}" == "--config_path" ) ]]; then
             CONFIG_PATH="${PASSTHROUGH_ARGS[$i+1]:-}"; CONFIG_IDX=$((i+1)); break
-        elif [[ "${IS_DEPOSIT}" == "true" && "${arg}" == --config_path=* ]]; then
+        elif [[ "${IS_STANDARDS}" == "true" && "${arg}" == --config_path=* ]]; then
             CONFIG_PATH="${arg#*=}"; CONFIG_IDX=$i; CONFIG_INLINE=true; break
         fi
     done
@@ -265,7 +268,7 @@ if [[ "${RUNTIME}" == "docker" ]]; then
         else
             CONFIG_ABS="${CONFIG_PATH}"
         fi
-        if [[ "${IS_DEPOSIT}" == "true" ]]; then
+        if [[ "${IS_STANDARDS}" == "true" ]]; then
             if [[ "${CONFIG_INLINE}" == "true" ]]; then
                 PASSTHROUGH_ARGS[CONFIG_IDX]="--config_path=${CONFIG_ABS}"
             else
@@ -277,6 +280,33 @@ if [[ "${RUNTIME}" == "docker" ]]; then
             EXTRA_CONFIG_MOUNT="$(dirname "${CONFIG_ABS}")"
             echo "Note: config file is outside \$METATLAS_DATA_DIR; adding read-only mount for ${EXTRA_CONFIG_MOUNT}"
         fi
+        SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
+    fi
+
+    if [[ "${SUBCOMMAND}" == "update-tags" ]]; then
+        for i in "${!SUB_ARGS[@]}"; do
+            arg="${SUB_ARGS[$i]}"
+            if [[ "${arg}" == "--input-csv" || "${arg}" == "--input_csv" ]]; then
+                TAG_INPUT_PATH="${SUB_ARGS[$i+1]:-}"
+                TAG_INPUT_IDX=$((i+1))
+                TAG_INPUT_PREFIX=""
+            elif [[ "${arg}" == --input-csv=* || "${arg}" == --input_csv=* ]]; then
+                TAG_INPUT_PATH="${arg#*=}"
+                TAG_INPUT_IDX=$i
+                TAG_INPUT_PREFIX="${arg%%=*}="
+            else
+                continue
+            fi
+            [[ -f "${TAG_INPUT_PATH}" ]] || die "Error: input CSV not found: ${TAG_INPUT_PATH}"
+            TAG_INPUT_DIR="$(cd "$(dirname "${TAG_INPUT_PATH}")" && pwd -P)"
+            TAG_INPUT_ABS="${TAG_INPUT_DIR}/$(basename "${TAG_INPUT_PATH}")"
+            SUB_ARGS[TAG_INPUT_IDX]="${TAG_INPUT_PREFIX}${TAG_INPUT_ABS}"
+            DATA_ABS="$(cd "${METATLAS_DATA_DIR}" && pwd -P)"
+            if [[ "${TAG_INPUT_ABS}" != "${DATA_ABS}/"* ]]; then
+                TAG_INPUT_MOUNT="${TAG_INPUT_ABS}"
+            fi
+            break
+        done
     fi
 fi
 
@@ -293,9 +323,9 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
         "--env=JUPYTERHUB_SERVICE_PREFIX=${JUPYTERHUB_SERVICE_PREFIX:-/}"
         "--env=PYTHONPATH=${PYTHONPATH_VALUE}"
     )
-    [[ "${DEV_MODE}" == "true" ]] && echo "Dev mode enabled: using local repo scripts at ${REPO_DIR}/scripts"
+    [[ "${DEV_MODE}" == "true" && "${SUBCOMMAND}" != "update-tags" ]] && echo "Dev mode enabled: using local repo scripts at ${REPO_DIR}/scripts"
 
-    if [[ "${IMAGE_TAG}" != "latest" ]]; then
+    if [[ "${IMAGE_TAG}" != "latest" && "${SUBCOMMAND}" != "update-tags" ]]; then
         KERNEL_DIR="${HOME}/.local/share/jupyter/kernels/metatlas2-${IMAGE_TAG}"
         if [[ ! -d "${KERNEL_DIR}" ]]; then
             echo "Registering Jupyter kernel spec for ${IMAGE_TAG} ..."
@@ -304,7 +334,7 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
     fi
 else
     # Docker (local macOS / non-NERSC HPC): ensure main DuckDB is present and current.
-    if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "atlas-msms-deposit" ]]; then
+    if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "update-tags" ]]; then
         MAIN_DB_DIR="${METATLAS_DATA_DIR}/databases/main_db"
         MAIN_DB_PATH="${MAIN_DB_DIR}/metatlas.duckdb"
 
@@ -345,12 +375,18 @@ else
     # Config directory outside $METATLAS_DATA_DIR.
     [[ -n "${EXTRA_CONFIG_MOUNT}" ]] && \
         DOCKER_ARGS+=("-v" "${EXTRA_CONFIG_MOUNT}:${EXTRA_CONFIG_MOUNT}:ro")
+    [[ -n "${TAG_INPUT_MOUNT}" ]] && \
+        DOCKER_ARGS+=("-v" "${TAG_INPUT_MOUNT}:${TAG_INPUT_MOUNT}:ro")
     # rclone config (Google Drive upload on non-NERSC systems).
     [[ -d "${HOME}/.config/rclone" ]] && \
         DOCKER_ARGS+=("-v" "${HOME}/.config/rclone:${HOME}/.config/rclone:ro")
+    if [[ "${SUBCOMMAND}" == "jupyter" ]]; then
+        ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
+        [[ ! -f "${ATLAS_KEY}" ]] || DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
+    fi
     if [[ "${DEV_MODE}" == "true" ]]; then
         DOCKER_ARGS+=("-v" "${REPO_DIR}:${REPO_DIR}:ro")
-        echo "Dev mode enabled: using local repo at ${REPO_DIR}"
+        [[ "${SUBCOMMAND}" == "update-tags" ]] || echo "Dev mode enabled: using local repo at ${REPO_DIR}"
     fi
 fi
 
@@ -370,25 +406,11 @@ _arg() { _parse_arg "$1" "${SUB_ARGS[@]}"; }   # value of --key in SUB_ARGS
 _opt() { _py_str "$(_arg "$1")"; }             # same, as a Python literal (None if empty)
 
 build_py_call() {
-    local cfg timestamp tags skip ow
+    local cfg timestamp ow
     case "${SUBCOMMAND}" in
         standards-annotation)
             cfg="$(_arg --config_path)"
             PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${cfg}')"
-            ;;
-        reverse-rt-align)
-            cfg="$(_arg --config_path)"
-            timestamp="$(_arg --annotation_timestamp)"
-            tags="$(_arg --tags)"; tags="${tags:-EMA}"
-            [[ "${timestamp}" =~ ^[0-9]{8}T[0-9]{6}_[0-9]{6}Z$ ]] || \
-                die "Error: reverse-rt-align requires --annotation_timestamp from a completed summary."
-
-            skip="False"
-            if _has_flag --skip_rt_alignment "${SUB_ARGS[@]}"; then
-                echo "Skipping reverse RT alignment and just creating a new run with the specified tags." >&2
-                skip="True"
-            fi
-            PY_CALL="from metatlas2.run_reverse_rt_align import run_reverse_rt_align; run_reverse_rt_align('${cfg}', '${timestamp}', '${tags}', ${skip})"
             ;;
         add-compounds)
             cfg="$(_arg --input_csv)"
@@ -398,7 +420,9 @@ build_py_call() {
             PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${cfg}', overwrite_db=${ow})"
             ;;
         add-atlases)
-            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('$(_arg --config_path)')"
+            custom="False"
+            if _has_flag --custom "${SUB_ARGS[@]}"; then custom="True"; fi
+            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('$(_arg --config_path)', custom=${custom})"
             ;;
         add-msms-refs)
             PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('$(_arg --config_path)')"
@@ -420,6 +444,14 @@ build_py_call() {
 # Dispatch
 # ---------------------------------------------------------------------------
 case "${SUBCOMMAND}" in
+    update-tags)
+        if [[ "${RUNTIME}" == "docker" ]]; then
+            ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
+            [[ ! -f "${ATLAS_KEY}" ]] || DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
+        fi
+        run_in_container /app/.venv/bin/python -m metatlas2.update_tags "${SUB_ARGS[@]}"
+        ;;
+
     jupyter)  # Docker only (Shifter rejected above)
         echo "=========================================="
         echo "Metatlas2 JupyterLab (portable mode)"
@@ -469,17 +501,7 @@ case "${SUBCOMMAND}" in
         sbatch "${TMPSCRIPT}"
         ;;
 
-    atlas-msms-deposit)
-        if [[ "${RUNTIME}" == "docker" ]]; then
-            ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-            if [[ -f "${ATLAS_KEY}" ]] && ! _has_flag --dry_run "${SUB_ARGS[@]}" && ! _has_flag --skip_atlas_upload "${SUB_ARGS[@]}"; then
-                DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
-            fi
-        fi
-        run_in_container /app/.venv/bin/python -m metatlas2.run_atlas_and_msms_deposit "${SUB_ARGS[@]}"
-        ;;
-
-    add-compounds|add-atlases|add-msms-refs|get-atlases|get-db-table|standards-annotation|reverse-rt-align)
+    add-compounds|add-atlases|add-msms-refs|get-atlases|get-db-table|standards-annotation)
         echo "Launching metatlas2 container to kick off routine '${SUBCOMMAND}' (tag=${IMAGE_TAG}, mode=${MODE}, runtime=${RUNTIME})..."
         build_py_call
         run_in_container /app/.venv/bin/python -c "${PY_CALL}"

@@ -309,7 +309,10 @@ def _build_isomer_dict(atlas_obj: "Atlas") -> dict[str, list[dict[str, Any]]]:
 
     mz_sim = np.abs(mzs[:, None] - mzs[None, :]) <= 0.005
     mass_sim = np.abs(masses[:, None] - masses[None, :]) <= 0.005
-    prefix_match = inchi_prefixes[:, None] == inchi_prefixes[None, :]
+    prefix_match = (
+        (inchi_prefixes[:, None] == inchi_prefixes[None, :])
+        & (inchi_prefixes[:, None] != "")
+    )
     
     isomer_mask = (mz_sim | mass_sim | prefix_match)
     np.fill_diagonal(isomer_mask, False) # Remove self
