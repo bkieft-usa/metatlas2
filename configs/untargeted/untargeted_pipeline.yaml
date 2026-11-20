@@ -131,13 +131,13 @@ GNPS2:
     formula_prediction_method: buddy_fiddle
     fragment_tolerance: "0.05"
     input_spectral_library: LIBRARYLOCATION/LC/LIBRARY
-    library_min_matched_peaks: "6"
+    library_min_matched_peaks: "3"
     library_min_similarity: "0.7"
     mode: fbmn
     noise_threshold_mode: standard
     pm_tolerance: "0.05"
     run_peak_resolving_challenger: "no"
-    topk: "1"
+    topk: "20"
 
 GDRIVE:
   upload: true
