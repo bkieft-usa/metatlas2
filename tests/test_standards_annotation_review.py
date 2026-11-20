@@ -308,7 +308,13 @@ def test_setup_refuses_existing_project_without_modifying_it(tmp_path, monkeypat
 
 def test_setup_creates_new_project_and_runs_extraction(tmp_path, monkeypatch):
     root = tmp_path / "new-project"
-    config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "extraction": {"peak_finding": {"x": 1}}}
+    config_file = tmp_path / "my_config.yaml"
+    config_file.write_text("project: {}\n")
+    input_file = tmp_path / "my_standards.csv"
+    input_file.write_text("compound_name\nA\n")
+    config = {"project": {"standards_run_name": "run", "owner": "jgi",
+                          "standards_input_file": str(input_file)},
+              "extraction": {"peak_finding": {"x": 1}}}
     calls = []
     data = SimpleNamespace()
     monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
@@ -326,10 +332,12 @@ def test_setup_creates_new_project_and_runs_extraction(tmp_path, monkeypatch):
     monkeypatch.setattr("metatlas2.standards_annotation_tools.run_standards_extraction", extraction)
     monkeypatch.setattr("metatlas2.notebook_generator.generate_standards_annotation_notebook",
                         lambda **_: calls.append(("notebook",)) or str(root / "notebook.ipynb"))
-    run_standards_annotation("config.yaml")
+    run_standards_annotation(str(config_file))
     assert [call[0] for call in calls] == ["db", "extract", "peaks", "notebook"]
     assert calls[2][1:] == (data, {"x": 1})
     assert root.is_dir()
+    assert (root / "my_config.yaml").read_text() == config_file.read_text()
+    assert (root / "my_standards.csv").read_text() == input_file.read_text()
 
 
 def test_detection_saves_matching_peak_and_ms2_once(project):

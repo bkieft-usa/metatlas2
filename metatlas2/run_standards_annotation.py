@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 from pathlib import Path
 
 import metatlas2.logging_config as lcf
@@ -60,6 +61,12 @@ def run_standards_annotation(config_path: str) -> None:
         logger = lcf.get_logger("run_standards_annotation")
         logger.info(f"Standards annotation workflow starting for config: {config_path}")
         logger.info(f"Output root: {output_root}")
+
+        # Persist the config YAML and input standards table alongside results
+        input_file = config["project"]["standards_input_file"]
+        for src in (config_path, input_file):
+            dest = shutil.copy2(src, output_root / Path(src).name)
+            logger.info(f"Copied {src} to {dest}")
 
         db_path = get_project_db_path(config)
         run_name = config["project"]["standards_run_name"]
