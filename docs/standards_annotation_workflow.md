@@ -10,7 +10,7 @@ importing compounds and MS/MS references into the main database.
 
 ### Create inputs
 
-Log in to the NERSC Perlmutter system and copy the [example input CSV file](/global/cfs/cdirs/metatlas/projects/reference_standards_annotation/reference_standards_inputs/example_standards_input.csv) and fill it in, one row per compound + project. Then, copy the [example configuration YAML file](/global/cfs/cdirs/metatlas/projects/reference_standards_annotation/reference_standards_inputs/example_standards_annotation.yaml) and fill it in; ensure you enter the correct input CSV (which you just created) and a unique `standards_run_name` (which will become the output folder for your annotations).
+Log in to the NERSC Perlmutter system and copy the example input CSV file at `/global/cfs/cdirs/metatlas/projects/reference_standards_annotation/reference_standards_inputs/example_standards_input.csv` and fill it in, one row per compound + project. Then, copy the example configuration YAML file `/global/cfs/cdirs/metatlas/projects/reference_standards_annotation/reference_standards_inputs/example_standards_annotation.yaml` and fill it in; ensure you enter the correct input CSV (which you just created) and a unique `standards_run_name` (which will become the output folder for your annotations). And note the full path of the config file, which you'll be using in the command below.
 
 ### Run input table expansion and automated peak finding
 
