@@ -4,6 +4,8 @@ import math
 import json
 import os
 import re
+import shutil
+import tempfile
 import textwrap
 import uuid
 from concurrent.futures import ProcessPoolExecutor
@@ -26,7 +28,7 @@ import metatlas2.standards_annotation_db as sadb
 import metatlas2.file_and_project_format as fpf
 from metatlas2.standards_annotation_tools import STANDARD_CE_LABELS
 from metatlas2.standards_annotation_review import (
-    fix_peak_labels, review_directory, validate_selected_peaks,
+    annotation_run_dir, fix_peak_labels, validate_selected_peaks,
 )
 from metatlas2.utils import should_disable_tqdm, safe_float, safe_isnan
 
@@ -863,12 +865,14 @@ def run_standards_annotation_summary(
     max_workers: int = 4,
     upload_to_gdrive: bool = True,
 ) -> None:
-    """Generate all post-annotation summary outputs.
+    """Summarize and freeze the draft annotation run.
 
-    Loads analyst selections from the project DB via
-    ``load_selected_peaks_with_ms2()`` and generates:
-      - Per-compound PDF figures (one per chrom+pol with selections)
-      - Summary CSV table
+    Loads the draft run's selections from the project DB and writes
+    ``outputs/annotation_run_<N>/`` containing per-compound PDF figures and
+    the summary CSV. Outputs are staged and published only when complete;
+    the run is then frozen (it can no longer be edited) and its output
+    directory recorded. Reopening the GUI afterwards starts annotation run
+    N+1 as a copy of run N.
 
     Set ``upload_to_gdrive`` to False to keep the outputs local.
     """
@@ -880,38 +884,61 @@ def run_standards_annotation_summary(
 
     from metatlas2.standards_annotation_db import get_project_output_root
     output_root = get_project_output_root(config)
-    logger.info("Loading analyst selections from project DB...")
-    sadb.validate_annotation_choices(db_path)
-    raw_selections = sadb.load_selected_peaks_with_ms2(db_path)
+    run_id = sadb.get_draft_annotation_run(db_path)
+    if run_id is None:
+        latest = sadb.get_latest_frozen_annotation_run(db_path)
+        detail = f" Annotation run {latest} is already summarized." if latest is not None else ""
+        raise ValueError(
+            "No draft annotation run to summarize." + detail
+            + " Open the GUI (Step 1) to start a new annotation run."
+        )
+    logger.info(f"Loading analyst selections for draft annotation run {run_id}...")
+    sadb.validate_annotation_choices(db_path, annotation_run_id=run_id)
+    raw_selections = sadb.load_selected_peaks_with_ms2(db_path, annotation_run_id=run_id)
     validate_selected_peaks(raw_selections)
     selections_df = fix_peak_labels(raw_selections)
     from metatlas2.standards_annotation_checks import check_isomer_adducts, check_retention_times
     check_isomer_adducts(selections_df, sadb.load_isomer_check_targets(db_path))
     check_retention_times(selections_df)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    outputs_dir = review_directory(output_root, timestamp)
-    outputs_dir.mkdir(parents=True, exist_ok=False)
-    figures_dir = outputs_dir / "summary_figures"
+    outputs_dir = annotation_run_dir(output_root, run_id)
+    if outputs_dir.exists():
+        raise FileExistsError(
+            f"Output directory for draft annotation run {run_id} already exists: {outputs_dir}. "
+            "Move it aside before summarizing."
+        )
+    outputs_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Generating per-compound summary figures...")
-    make_standards_annotation_figures(
-        data=data,
-        selections_df=selections_df,
-        output_dir=figures_dir,
-        max_workers=max_workers,
-    )
-
-    logger.info("Generating summary CSV table...")
-    make_standards_annotation_table(
-        selections_df=selections_df,
-        output_dir=outputs_dir,
-        project_name=run_name,
-    )
-
-    (outputs_dir / ".summary_complete").touch(exist_ok=False)
-    logger.info(f"Summary outputs written to {outputs_dir}")
+    staging = Path(tempfile.mkdtemp(prefix=f".{outputs_dir.name}-", dir=outputs_dir.parent))
+    try:
+        logger.info("Generating per-compound summary figures...")
+        make_standards_annotation_figures(
+            data=data,
+            selections_df=selections_df,
+            output_dir=staging / "summary_figures",
+            max_workers=max_workers,
+        )
+        logger.info("Generating summary CSV table...")
+        make_standards_annotation_table(
+            selections_df=selections_df,
+            output_dir=staging,
+            project_name=run_name,
+        )
+        staging.rename(outputs_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    try:
+        sadb.freeze_annotation_run(db_path, run_id, outputs_dir)
+    except Exception:
+        shutil.rmtree(outputs_dir, ignore_errors=True)
+        raise
+    logger.info(f"Annotation run {run_id} frozen; summary outputs written to {outputs_dir}")
     if upload_to_gdrive:
         from metatlas2.gdrive_upload import upload_standards_outputs
-        upload_standards_outputs(config, outputs_dir, [outputs_dir])
+        url = upload_standards_outputs(config, outputs_dir, [outputs_dir])
+        sadb.set_annotation_run_gdrive_url(db_path, run_id, url)
 
-    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>Annotation timestamp: {timestamp}</div>"))
+    display(HTML(
+        f"<div style='font-size: 20px; font-weight: bold;'>Annotation run {run_id} summarized "
+        f"and frozen</div><div>Outputs: {outputs_dir}</div>"
+    ))

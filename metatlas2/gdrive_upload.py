@@ -180,9 +180,8 @@ def upload_standards_outputs(config: dict, annotation_dir: Path, sources: list[P
     if not isinstance(root_id, str) or not root_id.strip():
         raise ValueError("GDRIVE.root_folder_id must identify the JGI_Metabolomics_Projects folder.")
     annotation_dir = Path(annotation_dir).resolve()
-    from metatlas2.standards_annotation_review import TIMESTAMP_PATTERN
-    prefix = "annotation_run_"
-    if not annotation_dir.name.startswith(prefix) or not TIMESTAMP_PATTERN.fullmatch(annotation_dir.name[len(prefix):]):
+    from metatlas2.standards_annotation_review import ANNOTATION_RUN_DIR_PATTERN
+    if not ANNOTATION_RUN_DIR_PATTERN.fullmatch(annotation_dir.name):
         raise ValueError(f"Invalid annotation run directory: {annotation_dir}")
     if not annotation_dir.is_dir() or not sources:
         raise ValueError(f"Annotation directory or upload sources missing: {annotation_dir}")

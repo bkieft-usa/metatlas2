@@ -3,11 +3,11 @@ metatlas2/standards_annotation_rt_align.py
 
 Reverse RT alignment phase for the standards-annotation workflow.
 
-Selected peaks come from the current project database. QC inputs are
-loaded from the project files and main database.
+Selected peaks come from a chosen frozen annotation run in the project
+database. QC inputs are loaded from the project files and main database.
 
 Workflow:
-  1. Load the current saved selections and locate the summary folder.
+  1. Load the chosen annotation run's selections and locate its summary folder.
   2. Find QC h5 files for each project_name / chromatography in sa_compounds.
   3. Load the QC atlas from the main metatlas DuckDB.
   4. Extract QC compound MS1 peaks from the QC h5 files.
@@ -15,10 +15,12 @@ Workflow:
        X = measured_QC_RT  (from QC h5 files)
        y = historical_QC_RT (from QC atlas)
   6. Apply the model to the measured RT of each selected peak.
-  7. Write a new timestamped alignment run.
-  8. Generate outputs:
-       - RTAlignment-Summary__{run_name}.pdf
+  7. Write ``annotation_run_<N>/rt_alignment_<M>/`` with outputs:
+       - model_figures/RTAlignment-Summary__{run_name}__{chrom}.pdf
        - StandardsAnnotation_Summary_Aligned_{run_name}.csv
+       - alignment_config.json
+  8. Record the alignment run (models, QC points, aligned peaks) in the
+     project database as alignment run M.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import glob
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,23 +49,38 @@ import metatlas2.rt_align_tools as rat
 import metatlas2.extract_data_from_h5 as edh
 import metatlas2.workflow_objects as wfo
 from metatlas2.standards_annotation_review import (
-    fix_peak_labels, review_directory, validate_selected_peaks,
+    alignment_run_dir, fix_peak_labels, validate_selected_peaks,
 )
 
 logger = lcf.get_logger("standards_annotation_rt_align")
 
 
 def run_reverse_rt_align(
-    config_path: str, 
-    timestamp: str, 
+    config_path: str,
+    annotation_run_id: int | None,
     skip_rt_alignment: bool = False,
     upload_to_gdrive: bool = True,
 ) -> None:
-    """Run reverse alignment for a project and optionally upload its outputs."""
+    """Align a frozen annotation run and optionally upload its outputs.
+
+    Args:
+        config_path:       Standards-annotation YAML config.
+        annotation_run_id: Required frozen annotation run to align (see the
+                           project history printed in the notebook).
+        skip_rt_alignment: Copy measured RTs to the aligned columns.
+        upload_to_gdrive:  Upload the alignment directory to Google Drive.
+    """
     from metatlas2.gdrive_upload import upload_standards_outputs
     from metatlas2.load_tools import load_standards_config
-    from metatlas2.standards_annotation_db import get_project_db_path, get_project_output_root
+    from metatlas2.standards_annotation_db import (
+        get_project_db_path, get_project_output_root, set_alignment_run_gdrive_url,
+    )
 
+    if annotation_run_id is None:
+        raise ValueError(
+            "Set ANNOTATION_RUN_ID to the frozen annotation run to align "
+            "(see the project history above)."
+        )
     config_path = str(Path(config_path).resolve())
     config = load_standards_config(config_path)
     output_root = get_project_output_root(config)
@@ -81,15 +99,18 @@ def run_reverse_rt_align(
         reconfigure_existing=False,
     ):
         logger.info("Reverse RT alignment starting for config: %s", config_path)
-        alignment_dir, alignment_timestamp = run_reverse_rt_alignment(
-            config_path, db_path, output_root / "outputs", timestamp,
+        alignment_run_id, alignment_dir = run_reverse_rt_alignment(
+            config_path, db_path, output_root / "outputs", annotation_run_id,
             skip_rt_alignment=skip_rt_alignment,
         )
         if upload_to_gdrive:
-            upload_standards_outputs(config, alignment_dir.parent, [alignment_dir])
+            url = upload_standards_outputs(config, alignment_dir.parent, [alignment_dir])
+            set_alignment_run_gdrive_url(db_path, alignment_run_id, url)
 
-    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>Annotation timestamp: {timestamp}</div>"))
-    display(HTML(f"<div style='font-size: 20px; font-weight: bold;'>Alignment timestamp: {alignment_timestamp}</div>"))
+    display(HTML(
+        f"<div style='font-size: 20px; font-weight: bold;'>Alignment run {alignment_run_id} "
+        f"(annotation run {annotation_run_id}) complete</div><div>Outputs: {alignment_dir}</div>"
+    ))
 
 
 # Config helpers
@@ -666,7 +687,7 @@ def _align_chromatography(
     selections: pd.DataFrame,
     lcmsruns,
     polarities: list[str] | None,
-) -> tuple[pd.DataFrame, tuple[str, pd.DataFrame, dict]]:
+) -> tuple[pd.DataFrame, tuple[str, pd.DataFrame, dict], dict[str, Any]]:
     """Build the RT model for one chromatography and apply it to its selections."""
     chrom_cfg = _get_chrom_rt_cfg(config, chrom)
     if chrom_cfg is None:
@@ -696,7 +717,33 @@ def _align_chromatography(
     aligned["rt_model_r2"] = model.get("r2", float("nan"))
     aligned["rt_model_rmse"] = model.get("rmse", float("nan"))
     aligned["qc_atlas_uid"] = qc_atlas.atlas_uid
-    return aligned, (chrom, modeling_df, model)
+    model_record = _model_record(chrom, chrom_cfg, model, modeling_df, qc_atlas.atlas_uid, qc_runs)
+    return aligned, (chrom, modeling_df, model), model_record
+
+
+def _model_record(
+    chrom: str, chrom_cfg: dict, model: dict, modeling_df: pd.DataFrame,
+    qc_atlas_uid: str, qc_runs: list,
+) -> dict[str, Any]:
+    """Return the database record for one chromatography's fitted model."""
+    params = {k: v for k, v in chrom_cfg.items() if str(k).upper() != "ATLAS"}
+    return {
+        "chromatography": chrom,
+        "qc_atlas_uid": qc_atlas_uid,
+        "qc_atlas_selector": _ci_get(chrom_cfg, "ATLAS"),
+        "model_type": model.get("model_type"),
+        "degree": model.get("degree"),
+        "coefficients": model.get("coefficients", []),
+        "intercept": model.get("intercept"),
+        "offset": model.get("offset"),
+        "r2": model.get("r2"),
+        "rmse": model.get("rmse"),
+        "equation": model.get("equation"),
+        "n_points": len(modeling_df),
+        "params": params,
+        "qc_files": [os.path.basename(str(getattr(run, "filename", None) or getattr(run, "file_path", "")))
+                     for run in qc_runs],
+    }
 
 def _passthrough_alignment(selections: pd.DataFrame) -> pd.DataFrame:
     """Return selections with aligned RT columns equal to the input RTs (no model)."""
@@ -721,34 +768,33 @@ def run_reverse_rt_alignment(
     config_path: str,
     db_path: str,
     output_path: str | Path,
-    timestamp: str,
+    annotation_run_id: int,
     skip_rt_alignment: bool = False,
-) -> tuple[Path, str]:
-    """Orchestrate the full reverse RT alignment workflow.
+) -> tuple[int, Path]:
+    """Orchestrate reverse RT alignment of one frozen annotation run.
 
     Steps:
-      1. Load config, project DB, and the current saved selections.
+      1. Load config and the chosen annotation run's selections.
       2. For each chromatography: build its QC-based reverse RT model and
          apply it to that chromatography's selected peaks.
-      3. Publish the timestamped alignment outputs (plots, config, and the
-         aligned summary CSV with a final ``tags`` column).
+      3. Stage and publish ``annotation_run_<N>/rt_alignment_<M>/`` (model
+         plots, config snapshot, and the aligned summary CSV with a final
+         ``tags`` column).
+      4. Record alignment run M with its models, QC points and aligned peaks.
 
     Args:
-        config_path: Path to the standards-annotation YAML config file.
-        db_path:     Path to the project database.
-        output_path: Output path; its parent holds the review directories.
-        timestamp:   Approved annotation run timestamp.
+        config_path:       Path to the standards-annotation YAML config file.
+        db_path:           Path to the project database.
+        output_path:       The project ``outputs`` directory.
+        annotation_run_id: Frozen annotation run to align.
         skip_rt_alignment: If True, do not build or apply any RT model; just
             copy the input RTs to the aligned columns.
 
     Returns:
-        The alignment output directory and its timestamp.
+        The alignment run ID and its output directory.
     """
     from metatlas2.load_tools import load_standards_config
-    from metatlas2.standards_annotation_db import (
-        load_selected_peaks_with_ms2,
-        validate_annotation_choices,
-    )
+    from metatlas2 import standards_annotation_db as sadb
     from metatlas2.standards_annotation_summary import make_standards_annotation_table
 
     config = load_standards_config(str(Path(config_path).resolve()))
@@ -757,29 +803,38 @@ def run_reverse_rt_alignment(
     tags_value = ";".join(config.get("tags", {"atlas": ["EMA"]})["atlas"])
     if tags_value == "EMA":
         logger.warning("Tag is set to default ('EMA') only. Do you need to create any more specific tag?")
-    logger.info(f"Reverse RT alignment starting for run_name={run_name}, timestamp={timestamp}, tags={tags_value}")
 
-    # --- Validate prior step and load selections ---
-    annotation_dir = review_directory(Path(output_path).parent, timestamp)
-    if not (
-        (annotation_dir / ".summary_complete").is_file()
-        and (annotation_dir / f"StandardsAnnotation_Summary_{run_name}.csv").is_file()
-    ):
-        raise ValueError(f"Completed summary not found for timestamp {timestamp}: {annotation_dir}")
-
-    validate_annotation_choices(db_path)
-    raw_selections = load_selected_peaks_with_ms2(db_path)
+    # --- Validate the annotation run and load its selections ---
+    run = sadb.get_annotation_run(db_path, annotation_run_id)
+    if run["status"] != "frozen":
+        raise ValueError(
+            f"Annotation run {annotation_run_id} is a draft. Run the summary (Step 2) to freeze it "
+            "before alignment."
+        )
+    draft = sadb.get_draft_annotation_run(db_path)
+    if draft is not None:
+        logger.warning(
+            f"Draft annotation run {draft} has unsummarized changes; aligning frozen annotation run "
+            f"{annotation_run_id} as requested."
+        )
+    annotation_dir = Path(run["output_dir"] or "")
+    if not annotation_dir.is_dir():
+        raise FileNotFoundError(
+            f"Summary directory of annotation run {annotation_run_id} not found: {annotation_dir}"
+        )
+    logger.info(
+        f"Reverse RT alignment starting for run_name={run_name}, "
+        f"annotation run={annotation_run_id}, tags={tags_value}"
+    )
+    sadb.validate_annotation_choices(db_path, annotation_run_id=annotation_run_id)
+    raw_selections = sadb.load_selected_peaks_with_ms2(db_path, annotation_run_id=annotation_run_id)
     validate_selected_peaks(raw_selections)
     selections_df = fix_peak_labels(raw_selections)
-    logger.info(f"Loaded {len(selections_df)} current selections from the project database")
-
-    # --- Create output directory ---
-    alignment_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    alignment_dir = annotation_dir / f"rt_align_{alignment_timestamp}"
-    alignment_dir.mkdir(parents=False, exist_ok=False)
+    logger.info(f"Loaded {len(selections_df)} selections from annotation run {annotation_run_id}")
 
     # --- Align each chromatography (or pass through unchanged) ---
     model_plots: list[tuple[str, pd.DataFrame, dict]] = []
+    model_records: list[dict[str, Any]] = []
     if skip_rt_alignment:
         logger.info("skip_rt_alignment=True: aligned RT columns will equal the input RTs")
         aligned_df = _passthrough_alignment(selections_df)
@@ -787,11 +842,12 @@ def run_reverse_rt_alignment(
         lcmsruns = get_project_lcmsruns(config, db_path)
         chunks = []
         for chrom, chrom_selections in selections_df.groupby("chromatography", sort=False):
-            aligned, plot_info = _align_chromatography(
+            aligned, plot_info, record = _align_chromatography(
                 config, chrom, chrom_selections.copy(), lcmsruns, polarities
             )
             chunks.append(aligned)
             model_plots.append(plot_info)
+            model_records.append(record)
         if not chunks:
             raise ValueError("No aligned data produced. Aborting.")
         aligned_df = pd.concat(chunks, ignore_index=True)
@@ -804,37 +860,51 @@ def run_reverse_rt_alignment(
     aligned_cols = ["rt_peak_aligned", "rt_min_aligned", "rt_max_aligned"]
     if not np.isfinite(aligned_df[aligned_cols].to_numpy(dtype=float)).all():
         raise ValueError("Aligned RT values must be finite for every selected peak.")
+    if "rt_delta" not in aligned_df.columns:
+        aligned_df["rt_delta"] = aligned_df["rt_peak_aligned"] - aligned_df["rt_peak"]
 
-    # --- Stage outputs, then publish ---
-    rt_align_dir = alignment_dir / "rt_alignment"
-    rt_align_dir.mkdir()
+    # --- Stage outputs, then publish and record ---
+    alignment_run_id = sadb.next_alignment_run_id(db_path)
+    alignment_dir = alignment_run_dir(annotation_dir, alignment_run_id)
+    if alignment_dir.exists():
+        raise FileExistsError(f"Alignment output directory already exists: {alignment_dir}")
     summary_name = f"StandardsAnnotation_Summary_Aligned_{run_name}.csv"
-    final_summary = alignment_dir / summary_name
+    config_json = json.dumps(config, indent=2, default=str)
 
-    with tempfile.TemporaryDirectory(prefix=".rt-align-", dir=alignment_dir) as temp:
-        staging = Path(temp)
-
+    staging = Path(tempfile.mkdtemp(prefix=f".{alignment_dir.name}-", dir=annotation_dir))
+    try:
+        figures = staging / "model_figures"
+        figures.mkdir()
         for chrom, modeling_df, model in model_plots:
-            plot = Path(make_rt_alignment_summary_plot(modeling_df, model, staging, f"{run_name}__{chrom}"))
+            plot = Path(make_rt_alignment_summary_plot(modeling_df, model, figures, f"{run_name}__{chrom}"))
             if not plot.is_file():
                 raise RuntimeError(f"RT alignment figure was not created: {plot}")
-
         make_standards_annotation_table(aligned_df, staging, run_name, aligned=True)
         staged_summary = staging / summary_name
         if not staged_summary.is_file():
             raise RuntimeError(f"Aligned annotation summary was not created: {staged_summary}")
         _append_tags_column(staged_summary, tags_value)
+        (staging / "alignment_config.json").write_text(config_json, encoding="utf-8")
+        os.replace(staging, alignment_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    try:
+        sadb.record_alignment_run(
+            db_path,
+            alignment_run_id=alignment_run_id,
+            annotation_run_id=annotation_run_id,
+            output_dir=alignment_dir,
+            skip_alignment=skip_rt_alignment,
+            tags=tags_value,
+            config_snapshot=config_json,
+            models=model_records,
+            qc_points={chrom: modeling_df for chrom, modeling_df, _ in model_plots},
+            aligned_peaks=aligned_df,
+        )
+    except Exception:
+        shutil.rmtree(alignment_dir, ignore_errors=True)
+        raise
 
-        config_file = staging / "alignment_config.json"
-        config_file.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
-
-        try:
-            for src in [*staging.glob("*.pdf"), config_file]:
-                os.replace(src, rt_align_dir / src.name)
-            os.replace(staged_summary, final_summary)
-        except Exception:
-            final_summary.unlink(missing_ok=True)
-            raise
-
-    logger.info(f"Reverse RT alignment complete. Outputs: {alignment_dir}")
-    return alignment_dir, alignment_timestamp
+    logger.info(f"Reverse RT alignment run {alignment_run_id} complete. Outputs: {alignment_dir}")
+    return alignment_run_id, alignment_dir
