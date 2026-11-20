@@ -12,6 +12,7 @@ version = "0.1.0"
 description = "Metatlas targeted lite version venv"
 requires-python = ">=3.11.8"
 dependencies = [
+    "beautifulsoup4>=4.12",
     "dash==3.4.0",
     "dash-bootstrap-components>=2.0.4",
     "dash-extensions==2.0.4",
@@ -30,6 +31,7 @@ dependencies = [
     "jupyter-dash>=0.4.2",
     "jupyterlab>=4.5.5",
     "jupyterlab-widgets>=3.0.16",
+    "labkey>=4.0.1",
     "matchms==0.31.0",
     "matplotlib==3.10.8",
     "mplcursors>=0.7",
@@ -41,6 +43,7 @@ dependencies = [
     "pandas==2.3.3",
     "panel>=1.8.7",
     "param>=2.3.2",
+    "paramiko>=3.4",
     "pillow==12.1.1",
     "plotly==5.24.1",
     "pubchempy==1.0.5",
@@ -53,8 +56,10 @@ dependencies = [
     "pyparsing==3.3.2",
     "pytest==8.3.4",
     "python-dateutil>=2.9.0.post0",
+    "pyyaml>=6.0",
     "rdkit>=2024.9.6",
     "regex==2024.11.6",
+    "requests>=2.32",
     "scikit-learn==1.8.0",
     "scipy==1.17.1",
     "serialize==0.2.1",
