@@ -545,15 +545,19 @@ def generate_standards_annotation_notebook(
         _sa_nb_run_params_cell(run_params),
         nbformat.v4.new_markdown_cell("## Step 0: Load Data"),
         _sa_nb_data_cell(),
-        nbformat.v4.new_markdown_cell("## Step 1: Peak Selection GUI"),
+        nbformat.v4.new_markdown_cell(_SA_STEP1_MARKDOWN),
+        _sa_nb_history_cell(),
+        _sa_nb_gui_params_cell(),
         _sa_nb_gui_cell(),
-        nbformat.v4.new_markdown_cell("## Step 2: Annotation Summary (run after completing peak selection in GUI)"),
+        nbformat.v4.new_markdown_cell(_SA_STEP2_MARKDOWN),
         _sa_nb_summary_params_cell(),
         _sa_nb_summary_cell(),
-        nbformat.v4.new_markdown_cell("## Step 3: Reverse RT Alignment (run after peak selections are reviewed)"),
+        nbformat.v4.new_markdown_cell(_SA_STEP3_MARKDOWN),
+        _sa_nb_history_cell(),
         _sa_nb_alignment_params_cell(),
         _sa_nb_alignment_cell(),
-        nbformat.v4.new_markdown_cell("## Step 4: Upload and Deposit Atlas and MSMS Refs (run after peak selections and alignment are approved)"),
+        nbformat.v4.new_markdown_cell(_SA_STEP4_MARKDOWN),
+        _sa_nb_history_cell(),
         _sa_nb_deposit_params_cell(),
         _sa_nb_deposit_cell(),
     ]
@@ -577,7 +581,10 @@ def _sa_nb_header_cell(project_name: str) -> "nbformat.NotebookNode":
 def _sa_nb_imports_cell() -> "nbformat.NotebookNode":
     src = (
         "import logging\n"
-        "from metatlas2.standards_annotation_db import load_extraction_from_db\n"
+        "from metatlas2.standards_annotation_db import (\n"
+        "    load_extraction_from_db, start_new_annotation_run, discard_draft_annotation_run,\n"
+        ")\n"
+        "from metatlas2.standards_annotation_review import show_standards_project_history\n"
         "from metatlas2.standards_annotation_gui import build_standards_annotation_gui\n"
         "from metatlas2.standards_annotation_summary import run_standards_annotation_summary\n"
         "from metatlas2.standards_annotation_rt_align import run_reverse_rt_align\n"
@@ -606,12 +613,60 @@ def _sa_nb_data_cell() -> "nbformat.NotebookNode":
     )
     return nbformat.v4.new_code_cell(src)
 
+_SA_STEP1_MARKDOWN = (
+    "## Step 1: Peak Selection GUI"
+)
+    # "Each review iteration is a numbered **annotation run**. With `ANNOTATION_RUN_ID = None` the GUI "
+    # "edits the current *draft* run; if the latest run was already summarized (frozen), a new draft run "
+    # "is started as a copy of it. Set `ANNOTATION_RUN_ID` to a frozen run's number to view that run "
+    # "read-only.\n\n"
+    # "To continue from an earlier run instead of the latest, run "
+    # "`start_new_annotation_run(RUN_PARAMS['project_db_path'], from_annotation_run_id=N)` "
+    # "(add `discard_draft=True` to replace an unsummarized draft), then open the GUI with "
+    # "`ANNOTATION_RUN_ID = None`."
+
+_SA_STEP2_MARKDOWN = (
+    "## Step 2: Annotation Summary (run after completing peak selection in GUI)"
+)
+    # "Summarizes the draft annotation run into `outputs/annotation_run_N/` and freezes it. "
+    # "Further GUI changes go into a new annotation run."
+
+_SA_STEP3_MARKDOWN = (
+    "## Step 3: Reverse RT Alignment (run after peak selections are reviewed)"
+)
+    # "Choose the approved frozen annotation run from the history below. Each alignment is a numbered "
+    # "**RT alignment run** written to `annotation_run_N/rt_alignment_M/`."
+
+_SA_STEP4_MARKDOWN = (
+    "## Step 4: Upload and Deposit Atlas and MSMS Refs (run after peak selections and alignment are approved)"
+)
+    # "Choose the approved RT alignment run from the history below. First run with `DRY_RUN = True` to write "
+    # "editable previews to `rt_alignment_M/deposit_K/`. Edit, add, or delete rows in the previews if needed "
+    # "(leave `sa_entry_id` blank for new rows), then run with `DRY_RUN = False` to deposit exactly those "
+    # "files. Edits are recorded in the project database."
+
+def _sa_nb_history_cell() -> "nbformat.NotebookNode":
+    src = (
+        "# Annotation runs, RT alignment runs, and deposits recorded in the project database.\n"
+        "show_standards_project_history(RUN_PARAMS['project_db_path']);"
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
+def _sa_nb_gui_params_cell() -> "nbformat.NotebookNode":
+    src = (
+        "ANNOTATION_RUN_ID = None # None: edit the draft annotation run (or start one from the latest run). An integer: view that frozen run read-only."
+    )
+    return nbformat.v4.new_code_cell(src)
+
+
 def _sa_nb_gui_cell() -> "nbformat.NotebookNode":
     src = (
         "# Launch the annotation GUI. Click 'Save & Exit' when done to ensure all changes are saved.\n"
         "build_standards_annotation_gui(\n"
         "    data=data,\n"
-        "    config=config"
+        "    config=config,\n"
+        "    annotation_run_id=ANNOTATION_RUN_ID,\n"
         ")"
     )
     return nbformat.v4.new_code_cell(src)
@@ -625,7 +680,7 @@ def _sa_nb_summary_params_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
     src = (
-        "# Generate a new timestamped annotation summary with figures and table to review.\n"
+        "# Summarize and freeze the draft annotation run (figures and table to review).\n"
         "run_standards_annotation_summary(\n"
         "    data=data,\n"
         "    config=config,\n"
@@ -637,7 +692,7 @@ def _sa_nb_summary_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_alignment_params_cell() -> "nbformat.NotebookNode":
     src = (
-        "ANNOTATION_TIMESTAMP = '' # Required: Set the approved summary timestamp before running alignment.\n"
+        "ANNOTATION_RUN_ID = None # Required: the approved frozen annotation run to align (see the history above).\n"
         "UPLOAD_ALIGNMENT_TO_GDRIVE = True # If True, upload the alignment results (model, aligned data table) to Google Drive.\n"
         "SKIP_RT_ALIGNMENT = False # If True, do not align measured retention times to QC atlas space."
     )
@@ -649,7 +704,7 @@ def _sa_nb_alignment_cell() -> "nbformat.NotebookNode":
         "# Run reverse RT alignment to align measured RTs to historical (QC) RT space with above parameters.\n"
         "run_reverse_rt_align(\n"
         "    config_path=RUN_PARAMS['config_path'],\n"
-        "    timestamp=ANNOTATION_TIMESTAMP,\n"
+        "    annotation_run_id=ANNOTATION_RUN_ID,\n"
         "    skip_rt_alignment=SKIP_RT_ALIGNMENT,\n"
         "    upload_to_gdrive=UPLOAD_ALIGNMENT_TO_GDRIVE,\n"
         ")"
@@ -659,10 +714,10 @@ def _sa_nb_alignment_cell() -> "nbformat.NotebookNode":
 
 def _sa_nb_deposit_params_cell() -> "nbformat.NotebookNode":
     src = (
-        "ANNOTATION_TIMESTAMP = '' # Required: Set the approved annotation timestamp before running deposit.\n"
-        "ALIGNMENT_TIMESTAMP = '' # Required: Set the approved alignment timestamp before running deposit. Must be an alignment within the above annotation run.\n"
-        "UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE = True # If True, upload the atlas and MSMS references to Google Drive for preview.\n"
-        "DRY_RUN = True # If True, generate but do not upload/deposit the atlas table and MSMS references (useful for final review).\n"
+        "ANNOTATION_RUN_ID = None # Required: the approved annotation run (see the history above).\n"
+        "ALIGNMENT_RUN_ID = None # Required: the approved RT alignment run of that annotation run to deposit (see the history above).\n"
+        "UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE = True # If True, upload the deposit files to Google Drive.\n"
+        "DRY_RUN = True # If True, write editable previews only. If False, deposit the (possibly edited) latest previews of this alignment run.\n"
         "FORCE_ADD = False # If True, force add new peaks and MSMS references even if they already exist for a given InChIKey+adduct.\n"
         "SKIP_ATLAS_UPLOAD = False # If True, the generated atlas will not be uploaded and added to the centralized atlas Google Sheet.\n"
         "SKIP_MSMS_REFS_DEPOSIT = False # If True, the generated MSMS references will not be deposited to the Metatlas database."
@@ -675,8 +730,8 @@ def _sa_nb_deposit_cell() -> "nbformat.NotebookNode":
         "# Run the atlas and MSMS references deposit workflow with above parameters.\n"
         "run_atlas_and_msms_deposit(\n"
         "    config_path=RUN_PARAMS['config_path'],\n"
-        "    annotation_timestamp=ANNOTATION_TIMESTAMP,\n"
-        "    alignment_timestamp=ALIGNMENT_TIMESTAMP,\n"
+        "    annotation_run_id=ANNOTATION_RUN_ID,\n"
+        "    alignment_run_id=ALIGNMENT_RUN_ID,\n"
         "    dry_run=DRY_RUN,\n"
         "    force_add=FORCE_ADD,\n"
         "    skip_atlas_upload=SKIP_ATLAS_UPLOAD,\n"

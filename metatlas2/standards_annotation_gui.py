@@ -104,6 +104,7 @@ def build_standards_annotation_gui(
     data: "StandardsAnnotationData",
     config: dict[str, Any] | str | None = None,
     port: int = 8050,
+    annotation_run_id: int | None = None,
 ) -> None:
     """Build and run the standards-annotation Dash GUI.
 
@@ -111,9 +112,22 @@ def build_standards_annotation_gui(
         data:   Extracted data container (from :func:`run_standards_extraction`).
         config: Parsed config dict, path to config YAML, or None.
         port:   Starting port for the Dash server.
+        annotation_run_id: ``None`` edits the draft annotation run, creating
+            it from the latest frozen run if needed. A frozen run's ID opens
+            that run read-only; the draft's ID edits the draft.
     """
     cfg = config
     db_path = data.project_db_path
+    if annotation_run_id is None:
+        run_id = sadb.open_or_create_draft_annotation_run(db_path)
+        read_only = False
+    else:
+        run_id = int(annotation_run_id)
+        read_only = sadb.get_annotation_run(db_path, run_id)["status"] == "frozen"
+    if read_only:
+        logger.info(f"Viewing frozen annotation run {run_id} read-only; changes will not be saved.")
+    else:
+        logger.info(f"Editing draft annotation run {run_id}.")
     gui_cfg = cfg.get("gui", {})
     lcmsruns_color_map = gui_cfg.get("gui_lcmsruns_colors", {})
     MAX_CE = 2
@@ -125,7 +139,7 @@ def build_standards_annotation_gui(
     injbl_ms1_df = data.injbl_ms1_df if hasattr(data, "injbl_ms1_df") else pd.DataFrame()
 
     # ── Load peaks and MS2 associations from DB ───────────────────────────────
-    peaks_holder: list[pd.DataFrame] = [sadb.load_peaks(db_path)]
+    peaks_holder: list[pd.DataFrame] = [sadb.load_peaks(db_path, annotation_run_id=run_id)]
     peak_ms2_df = sadb.load_peak_ms2(db_path)
 
     if peaks_holder[0].empty:
@@ -275,11 +289,11 @@ def build_standards_annotation_gui(
     for _, row in expanded_table.iterrows():
         uid_to_compound_name[str(row["compound_uid"])] = str(row["compound_name"])
 
-    checkpoint = sadb.load_gui_checkpoint(db_path)
+    checkpoint = sadb.load_gui_checkpoint(db_path, annotation_run_id=run_id)
     if checkpoint and checkpoint in compound_names:
         starting_idx = compound_names.index(checkpoint)
     else:
-        first_incomplete_uid, _ = sadb.get_first_incomplete_compound(db_path)
+        first_incomplete_uid, _ = sadb.get_first_incomplete_compound(db_path, annotation_run_id=run_id)
         first_incomplete_name = uid_to_compound_name.get(first_incomplete_uid)
         starting_idx = (
             compound_names.index(first_incomplete_name)
@@ -401,12 +415,13 @@ def build_standards_annotation_gui(
             options.append({
                 "label": "No good peaks",
                 "value": _no_good_key(chrom, pol_label),
+                "disabled": read_only,
             })
 
             for _, adduct, peak_uid, label, is_manual, _ in sorted(
                 entries, key=lambda entry: entry[0], reverse=True
             ):
-                options.append({"label": label, "value": peak_uid})
+                options.append({"label": label, "value": peak_uid, "disabled": read_only})
                 n_items += 1
 
         _emit_polarity_section("POS", polarity_entries["POS"])
@@ -995,6 +1010,8 @@ def build_standards_annotation_gui(
         analyst_notes_by_chrom: dict[str, str],
         resume_compound: str | None = None,
     ) -> None:
+        if read_only:
+            return
         compound_uids = compound_name_to_uids.get(compound_name, [])
         peaks_df = peaks_holder[0]
         selections = []
@@ -1022,6 +1039,7 @@ def build_standards_annotation_gui(
                 db_path, compound_name, compound_uids, selections,
                 analyst_notes_by_chrom, compound_chroms.get(compound_name, []),
                 resume_compound=resume_compound, no_good_peaks=no_good,
+                annotation_run_id=run_id,
             )
         except Exception:
             logger.exception(
@@ -1032,10 +1050,10 @@ def build_standards_annotation_gui(
 
     def _load_session_for_compound(compound_name: str) -> dict:
         checked_peaks: dict[str, bool] = {}
-        for chrom, polarity in sadb.load_no_good_peaks(db_path, compound_name):
+        for chrom, polarity in sadb.load_no_good_peaks(db_path, compound_name, annotation_run_id=run_id):
             checked_peaks[_no_good_key(chrom, polarity)] = True
-        notes_by_chrom = sadb.load_compound_notes(db_path, compound_name)
-        sel_df = sadb.load_analyst_selections(db_path)
+        notes_by_chrom = sadb.load_compound_notes(db_path, compound_name, annotation_run_id=run_id)
+        sel_df = sadb.load_analyst_selections(db_path, annotation_run_id=run_id)
         if sel_df.empty:
             return {"checked_peaks": checked_peaks, "analyst_notes_by_chrom": notes_by_chrom}
         cmp_sel = sel_df[sel_df["compound_name"] == compound_name]
@@ -1081,7 +1099,7 @@ def build_standards_annotation_gui(
             suppress_callback_exceptions=True,
         )
         run_name = cfg["project"]["standards_run_name"]
-        app.title = f"Standards Annotation | {run_name}"
+        app.title = f"Standards Annotation | {run_name} | run {run_id}{' (read-only)' if read_only else ''}"
         app.config.prevent_initial_callbacks = "initial_duplicate"
     except Exception as exc:
         logger.error(f"Failed to create Dash app: {exc}")
@@ -1186,13 +1204,15 @@ def build_standards_annotation_gui(
                         width=3,
                     ),
                     dbc.Col(
-                        dbc.Button("Add", id=f"sa-add-peak-btn-{slot}", color="secondary", size="sm"),
+                        dbc.Button("Add", id=f"sa-add-peak-btn-{slot}", color="secondary", size="sm",
+                                   disabled=read_only),
                         width=1,
                     ),
                     dbc.Col(
                         dbc.Input(
                             id=f"sa-analyst-notes-{slot}", placeholder="Notes...",
                             debounce=True, size="sm", style={"fontSize": "0.8rem"},
+                            disabled=read_only,
                         ),
                         width=3,
                     ),
@@ -1280,6 +1300,14 @@ def build_standards_annotation_gui(
                     dbc.Button("< Previous", id="sa-prev-btn", color="primary", size="md", className="me-1"),
                     html.Span(id="sa-progress-div", className="small me-1 ms-1"),
                     dbc.Button("Next >", id="sa-next-btn", color="primary", size="md"),
+                ], width="auto", className="d-flex align-items-center"),
+                dbc.Col([
+                    html.Div(
+                        f"Annotation run {run_id} — read-only (frozen)" if read_only
+                        else f"Annotation run {run_id} — draft (changes are saved)",
+                        id="sa-run-banner",
+                        className="fw-bold small " + ("text-danger" if read_only else "text-success"),
+                    ),
                 ], width="auto", className="d-flex align-items-center"),
                 dbc.Col([
                     html.Div(id="sa-status-div", className="text-muted small"),
@@ -1472,7 +1500,7 @@ def build_standards_annotation_gui(
                 else:
                     checked = [
                         o["value"] for o in options
-                        if not o.get("disabled")
+                        if not str(o["value"]).endswith("_header__")
                         and checked_keys_dict.get(o["value"], False)
                     ]
                 pos_opts, neg_opts = _split_options_by_polarity(options)
@@ -1717,7 +1745,7 @@ def build_standards_annotation_gui(
                 prevent_initial_call=True,
             )
             def add_manual_peak(n_clicks, rt_selected, adduct, session, compound_idx):
-                if not n_clicks or rt_selected is None or not adduct:
+                if read_only or not n_clicks or rt_selected is None or not adduct:
                     raise dash.exceptions.PreventUpdate
                 session = dict(session)
                 idx = int(compound_idx or 0)
@@ -1815,6 +1843,7 @@ def build_standards_annotation_gui(
                     "peak_num":               peak_num,
                     "is_manual":              True,
                     "collision_energy_label": ce_label,
+                    "created_in_annotation_run": run_id,
                 }
                 ms2_assoc = sat.associate_peak_ms2(
                     new_peak, expanded_table, ms2_df if ms2_df is not None else pd.DataFrame()
@@ -1822,7 +1851,7 @@ def build_standards_annotation_gui(
                 sadb.save_manual_peak_to_db(db_path, new_peak, ms2_assoc)
                 if ms2_assoc:
                     peak_ms2_by_uid[new_peak_uid] = ms2_assoc
-                peaks_holder[0] = sadb.load_peaks(db_path)
+                peaks_holder[0] = sadb.load_peaks(db_path, annotation_run_id=run_id)
 
                 checked_dict = dict(session.get("checked_peaks") or {})
                 checked_dict[new_peak_uid] = True
@@ -1931,6 +1960,9 @@ def build_standards_annotation_gui(
             raise dash.exceptions.PreventUpdate
         name, checked_list, notes_by_chrom = _extract_session_for_save(session)
         _save_compound_selections(name, checked_list, notes_by_chrom)
+        if read_only:
+            logger.info("Analyst clicked Exit on read-only annotation run %s -- shutting down GUI server.", run_id)
+            return True, "Closed (read-only; nothing saved). You may close this tab."
         logger.info("Analyst clicked Save & Exit -- shutting down GUI server.")
         return True, "Saved. You may close this tab."
 
