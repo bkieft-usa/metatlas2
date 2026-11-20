@@ -1,0 +1,152 @@
+# Untargeted pipeline configuration (metatlas2.run_untargeted_pipeline).
+#
+# Every value below equals the built-in default (metatlas2/untargeted/config.py),
+# so this file documents the defaults and is a starting point for overrides.
+# You only need to keep the keys you change. CLI flags override this file.
+#
+#   metatlas2.sh untargeted run --config configs/untargeted/untargeted_pipeline.yaml
+
+PATHS:
+  raw_data_dir: /global/cfs/cdirs/metatlas/raw_data
+  # One {project}_{positive|negative}/ directory per project polarity.
+  output_dir: /global/cfs/cdirs/metatlas/projects/untargeted_tasks
+  # Project zip archives (and the downloaded GNPS2 guide).
+  download_dir: /global/cfs/cdirs/metatlas/projects/untargeted_outputs
+  log_file: /global/cfs/cdirs/m2650/untargeted_logs/untargeted_pipeline.log
+  # Force the raw_data subdirectory (e.g. jgi); null = infer from project field 1 (EB -> egsb).
+  raw_data_subdir: null
+  # Searched when the project is not under the inferred subdirectory.
+  fallback_raw_data_subdirs: [jgi, egsb, akuftin, agolini, kblouie, lzhan, smkosina, jsjordan, mtvu, tharwood, bpb]
+  # Unix group applied to outputs (chgrp); null to skip.
+  group: metatlas
+
+LIMS:
+  server: metatlas.jgi.doe.gov
+  container: LIMS/
+  api_key_file: /global/cfs/cdirs/metatlas/labkey_user.txt
+  schema: lists
+  # Point tasks_table at a copy of the list to test without touching production state.
+  tasks_table: untargeted_tasks
+  files_table: lcmsrun_plus
+  timeout: 10000
+  max_rows: 1000000
+  batch_size: 1000
+
+PROJECT_SELECTION:
+  # Newest file in a project must be at least this old (hours) before it is picked up.
+  min_file_age_hours: 3
+  # Require conforming mzML/project names (>=16 fields, polarity in field 9, 9-10 dir fields).
+  validate_names: false
+  # Keep files with "Blank" in the name.
+  skip_blank_filter: false
+  # Extraction-control sample group(s) (field 12 of file names).
+  background_designator: [ExCtrl]
+
+MZMINE:
+  executable: /global/common/software/m2650/mzmine_parameters/MZmine/MZmine-3.7.2/bin/MZmine
+  extra_args: -threads auto -t /tmp
+  batch_file_dir: /global/common/software/m2650/mzmine_parameters/batch_files
+  # Text in the template XML replaced by {output_dir}/{project}_{pol}/{project}_{pol}.
+  output_placeholder: /Users/bpb/Downloads/mzmine_outputs
+  # Instrument (project field 6) -> template; first matching rule wins.
+  # parameter_row is recorded in LIMS (mzmine_parameter_row).
+  template_rules:
+    - {match: [iqx, idx], template: IQX-mzmine-3.7.2-batchparams.xml, parameter_row: 5}
+    - {match: [exp, exploris, qe], template: mzmine-3.7.2-batchparams.xml, parameter_row: 2}
+  default_template: IQX-mzmine-3.7.2-batchparams.xml
+  default_parameter_row: 5
+  # Full path to one batch XML to use for every project instead of the rules above.
+  custom_batch_params: null
+  slurm:
+    nodes: 1
+    exclusive: true
+    account: m2650
+    constraint: cpu
+    qos: regular
+    time: "3:00:00"
+    # Time limit used when an errored job is resubmitted.
+    retry_time: "6:00:00"
+  # Resubmit MZmine jobs in '09 error' automatically. Only applies to jobs this
+  # pipeline queued before (they have a *_mzmine-queued.txt marker); projects that
+  # errored under the legacy pipeline still need --direct_input.
+  auto_resubmit_errors: true
+  max_retries: 1
+  # RUNNING longer than the sbatch time limit + this grace => job is declared failed.
+  status_grace_hours: 1
+  # Queued but never started after this long => job is declared failed.
+  max_pending_hours: 48
+
+FILTERING:
+  # Background filter: sample max must be >= ratio x control max (also +1e4 and +1e5 variants).
+  background_ratio: 3
+  # JGI projects: zeros in the 3x-exctrl table become lowest_nonzero * zero_value.
+  zero_value: 0.6666666666666666
+  # Retention-time windows (minutes): HILIC = polar, C18 = nonpolar.
+  polar_solvent_front: 0.8
+  polar_solvent_end: 17.5
+  nonpolar_solvent_front: 0.5
+  nonpolar_solvent_end: 10
+
+GNPS2:
+  username: bpbowen
+  # File with a line like MYVARIABLE="password".
+  credentials_file: /global/cfs/cdirs/metatlas/gnps2/gnps2_bpbowen.txt
+  base_url: https://gnps2.org
+  sftp_host: sftp.gnps2.org
+  sftp_port: 443
+  sftp_retry_wait_seconds: 30
+  request_timeout_seconds: 300
+  mirror_raw_data: true
+  mirror_mzmine_results: true
+  submit_everything_bagel: true
+  # Internal calibrant removed from MGF files before FBMN submission.
+  calibrant_mz: {positive: 202.0777, negative: 202.0788}
+  calibrant_ppm: 5
+  fbmn_params:
+    workflowname: feature_based_molecular_networking_workflow
+    featurefindingtool: MZMINE
+    input_libraries: LIBRARYLOCATION/LC/LIBRARY
+    input_supplemental_edges: ""
+    library_analog_search: "0"
+    library_min_cosine: "0.7"
+    library_min_matched_peaks: "3"
+    library_topk: "20"
+    min_peak_intensity: "0.0"
+    networking_max_shift: "1999"
+    networking_min_cosine: "0.7"
+    networking_min_matched_peaks: "3"
+    normalization: None
+    pm_tolerance: "0.01"
+    fragment_tolerance: "0.01"
+    precursor_filter: "1"
+    api: "no"
+  everything_bagel_params:
+    workflowname: everything_bagel_workflow
+    detection_preset: rare
+    experimentdescription: ""
+    feature_finder_engine: v1
+    filter_precursor: "1"
+    filter_window: "1"
+    filtertostructures: "0"
+    formula_prediction_method: buddy_fiddle
+    fragment_tolerance: "0.05"
+    input_spectral_library: LIBRARYLOCATION/LC/LIBRARY
+    library_min_matched_peaks: "3"
+    library_min_similarity: "0.7"
+    mode: fbmn
+    noise_threshold_mode: standard
+    pm_tolerance: "0.05"
+    run_peak_resolving_challenger: "no"
+    topk: "20"
+
+GDRIVE:
+  upload: true
+  # rclone remote:path where project zips are uploaded (rclone config of the running user).
+  remote: ben_lbl_gdrive:/untargeted_outputs
+  add_documentation: true
+  doc_name: Untargeted_metabolomics_GNPS2_Guide.docx
+  # Shorten file names inside zips to {date}_{dept}_{submitter}_{pid}_{chromatography}.
+  abridged_filenames: true
+  # Zip only when total features across polarities exceed this.
+  min_features: 0
+  abridged_strip_suffixes: [_lenient, _strict, _custom, _test]

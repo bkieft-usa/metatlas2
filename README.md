@@ -96,6 +96,7 @@ See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for 
 | **[run_targeted_analysis.md](docs/run_targeted_analysis.md)** | Main workflow execution: project setup, RT alignment, and auto identification |
 | **[manual_curation_and_summary.md](docs/manual_curation_and_summary.md)** | Interactive GUI for manual peak curation and summary generation |
 | **[standards_annotation_workflow.md](docs/standards_annotation_workflow.md)** | Analyst guide to standards annotation, review, alignment, and atlas/MS/MS deposition |
+| **[untargeted_workflow.md](docs/untargeted_workflow.md)** | Automated untargeted pipeline: LIMS project discovery, MZmine, GNPS2 FBMN, zip/Google Drive upload |
 
 ### Developer Resources
 

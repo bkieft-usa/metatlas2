@@ -76,9 +76,17 @@ def _get_drive_name_for_id(folder_id: str) -> str | None:
 def _rclone_copy(
     source: Path, drive: str, dest_path: Path, overwrite: bool = False,
     *, apply_excludes: bool = True, required: bool = False,
+    update: bool = False, ignore_existing: bool = False,
 ) -> None:
     """
-    Copy *source* directory to *drive*:*dest_path*
+    Copy *source* (a directory or a single file) to *drive*:*dest_path*.
+
+    Args:
+        overwrite: Add ``--ignore-times`` so every file is re-transferred.
+        apply_excludes: Apply :data:`RCLONE_UPLOAD_EXCLUDES`.
+        required: Raise (instead of warning) if the rclone binary is missing.
+        update: Add ``--update`` (skip files that are newer on the remote).
+        ignore_existing: Add ``--ignore-existing`` (never replace remote files).
     """
     dest = f"{drive}:{dest_path}"
     cmd = [
@@ -97,7 +105,11 @@ def _rclone_copy(
             cmd.extend(["--exclude", pattern])
     if overwrite:
         cmd.append("--ignore-times")
-    
+    if update:
+        cmd.append("--update")
+    if ignore_existing:
+        cmd.append("--ignore-existing")
+
     try:
         logger.info(f"Starting rclone upload: {source} -> {dest}")
         with tqdm(total=100, desc="Uploading to Google Drive", unit="%", disable=should_disable_tqdm()) as pbar:
@@ -124,6 +136,41 @@ def _rclone_copy(
             logger.exception("rclone binary not found at %s", _get_rclone_path())
             raise
         logger.warning("rclone binary not found at %s — skipping upload.", _get_rclone_path())
+
+def rclone_run(args: list[str]) -> str:
+    """Run ``rclone <args...>`` and return its stdout.
+
+    Raises:
+        FileNotFoundError: If the rclone binary cannot be found.
+        subprocess.CalledProcessError: If rclone exits non-zero.
+    """
+    cmd = [_get_rclone_path(), *args]
+    logger.debug("Running rclone command: %s", " ".join(cmd))
+    return subprocess.check_output(cmd, text=True)
+
+
+def rclone_list(remote_path: str, *, long: bool = False, max_depth: int = 1) -> list[list[str]]:
+    """List files at an rclone remote path (``rclone ls``/``lsl``).
+
+    Args:
+        remote_path: e.g. ``"my_remote:/some/folder"``.
+        long: Use ``lsl`` (size, date, time, name) instead of ``ls`` (size, name).
+        max_depth: Value for ``--max-depth``.
+
+    Returns:
+        One list of whitespace-split fields per listed file. File names
+        containing spaces are re-joined into the final field.
+    """
+    out = rclone_run(["lsl" if long else "ls", remote_path, "--max-depth", str(max_depth)])
+    n_leading = 3 if long else 1
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) <= n_leading:
+            continue
+        rows.append(parts[:n_leading] + [" ".join(parts[n_leading:])])
+    return rows
+
 
 def _has_drive_access(drive: str) -> tuple[bool, str | None]:
     """Return whether the configured remote is accessible and an optional error message."""
