@@ -16,6 +16,12 @@
 #   metatlas2 [--image TAG] [--dev] get-db-table --table-name NAME [--output_path PATH] [--database_path PATH]
 #   metatlas2 [--image TAG] [--dev] update-tags {add|remove|retag} --input-csv FILE
 #   metatlas2 [--image TAG] [--dev] update-tags retrieve
+#   metatlas2 [--image TAG] [--dev] untargeted run [--config FILE] [--dry_run] [--direct_input P1,P2] ...
+#   metatlas2 [--image TAG] [--dev] untargeted status [--print_recent N] [--direct_input P1,P2]
+#   metatlas2 [--image TAG] [--dev] untargeted mirror-raw --direct_input P1 --mode {hard|soft}
+#   metatlas2 [--image TAG] [--dev] untargeted run [--config FILE] [--dry_run] [--direct_input P1,P2] ...
+#   metatlas2 [--image TAG] [--dev] untargeted status [--print_recent N] [--direct_input P1,P2]
+#   metatlas2 [--image TAG] [--dev] untargeted mirror-raw --mode {hard|soft} --direct_input P1,P2
 #   metatlas2 [--image TAG] [--standalone] [--update-data]
 #
 # Flags (consumed by this script, not forwarded to Python):
@@ -399,6 +405,35 @@ run_in_container() {
     fi
 }
 
+# _drain_sbatch_queue QUEUE_FILE — submit MZmine jobs queued by the untargeted pipeline.
+# Each line: <sbatch file>\t<job-id file>\t<prefix>. Writes "<prefix>=<jobid>" to the
+# job-id file (same format as the legacy pipeline). Unsubmitted jobs are detected by
+# the pipeline's next run (no job-id file) and marked '09 error'.
+_drain_sbatch_queue() {
+    local queue="$1" sbatch_file job_id_file prefix out job_id rc=0
+    if [[ ! -s "${queue}" ]]; then
+        rm -f "${queue}"
+        return 0
+    fi
+    if ! command -v sbatch &>/dev/null; then
+        echo "Error: 'sbatch' not found on this host; queued MZmine jobs left in ${queue}" >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r sbatch_file job_id_file prefix; do
+        [[ -n "${sbatch_file}" ]] || continue
+        if out="$(sbatch --parsable "${sbatch_file}" 2>&1)"; then
+            job_id="${out%%;*}"
+            printf '%s=%s\n' "${prefix}" "${job_id}" > "${job_id_file}"
+            echo "Submitted MZmine job ${prefix} as Slurm job ${job_id}"
+        else
+            echo "Error: sbatch failed for ${sbatch_file}: ${out}" >&2
+            rc=1
+        fi
+    done < "${queue}"
+    rm -f "${queue}"
+    return "${rc}"
+}
+
 # ---------------------------------------------------------------------------
 # Python call builders for the lightweight "routine" subcommands
 # ---------------------------------------------------------------------------
@@ -440,10 +475,56 @@ build_py_call() {
     esac
 }
 
+# _drain_sbatch_queue FILE — submit MZmine jobs queued by the untargeted pipeline.
+# Each line: <sbatch file>\t<job-id file>\t<prefix>. Runs on the host because
+# sbatch is not available inside the container.
+_drain_sbatch_queue() {
+    local queue="$1" sbatch_file job_id_file prefix out job_id
+    if [[ -s "${queue}" ]]; then
+        while IFS=$'\t' read -r sbatch_file job_id_file prefix; do
+            [[ -n "${sbatch_file}" ]] || continue
+            if out="$(sbatch --parsable "${sbatch_file}" 2>&1)"; then
+                job_id="${out%%;*}"
+                echo "${prefix}=${job_id}" > "${job_id_file}"
+                echo "Submitted MZmine job ${job_id} for ${prefix}"
+            else
+                echo "ERROR: sbatch failed for ${sbatch_file}: ${out}" >&2
+            fi
+        done < "${queue}"
+    fi
+    rm -f "${queue}"
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 case "${SUBCOMMAND}" in
+    untargeted)
+        UNT_ARGS=("${SUB_ARGS[@]}")
+        QUEUE_FILE=""
+        if [[ "${SUB_ARGS[0]:-}" == "run" ]] \
+            && ! _has_flag --dry_run "${SUB_ARGS[@]}" && ! _has_flag --dry-run "${SUB_ARGS[@]}" \
+            && command -v sbatch &>/dev/null; then
+            QUEUE_DIR="${HOME}/.metatlas2/untargeted_sbatch_queue"
+            mkdir -p "${QUEUE_DIR}"
+            QUEUE_FILE="$(mktemp "${QUEUE_DIR}/queue_XXXXXX.tsv")"
+            UNT_ARGS+=("--sbatch_queue_file" "${QUEUE_FILE}")
+            [[ "${RUNTIME}" == "docker" ]] && DOCKER_ARGS+=("-v" "${QUEUE_DIR}:${QUEUE_DIR}")
+        fi
+        set +e
+        if [[ "${RUNTIME}" == "shifter" ]]; then
+            shifter "${SHIFTER_ARGS[@]}" /app/.venv/bin/python -m metatlas2.run_untargeted_pipeline "${UNT_ARGS[@]}"
+        else
+            docker run "${DOCKER_ARGS[@]}" --entrypoint /app/.venv/bin/python "${IMAGE_FULL}" \
+                -m metatlas2.run_untargeted_pipeline "${UNT_ARGS[@]}"
+        fi
+        UNT_RC=$?
+        set -e
+        # Submit queued MZmine jobs even if a later pipeline step failed.
+        [[ -n "${QUEUE_FILE}" ]] && _drain_sbatch_queue "${QUEUE_FILE}"
+        exit "${UNT_RC}"
+        ;;
+
     update-tags)
         if [[ "${RUNTIME}" == "docker" ]]; then
             ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
@@ -499,6 +580,29 @@ case "${SUBCOMMAND}" in
         shifter "${SHIFTER_ARGS[@]}" --entrypoint \
             "${PASSTHROUGH_ARGS[@]}" --script-only --output "${TMPSCRIPT}"
         sbatch "${TMPSCRIPT}"
+        ;;
+
+    untargeted)
+        # Untargeted pipeline: python -m metatlas2.run_untargeted_pipeline {run|status|mirror-raw|write-config} ...
+        # 'sbatch' is not available inside the container, so for 'run' the container
+        # appends MZmine jobs to a queue file and this host script submits them afterwards.
+        UT_ARGS=("${SUB_ARGS[@]}")
+        UT_QUEUE=""
+        if [[ "${SUB_ARGS[0]:-}" == "run" ]] && ! _has_flag --dry_run "${SUB_ARGS[@]}" \
+                && ! _has_flag --dry-run "${SUB_ARGS[@]}"; then
+            UT_QUEUE_DIR="${HOME}/.metatlas2/untargeted_sbatch_queue"
+            mkdir -p "${UT_QUEUE_DIR}"
+            UT_QUEUE="$(mktemp "${UT_QUEUE_DIR}/queue_$(date +%Y%m%d_%H%M%S)_XXXXXX.tsv")"
+            UT_ARGS+=("--sbatch_queue_file" "${UT_QUEUE}")
+        fi
+        set +e
+        run_in_container /app/.venv/bin/python -m metatlas2.run_untargeted_pipeline "${UT_ARGS[@]}"
+        UT_RC=$?
+        set -e
+        if [[ -n "${UT_QUEUE}" ]]; then
+            _drain_sbatch_queue "${UT_QUEUE}" || UT_RC=1
+        fi
+        exit "${UT_RC}"
         ;;
 
     add-compounds|add-atlases|add-msms-refs|get-atlases|get-db-table|standards-annotation)

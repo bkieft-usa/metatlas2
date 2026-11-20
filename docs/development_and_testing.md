@@ -18,6 +18,8 @@ The test suite is split into two tiers:
 - `add-atlases` pipeline: creates atlases from TSV files, validates compound associations
 - `run` pipeline: project setup, RT alignment, and auto-identification stages against synthetic HDF5 data
 
+**Untargeted pipeline (`tests/test_untargeted_*.py`, unit tier):** uses `InMemoryLims` in place of LabKey, and fakes for GNPS2 HTTP/SFTP, rclone and `sbatch`. Synthetic projects come from `tests/untargeted_fixtures.py`. `test_untargeted_pipeline.py::test_full_lifecycle` drives one project through three runs, from project creation to upload. `test_wrapper_drains_sbatch_queue` runs the bash queue-drain function from `scripts/metatlas2.sh` against a fake `sbatch`.
+
 **What is NOT tested:**
 - GUI / Jupyter notebook rendering
 - Slurm job submission

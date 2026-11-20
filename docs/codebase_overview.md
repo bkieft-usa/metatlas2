@@ -83,6 +83,7 @@ This comprehensive guide covers:
 | `get_atlases_from_db.py` | Fetches and exports atlas data from the main database |
 | `get_db_table.py` | Exports any table from the main DuckDB as a CSV file |
 | `convert_raw_files.py` | An automated background script that converts .raw LCMS run files to .mzML, .h5, and parquet |
+| `run_untargeted_pipeline.py` + `untargeted/` | Automated untargeted pipeline (LIMS → MZmine → GNPS2 FBMN → zip/Drive); see [untargeted_workflow.md](untargeted_workflow.md) for the module map |
 
 ---
 
