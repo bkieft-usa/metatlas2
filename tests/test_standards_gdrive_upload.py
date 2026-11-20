@@ -8,10 +8,10 @@ from metatlas2 import gdrive_upload as drive
 
 @pytest.fixture
 def annotation(tmp_path):
-    directory = tmp_path / "outputs" / "annotation_run_20260101T120000_000000Z"
+    directory = tmp_path / "outputs" / "annotation_run_1"
     directory.mkdir(parents=True)
     (directory / "summary.csv").write_text("summary")
-    alignment = directory / "rt_align_20260101T120001_000000Z"
+    alignment = directory / "rt_alignment_1"
     alignment.mkdir()
     (alignment / "atlas.csv").write_text("atlas")
     (alignment / "refs.tab").write_text("refs")

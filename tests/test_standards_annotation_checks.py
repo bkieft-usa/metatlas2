@@ -147,8 +147,9 @@ def test_summary_checks_before_creating_output(tmp_path, monkeypatch):
         ("A", "C18", "POS", "H", 1, "SAME-X"),
         ("B", "C18", "POS", "Na", 1, "SAME-Y"),
     ])
-    monkeypatch.setattr(db, "validate_annotation_choices", lambda _: None)
-    monkeypatch.setattr(db, "load_selected_peaks_with_ms2", lambda _: df)
+    monkeypatch.setattr(db, "get_draft_annotation_run", lambda _: 1)
+    monkeypatch.setattr(db, "validate_annotation_choices", lambda _, annotation_run_id: None)
+    monkeypatch.setattr(db, "load_selected_peaks_with_ms2", lambda _, annotation_run_id: df)
     monkeypatch.setattr(db, "load_isomer_check_targets", lambda _: targets([]))
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "fix_peak_labels", lambda selections: selections)
