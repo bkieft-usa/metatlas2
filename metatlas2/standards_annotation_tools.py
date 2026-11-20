@@ -348,7 +348,8 @@ def build_standards_lcmsrun_table(
     )
 
     if output_dir is not None:
-        expanded_table_path = os.path.join(output_dir, "full_search_table.csv")
+        input_stem = Path(project["standards_input_file"]).stem
+        expanded_table_path = os.path.join(output_dir, f"{input_stem}_expanded.csv")
         result.to_csv(expanded_table_path, index=False)
         logger.info(f"Expanded table saved to {expanded_table_path}")
 
