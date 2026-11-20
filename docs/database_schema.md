@@ -25,6 +25,7 @@ This document describes the metatlas2 database schema, table structure, and how 
   - [ms1_data Table](#ms1_data-table)
   - [ms2_data Table](#ms2_data-table)
   - [manual_curation Table](#manual_curation-table)
+- [Standards Annotation Project Database](#standards-annotation-project-database)
 - [Workflow Objects and Database Mapping](#workflow-objects-and-database-mapping)
 - [Database Relationships and Visual Schema](#database-relationships-and-visual-schema)
   - [Main Database Schema Diagram](#main-database-schema-diagram)
@@ -458,6 +459,70 @@ Stores manual curation decisions and compound identification results. This is th
 - `ms1_notes`, `ms2_notes`, `other_notes` store standardized quality decisions from the GUI radio buttons
 - `max_eic_rt` / `max_eic_intensity` identify the highest-quality EIC peak for display in summaries
 - `analysis_type` and `analysis_name` allow the same compound to be analyzed independently in different workflows within the same RT alignment and analysis iteration
+
+---
+
+## Standards Annotation Project Database
+
+The standards-annotation workflow (`metatlas2.sh standards-annotation`) uses its
+own project DuckDB at
+`$METATLAS_DATA_DIR/projects/reference_standards_annotation/<analyst>/<standards_run_name>/<standards_run_name>.duckdb`.
+It is created and written only by `metatlas2/standards_annotation_db.py`. The
+analyst workflow is described in [standards_annotation_workflow.md](standards_annotation_workflow.md).
+
+Review history is versioned: each review iteration is an **annotation run**
+(`draft` while edited in the GUI, `frozen` once summarized), each RT alignment
+of a frozen annotation run is an **alignment run**, and each deposit preview is
+a **deposit**. Runs and deposits are numbered 1, 2, 3, ... and map to output
+directories `outputs/annotation_run_<N>/rt_alignment_<M>/deposit_<K>/`.
+
+```
+extraction layer (written once)          review history                         deposit
+──────────────────────────────          ──────────────────────────────         ─────────────────────────────
+sa_compounds ─┐                          sa_annotation_runs (N)
+sa_extraction_targets ─┤                   ├─ sa_run_selections ──► sa_peaks
+sa_ms1, sa_ms2, sa_tic, sa_injbl_ms1       ├─ sa_run_no_good_peaks
+sa_ms1_sources                             ├─ sa_run_compound_notes
+sa_peaks ── sa_peak_ms2                    ├─ sa_run_state
+                                           └─ sa_alignment_runs (M)
+                                                ├─ sa_alignment_models
+                                                ├─ sa_alignment_qc_points
+                                                ├─ sa_aligned_peaks ──► sa_peaks
+                                                ├─ sa_atlas_entries / sa_msms_entries
+                                                └─ sa_deposits (K)
+                                                     ├─ sa_deposit_atlas_rows (generated | final)
+                                                     ├─ sa_deposit_msms_rows  (generated | final)
+                                                     └─ sa_deposit_changes
+```
+
+| Table | Key | Contents |
+|---|---|---|
+| `sa_compounds` | `compound_uid` | One row per compound name + adduct with structure and theoretical m/z. |
+| `sa_extraction_targets` | `mz_rt_uid` | One row per compound/adduct/file extraction target with RT window and input annotation notes. |
+| `sa_ms1`, `sa_ms2`, `sa_tic`, `sa_injbl_ms1` | per table | Extracted EICs, MS2 scans, TIC, and injection-blank EICs. |
+| `sa_ms1_sources` | compound, chromatography, polarity | The MS1 file chosen for each group. |
+| `sa_peaks` | `peak_uid` | Detected and manual peaks. `created_in_annotation_run` is set for manual peaks; a frozen run only shows peaks created in or before it. |
+| `sa_peak_ms2` | `peak_uid`, `filename` | Closest MS2 scan per peak and CE file. |
+| `sa_annotation_runs` | `annotation_run_id` | Status (`draft`/`frozen`), parent run, created/frozen dates and analyst, summary directory, Drive link, GUI checkpoint. At most one draft. |
+| `sa_run_selections` | run, `peak_uid` | Selected peaks and analyst notes in a run. |
+| `sa_run_no_good_peaks` | run, compound, chromatography, polarity | Explicit "No good peaks" decisions. |
+| `sa_run_compound_notes` | run, compound, chromatography | Analyst notes per compound and chromatography. |
+| `sa_run_state` | run, `compound_uid`, chromatography | Pending/complete status used to resume the GUI. |
+| `sa_alignment_runs` | `alignment_run_id` | Annotation run aligned, dates, directory, Drive link, `skip_alignment`, atlas tags, and full config snapshot. |
+| `sa_alignment_models` | run, chromatography | Model type, degree, coefficients, intercept, offset, R², RMSE, equation, number of QC points, QC atlas UID and selector, settings, QC filenames. |
+| `sa_alignment_qc_points` | run, chromatography, point | Per-QC-compound measured RT, atlas RT, prediction, and residual. |
+| `sa_aligned_peaks` | run, `peak_uid` | Output order, review label and number, measured and aligned RT peak/min/max, RT difference. |
+| `sa_atlas_entries` | alignment run, `entry_id` | Current atlas rows to deposit for an alignment run (centralized-atlas columns). Generated on the first preview; deposits write analyst edits back (`origin = manual` for added rows, `is_excluded` for deleted rows, `last_modified_by_deposit`). |
+| `sa_msms_entries` | alignment run, `entry_id` | Current MS/MS reference rows (importer `.tab` columns plus `sa_peak_uid`, `sa_ce_label`, measured collision energy), maintained like `sa_atlas_entries`. |
+| `sa_deposits` | `deposit_id` | Alignment run, status (`previewed`, `superseded`, `in_progress`, `deposited`), directory, SHA-256 of the generated and deposited files, stage status (`compounds`, `atlas`, `msms`: `pending`/`done`/`skipped`) with times, `force_add`. |
+| `sa_deposit_atlas_rows` | deposit, version, row | Exact rows of the preview as generated and as deposited, with `change_status` (`unchanged`/`edited`/`added`) and `sheet_outcome` (`appended`/`skipped_duplicate`/`skipped_by_flag`). |
+| `sa_deposit_msms_rows` | deposit, version, row | As above for MS/MS references, with `import_outcome` (`inserted`/`skipped_existing`/`filtered`/`skipped_by_flag`) and the main-database `ref_uid`. |
+| `sa_deposit_changes` | — | One row per edited value, added row, or removed row between the generated preview and the deposited file. |
+
+The review tables do not declare foreign keys because DuckDB cannot delete a
+referenced row in the same transaction as the rows that reference it, which
+discarding a draft annotation run requires. The helper module enforces the
+relationships.
 
 ---
 

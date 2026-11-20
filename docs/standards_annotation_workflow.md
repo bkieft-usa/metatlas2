@@ -4,6 +4,56 @@ This guide covers preparing reference standards, reviewing their peaks,
 aligning retention times (RTs), appending atlas rows to Google Sheets, and
 importing compounds and MS/MS references into the main database. RTs are in **minutes**.
 
+## 0. Quickstart guide
+
+On a NERSC Perlmutter login node or compute node, run the following command
+(from anywhere in the filesystem).
+
+```bash
+metatlas2.sh standards-annotation --config_path /absolute/path/to/standards_config.yaml
+```
+
+An annotation notebook will be created and its location printed to the command
+line standard output. Open the notebook to begin annotation.
+
+Run the notebook through Step 1 and click the "Open Standards Annotation GUI" link.
+A Dash app will open in another tab in your browser. Complete the annotation by using
+checkboxes to select high-quality peaks (or manually create new peaks) that will go 
+into the centralized metatlas atlas table. After finishing peak selection (either
+a completed or partial analysis), click "Save and Exit" in the top right corner of
+the GUI to ensure all changes are saved to the database. Note: all analyst input
+(checkboxes, notes, manual peaks) is saved every Next/Previous navigation, but the final
+"Save and Exit" does database checks and shuts down the app port.
+
+Once the message "Analyst clicked Save & Exit -- shutting down GUI server" appears
+in the notebook cell output, run the cells in Step 2. This summarizes and freezes the
+current **annotation run** (numbered 1, 2, 3, ...): a summary table and figures are
+written to `outputs/annotation_run_N/` and (optionally) uploaded to a shared Google
+Drive folder. The peak selections are now ready for review.
+
+After review, if changes are necessary, rerun through Step 1 again to re-open the
+GUI. Because annotation run N is frozen, the GUI automatically starts annotation run
+N+1 as a copy of run N; make the requested updates there. **Important:** after updating
+peaks in the GUI, ALWAYS re-run Step 2 to summarize and freeze the new annotation run.
+Every annotation run stays in the project database: set `ANNOTATION_RUN_ID` in Step 1
+to view any earlier run read-only in the GUI.
+
+Once peak selections are approved, run the Step 3 cells. The history cell lists every
+annotation run with its dates; set `ANNOTATION_RUN_ID` to the approved run. Step 3
+corrects the measured RT peaks back to historical RT space (based on the QC atlas
+in the config for each chromatography) and creates **RT alignment run** M in
+`annotation_run_N/rt_alignment_M/`. Review the RT alignment model and summary figure
+and the output table to ensure Aligned RT Peaks are as expected. If the model needs
+changes (for example, removing an InChIKey in `exclude_inchikeys` or removing a QC
+file), rerun Step 3; each rerun creates a new numbered alignment run.
+
+Finally, run the Step 4 cells with `ANNOTATION_RUN_ID` and `ALIGNMENT_RUN_ID` set to
+the approved annotation run and its approved alignment run. Run first with `DRY_RUN = True` to write editable previews of the atlas table
+and MS/MS references (generated from the project database) to
+`rt_alignment_M/deposit_K/`. If needed, edit those files by hand. Then run with
+`DRY_RUN = False`: the edited files are uploaded/deposited exactly as they are, and
+the edits are recorded in the project database.
+
 ## 1. Before you start
 
 Complete [initial setup](initial_setup.md), including `METATLAS_DATA_DIR`, the
@@ -43,18 +93,21 @@ compound names and structures across rows for the same compound.
 
 | Column | What to enter |
 |---|---|
-| `compound_name` | The name used in review and exported as `Compound Name`; the separate `Compound Label` field becomes the canonical atlas `label`. |
-| `smiles`, `inchi`, `inchi_key` | Supply a valid SMILES or InChI where possible. If only an InChIKey is available, the workflow attempts a PubChem lookup. Missing InChI/InChIKey can be derived from a structure. |
-| `project_name` | The experiment folder name, not a full path. The workflow searches `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/*.h5`. |
-| `group_name` | The sample name parsed from the HDF5 filename, matched case-insensitively. It is not a substring search. |
-| `rt_min`, `rt_max` | The expected extraction window in minutes. Blank or nonnumeric values default to 0 and 20, respectively; enter explicit numeric bounds to avoid an unintended window. |
-| `annotation_notes` | Optional existing notes for this input row, carried through to the summary and atlas. |
+| `label` | The name used in review and exported as `Compound Label` in the output tables.
+| `compound_name` | An optional secondary name that is stored and exported as `Compound Name` in the output tables but not used during annotation. |
+| `smiles`, `inchi`, `inchi_key` | Supply a valid SMILES (preferred) or InChI where possible. If only an InChIKey is available, the workflow attempts a PubChem lookup. Missing InChI/InChIKey can be derived from a structure. |
+| `project_name` | The experiment folder name for locating raw files, not a full path. The workflow searches `$METATLAS_DATA_DIR/raw_data/<owner>/<project_name>/*.h5`. |
+| `group_name` | The sample name parsed from the HDF5 filename, matched case-insensitively. It is not a substring search - the group in the input CSV must match the filename field exactly. |
+| `rt_min`, `rt_max` | Optional: The expected extraction window in minutes. Blank or nonnumeric values default to min or max TIC values, respectively. |
+| `annotation_notes` | Optional: Existing notes for this input row, carried through to the GUI, summaries, and atlases. |
+
+### Rules and checks for expanding the input CSV
 
 Quote CSV fields containing commas. Check structures and names carefully:
 the workflow requires a resolvable InChI and InChIKey for each input row.
 It desalts the structure by keeping its largest fragment and neutralizes
-charges using the historical standards cleaning rules. If the resulting
-InChIKey differs from the supplied or derived key, input expansion stops;
+charges using RDKit and custom cleaning rules. If the resulting InChIKey after
+cleaning differs from the supplied or derived key and error will be raised;
 provide a matching neutral, desalted structure and key. If both SMILES and
 InChI are supplied, both are checked against the key. An InChIKey alone
 requires a successful PubChem structure lookup for this check.
@@ -77,7 +130,7 @@ PROJECT:
   standards_run_name: my_standards_run
   standards_input_file: /absolute/path/to/standards_input.csv
   owner: jgi
-  chem_source: "Chemical source"
+  chem_source: "Vendor or mix name, or conventionally 'individual standard'"
   include_polarities: [POS, NEG]
   include_adducts: ["[M+H]+", "[M+Na]+", "[M-H]-"]
 
@@ -149,14 +202,19 @@ Set `GDRIVE.root_folder_id` to the ID in the URL of the shared
 ```text
 Reference_Standards_Annotation/
   <standards_run_name>/
-    annotation_run_<annotation_timestamp>/
+    annotation_run_<N>/
       StandardsAnnotation_Summary_<standards_run_name>.csv
       summary_figures/
-      rt_align_<alignment_timestamp>/
+      rt_alignment_<M>/
         StandardsAnnotation_Summary_Aligned_<standards_run_name>.csv
-        rt_alignment/
-        Atlas_Deposit_Preview_<standards_run_name>.csv
-        MsmsRefs_Deposit_Preview_<standards_run_name>.tab
+        alignment_config.json
+        model_figures/
+        deposit_<K>/
+          Atlas_Deposit_<standards_run_name>.csv
+          MsmsRefs_Deposit_<standards_run_name>.tab
+          Atlas_Deposit_<standards_run_name>.final.csv
+          MsmsRefs_Deposit_<standards_run_name>.final.tab
+          deposit_changes.csv
 ```
 
 The summary, alignment, and deposit stages each upload their corresponding
@@ -233,18 +291,31 @@ not used for peak detection.
 
 Open the generated notebook in JupyterHub with its `metatlas2 (latest)` kernel and run
 the cells up through the GUI cell. The notebook reloads the project database;
-its generated `RUN_PARAMS` should not need editing.
+its generated `RUN_PARAMS` should not need editing. Pass `upload_to_gdrive=False`
+to a summary, alignment, or deposit call to skip that stage's Drive upload.
 
-For an existing notebook generated before the notebook-only workflow, update
-its imports to use the implementation modules:
+### Annotation runs
 
-```python
-from metatlas2.standards_annotation_rt_align import run_reverse_rt_align
-from metatlas2.deposit_ref_standards_atlas_and_msms_refs import run_atlas_and_msms_deposit
-```
+Each review iteration is a numbered **annotation run** stored in the project
+database. A run is a *draft* while you edit it in the GUI and becomes *frozen*
+when it is summarized (Step 2); frozen runs never change. At most one draft
+exists at a time. The history cell above the GUI lists every run with its
+status, dates, number of selected peaks, and output directory.
 
-Existing notebooks can also pass `upload_to_gdrive=False` to each summary,
-alignment, or deposit call to skip that stage's Drive upload.
+* `ANNOTATION_RUN_ID = None` (default): the GUI edits the draft run. If there is
+  no draft, it starts one: run 1 starts empty and later runs start as a copy of
+  the latest frozen run.
+* `ANNOTATION_RUN_ID = N` for a frozen run: the GUI shows that run exactly as it
+  was summarized, **read-only** (checkboxes, notes, and Add are disabled and
+  nothing is saved). Manual peaks added in later runs are hidden.
+* To continue from an earlier run instead of the latest one, run
+  `start_new_annotation_run(RUN_PARAMS['project_db_path'], from_annotation_run_id=N)`
+  in a cell, then open the GUI with `ANNOTATION_RUN_ID = None`. If an
+  unsummarized draft exists, add `discard_draft=True` to discard it (and the
+  manual peaks added in it). `discard_draft_annotation_run(...)` discards a
+  draft without starting a new one.
+
+### Using the GUI
 
 1. For each compound, examine each chromatography and polarity: EICs and
    candidate markers, the target-compound TIC, blank, and **Show MS2 Scans**
@@ -259,35 +330,42 @@ alignment, or deposit call to skip that stage's Drive upload.
 3. If a suitable peak was missed, choose its **Adduct** and an EIC **RT
    peak**, then click **Add**. The manual peak uses that MS1 file, initial
    bounds of +/- 0.1 min (lower bound no less than zero), and the same
-   closest-MS2 rule. Review its selection and spectra.
+   closest-MS2 rule. Review its selection and spectra. Manual peaks belong to
+   the draft run they were added in and remain available to later runs.
 4. Enter analyst notes. Use **Previous**, **Next**, or the compound dropdown
-   to navigate; navigation saves decisions and notes. Click **Save & Exit**
-   when finished. Reopen the notebook and GUI to resume from saved review.
+   to navigate; navigation saves decisions and notes to the draft run. Click
+   **Save & Exit** when finished. Reopen the notebook and GUI to resume the
+   draft from its saved checkpoint.
 
 ## 6. Generate and approve the summary
 
-After **Save & Exit**, run the notebook's summary cell. Every target group
+After **Save & Exit**, run the notebook's summary cell. It summarizes the
+**draft** annotation run N (it fails if there is no draft). Every target group
 must have a decision and at least one actual peak must be selected. The cell
-prints a UTC timestamp of the form `YYYYMMDDTHHMMSS_ffffffZ` and creates:
+creates:
 
 ```text
-outputs/annotation_run_<annotation_timestamp>/
+outputs/annotation_run_<N>/
   StandardsAnnotation_Summary_<standards_run_name>.csv
   summary_figures/
-  .summary_complete
 ```
 
-By default, the cell uploads the entire annotation directory to Google Drive
-and logs the link to that `annotation_run_<annotation_timestamp>` folder.
-Set `UPLOAD_SUMMARY_TO_GDRIVE = False` in the summary parameters cell to
-skip this upload. Share the outputs with the supervisor and review the CSV
-and PDFs before proceeding.
+Outputs are staged and published only when complete; the run is then frozen
+and its output directory recorded in the database. If summary generation
+fails, nothing is published and the run stays a draft.
+
+By default, the cell uploads the annotation run directory to Google Drive and
+records the link. Set `UPLOAD_SUMMARY_TO_GDRIVE = False` in the summary
+parameters cell to skip this upload. Share the outputs with the supervisor and
+review the CSV and PDFs before proceeding. If changes are requested, reopen the
+GUI (a new draft run N+1 is started from run N) and summarize again.
+
 The CSV contains one row per selected peak, notes, MS1 source, and separate
 CE102040/CE205060 MS2 fields. Spectra are `[[m/z values], [intensities]]`;
 missing scans leave empty fields. Selected peaks are numbered by measured RT
 within each chromatography/polarity/compound/source/adduct group; `GUI Peak
 Num` preserves the original GUI number. Summary generation does not renumber
-database peaks. Each invocation creates a new directory.
+database peaks.
 
 Before creating outputs, the summary compares selected adducts for candidate
 isomers within each chromatography and polarity. Compounds are candidates
@@ -313,81 +391,112 @@ polarities. The QC files must be in the relevant experiment directories and
 match the atlas polarity. The aligned peak's RT difference is also added to
 its min and max bounds.
 
-In the parameters cell immediately before reverse alignment, set
-`ANNOTATION_TIMESTAMP` to the approved summary timestamp (without the
-directory prefix), run that cell, then run the reverse alignment cell.
+Run the history cell, set `ANNOTATION_RUN_ID` in the alignment parameters cell
+to the **approved frozen** annotation run, and run the alignment cell.
+Alignment always uses that run's saved selections, even if a newer draft
+exists (a warning is logged). It writes **RT alignment run** M, numbered across
+the whole project:
 
-The summary timestamp must name a completed summary. Alignment nevertheless
-reads the **current saved project database selections**, not a snapshot of
-that summary. After any review changes, generate and approve a new summary
-and use its timestamp. The software does not compare the two. Do not edit the
-config or QC inputs while alignment is running.
-
-The cell prints an alignment timestamp and writes a new
-`rt_align_<alignment_timestamp>/` inside the chosen summary directory:
-
-* `StandardsAnnotation_Summary_Aligned_<standards_run_name>.csv` has aligned
-  peak/min/max columns, signed `RT diff` (aligned minus measured peak), and
-  the config's `TAGS.atlas`.
-* `rt_alignment/` contains per-chromatography model PDFs and
-  `alignment_config.json`, a snapshot of the loaded settings.
+* `annotation_run_<N>/rt_alignment_<M>/StandardsAnnotation_Summary_Aligned_<standards_run_name>.csv`
+  has aligned peak/min/max columns, signed `RT diff` (aligned minus measured
+  peak), and the config's `TAGS.atlas`.
+* `model_figures/` contains per-chromatography model PDFs and
+  `alignment_config.json` is a snapshot of the loaded settings.
+* The project database records the run with each chromatography's model
+  (type, coefficients/offset, R², RMSE, equation, QC atlas UID and selector,
+  settings, and the QC filenames used), its QC points (measured vs. atlas RT,
+  prediction, residual), and every aligned peak.
 
 Inspect the QC points, fit, residuals, R², RMSE, aligned RTs, bounds, and
 tags. Missing QC data, insufficient observations, or an unusable model stop
-alignment. Adjust the config and rerun to compare separate timestamped
-outputs; approve the particular alignment to deposit. If intentionally
-skipping alignment is appropriate, set `SKIP_RT_ALIGNMENT = True` in the
-alignment parameters cell and rerun it; aligned RTs then equal measured RTs
-and no model plots are produced. The
-alignment directory is uploaded into the same Drive annotation folder by
-default; set `UPLOAD_ALIGNMENT_TO_GDRIVE = False` to skip this upload.
-Alignment does not itself write an atlas to the main database.
+alignment and nothing is published or recorded. Adjust the config (for
+example `exclude_inchikeys`) or QC files and rerun to create a new alignment
+run; earlier runs are kept. If intentionally skipping alignment is
+appropriate, set `SKIP_RT_ALIGNMENT = True`; aligned RTs then equal measured
+RTs and no model is fitted. The alignment directory is uploaded into the same
+Drive annotation folder by default; set `UPLOAD_ALIGNMENT_TO_GDRIVE = False`
+to skip this upload. Alignment does not itself write an atlas to the main
+database.
 
-## 8. Preview and deposit the atlas and references
+## 8. Preview, edit, and deposit the atlas and references
 
-Set `ALIGNMENT_TIMESTAMP` in the parameters cell immediately before deposit to
-the **approved** alignment timestamp, without the directory prefix. Keep
-`ANNOTATION_TIMESTAMP` set to the corresponding approved summary timestamp.
-Run the deposit parameters cell and then the deposit cell. `DRY_RUN` defaults
-to `True`.
+Run the history cell and set both `ANNOTATION_RUN_ID` and `ALIGNMENT_RUN_ID`
+in the deposit parameters cell to the **approved** annotation run and its
+approved alignment run. Alignment run numbers are unique across the project;
+the deposit stops if the alignment run did not align that annotation run, which
+guards against choosing the wrong run. `DRY_RUN` defaults to `True`.
 
-The dry run writes the following next to the chosen aligned summary and,
-by default, uploads them to the same Drive alignment folder, without
-depositing to the sheet or changing the main database. Set
-`UPLOAD_ATLAS_AND_MSMS_DEPOSIT_PREVIEW_TO_GDRIVE = False` to skip the preview
-upload independently of the sheet and database deposit options:
+### Dry run: previews generated from the database
 
-* `Atlas_Deposit_Preview_<standards_run_name>.csv`: aligned RTs,
-  theoretical m/z, 5 ppm m/z tolerance, tags from the aligned summary,
-  preparation dates, and combined analyst/input notes. Structures are read
-  from the **current** project database and formula is derived from them.
-* `MsmsRefs_Deposit_Preview_<standards_run_name>.tab`: one importer-format
-  row per available selected peak/CE spectrum. Missing or empty spectra are
-  warned about and omitted; missing precursor m/z or CE is also warned about.
-  `database` is `metatlas`, `id` is a unique 32-character ID, and `name`
-  is the atlas compound label. The MS2 scan filename supplies the instrument
-  and normalized CE ramp (`CE102040norm` becomes `ramp-102040norm`, and
-  `CE205060norm` becomes `ramp-205060norm`); instrument type is `Orbitrap`.
-  A missing, malformed, or unsupported scan filename stops preparation.
-  Inspect structures, formula, exact mass, metadata, spectra, and counts.
+`DRY_RUN = True` creates deposit K in
+`annotation_run_<N>/rt_alignment_<M>/deposit_<K>/` and, by default, uploads it
+to Drive. Nothing is deposited. All content comes from the project database
+(aligned peaks, structures, the annotation run's notes, input annotation notes,
+the alignment run's tags, and the selected peaks' MS2 scans); the aligned
+summary CSV is a review artifact only.
 
-The analyst must select the reviewed timestamps and ensure project structures
-still match the review; the tool does not verify subsequent changes. Both
-previews are created exclusively and cannot be overwritten. After reviewing
-them, move or remove **both** preview files, set `DRY_RUN = False`, rerun the
-deposit parameters cell, and rerun the deposit cell. This recreates both files,
-imports compounds, appends the atlas, and imports MS/MS references. The full
-previews are used for both database imports, including rows skipped from the
-sheet.
+* `Atlas_Deposit_<standards_run_name>.csv`: the centralized-atlas columns
+  (aligned RTs, theoretical m/z, 5 ppm m/z tolerance, tags, preparation dates,
+  combined analyst/input notes, `PROJECT.chem_source` from the config, and
+  formula derived from the structure) followed by `sa_entry_id` and
+  `sa_peak_uid`.
+* `MsmsRefs_Deposit_<standards_run_name>.tab`: one importer-format row per
+  available selected peak/CE spectrum, followed by `sa_entry_id`,
+  `sa_peak_uid`, `sa_ce_label`, and `sa_measured_collision_energy`. Missing or
+  empty spectra are warned about and omitted. `database` is `metatlas`, `id`
+  is a unique 32-character ID (stable across later previews of the same
+  alignment run), and `name` is the atlas compound label. The MS2 scan filename
+  supplies the instrument and normalized CE ramp (`CE102040norm` becomes
+  `ramp-102040norm`); a malformed or unsupported filename stops preparation.
 
-If one deposit step has already completed, move or remove both previews before
-retrying with `SKIP_ATLAS_UPLOAD = True` to skip the Google Sheets upload or
-`SKIP_MSMS_REFS_DEPOSIT = True` to skip the MS/MS reference import. Rerun the
-parameters cell after changing either option. Both flags
-default to false and can be combined; previews are still created. Compound
-import and InChIKey validation still run when either deposit step is enabled.
-Check the sheet and main database after a failure before deciding which step
-to skip, since a failed operation may have partially completed.
+The first preview of an alignment run stores its rows as that run's deposit
+content. Later previews of the same alignment run reuse that content,
+including edits written back by an earlier deposit. Each dry run creates a new
+deposit and supersedes older, undeposited previews of that alignment run.
+
+### Editing the previews
+
+Inspect structures, formula, exact mass, metadata, spectra, and counts. You
+may edit any value, delete rows, or add rows (leave `sa_entry_id` blank for new
+rows; a blank MS/MS `id` gets a new ID). Do not rename or remove columns. The
+`sa_*` columns link rows to the database and are removed before upload and
+import; `sa_measured_collision_energy` is stored in the main database's numeric
+`collision_energy` column.
+
+### Deposit
+
+Set `DRY_RUN = False` and rerun the parameters and deposit cells. The latest
+preview of the alignment run is used (pass `deposit_id=K` to the deposit call
+to choose another unsuperseded preview). The cell:
+
+1. Reads the preview files back and validates them (columns, required values,
+   polarity, numeric RTs with `rt_min <= rt_peak <= rt_max`, spectra, unique
+   IDs and `sa_entry_id`s). Invalid files stop the deposit with nothing
+   changed.
+2. Compares them to the generated preview and records every edited value,
+   added row, and removed row in the project database and in
+   `deposit_changes.csv`.
+3. Writes the edits back to the alignment run's deposit content
+   (`sa_atlas_entries` / `sa_msms_entries`: edited rows updated, added rows
+   stored as `manual`, deleted rows marked excluded), snapshots the exact rows,
+   and writes `*.final.csv` / `*.final.tab` (without `sa_*` columns).
+4. Imports compounds from the final atlas file, appends the final atlas rows to
+   Google Sheets, and imports the final MS/MS file, recording for each row
+   whether it was appended or skipped as a duplicate, and whether each
+   spectrum was inserted (with its main-database `ref_uid`), skipped as an
+   existing InChIKey/adduct pair, or filtered by the importer.
+
+The project database therefore records exactly what reached the sheet and
+`msms_refs`.
+
+`SKIP_ATLAS_UPLOAD = True` or `SKIP_MSMS_REFS_DEPOSIT = True` skips a stage;
+the skip is recorded and rerunning with the flag cleared performs that stage
+for the same deposit. If a stage fails, rerun with `DRY_RUN = False`: completed
+stages are not repeated. Once a deposit has started, its preview files must
+not change (the deposit refuses changed files); restore them, or start over
+with a new dry run (not possible while a deposit is partially complete).
+A deposit that is complete cannot be deposited again; a new dry run is
+required, and a warning notes that a project deposit already exists.
 
 For a real deposit, the service account key must be accessible at
 `/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json`
@@ -410,33 +519,36 @@ already present by InChIKey. It imports spectra into `msms_refs` in
 Spectra whose `(inchi_key, adduct)` already exists in `msms_refs` are warned
 about and skipped, regardless of source database or collision energy. Multiple
 spectra for a new pair in the same deposit are retained. Set `FORCE_ADD = True`
-to insert existing pairs as well. The preview contains all prepared spectra,
-including any that will be skipped.
-Generated rows use `database=metatlas`. The main database's numeric
-`collision_energy` column stores the measured scan energy from the aligned
-summary, not the ramp string in the `.tab`. Importing the `.tab` separately
-with `add-msms-refs` cannot recover that measured value and warns that the
-numeric field will be blank. If the MS/MS preview is
-missing at import time, the cell fails after the sheet deposit; inspect the
-sheet before retrying.
+to insert existing pairs as well. The importer skips invalid/empty spectra and
+removes fragment peaks at or above precursor m/z + 2.5 when a precursor is
+present; spectra emptied by that filter are skipped. Each row's outcome is
+recorded in the project database.
 
 Check stdout and the deposit log in the project's `logs` directory for
-inserted and skipped counts and warnings. The importer skips invalid/empty spectra and removes fragment peaks
-at or above precursor m/z + 2.5 when a precursor is present; spectra emptied
-by that filter are skipped. Compare the resulting records and counts with the
-reviewed preview, accounting for these filters. For example, with read access
-to the main database, export the table for inspection:
+inserted and skipped counts and warnings. To compare with the main database,
+export the table and match `ref_id` against the `id` column of the final
+MS/MS file:
 
 ```bash
 metatlas2.sh get-db-table --table-name msms_refs --output_path /absolute/path/to/msms_refs_export.csv
 ```
 
-Match `database=metatlas` and `ref_id` against the IDs in the deposited preview
-(the IDs are regenerated on each preview). **Imports are not idempotent:** each import
-creates new rows, even for the same file or InChIKey. Compound import, sheet
-append/sort, and MS/MS import are separate operations, in that order. If any
-step fails or its outcome is uncertain, inspect both destinations before
+**Imports are not idempotent:** each import creates new rows. Compound import,
+sheet append/sort, and MS/MS import are separate operations, in that order. If
+any step fails or its outcome is uncertain, inspect both destinations before
 retrying; coordinate any cleanup with the database administrator.
+
+### Project database tables
+
+The project database (`<standards_run_name>.duckdb`) can be queried directly
+with DuckDB. See [database schema](database_schema.md#standards-annotation-project-database)
+for the full table list. Useful tables: `sa_annotation_runs` and
+`sa_run_selections` (review history), `sa_alignment_runs`,
+`sa_alignment_models`, `sa_alignment_qc_points`, `sa_aligned_peaks`
+(alignment history), `sa_atlas_entries` / `sa_msms_entries` (current deposit
+content per alignment run), and `sa_deposits`, `sa_deposit_atlas_rows`,
+`sa_deposit_msms_rows`, `sa_deposit_changes` (what was previewed, what was
+deposited, and how it was edited).
 
 ## Troubleshooting and recordkeeping
 
@@ -448,13 +560,15 @@ retrying; coordinate any cleanup with the database administrator.
   adducts. Check the expanded table against the CSV.
 * Incomplete review: reopen the GUI, resolve every group, save, and rerun the
   summary. A summary requires at least one selected peak overall.
+* "No draft annotation run to summarize": the latest run is already frozen.
+  Open the GUI to start a new run, or use the existing run's outputs.
 * Failed alignment: check the chromatography's QC atlas UID, matching QC
   files/polarity, extraction window and tolerance, and minimum observations.
   Review diagnostic PDFs rather than assuming a fitted model is acceptable.
 * Failed Drive upload: fix rclone configuration or access. Local outputs
   remain. To retry without rerunning review, alignment, or deposit, run the
   following in the notebook after replacing the path with the affected
-  annotation directory. It uploads that directory and prints its link:
+  `annotation_run_<N>` directory. It uploads that directory and prints its link:
 
   ```python
   from pathlib import Path
@@ -462,16 +576,17 @@ retrying; coordinate any cleanup with the database administrator.
   from metatlas2.load_tools import load_standards_config
 
   config = load_standards_config(RUN_PARAMS["config_path"])
-  annotation_dir = Path("/absolute/path/to/outputs/annotation_run_<annotation_timestamp>")
+  annotation_dir = Path("/absolute/path/to/outputs/annotation_run_<N>")
   print(upload_standards_outputs(config, annotation_dir, [annotation_dir]))
   ```
 
-  If the deposit preview upload failed, no database or sheet deposit was
-  attempted. After resolving the upload, move or remove both local previews
-  before retrying the deposit cell. For other deposit failures, inspect
-  the destinations before retrying.
-* Keep the input CSV, config, project database, approved timestamps, summary,
-  alignment outputs, previews, import log, and confirmation of sheet/database
-  results together according to your team's recordkeeping practice. Project
+  If the deposit preview upload failed, the preview is still recorded and no
+  sheet or database deposit was attempted; you can continue with
+  `DRY_RUN = False`. For other deposit failures, inspect the destinations
+  and the deposit's stages in the history cell before retrying.
+* Keep the input CSV, config, project database, summary, alignment outputs,
+  deposit files, import log, and confirmation of sheet/database results
+  together according to your team's recordkeeping practice. The project
+  database records which annotation run, alignment run, and deposit were used. Project
   schemas are not migrated from older versions; start a new project when
   required.
