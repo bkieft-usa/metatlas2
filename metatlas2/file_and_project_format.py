@@ -403,3 +403,84 @@ def msms_reference_file_metadata(filename: str) -> tuple[str, str]:
     if len(matches) != 1:
         raise ValueError(f"Expected one supported normalized CE ramp in MS2 filename: {filename!r}")
     return fields["instrument"], f"ramp-{matches[0]}"
+
+# ---------------------------------------------------------------------------
+# Lenient, field-index based helpers.
+#
+# The strict regexes above require fully conforming names. The untargeted
+# pipeline must also handle project directories and files that only roughly
+# follow the naming SOP, so it splits on "_" and reads fields by position,
+# exactly as the legacy ``metatlas.tools.validate_filenames`` module did.
+# ---------------------------------------------------------------------------
+
+#: Minimum number of "_"-separated fields in a conforming LC-MS run filename.
+FILE_NUM_FIELDS = 16
+#: Required / optional number of "_"-separated fields in a project directory name.
+NUM_REQUIRED_DIRECTORY_FIELDS = 9
+NUM_OPTIONAL_DIRECTORY_FIELDS = 1
+#: Values allowed in the polarity field (index 9) of a filename.
+FILE_POLARITIES = ("FPS", "POS", "NEG", "EI")
+
+
+def _name_stem(name: str) -> str:
+    """Return the basename of *name* without its final extension (like ``Path.stem``)."""
+    base = os.path.basename(str(name))
+    stem, _ext = os.path.splitext(base)
+    return stem
+
+
+def get_name_field(name: str, field_num: int) -> str | None:
+    """Return the ``field_num``-th "_"-separated field of a file or project name.
+
+    The extension (if any) is dropped first, mirroring ``Path(name).stem``.
+    Returns ``None`` instead of raising when the field does not exist.
+
+    Args:
+        name: File name, path, or project directory name.
+        field_num: Zero-based field index.
+
+    Returns:
+        The field string, or ``None`` if *name* has too few fields.
+    """
+    fields = _name_stem(name).split("_")
+    if field_num < 0 or field_num >= len(fields):
+        return None
+    return fields[field_num]
+
+
+def validate_file_name_minimal(file_name: str) -> list[str]:
+    """Run the minimal LC-MS filename checks used by the untargeted pipeline.
+
+    Checks that the name has at least :data:`FILE_NUM_FIELDS` fields and that
+    field 9 is a recognised polarity (:data:`FILE_POLARITIES`).
+
+    Returns:
+        A list of error messages; empty if the name passes.
+    """
+    errors: list[str] = []
+    fields = _name_stem(file_name).split("_")
+    if len(fields) < FILE_NUM_FIELDS:
+        errors.append(
+            f"Filename contains {len(fields)} fields but a minimum of {FILE_NUM_FIELDS} are required."
+        )
+    polarity = fields[9] if len(fields) > 9 else None
+    if polarity not in FILE_POLARITIES:
+        errors.append(f"Field 9 (polarity) must be one of {list(FILE_POLARITIES)}, got {polarity!r}.")
+    return errors
+
+
+def parent_dir_num_fields(file_path: str) -> list[str]:
+    """Check that the parent directory of *file_path* has a legal number of fields.
+
+    Returns:
+        A list of error messages; empty if the parent directory name passes.
+    """
+    min_fields = NUM_REQUIRED_DIRECTORY_FIELDS
+    max_fields = min_fields + NUM_OPTIONAL_DIRECTORY_FIELDS
+    parent = _name_stem(os.path.dirname(str(file_path)))
+    num_fields = len(parent.split("_"))
+    if num_fields > max_fields:
+        return [f"Parent directory contains {num_fields} fields and the maximum allowed is {max_fields}."]
+    if num_fields < min_fields:
+        return [f"Parent directory contains {num_fields} fields but the minimum allowed is {min_fields}."]
+    return []
