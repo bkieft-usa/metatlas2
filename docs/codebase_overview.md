@@ -49,41 +49,78 @@ This comprehensive guide covers:
 
 ## Module Map for Targeted Analysis
 
+The `metatlas2` package is split into four subpackages:
+
+```
+metatlas2/
+├── shared_tools/          # Data model, DB access, file/path helpers and DB admin tools used by every workflow
+├── targeted/              # Targeted analysis (RT alignment → auto-ID → curation GUI → summary)
+├── standards_annotation/  # Reference-standards annotation workflow
+└── untargeted/            # Untargeted pipeline (LIMS → MZmine → GNPS2 FBMN → zip/Drive)
+```
+
+### `metatlas2/targeted/`
+
 | Module | Role |
 |---|---|
 | `run_targeted_analysis.py` | CLI entry point — parses args, builds `paths` dict, dispatches to `workflows.py` |
 | `workflows.py` | Orchestration layer — one `run_*` function per workflow phase |
-| `workflow_objects.py` | Dataclasses that carry state between workflow functions |
+| `ms2_hit_detection.py` (`mhd`) | MS2 spectral matching against reference library |
+| `create_curation_container.py` (`ccc`) | Builds `curation_df` (ManualCuration records) from identification results |
+| `analysis_gui.py` (`agu`) | Builds the interactive Dash curation app |
+| `analysis_summary.py` (`asm`) | Generates final summary files and QC figures |
+| `note_options.py` (`gno`) | Defines MS1/MS2/other note options and hotkeys for the GUI |
+| `parquet_interact.py` (`pqi`) | Parquet write helpers (schema, partitioning, table builders); query engine lives in `workflow_objects.ParquetQueryInterpreter` (see [parquet_query.md](parquet_query.md)) |
+
+### `metatlas2/shared_tools/`
+
+| Module | Role |
+|---|---|
+| `workflow_objects.py` (`wfo`) | Dataclasses that carry state between workflow functions |
+| `paths.py` (`pth`) | `set_up_paths()` / `get_project_db_path()` — builds all filesystem paths from `METATLAS_DATA_DIR` |
 | `atlas_sheet.py` | Reads the shared master atlas sheet, filters exact tag tokens by chromatography/polarity, and resolves selectors to reusable main-database atlas snapshots |
 | `database_interact.py` (`dbi`) | All DuckDB reads and writes |
 | `load_tools.py` (`ldt`) | Config/file loading, YAML validation, and CSV serialization |
 | `lcmsruns_tools.py` (`lrt`) | Raw file discovery and LCMS run filtering |
 | `extract_data_from_h5.py` (`edh`) | Reads raw HDF5 files to build `ExperimentalData` |
 | `rt_align_tools.py` (`rat`) | RT alignment model fitting, application, and visualization |
-| `ms2_hit_detection.py` (`mhd`) | MS2 spectral matching against reference library |
-| `create_curation_container.py` (`ccc`) | Builds `curation_df` (ManualCuration records) from identification results |
-| `analysis_gui.py` (`agu`) | Builds the interactive Dash curation app |
-| `analysis_summary.py` (`asm`) | Generates final summary files and QC figures |
-| `notebook_generator.py` (`nbg`) | Generates Jupyter curation notebooks and the per-RTA/TGA `QueryNotebook` for Parquet querying (see [parquet_query.md](parquet_query.md)) |
+| `notebook_generator.py` (`nbg`) | Generates Jupyter curation notebooks (targeted and standards annotation) and the per-RTA/TGA `QueryNotebook` for Parquet querying (see [parquet_query.md](parquet_query.md)) |
 | `pubchem_retrieval.py` (`pcr`) | Fetches and caches compound metadata from PubChem |
+| `chebi_retrieval.py` (`chr`) / `modelseed_retrieval.py` (`msr`) | ChEBI and ModelSEED compound annotation lookups |
+| `chem_info.py` | RDKit-based structure helpers (InChI/SMILES parsing, formulas, masses) |
 | `file_and_project_format.py` (`fpf`) | Filename parsing, polarity/chromatography normalization |
-| `note_options.py` (`gno`) | Defines MS1/MS2/other note options and hotkeys for the GUI |
-| `parquet_interact.py` (`pqi`) | Parquet write helpers (schema, partitioning, table builders); query engine lives in `workflow_objects.ParquetQueryInterpreter` (see [parquet_query.md](parquet_query.md)) |
 | `gdrive_upload.py` (`gdu`) | Optional Google Drive upload of output files |
 | `utils.py` | Shared utility helpers (tqdm, worker count, provenance) |
-| `logging_config.py` | Sets up logging to point to scripts where each step takes place for transparency |
-
-## Other Scripts and Tools
-
-| Module | Role |
-|---|---|
+| `logging_config.py` (`lcf`) | Sets up logging to point to scripts where each step takes place for transparency |
 | `add_atlases_to_db.py` | Adds new atlases (sets of compounds) to main database via config |
 | `add_compounds_to_db.py` | Adds new compounds to main database so they are findable |
 | `add_msms_refs_to_db.py` | Adds MS/MS reference spectra to the main database from `.jsonl` files |
 | `get_atlases_from_db.py` | Fetches and exports atlas data from the main database |
 | `get_db_table.py` | Exports any table from the main DuckDB as a CSV file |
-| `convert_raw_files.py` | An automated background script that converts .raw LCMS run files to .mzML, .h5, and parquet |
-| `run_untargeted_pipeline.py` + `untargeted/` | Automated untargeted pipeline (LIMS → MZmine → GNPS2 FBMN → zip/Drive); see [untargeted_workflow.md](untargeted_workflow.md) for the module map |
+| `update_tags.py` | Adds/removes/retags centralized atlas tags (see [update_centralized_atlas_tags.md](update_centralized_atlas_tags.md)) |
+
+### `metatlas2/standards_annotation/`
+
+| Module | Role |
+|---|---|
+| `run_standards_annotation.py` | Entry point — sets up the standards project and generates its notebook |
+| `standards_annotation_tools.py` (`sat`) | Standards data loading, peak detection and annotation helpers |
+| `standards_annotation_db.py` (`sadb`) | Standards project database reads/writes |
+| `standards_annotation_gui.py` | Interactive standards annotation GUI |
+| `standards_annotation_checks.py` | Isomer/adduct, RT and InChIKey validation checks |
+| `standards_annotation_rt_align.py` | Reverse RT alignment of annotated standards |
+| `standards_annotation_summary.py` | Standards annotation summary tables and figures |
+| `standards_annotation_review.py` | Project history and annotation-run directory helpers |
+| `deposit_ref_standards_atlas_and_msms_refs.py` | Deposits finished atlases and MS/MS refs into the main database |
+
+See [standards_annotation_workflow.md](standards_annotation_workflow.md).
+
+## Other Scripts and Tools
+
+| Module | Role |
+|---|---|
+| `ingest/` | Raw file conversion (`run_file_conversion`, host-side), mzML → h5 writer (`h5_writer`), LIMS file sync (`run_lims_file_sync`); see [raw_data_ingest.md](raw_data_ingest.md) |
+| `untargeted/` (entry point `untargeted/run_untargeted_pipeline.py`) | Automated untargeted pipeline (LIMS → MZmine → GNPS2 FBMN → zip/Drive); see [untargeted_workflow.md](untargeted_workflow.md) for the module map |
 
 ---
 
@@ -94,7 +131,7 @@ This comprehensive guide covers:
 | Call | What it does |
 |---|---|
 | `add_compounds_to_db(input_csv)` | Loads one CSV/TSV directly |
-| `rtg.set_up_paths(config=None)` | Builds the `paths` dict pointing at the main DB and enrichment caches |
+| `pth.set_up_paths(config=None)` | Builds the `paths` dict pointing at the main DB and enrichment caches |
 | `dbi.create_metatlas_database(main_db_path)` | Creates the DuckDB schema if it does not already exist |
 | `ldt.load_compound_input(file_path)` | Reads a compound CSV/TSV into a DataFrame |
 | `pcr.retrieve_pubchem_info(compounds_df, ...)` | Looks up PubChem data only if the input lacks a `smiles` or `inchi` column |

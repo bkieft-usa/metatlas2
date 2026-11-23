@@ -20,6 +20,13 @@ The test suite is split into two tiers:
 
 **Untargeted pipeline (`tests/test_untargeted_*.py`, unit tier):** uses `InMemoryLims` in place of LabKey, and fakes for GNPS2 HTTP/SFTP, rclone and `sbatch`. Synthetic projects come from `tests/untargeted_fixtures.py`. `test_untargeted_pipeline.py::test_full_lifecycle` drives one project through three runs, from project creation to upload. `test_wrapper_drains_sbatch_queue` runs the bash queue-drain function from `scripts/metatlas2.sh` against a fake `sbatch`.
 
+**Raw data ingest (`tests/test_ingest_*.py`, unit tier):**
+
+- **Converter:** runs against a synthetic `raw_data` tree with a fake ThermoRawFileParser script. The tests cover every failure path and check that `scripts/ingest/conversion_report.sh` still parses the `.failed` files.
+- **h5 writer:** fed fake pymzml spectra.
+- **LIMS sync:** runs against `InMemoryLims`.
+- **Host imports:** `test_host_modules_import_with_stdlib_only` guards that the host-side converter never imports numpy, pandas, pymzml or tables.
+
 **What is NOT tested:**
 - GUI / Jupyter notebook rendering
 - Slurm job submission
@@ -221,6 +228,6 @@ from unittest.mock import patch
 def _fake_pubchem_info(compounds, **kwargs):
     return compounds  # return input unchanged
 
-with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
+with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info):
     add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 ```

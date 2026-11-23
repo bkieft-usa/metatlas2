@@ -39,8 +39,8 @@ The Parquet query system has three layers:
 | Layer | File | Role |
 |-------|------|------|
 | **Notebook** | `QueryNotebook__<project>.ipynb` | Analyst-facing interface; pre-filled with project metadata; contains schema reference, query guide, and example queries |
-| **Dispatcher** | `metatlas2/workflows.py` → `run_parquet_query()` | Thin public API; constructs the interpreter and calls `execute()` |
-| **Engine** | `metatlas2/workflow_objects.py` → `ParquetQueryInterpreter` | Translates a `params` dict into a PyArrow predicate expression; applies predicate-pushdown scan against the Parquet files |
+| **Dispatcher** | `metatlas2/targeted/workflows.py` → `run_parquet_query()` | Thin public API; constructs the interpreter and calls `execute()` |
+| **Engine** | `metatlas2/shared_tools/workflow_objects.py` → `ParquetQueryInterpreter` | Translates a `params` dict into a PyArrow predicate expression; applies predicate-pushdown scan against the Parquet files |
 
 ---
 
@@ -89,7 +89,7 @@ The generated notebook has 8 cells:
 | # | Type | Content |
 |---|------|---------|
 | 1 | Markdown | Header — project name, chromatography, RTA/TGA numbers |
-| 2 | Code | Imports (`pandas`, `metatlas2.workflows`, logging) |
+| 2 | Code | Imports (`pandas`, `metatlas2.targeted.workflows`, logging) |
 | 3 | Code | `RUN_PARAMS` dict pre-filled at generation time; exposes `PARQUET_ROOT`, `PROJECT_NAME`, `CHROMATOGRAPHY`, `RTA`, `TGA` |
 | 4 | Markdown | **Schema Reference** — full column table for both grains |
 | 5 | Markdown | **Query Builder Guide** — filter suffix system and minimal template |
@@ -294,15 +294,15 @@ high_confidence_core_hits.df.head(20)
 params dict (notebook cell)
     │
     ▼
-wfs.run_parquet_query()                 metatlas2/workflows.py
+wfs.run_parquet_query()                 metatlas2/targeted/workflows.py
     │  thin dispatcher — constructs ParquetQueryInterpreter, calls execute()
     ▼
-ParquetQueryInterpreter.__init__()      metatlas2/workflow_objects.py
+ParquetQueryInterpreter.__init__()      metatlas2/shared_tools/workflow_objects.py
     │  1. resolves grain subdirectory (compound_file or compound_lfc)
     │  2. pre-filters .parquet files to RTA{n}-TGA{m}-*.parquet via rglob
     │  3. builds pyarrow.dataset with Hive partitioning
     ▼
-ParquetQueryInterpreter.execute()       metatlas2/workflow_objects.py
+ParquetQueryInterpreter.execute()       metatlas2/shared_tools/workflow_objects.py
     ├── _build_filter(params)           params keys → PyArrow Expression (AND-chained)
     ├── _build_sql_string(params)       params keys → human-readable SQL (display only)
     └── dataset.to_table(filter=expr)  predicate-pushdown scan of .parquet files
@@ -317,7 +317,7 @@ The analyst calls `wfs.run_parquet_query()` with a `params` dict. `PARQUET_ROOT`
 
 ### Step 2 — `wfs.run_parquet_query()`
 
-Defined in `metatlas2/workflows.py`. A thin dispatcher that constructs a `ParquetQueryInterpreter` and calls `execute()`:
+Defined in `metatlas2/targeted/workflows.py`. A thin dispatcher that constructs a `ParquetQueryInterpreter` and calls `execute()`:
 
 ```python
 grain = params.get("grain", "compound_lfc")
@@ -331,7 +331,7 @@ return engine.execute(params)
 
 ### Step 3 — `ParquetQueryInterpreter.__init__()`
 
-Defined in `metatlas2/workflow_objects.py`. Sets up the PyArrow dataset in two sub-steps:
+Defined in `metatlas2/shared_tools/workflow_objects.py`. Sets up the PyArrow dataset in two sub-steps:
 
 **3a. Resolve the dataset directory**
 
@@ -409,7 +409,7 @@ Returns a `ParquetQueryResult` named tuple with fields:
 
 ### `ParquetQueryInterpreter`
 
-Defined in `metatlas2/workflow_objects.py`. Not typically called directly — use `wfs.run_parquet_query()` instead.
+Defined in `metatlas2/shared_tools/workflow_objects.py`. Not typically called directly — use `wfs.run_parquet_query()` instead.
 
 ```python
 ParquetQueryInterpreter(

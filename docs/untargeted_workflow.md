@@ -34,7 +34,7 @@ metatlas2.sh untargeted mirror-raw --direct_input PROJ_A --mode soft     # or --
 metatlas2.sh untargeted write-config my_untargeted.yaml
 ```
 
-`metatlas2.sh untargeted …` runs `python -m metatlas2.run_untargeted_pipeline …` in the metatlas2 container. Without the wrapper, for example from the repo venv on a login node, run that same module command. When there is no queue file and `sbatch` is on `PATH`, MZmine jobs are submitted directly.
+`metatlas2.sh untargeted …` runs `python -m metatlas2.untargeted.run_untargeted_pipeline …` in the metatlas2 container. Without the wrapper, for example from the repo venv on a login node, run that same module command. When there is no queue file and `sbatch` is on `PATH`, MZmine jobs are submitted directly.
 
 ### Scheduling (scrontab)
 
@@ -81,7 +81,7 @@ A raw-data directory (LIMS `parent_dir`) becomes a task when all of these hold:
 - it is not already in `untargeted_tasks`;
 - its newest file is more than 3 hours old;
 - at least one file name contains `MS2`/`MSMS` but not `_MS1_`;
-- there is no `nountargeted.txt` in the raw-data directory.
+- there is no opt-out file (`NO_UNTARGETED.TXT` or `nountargeted.txt`, any case) in the raw-data directory. The legacy pipeline only checked `nountargeted.txt`, but the data transfer only copies `NO_UNTARGETED.TXT`, so the opt-out never took effect before.
 
 The MZmine file list per polarity excludes:
 
@@ -243,7 +243,7 @@ The legacy scrontab jobs keep running until they are switched off. Don't run bot
 3. Optionally, rehearse against a copy of the LIMS list: `LIMS.tasks_table` in a config, or `--lims_tasks_table`.
 4. Comment out the legacy `run_untargeted_pipeline` scron entry and add the new one.
 5. Point the email scron entries at `scripts/untargeted/`.
-6. `update_lcmsfiles_in_lims.py` and `convert_files.sh` are still needed from the legacy repo. They feed LIMS and create the mzML files.
+6. The LIMS file sync and the raw-file converter feed this pipeline (LIMS `lcmsrun_plus` and the mzML files). Both are now ported as `metatlas2.sh lims-sync` and `metatlas2.sh convert-raw`; see [raw_data_ingest.md](raw_data_ingest.md).
 
 ---
 
@@ -251,7 +251,7 @@ The legacy scrontab jobs keep running until they are switched off. Don't run bot
 
 | Module | Role |
 |---|---|
-| `run_untargeted_pipeline.py` | CLI (`run`, `status`, `mirror-raw`, `write-config`) |
+| `untargeted/run_untargeted_pipeline.py` | CLI (`run`, `status`, `mirror-raw`, `write-config`) |
 | `untargeted/config.py` | Defaults, YAML loading, CLI overrides |
 | `untargeted/context.py` | `RunContext`: config, LIMS backend, flags, clock |
 | `untargeted/status.py` | `TaskStatus`, `PolarityTask` (file layout), LIMS dataframe filters |
