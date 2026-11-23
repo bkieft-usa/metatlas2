@@ -5,7 +5,7 @@
 # next to this script (rsyncd.<hostname>.conf) instead of the legacy repo.
 #
 # msdata's crontab on dtn04.nersc.gov (restarts the daemon if it isn't running):
-#   */5 * * * * /bin/flock -w 0 /tmp/msdata.rsyncd.lock /global/common/software/m2650/metatlas2/scripts/ingest/rsyncd_start.sh
+#   */5 * * * * /bin/flock -w 0 /tmp/msdata.rsyncd.lock /global/cfs/cdirs/metatlas/tools/metatlas2/scripts/ingest/rsyncd_start.sh
 #
 # If the daemon is already running, the new one can't bind the port and exits;
 # that's expected. The daemon re-reads its config on every connection, so config

@@ -63,10 +63,10 @@ The clone follows `main`, so the script has to be merged there first. Once the n
 `msdata`'s crontab on dtn04 restarts the daemon if it isn't running:
 
 ```bash
-*/5 * * * * /bin/flock -w 0 /tmp/msdata.rsyncd.lock /global/common/software/m2650/metatlas2/scripts/ingest/rsyncd_start.sh
+*/5 * * * * /bin/flock -w 0 /tmp/msdata.rsyncd.lock /global/cfs/cdirs/metatlas/tools/metatlas2/scripts/ingest/rsyncd_start.sh
 ```
 
-The daemon re-reads its config on every connection, so config changes merged to `main` take effect after the next checkout pull. The config path, however, is fixed when the daemon starts. After changing the crontab path, kill the running daemon so cron restarts it from the new location:
+The daemon re-reads its config on every connection, so edits to the config in `/global/cfs/cdirs/metatlas/tools/metatlas2` take effect immediately; review them before saving. The config path, however, is fixed when the daemon starts. After changing the crontab path, kill the running daemon so cron restarts it from the new location:
 
 ```bash
 pkill -u msdata -f 'rsync --daemon'
