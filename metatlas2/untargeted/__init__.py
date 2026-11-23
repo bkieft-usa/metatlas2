@@ -6,6 +6,7 @@ tracked in the LabKey LIMS list ``untargeted_tasks``; see
 
 Modules
 -------
+run_untargeted_pipeline  CLI entry point (run, status, mirror-raw, write-config).
 config            Default settings, YAML loading and CLI overrides.
 status            Status vocabulary, per-polarity path helpers, LIMS dataframe filters.
 lims              LabKey client (lazy) plus an in-memory stand-in for tests/dry runs.

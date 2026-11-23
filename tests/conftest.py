@@ -22,7 +22,7 @@ import pandas as pd
 import pytest
 import tables
 
-from metatlas2.workflow_objects import Atlas, CompoundMZRT, ExperimentalData, LCMSRun
+from metatlas2.shared_tools.workflow_objects import Atlas, CompoundMZRT, ExperimentalData, LCMSRun
 
 def _uid() -> str:
     return str(uuid.uuid4())
@@ -66,7 +66,7 @@ def _make_atlas(
     atlas_name: str = "EMA",
 ) -> Atlas:
     """Wrap a list of :class:`CompoundMZRT` objects into an :class:`Atlas`."""
-    from metatlas2.workflow_objects import AtlasCategory
+    from metatlas2.shared_tools.workflow_objects import AtlasCategory
     compound_mzrts = {c.mz_rt_uid: c for c in compounds}
     return Atlas(
         atlas_uid=_uid(),
@@ -103,7 +103,7 @@ def write_synthetic_h5(
 
     Both the base table (e.g. ``ms1_pos``) and the m/z-sorted variant
     (``ms1_pos_mz``) are written so that the ``mz_bounds`` fast-path in
-    :func:`metatlas2.extract_data_from_h5._load_h5_table` works correctly.
+    :func:`metatlas2.shared_tools.extract_data_from_h5._load_h5_table` works correctly.
 
     Args:
         path:          Destination file path (must not already exist).
@@ -273,7 +273,7 @@ def ms1_wide_df(adenine_compound: CompoundMZRT) -> pd.DataFrame:
     """Wide-format MS1 DataFrame for a single compound × single file.
 
     Mirrors the schema produced by
-    :func:`metatlas2.extract_data_from_h5._widen_one_file_ms1`.
+    :func:`metatlas2.shared_tools.extract_data_from_h5._widen_one_file_ms1`.
     """
     uid = adenine_compound.mz_rt_uid
     rts  = [ADENINE_RT - 0.1, ADENINE_RT - 0.05, ADENINE_RT, ADENINE_RT + 0.05, ADENINE_RT + 0.1]
@@ -297,7 +297,7 @@ def ms2_wide_df(adenine_compound: CompoundMZRT) -> pd.DataFrame:
     """Wide-format MS2 DataFrame for a single compound × single scan.
 
     Mirrors the schema produced by
-    :func:`metatlas2.extract_data_from_h5._widen_one_file_ms2`.
+    :func:`metatlas2.shared_tools.extract_data_from_h5._widen_one_file_ms2`.
     """
     uid = adenine_compound.mz_rt_uid
     return pd.DataFrame([{

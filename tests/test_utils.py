@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/utils.py.
+"""Unit tests for metatlas2/shared_tools/utils.py.
 
 All functions are pure (no I/O, no network, no subprocess).
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from metatlas2.utils import as_list, jsonable_list, safe_float, safe_isnan
+from metatlas2.shared_tools.utils import as_list, jsonable_list, safe_float, safe_isnan
 
 
 # ===========================================================================

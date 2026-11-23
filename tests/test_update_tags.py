@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from metatlas2 import update_tags
+from metatlas2.shared_tools import update_tags
 
 
 KEY = "GTZCVFVGUGFEME-IWQZZHSRSA-N"
@@ -170,7 +170,7 @@ def test_entrypoint_dispatches_tag_command(tmp_path, runtime, operation):
     )
     args = capture.read_text(encoding="utf-8").splitlines()
     assert result.stdout == ""
-    expected = ["/app/.venv/bin/python", "-m", "metatlas2.update_tags", *arguments]
+    expected = ["/app/.venv/bin/python", "-m", "metatlas2.shared_tools.update_tags", *arguments]
     assert args[-len(expected):] == expected
     if runtime == "docker" and operation == "add":
         assert f"{csv_path}:{csv_path}:ro" in args

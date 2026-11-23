@@ -97,6 +97,7 @@ See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for 
 | **[manual_curation_and_summary.md](docs/manual_curation_and_summary.md)** | Interactive GUI for manual peak curation and summary generation |
 | **[standards_annotation_workflow.md](docs/standards_annotation_workflow.md)** | Analyst guide to standards annotation, review, alignment, and atlas/MS/MS deposition |
 | **[untargeted_workflow.md](docs/untargeted_workflow.md)** | Automated untargeted pipeline: LIMS project discovery, MZmine, GNPS2 FBMN, zip/Google Drive upload |
+| **[raw_data_ingest.md](docs/raw_data_ingest.md)** | Raw file conversion (.raw → .mzML → .h5), LIMS file-table sync, S3 archive and their email reports |
 
 ### Developer Resources
 

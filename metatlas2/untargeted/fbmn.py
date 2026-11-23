@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-import metatlas2.logging_config as lcf
+import metatlas2.shared_tools.logging_config as lcf
 from metatlas2.untargeted.context import RunContext
 from metatlas2.untargeted.gnps2 import (
     build_eb_file_list,

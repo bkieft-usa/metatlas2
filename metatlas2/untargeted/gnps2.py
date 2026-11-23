@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import metatlas2.logging_config as lcf
+import metatlas2.shared_tools.logging_config as lcf
 from metatlas2.untargeted.status import tab_print
 
 logger = lcf.get_logger("untargeted.gnps2")

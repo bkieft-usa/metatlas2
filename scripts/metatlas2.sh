@@ -16,9 +16,9 @@
 #   metatlas2 [--image TAG] [--dev] get-db-table --table-name NAME [--output_path PATH] [--database_path PATH]
 #   metatlas2 [--image TAG] [--dev] update-tags {add|remove|retag} --input-csv FILE
 #   metatlas2 [--image TAG] [--dev] update-tags retrieve
-#   metatlas2 [--image TAG] [--dev] untargeted run [--config FILE] [--dry_run] [--direct_input P1,P2] ...
-#   metatlas2 [--image TAG] [--dev] untargeted status [--print_recent N] [--direct_input P1,P2]
-#   metatlas2 [--image TAG] [--dev] untargeted mirror-raw --direct_input P1 --mode {hard|soft}
+#   metatlas2 [--image TAG] [--dev] convert-raw convert {jgi|egsb} [--dry_run] [--max_workers N]
+#   metatlas2 [--image TAG] [--dev] convert-raw convert-file PATH.raw
+#   metatlas2 [--image TAG] [--dev] lims-sync [--dry_run] [--skip_file_tables] ...
 #   metatlas2 [--image TAG] [--dev] untargeted run [--config FILE] [--dry_run] [--direct_input P1,P2] ...
 #   metatlas2 [--image TAG] [--dev] untargeted status [--print_recent N] [--direct_input P1,P2]
 #   metatlas2 [--image TAG] [--dev] untargeted mirror-raw --mode {hard|soft} --direct_input P1,P2
@@ -405,35 +405,6 @@ run_in_container() {
     fi
 }
 
-# _drain_sbatch_queue QUEUE_FILE — submit MZmine jobs queued by the untargeted pipeline.
-# Each line: <sbatch file>\t<job-id file>\t<prefix>. Writes "<prefix>=<jobid>" to the
-# job-id file (same format as the legacy pipeline). Unsubmitted jobs are detected by
-# the pipeline's next run (no job-id file) and marked '09 error'.
-_drain_sbatch_queue() {
-    local queue="$1" sbatch_file job_id_file prefix out job_id rc=0
-    if [[ ! -s "${queue}" ]]; then
-        rm -f "${queue}"
-        return 0
-    fi
-    if ! command -v sbatch &>/dev/null; then
-        echo "Error: 'sbatch' not found on this host; queued MZmine jobs left in ${queue}" >&2
-        return 1
-    fi
-    while IFS=$'\t' read -r sbatch_file job_id_file prefix; do
-        [[ -n "${sbatch_file}" ]] || continue
-        if out="$(sbatch --parsable "${sbatch_file}" 2>&1)"; then
-            job_id="${out%%;*}"
-            printf '%s=%s\n' "${prefix}" "${job_id}" > "${job_id_file}"
-            echo "Submitted MZmine job ${prefix} as Slurm job ${job_id}"
-        else
-            echo "Error: sbatch failed for ${sbatch_file}: ${out}" >&2
-            rc=1
-        fi
-    done < "${queue}"
-    rm -f "${queue}"
-    return "${rc}"
-}
-
 # ---------------------------------------------------------------------------
 # Python call builders for the lightweight "routine" subcommands
 # ---------------------------------------------------------------------------
@@ -445,31 +416,31 @@ build_py_call() {
     case "${SUBCOMMAND}" in
         standards-annotation)
             cfg="$(_arg --config_path)"
-            PY_CALL="from metatlas2.run_standards_annotation import run_standards_annotation; run_standards_annotation('${cfg}')"
+            PY_CALL="from metatlas2.standards_annotation.run_standards_annotation import run_standards_annotation; run_standards_annotation('${cfg}')"
             ;;
         add-compounds)
             cfg="$(_arg --input_csv)"
             [[ -n "${cfg}" ]] || die "Error: add-compounds requires --input_csv FILE."
             ow="False"
             if _has_flag --overwrite_db "${SUB_ARGS[@]}"; then ow="True"; fi
-            PY_CALL="from metatlas2.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${cfg}', overwrite_db=${ow})"
+            PY_CALL="from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db; add_compounds_to_db('${cfg}', overwrite_db=${ow})"
             ;;
         add-atlases)
             custom="False"
             if _has_flag --custom "${SUB_ARGS[@]}"; then custom="True"; fi
-            PY_CALL="from metatlas2.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('$(_arg --config_path)', custom=${custom})"
+            PY_CALL="from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db; add_atlases_to_db('$(_arg --config_path)', custom=${custom})"
             ;;
         add-msms-refs)
-            PY_CALL="from metatlas2.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('$(_arg --config_path)')"
+            PY_CALL="from metatlas2.shared_tools.add_msms_refs_to_db import add_msms_refs_to_db; add_msms_refs_to_db('$(_arg --config_path)')"
             ;;
         get-db-table)
-            PY_CALL="from metatlas2.get_db_table import export_table_to_csv; export_table_to_csv('$(_arg --table-name)', output_path=$(_opt --output_path), database_path=$(_opt --database_path))"
+            PY_CALL="from metatlas2.shared_tools.get_db_table import export_table_to_csv; export_table_to_csv('$(_arg --table-name)', output_path=$(_opt --output_path), database_path=$(_opt --database_path))"
             ;;
         get-atlases)
             if [[ "${SUB_ARGS[0]:-}" == "fetch" ]]; then
-                PY_CALL="from metatlas2.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('$(_arg --atlas_uids)'), output_path=$(_opt --output_path), database_path=$(_opt --database_path))"
+                PY_CALL="from metatlas2.shared_tools.get_atlases_from_db import get_atlases, _parse_csv_values; get_atlases(atlas_uids=_parse_csv_values('$(_arg --atlas_uids)'), output_path=$(_opt --output_path), database_path=$(_opt --database_path))"
             else
-                PY_CALL="from metatlas2.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_opt --database_path), chromatography=$(_opt --chromatography), polarity=$(_opt --polarity), atlas_category=$(_opt --atlas_category), atlas_name_key=$(_opt --atlas_name_key), created_by=$(_opt --created_by))"
+                PY_CALL="from metatlas2.shared_tools.get_atlases_from_db import query_atlases; query_atlases(database_path=$(_opt --database_path), chromatography=$(_opt --chromatography), polarity=$(_opt --polarity), atlas_category=$(_opt --atlas_category), atlas_name_key=$(_opt --atlas_name_key), created_by=$(_opt --created_by))"
             fi
             ;;
     esac
@@ -513,10 +484,10 @@ case "${SUBCOMMAND}" in
         fi
         set +e
         if [[ "${RUNTIME}" == "shifter" ]]; then
-            shifter "${SHIFTER_ARGS[@]}" /app/.venv/bin/python -m metatlas2.run_untargeted_pipeline "${UNT_ARGS[@]}"
+            shifter "${SHIFTER_ARGS[@]}" /app/.venv/bin/python -m metatlas2.untargeted.run_untargeted_pipeline "${UNT_ARGS[@]}"
         else
             docker run "${DOCKER_ARGS[@]}" --entrypoint /app/.venv/bin/python "${IMAGE_FULL}" \
-                -m metatlas2.run_untargeted_pipeline "${UNT_ARGS[@]}"
+                -m metatlas2.untargeted.run_untargeted_pipeline "${UNT_ARGS[@]}"
         fi
         UNT_RC=$?
         set -e
@@ -530,7 +501,7 @@ case "${SUBCOMMAND}" in
             ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
             [[ ! -f "${ATLAS_KEY}" ]] || DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
         fi
-        run_in_container /app/.venv/bin/python -m metatlas2.update_tags "${SUB_ARGS[@]}"
+        run_in_container /app/.venv/bin/python -m metatlas2.shared_tools.update_tags "${SUB_ARGS[@]}"
         ;;
 
     jupyter)  # Docker only (Shifter rejected above)
@@ -582,27 +553,22 @@ case "${SUBCOMMAND}" in
         sbatch "${TMPSCRIPT}"
         ;;
 
-    untargeted)
-        # Untargeted pipeline: python -m metatlas2.run_untargeted_pipeline {run|status|mirror-raw|write-config} ...
-        # 'sbatch' is not available inside the container, so for 'run' the container
-        # appends MZmine jobs to a queue file and this host script submits them afterwards.
-        UT_ARGS=("${SUB_ARGS[@]}")
-        UT_QUEUE=""
-        if [[ "${SUB_ARGS[0]:-}" == "run" ]] && ! _has_flag --dry_run "${SUB_ARGS[@]}" \
-                && ! _has_flag --dry-run "${SUB_ARGS[@]}"; then
-            UT_QUEUE_DIR="${HOME}/.metatlas2/untargeted_sbatch_queue"
-            mkdir -p "${UT_QUEUE_DIR}"
-            UT_QUEUE="$(mktemp "${UT_QUEUE_DIR}/queue_$(date +%Y%m%d_%H%M%S)_XXXXXX.tsv")"
-            UT_ARGS+=("--sbatch_queue_file" "${UT_QUEUE}")
-        fi
-        set +e
-        run_in_container /app/.venv/bin/python -m metatlas2.run_untargeted_pipeline "${UT_ARGS[@]}"
-        UT_RC=$?
-        set -e
-        if [[ -n "${UT_QUEUE}" ]]; then
-            _drain_sbatch_queue "${UT_QUEUE}" || UT_RC=1
-        fi
-        exit "${UT_RC}"
+    convert-raw)
+        # raw -> mzML -> h5 converter. The orchestrator runs on the HOST (ThermoRawFileParser
+        # has its own shifter image and shifter can't run inside a container) with plain
+        # python3.11 (standard library only); the mzML -> h5 step runs in this image.
+        [[ "${RUNTIME}" == "shifter" ]] || die "Error: 'convert-raw' is only supported on NERSC/Shifter systems."
+        HOST_PY="${METATLAS2_HOST_PYTHON:-/usr/bin/python3.11}"
+        [[ -x "${HOST_PY}" ]] || die "Error: host Python not found: ${HOST_PY} (set METATLAS2_HOST_PYTHON)."
+        PYTHONPATH="${REPO_DIR}" \
+        METATLAS2_IMAGE="docker:${IMAGE_FULL}" \
+        METATLAS2_CONTAINER_PYTHONPATH="${PYTHONPATH_VALUE}" \
+            exec "${HOST_PY}" -m metatlas2.ingest.run_file_conversion "${SUB_ARGS[@]}"
+        ;;
+
+    lims-sync)
+        # Sync raw/mzML/h5 files on disk into the LIMS file tables (runs in the container).
+        run_in_container /app/.venv/bin/python -m metatlas2.ingest.run_lims_file_sync "${SUB_ARGS[@]}"
         ;;
 
     add-compounds|add-atlases|add-msms-refs|get-atlases|get-db-table|standards-annotation)
@@ -622,7 +588,7 @@ case "${SUBCOMMAND}" in
                 -p "127.0.0.1:8050-8069:8050-8069" \
                 --entrypoint /app/.venv/bin/python \
                 "${IMAGE_FULL}" \
-                -m metatlas2.run_targeted_analysis \
+                -m metatlas2.targeted.run_targeted_analysis \
                 "${PASSTHROUGH_ARGS[@]}"
         fi
         ;;

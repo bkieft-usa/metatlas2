@@ -3,7 +3,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from metatlas2 import gdrive_upload as drive
+from metatlas2.shared_tools import gdrive_upload as drive
 
 
 @pytest.fixture

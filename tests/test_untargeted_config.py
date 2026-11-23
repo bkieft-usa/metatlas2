@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from metatlas2.file_and_project_format import get_name_field, parent_dir_num_fields, validate_file_name_minimal
-from metatlas2.run_untargeted_pipeline import build_parser, config_overrides
+from metatlas2.shared_tools.file_and_project_format import get_name_field, parent_dir_num_fields, validate_file_name_minimal
+from metatlas2.untargeted.run_untargeted_pipeline import build_parser, config_overrides
 from metatlas2.untargeted.config import DEFAULT_CONFIG, load_untargeted_config, normalize_number
 
 REPO = Path(__file__).resolve().parents[1]

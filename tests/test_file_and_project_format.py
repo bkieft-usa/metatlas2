@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/file_and_project_format.py.
+"""Unit tests for metatlas2/shared_tools/file_and_project_format.py.
 
 All functions are pure (regex matching + string manipulation, no I/O).
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from metatlas2.file_and_project_format import (
+from metatlas2.shared_tools.file_and_project_format import (
     canonical_chromatography,
     get_file_parts,
     get_project_chromatography,
@@ -187,7 +187,7 @@ class TestParseFileName:
         fields = parse_file_name(_HILICZ_POS_FILE)
         assert fields["chromatography"] == "HILIC"
         # normalize_chromatography still returns lowercase for matching
-        from metatlas2.file_and_project_format import normalize_chromatography
+        from metatlas2.shared_tools.file_and_project_format import normalize_chromatography
         assert normalize_chromatography(fields["chromatography"]) == "hilic"
 
     def test_mzml_extension_accepted(self):
@@ -257,7 +257,7 @@ class TestGetProjectChromatography:
     def test_normalize_of_result_is_lowercase(self):
         # normalize_chromatography on the result still gives lowercase for matching
         result = get_project_chromatography(_STANDALONE_PROJECT)
-        from metatlas2.file_and_project_format import normalize_chromatography
+        from metatlas2.shared_tools.file_and_project_format import normalize_chromatography
         assert normalize_chromatography(result) == "hilic"
 
 

@@ -13,17 +13,17 @@ import duckdb
 import pandas as pd
 import pytest
 
-from metatlas2 import standards_annotation_db as db
-from metatlas2 import standards_annotation_gui as gui
-from metatlas2 import standards_annotation_review as review
-from metatlas2 import standards_annotation_rt_align as align
-from metatlas2 import standards_annotation_summary as summary
-from metatlas2 import standards_annotation_tools as tools
-from metatlas2 import deposit_ref_standards_atlas_and_msms_refs as deposit
-from metatlas2.deposit_ref_standards_atlas_and_msms_refs import run_atlas_and_msms_deposit
-from metatlas2.standards_annotation_rt_align import run_reverse_rt_align
-from metatlas2.run_standards_annotation import run_standards_annotation
-from metatlas2.workflow_objects import NewMsmsRefsConfig
+from metatlas2.standards_annotation import standards_annotation_db as db
+from metatlas2.standards_annotation import standards_annotation_gui as gui
+from metatlas2.standards_annotation import standards_annotation_review as review
+from metatlas2.standards_annotation import standards_annotation_rt_align as align
+from metatlas2.standards_annotation import standards_annotation_summary as summary
+from metatlas2.standards_annotation import standards_annotation_tools as tools
+from metatlas2.standards_annotation import deposit_ref_standards_atlas_and_msms_refs as deposit
+from metatlas2.standards_annotation.deposit_ref_standards_atlas_and_msms_refs import run_atlas_and_msms_deposit
+from metatlas2.standards_annotation.standards_annotation_rt_align import run_reverse_rt_align
+from metatlas2.standards_annotation.run_standards_annotation import run_standards_annotation
+from metatlas2.shared_tools.workflow_objects import NewMsmsRefsConfig
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +35,7 @@ def isolated_data_dir(tmp_path_factory, monkeypatch):
 @pytest.fixture(autouse=True)
 def mock_standards_drive_upload(monkeypatch):
     upload = Mock(return_value="https://drive.google.com/drive/folders/review")
-    monkeypatch.setattr("metatlas2.gdrive_upload.upload_standards_outputs", upload)
+    monkeypatch.setattr("metatlas2.shared_tools.gdrive_upload.upload_standards_outputs", upload)
     return upload
 
 
@@ -297,7 +297,7 @@ def test_setup_refuses_existing_project_without_modifying_it(tmp_path, monkeypat
     project_dir.mkdir()
     existing = project_dir / "sentinel"
     existing.write_text("unchanged")
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: {"project": {"standards_run_name": "run", "owner": "jgi"}})
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: {"project": {"standards_run_name": "run", "owner": "jgi"}})
     monkeypatch.setattr(db, "get_project_output_root", lambda _: project_dir)
     monkeypatch.setattr(db, "get_raw_data_root", lambda _: str(tmp_path))
     with pytest.raises(FileExistsError, match="different standards_run_name"):
@@ -317,20 +317,20 @@ def test_setup_creates_new_project_and_runs_extraction(tmp_path, monkeypatch):
               "extraction": {"peak_finding": {"x": 1}}}
     calls = []
     data = SimpleNamespace()
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(db, "get_project_output_root", lambda _: root)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: str(root / "run.duckdb"))
     monkeypatch.setattr(db, "get_raw_data_root", lambda _: str(tmp_path))
     monkeypatch.setattr(db, "create_project_db", lambda path: calls.append(("db", path)))
-    monkeypatch.setattr("metatlas2.standards_annotation_tools.detect_and_save_peaks",
+    monkeypatch.setattr("metatlas2.standards_annotation.standards_annotation_tools.detect_and_save_peaks",
                         lambda obj, peak_params: calls.append(("peaks", obj, peak_params)))
     def extraction(*_):
-        from metatlas2.standards_annotation_tools import detect_and_save_peaks
+        from metatlas2.standards_annotation.standards_annotation_tools import detect_and_save_peaks
         calls.append(("extract",))
         detect_and_save_peaks(data, peak_params=config["extraction"]["peak_finding"])
         return data
-    monkeypatch.setattr("metatlas2.standards_annotation_tools.run_standards_extraction", extraction)
-    monkeypatch.setattr("metatlas2.notebook_generator.generate_standards_annotation_notebook",
+    monkeypatch.setattr("metatlas2.standards_annotation.standards_annotation_tools.run_standards_extraction", extraction)
+    monkeypatch.setattr("metatlas2.shared_tools.notebook_generator.generate_standards_annotation_notebook",
                         lambda **_: calls.append(("notebook",)) or str(root / "notebook.ipynb"))
     run_standards_annotation(str(config_file))
     assert [call[0] for call in calls] == ["db", "extract", "peaks", "notebook"]
@@ -615,7 +615,7 @@ def test_missing_ms2_file_is_reported(monkeypatch):
 
 def test_alignment_does_not_create_missing_project(tmp_path, monkeypatch):
     root = tmp_path / "missing"
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: {"project": {"standards_run_name": "run", "owner": "jgi"}})
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: {"project": {"standards_run_name": "run", "owner": "jgi"}})
     monkeypatch.setattr(db, "get_project_output_root", lambda _: root)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: str(root / "run.duckdb"))
     with pytest.raises(FileNotFoundError, match="project database not found"):
@@ -626,7 +626,7 @@ def test_alignment_does_not_create_missing_project(tmp_path, monkeypatch):
 
 
 def test_standards_config_loads_and_validates_deposit_tags(tmp_path):
-    from metatlas2.load_tools import load_standards_config
+    from metatlas2.shared_tools.load_tools import load_standards_config
 
     input_file = tmp_path / "input.csv"
     input_file.touch()
@@ -640,7 +640,7 @@ def test_standards_config_loads_and_validates_deposit_tags(tmp_path):
 
 
 def test_standards_config_validates_chem_source(tmp_path):
-    from metatlas2.load_tools import load_standards_config
+    from metatlas2.shared_tools.load_tools import load_standards_config
 
     input_file = tmp_path / "input.csv"
     input_file.touch()
@@ -659,7 +659,7 @@ def test_reverse_alignment_uploads_output(project, tmp_path, monkeypatch, mock_s
     config = {"project": {"standards_run_name": "run"}}
     annotation = tmp_path / "outputs" / "annotation_run_1"
     alignment = annotation / "rt_alignment_4"
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
     run = Mock(return_value=(4, alignment))
@@ -702,7 +702,7 @@ def test_annotation_runs_and_multiple_alignments_use_chosen_run(project, tmp_pat
     assert table.columns[-1] == "GUI Peak Num"
     assert table["GUI Peak Num"].tolist() == [1, 3]
     assert table["Compound Label"].tolist() == ["A (peak1)", "A (peak2)"]
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     mock_alignment_model(monkeypatch)
     out = tmp_path / "outputs"
@@ -755,7 +755,7 @@ def test_annotation_runs_and_multiple_alignments_use_chosen_run(project, tmp_pat
 
 @pytest.mark.parametrize("use_tags", [True, False])
 def test_reverse_alignment_snapshots_resolved_atlas(project, tmp_path, monkeypatch, use_tags):
-    from metatlas2 import atlas_sheet
+    from metatlas2.shared_tools import atlas_sheet
 
     selector = {"tags": ["QC"], "polarity": "POS"} if use_tags else {"uid": "qc-uid", "polarity": "POS"}
     config = {
@@ -764,7 +764,7 @@ def test_reverse_alignment_snapshots_resolved_atlas(project, tmp_path, monkeypat
     }
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     atlas = SimpleNamespace(
         atlas_uid="qc-uid", chromatography="C18", polarity="POS",
@@ -820,7 +820,7 @@ def test_failed_summary_publishes_nothing_and_keeps_draft(project, tmp_path, mon
 
 def test_alignment_rejects_draft_or_missing_run(project, tmp_path, monkeypatch):
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}}
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     with pytest.raises(ValueError, match="draft"):
         align.run_reverse_rt_alignment("config", project, tmp_path / "outputs", 1)
     with pytest.raises(ValueError, match="does not exist"):
@@ -833,7 +833,7 @@ def test_alignment_rejects_missing_peak_results(project, tmp_path, monkeypatch):
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     mock_alignment_model(monkeypatch)
     monkeypatch.setattr(align, "apply_reverse_rt_model", lambda df, _: df.iloc[:1].copy())
@@ -849,7 +849,7 @@ def test_alignment_rejects_nonfinite_results(project, tmp_path, monkeypatch):
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     mock_alignment_model(monkeypatch)
     monkeypatch.setattr(align, "apply_reverse_rt_model", lambda df, _: df.assign(
@@ -926,7 +926,7 @@ def test_real_model_applies_to_chosen_run_selections(project, tmp_path, monkeypa
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     qc_runs = [SimpleNamespace(filename="qc1.h5"), SimpleNamespace(filename="qc2.h5")]
     monkeypatch.setattr(align, "get_qc_runs_for_chrom", lambda *_args, **_kwargs: qc_runs)
@@ -974,7 +974,7 @@ def test_failed_alignment_publication_is_incomplete(project, tmp_path, monkeypat
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     mock_alignment_model(monkeypatch)
     summary.run_standards_annotation_summary(SimpleNamespace(config=config, project_db_path=project))
@@ -1028,7 +1028,7 @@ def test_alignment_summary_preserves_rows_and_adds_aligned_rts(project, tmp_path
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}, "HILIC": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     original_apply = align.apply_reverse_rt_model
     mock_alignment_model(monkeypatch)
@@ -1122,7 +1122,7 @@ def test_missing_model_never_publishes_alignment(project, tmp_path, monkeypatch,
     config = {"project": {"standards_run_name": "run", "owner": "jgi"}, "rt_alignment": {"C18": {}}}
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     mock_alignment_model(monkeypatch)
     if failure == "no_config":
@@ -1219,7 +1219,7 @@ MS2_TEMPLATE = ("20260720_JGI_PLM-RS_512633_SorghSwg_final_EXP120B_HILICZ_"
 @pytest.fixture
 def deposit_project(project, tmp_path, monkeypatch):
     """A project with a frozen annotation run 1 and alignment run 1 (offset -0.5 min)."""
-    import metatlas2.database_interact as dbi
+    import metatlas2.shared_tools.database_interact as dbi
 
     monkeypatch.setenv("METATLAS_DATA_DIR", str(tmp_path))
     main_db = tmp_path / "databases" / "main_db" / "metatlas.duckdb"
@@ -1238,7 +1238,7 @@ def deposit_project(project, tmp_path, monkeypatch):
     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
     monkeypatch.setattr(summary, "make_standards_annotation_figures", lambda **_: None)
-    monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+    monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
     monkeypatch.setattr(align, "get_project_lcmsruns", lambda *_: [])
     original_apply = align.apply_reverse_rt_model
     mock_alignment_model(monkeypatch)
@@ -1250,8 +1250,8 @@ def deposit_project(project, tmp_path, monkeypatch):
     sheet = Mock(side_effect=lambda atlas, force_add=False: ["appended"] * len(atlas))
     monkeypatch.setattr(deposit, "deposit_atlas_to_google_sheet", sheet)
     compounds = Mock()
-    monkeypatch.setattr("metatlas2.workflow_objects.add_compounds_from_files", compounds)
-    monkeypatch.setattr("metatlas2.database_interact.get_compound_uids_by_inchi_keys",
+    monkeypatch.setattr("metatlas2.shared_tools.workflow_objects.add_compounds_from_files", compounds)
+    monkeypatch.setattr("metatlas2.shared_tools.database_interact.get_compound_uids_by_inchi_keys",
                         lambda _path, keys: dict.fromkeys(keys, "uid"))
     monkeypatch.setattr("IPython.display.display", lambda *_: None)
     summary.run_standards_annotation_summary(SimpleNamespace(config=config, project_db_path=project))
@@ -1589,7 +1589,7 @@ def test_deposit_reports_empty_spectrum(monkeypatch):
 
 @pytest.mark.parametrize("force_add", [False, True])
 def test_deposit_msms_import_records_existing_pairs(tmp_path, monkeypatch, force_add):
-    import metatlas2.database_interact as dbi
+    import metatlas2.shared_tools.database_interact as dbi
 
     # The importer resolves the main database from METATLAS_DATA_DIR; never use the real one.
     monkeypatch.setenv("METATLAS_DATA_DIR", str(tmp_path))
@@ -1790,7 +1790,7 @@ def test_standalone_msms_export_uses_selected_scan_metadata(project, tmp_path):
 # ])
 # def test_deposit_rejects_invalid_timestamps(project, tmp_path, monkeypatch, timestamp, alignment_timestamp):
 #     config = {"project": {"standards_run_name": "run"}}
-#     monkeypatch.setattr("metatlas2.load_tools.load_standards_config", lambda _: config)
+#     monkeypatch.setattr("metatlas2.shared_tools.load_tools.load_standards_config", lambda _: config)
 #     monkeypatch.setattr(db, "get_project_output_root", lambda _: tmp_path)
 #     monkeypatch.setattr(db, "get_project_db_path", lambda _: project)
 #     with pytest.raises(ValueError, match="timestamp"):

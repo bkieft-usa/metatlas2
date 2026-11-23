@@ -7,10 +7,10 @@ import pandas as pd
 import pytest
 from rdkit import Chem
 
-from metatlas2 import standards_annotation_checks as checks
-from metatlas2 import standards_annotation_db as db
-from metatlas2 import standards_annotation_summary as summary
-from metatlas2 import standards_annotation_tools as tools
+from metatlas2.standards_annotation import standards_annotation_checks as checks
+from metatlas2.standards_annotation import standards_annotation_db as db
+from metatlas2.standards_annotation import standards_annotation_summary as summary
+from metatlas2.standards_annotation import standards_annotation_tools as tools
 
 
 def structure(smiles):

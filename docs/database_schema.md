@@ -467,7 +467,7 @@ Stores manual curation decisions and compound identification results. This is th
 The standards-annotation workflow (`metatlas2.sh standards-annotation`) uses its
 own project DuckDB at
 `$METATLAS_DATA_DIR/projects/reference_standards_annotation/<analyst>/<standards_run_name>/<standards_run_name>.duckdb`.
-It is created and written only by `metatlas2/standards_annotation_db.py`. The
+It is created and written only by `metatlas2/standards_annotation/standards_annotation_db.py`. The
 analyst workflow is described in [standards_annotation_workflow.md](standards_annotation_workflow.md).
 
 Review history is versioned: each review iteration is an **annotation run**

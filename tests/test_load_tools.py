@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/load_tools.py.
+"""Unit tests for metatlas2/shared_tools/load_tools.py.
 
 Tested functions
 ----------------
@@ -13,7 +13,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import metatlas2.load_tools as ldt
+import metatlas2.shared_tools.load_tools as ldt
 
 # ---------------------------------------------------------------------------
 # Helpers

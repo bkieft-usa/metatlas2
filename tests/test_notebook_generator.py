@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import nbformat
 
-from metatlas2.notebook_generator import _make_header_cell, generate_standards_annotation_notebook
+from metatlas2.shared_tools.notebook_generator import _make_header_cell, generate_standards_annotation_notebook
 
 
 def test_header_displays_input_atlas_tags_and_uid():
@@ -61,17 +61,17 @@ def test_standards_notebook_passes_reviewed_run_ids_and_options(tmp_path):
         for alias in node.names
     }
     assert {
-        ("metatlas2.standards_annotation_db", "load_extraction_from_db"),
-        ("metatlas2.standards_annotation_db", "start_new_annotation_run"),
-        ("metatlas2.standards_annotation_db", "discard_draft_annotation_run"),
-        ("metatlas2.standards_annotation_review", "show_standards_project_history"),
-        ("metatlas2.standards_annotation_gui", "build_standards_annotation_gui"),
-        ("metatlas2.standards_annotation_summary", "run_standards_annotation_summary"),
-        ("metatlas2.load_tools", "load_standards_config"),
-        ("metatlas2.logging_config", "setup_logging"),
-        ("metatlas2.logging_config", "get_logger"),
-        ("metatlas2.standards_annotation_rt_align", "run_reverse_rt_align"),
-        ("metatlas2.deposit_ref_standards_atlas_and_msms_refs", "run_atlas_and_msms_deposit"),
+        ("metatlas2.standards_annotation.standards_annotation_db", "load_extraction_from_db"),
+        ("metatlas2.standards_annotation.standards_annotation_db", "start_new_annotation_run"),
+        ("metatlas2.standards_annotation.standards_annotation_db", "discard_draft_annotation_run"),
+        ("metatlas2.standards_annotation.standards_annotation_review", "show_standards_project_history"),
+        ("metatlas2.standards_annotation.standards_annotation_gui", "build_standards_annotation_gui"),
+        ("metatlas2.standards_annotation.standards_annotation_summary", "run_standards_annotation_summary"),
+        ("metatlas2.shared_tools.load_tools", "load_standards_config"),
+        ("metatlas2.shared_tools.logging_config", "setup_logging"),
+        ("metatlas2.shared_tools.logging_config", "get_logger"),
+        ("metatlas2.standards_annotation.standards_annotation_rt_align", "run_reverse_rt_align"),
+        ("metatlas2.standards_annotation.deposit_ref_standards_atlas_and_msms_refs", "run_atlas_and_msms_deposit"),
     } == imported_functions
 
     def command_index(name):

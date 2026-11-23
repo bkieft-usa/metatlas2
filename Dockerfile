@@ -38,5 +38,5 @@ ENV PATH="/app/.venv/bin:$PATH"
 ARG IMAGE_TAG=latest
 ENV METATLAS2_IMAGE_TAG=${IMAGE_TAG}
 
-ENTRYPOINT ["python", "-m", "metatlas2.run_targeted_analysis"]
+ENTRYPOINT ["python", "-m", "metatlas2.targeted.run_targeted_analysis"]
 CMD ["--help"]

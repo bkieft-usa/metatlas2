@@ -28,7 +28,7 @@ from typing import Any
 
 import pandas as pd
 
-import metatlas2.logging_config as lcf
+import metatlas2.shared_tools.logging_config as lcf
 from metatlas2.untargeted.context import RunContext
 from metatlas2.untargeted.feature_filtering import (
     calculate_counts_for_lims_table,

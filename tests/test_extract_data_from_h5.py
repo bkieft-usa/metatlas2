@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/extract_data_from_h5.py.
+"""Unit tests for metatlas2/shared_tools/extract_data_from_h5.py.
 
 Every test exercises a *pure calculation* function — no database, no
 subprocess, no network.  HDF5 I/O is covered by the ``synthetic_h5_file``
@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from metatlas2.extract_data_from_h5 import (
+from metatlas2.shared_tools.extract_data_from_h5 import (
     _expand_atlas_windows,
     _filter_ms1_points,
     _filter_ms2_points,

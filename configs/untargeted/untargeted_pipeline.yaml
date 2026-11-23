@@ -1,4 +1,4 @@
-# Untargeted pipeline configuration (metatlas2.run_untargeted_pipeline).
+# Untargeted pipeline configuration (metatlas2.untargeted.run_untargeted_pipeline).
 #
 # Every value below equals the built-in default (metatlas2/untargeted/config.py),
 # so this file documents the defaults and is a starting point for overrides.
