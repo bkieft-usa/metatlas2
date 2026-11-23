@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-import metatlas2.logging_config as lcf
+import metatlas2.shared_tools.logging_config as lcf
 from metatlas2.untargeted.config import STEP_NAMES
 from metatlas2.untargeted.context import RunContext
 from metatlas2.untargeted.fbmn import download_fbmn_results, submit_fbmn_jobs, update_fbmn_status

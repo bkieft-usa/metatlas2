@@ -1,4 +1,4 @@
-"""LabKey LIMS access for the untargeted pipeline.
+"""LabKey LIMS access (shared by the untargeted pipeline and the LIMS file sync).
 
 :class:`LimsClient` talks to the real LabKey server. The ``APIWrapper`` is
 created lazily (on first use) so importing this module never reads
@@ -16,9 +16,9 @@ from typing import Any, Protocol
 
 import pandas as pd
 
-import metatlas2.logging_config as lcf
+import metatlas2.shared_tools.logging_config as lcf
 
-logger = lcf.get_logger("untargeted.lims")
+logger = lcf.get_logger("shared_tools.lims")
 
 WRITE_METHODS = ("update", "insert", "delete")
 
@@ -123,8 +123,23 @@ class LimsClient:
         result = self.api.query.execute_sql(self.schema, sql, max_rows=self.max_rows, timeout=self.timeout)
         if result is None:
             raise RuntimeError(f"execute_sql: failed to load results from {self.schema}.{table}")
-        df = pd.DataFrame(result["rows"])
+        rows = result["rows"]
+        if len(rows) >= self.max_rows:
+            # A truncated read would make callers think rows are missing (and e.g.
+            # insert duplicates), so treat it as an error rather than continue.
+            raise RuntimeError(
+                f"LIMS list '{table}' returned {len(rows)} rows, which hits max_rows={self.max_rows}; "
+                "results may be truncated. Increase LIMS.max_rows.")
+        df = pd.DataFrame(rows)
+        if df.empty and columns is not None:
+            df = pd.DataFrame(columns=columns)
         return df[[c for c in df.columns if not str(c).startswith("_")]]
+
+    def count_rows(self, table: str) -> int:
+        """Number of rows in a LabKey list (``SELECT COUNT(*)``)."""
+        result = self.api.query.execute_sql(
+            self.schema, f"SELECT COUNT(*) AS n FROM {table};", timeout=self.timeout)
+        return int(result["rows"][0]["n"])
 
     def update_table(
         self, df: pd.DataFrame, table: str, method: str = "update", pause_time: float | None = None
@@ -170,8 +185,13 @@ class InMemoryLims:
     def get_table(self, table: str, columns: list[str] | None = None) -> pd.DataFrame:
         df = self.tables.get(table, pd.DataFrame()).copy()
         if columns is not None:
+            if df.empty and not set(columns) <= set(df.columns):
+                return pd.DataFrame(columns=columns)
             df = df[columns]
         return df.reset_index(drop=True)
+
+    def count_rows(self, table: str) -> int:
+        return len(self.tables.get(table, pd.DataFrame()))
 
     def update_table(self, df: pd.DataFrame, table: str, method: str = "update", pause_time: float | None = None) -> None:
         if method not in WRITE_METHODS:

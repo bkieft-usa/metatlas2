@@ -57,8 +57,11 @@ def generate_gui_notebooks(
     nb.cells = [
         _make_header_cell(run_params),
         _make_imports_cell(),
+        _make_params_markdown_header(),
         _make_params_cell(run_params, auto_id_obj),
+        _make_gui_markdown_header(),
         _make_gui_cell(),
+        _make_summary_markdown_header(),
         _make_summary_cell(),
     ]
 
@@ -83,6 +86,12 @@ def generate_gui_notebooks(
     logger.info(f"Analysis output directory created at {auto_id_obj.paths['analysis_output_dir']}/{auto_id_obj.ta.label}")
 
     return out_path
+
+def _make_params_markdown_header() -> nbformat.NotebookNode:
+    text = (
+        "## Step 0: Set Run Parameters\n"
+    )
+    return nbformat.v4.new_markdown_cell(text)
 
 def _make_params_cell(run_params: dict, auto_id_obj: "AutoIdentification") -> nbformat.NotebookNode:
     """Cell 3: RUN_PARAMS and OVERRIDE_PARAMS — fixed identifiers and optional per-run overrides.
@@ -158,6 +167,12 @@ def _make_imports_cell() -> nbformat.NotebookNode:
     )
     return nbformat.v4.new_code_cell(src)
 
+def _make_gui_markdown_header() -> nbformat.NotebookNode:
+    text = (
+        "## Step 1: Manual Curation GUI\n"
+    )
+    return nbformat.v4.new_markdown_cell(text)
+
 def _make_gui_cell() -> nbformat.NotebookNode:
     src = (
         "# Manual Curation - Dash application (opens in browser window)\n"
@@ -167,6 +182,12 @@ def _make_gui_cell() -> nbformat.NotebookNode:
         ")"
     )
     return nbformat.v4.new_code_cell(src)
+
+def _make_summary_markdown_header() -> nbformat.NotebookNode:
+    text = (
+        "## Step 2: Analysis Summary (only run after GUI curation is complete)\n"
+    )
+    return nbformat.v4.new_markdown_cell(text)
 
 def _make_summary_cell() -> nbformat.NotebookNode:
     src = (

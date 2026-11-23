@@ -12,8 +12,8 @@ import subprocess
 
 import pandas as pd
 
-import metatlas2.logging_config as lcf
-from metatlas2 import gdrive_upload as gdu
+import metatlas2.shared_tools.logging_config as lcf
+from metatlas2.shared_tools import gdrive_upload as gdu
 from metatlas2.untargeted.context import RunContext
 from metatlas2.untargeted.status import TaskStatus
 

@@ -8,7 +8,7 @@ task when all of these hold:
   ``--direct_input``);
 * its newest file is older than ``min_file_age_hours`` (3 h);
 * at least one file name contains ``MS2``/``MSMS`` and not ``_MS1_``;
-* its raw-data directory has no ``nountargeted.txt`` opt-out file.
+* its raw-data directory has no opt-out file (``NO_UNTARGETED.TXT`` or ``nountargeted.txt``, any case).
 
 For each polarity with files, ``{output_dir}/{project}_{polarity}/`` gets the
 metadata table, MZmine batch XML, mzML file list, and sbatch/runner scripts,
@@ -25,8 +25,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-import metatlas2.logging_config as lcf
-from metatlas2.file_and_project_format import (
+import metatlas2.shared_tools.logging_config as lcf
+from metatlas2.shared_tools.file_and_project_format import (
     get_name_field,
     parent_dir_num_fields,
     validate_file_name_minimal,
@@ -74,6 +74,24 @@ def find_raw_data_directory(
         if os.path.exists(path):
             return path
     return None
+
+
+#: Opt-out file names, compared case-insensitively. The data transfer only copies
+#: ``NO_UNTARGETED.TXT``; the legacy pipeline only looked for ``nountargeted.txt``,
+#: so in practice the opt-out never worked.
+OPT_OUT_FILE_NAMES = ("no_untargeted.txt", "nountargeted.txt")
+
+
+def has_opt_out_file(raw_data_dir: str, project: str) -> bool:
+    """True if ``{raw_data_dir}/*/{project}/`` contains an untargeted opt-out file (any case)."""
+    for project_dir in glob.glob(os.path.join(raw_data_dir, "*", project)):
+        try:
+            names = os.listdir(project_dir)
+        except OSError:
+            continue
+        if any(n.lower() in OPT_OUT_FILE_NAMES for n in names):
+            return True
+    return False
 
 
 def metadata_file_filter(
@@ -315,10 +333,10 @@ def update_new_untargeted_tasks(ctx: RunContext) -> pd.DataFrame | None:
         skip_blank_filter=bool(sel["skip_blank_filter"]),
         fallback_subdirs=paths.get("fallback_raw_data_subdirs"),
     )
-    new_projects = [
-        d for d in new_projects
-        if not glob.glob(os.path.join(paths["raw_data_dir"], "*", d["parent_dir"], "nountargeted.txt"))
-    ]
+    opted_out = [d["parent_dir"] for d in new_projects if has_opt_out_file(paths["raw_data_dir"], d["parent_dir"])]
+    if opted_out:
+        logger.info(tab_print(f"Skipping {len(opted_out)} project(s) with an opt-out file: {opted_out}", 2))
+    new_projects = [d for d in new_projects if d["parent_dir"] not in opted_out]
     if not new_projects:
         logger.info(tab_print("No new projects to add to untargeted tasks!", 2))
         return None
