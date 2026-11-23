@@ -45,13 +45,34 @@ crontab -e
 The new crontab:
 
 ```bash
-*/5 * * * * cd $HOME/metatlas2 && git pull --quiet >> $HOME/logs/git_pull.log 2>&1
+*/5 * * * * cd $HOME/metatlas2 && git pull --quiet --ff-only >> $HOME/logs/git_pull.log 2>&1
 */5 * * * * $HOME/metatlas2/scripts/ingest/file_transfer_sync.sh jgi
 */5 * * * * $HOME/metatlas2/scripts/ingest/file_transfer_sync.sh egsb
 48 2 * * * /usr/sbin/logrotate --state $HOME/logs/logrotate.status $HOME/logs/logrotate.conf
 ```
 
 The clone follows `main`, so the script has to be merged there first. Once the new entries have run cleanly, remove `~/bin/sync.sh` and the unused `~/metatlas` checkout.
+
+**Receiving end (dtn04).** The rsync daemon that receives the transfer runs as `msdata` on `dtn04.nersc.gov`.
+
+| File | Purpose |
+|---|---|
+| `scripts/ingest/rsyncd_start.sh` | Starts the daemon |
+| `scripts/ingest/rsyncd.dtn04.nersc.gov.conf` | Daemon config: modules `jgi` and `egsb` → `raw_data/<vol>`, user `msdata`, port 39653 |
+
+`msdata`'s crontab on dtn04 restarts the daemon if it isn't running:
+
+```bash
+*/5 * * * * /bin/flock -w 0 /tmp/msdata.rsyncd.lock /global/cfs/cdirs/metatlas/tools/metatlas2/scripts/ingest/rsyncd_start.sh
+```
+
+The daemon re-reads its config on every connection, so edits to the config in `/global/cfs/cdirs/metatlas/tools/metatlas2` take effect immediately; review them before saving. The config path, however, is fixed when the daemon starts. After changing the crontab path, kill the running daemon so cron restarts it from the new location:
+
+```bash
+pkill -u msdata -f 'rsync --daemon'
+```
+
+The daemon log `/global/cfs/cdirs/m2650/rsyncd/logs/rsyncd.dtn04.nersc.gov.log` is rotated nightly by the `rotate_rsyncd_logs` scron job, using `scripts/ingest/logrotate.rsyncd.conf`. The daemon keeps the log open, so rotation uses `copytruncate`.
 
 **Opt-out files.** A project can opt out of the untargeted pipeline with `NO_UNTARGETED.TXT`, which is the only spelling the transfer copies. The legacy pipeline only looked for `nountargeted.txt`, so the opt-out never worked: 53 projects in `raw_data` have the file and were processed anyway. metatlas2 now accepts either name in any case. This applies to new projects only.
 
