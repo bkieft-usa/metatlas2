@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/rt_align_tools.py.
+"""Unit tests for metatlas2/shared_tools/rt_align_tools.py.
 
 All tests exercise pure calculation functions — no database, no filesystem
 (except ``_save_rt_aligned_stats_to_json`` which writes to ``tmp_path``),
@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from metatlas2.rt_align_tools import (
+from metatlas2.shared_tools.rt_align_tools import (
     _apply_rt_model,
     _save_rt_aligned_stats_to_json,
     build_polynomial_model,
@@ -78,7 +78,7 @@ def _make_ms1_wide_for_uid(uid: str, rts: list[float], ints: list[float]) -> pd.
 
 def _make_rt_align_stub(atlas, ms1_df, params=None):
     """Build a minimal object that satisfies ``build_rt_alignment_model``'s interface."""
-    from metatlas2.workflow_objects import ExperimentalData
+    from metatlas2.shared_tools.workflow_objects import ExperimentalData
     exp_data = ExperimentalData(ms1_df=ms1_df)
     return SimpleNamespace(
         align_atlas_obj=atlas,

@@ -6,10 +6,10 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import metatlas2.atlas_sheet as atlas_sheet
-import metatlas2.standards_annotation_rt_align as standards_align
-from metatlas2.load_tools import _build_metatlas2_config
-from metatlas2.workflow_objects import (
+import metatlas2.shared_tools.atlas_sheet as atlas_sheet
+import metatlas2.standards_annotation.standards_annotation_rt_align as standards_align
+from metatlas2.shared_tools.load_tools import _build_metatlas2_config
+from metatlas2.shared_tools.workflow_objects import (
     Atlas,
     AtlasCategory,
     Metatlas2Config,
@@ -100,11 +100,11 @@ def test_resolve_config_atlas_inputs_persists_sheet_source_atlas_uids(monkeypatc
 
     created = []
     monkeypatch.setattr(
-        "metatlas2.database_interact.get_atlas_uid_by_source",
+        "metatlas2.shared_tools.database_interact.get_atlas_uid_by_source",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "metatlas2.database_interact.get_compound_uids_by_inchi_keys",
+        "metatlas2.shared_tools.database_interact.get_compound_uids_by_inchi_keys",
         lambda *_args: {
             "GFFGJBXGBJISGV-UHFFFAOYSA-N": "compound-uid",
             "QC-KEY": "qc-compound-uid",
@@ -116,11 +116,11 @@ def test_resolve_config_atlas_inputs_persists_sheet_source_atlas_uids(monkeypatc
         return SimpleNamespace(atlas_uid=f"atlas-{len(created)}")
 
     monkeypatch.setattr(
-        "metatlas2.database_interact.create_new_atlas_from_dataframe",
+        "metatlas2.shared_tools.database_interact.create_new_atlas_from_dataframe",
         create_atlas,
     )
     monkeypatch.setattr(
-        "metatlas2.database_interact.save_atlas_to_database",
+        "metatlas2.shared_tools.database_interact.save_atlas_to_database",
         lambda *_args: None,
     )
     config = Metatlas2Config(

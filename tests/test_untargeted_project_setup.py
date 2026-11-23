@@ -99,7 +99,7 @@ def test_step1_creates_inputs_and_inserts_lims_row(tmp_path):
     assert task.path("mzmine_runner").read_text() == f"sbatch {task.path('mzmine_sbatch')}"
 
 
-@pytest.mark.parametrize("case", ["too_new", "no_ms2", "opt_out", "already_tracked"])
+@pytest.mark.parametrize("case", ["too_new", "no_ms2", "opt_out", "opt_out_transfer_name", "already_tracked"])
 def test_step1_skips_ineligible_projects(tmp_path, case):
     ctx = _ctx(tmp_path, pd.DataFrame())
     raw = tmp_path / "raw_data"
@@ -111,6 +111,8 @@ def test_step1_skips_ineligible_projects(tmp_path, case):
         names = [n.replace("_MS2_", "_MS1_") for n in names]
     if case == "opt_out":
         (raw / "jgi" / PROJECT_JGI / "nountargeted.txt").write_text("")
+    if case == "opt_out_transfer_name":  # the name the raw-data transfer actually copies
+        (raw / "jgi" / PROJECT_JGI / "NO_UNTARGETED.TXT").write_text("")
     if case == "already_tracked":
         ctx.lims.tables["untargeted_tasks"] = pd.DataFrame({"parent_dir": [PROJECT_JGI]})
     ctx.lims.tables["lcmsrun_plus"] = lcmsruns_df(PROJECT_JGI, names, raw, "jgi", epoch)

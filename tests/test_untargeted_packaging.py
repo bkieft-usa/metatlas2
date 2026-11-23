@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import zipfile
 
-from metatlas2 import gdrive_upload as gdu
+from metatlas2.shared_tools import gdrive_upload as gdu
 from metatlas2.untargeted import packaging as pk
 from untargeted_fixtures import PROJECT_EB, PROJECT_JGI
 

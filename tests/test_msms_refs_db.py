@@ -1,12 +1,12 @@
 """Unit tests for the MSMS-refs database integration.
 
 Covers:
-* :func:`~metatlas2.database_interact.batch_save_msms_refs`
-* :func:`~metatlas2.load_tools.load_msms_refs_from_db`
-* :class:`~metatlas2.workflow_objects.NewMsmsRefsConfig` (YAML parsing + execute)
+* :func:`~metatlas2.shared_tools.database_interact.batch_save_msms_refs`
+* :func:`~metatlas2.shared_tools.load_tools.load_msms_refs_from_db`
+* :class:`~metatlas2.shared_tools.workflow_objects.NewMsmsRefsConfig` (YAML parsing + execute)
 
 All tests use a temporary DuckDB file created via
-:func:`~metatlas2.database_interact.create_metatlas_database` so the full
+:func:`~metatlas2.shared_tools.database_interact.create_metatlas_database` so the full
 schema (including ``msms_refs``) is exercised without
 touching any production database.
 """
@@ -20,9 +20,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import metatlas2.database_interact as dbi
-import metatlas2.load_tools as ldt
-from metatlas2.workflow_objects import NewMsmsRefsConfig
+import metatlas2.shared_tools.database_interact as dbi
+import metatlas2.shared_tools.load_tools as ldt
+from metatlas2.shared_tools.workflow_objects import NewMsmsRefsConfig
 
 
 # ---------------------------------------------------------------------------
@@ -374,9 +374,9 @@ class TestNewMsmsRefsConfig:
 
         config_path = self._write_config(tmp_path, str(tab_path))
 
-        import metatlas2.run_targeted_analysis as rtg
+        import metatlas2.shared_tools.paths as pth
         monkeypatch.setattr(
-            rtg, "set_up_paths",
+            pth, "set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
 
@@ -397,12 +397,12 @@ class TestNewMsmsRefsConfig:
         tab_path = tmp_path / "refs.tab"
         _write_tab(tab_path, [_tab_record(ref_id="one"), _tab_record(ref_id="two")])
         monkeypatch.setattr(
-            "metatlas2.run_targeted_analysis.set_up_paths",
+            "metatlas2.shared_tools.paths.set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
         warnings = []
         monkeypatch.setattr(
-            "metatlas2.workflow_objects.logger.warning",
+            "metatlas2.shared_tools.workflow_objects.logger.warning",
             lambda message, *args: warnings.append(message % args),
         )
 
@@ -422,9 +422,9 @@ class TestNewMsmsRefsConfig:
 
         config_path = self._write_config(tmp_path, str(tab_path))
 
-        import metatlas2.run_targeted_analysis as rtg
+        import metatlas2.shared_tools.paths as pth
         monkeypatch.setattr(
-            rtg, "set_up_paths",
+            pth, "set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
 
@@ -448,9 +448,9 @@ class TestNewMsmsRefsConfig:
 
         config_path = self._write_config(tmp_path, str(tab_path))
 
-        import metatlas2.run_targeted_analysis as rtg
+        import metatlas2.shared_tools.paths as pth
         monkeypatch.setattr(
-            rtg, "set_up_paths",
+            pth, "set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
 
@@ -479,9 +479,9 @@ class TestNewMsmsRefsConfig:
             tmp_path, str(tab_path), database_filter="metatlas"
         )
 
-        import metatlas2.run_targeted_analysis as rtg
+        import metatlas2.shared_tools.paths as pth
         monkeypatch.setattr(
-            rtg, "set_up_paths",
+            pth, "set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
 
@@ -507,9 +507,9 @@ class TestNewMsmsRefsConfig:
 
         config_path = self._write_config(tmp_path, str(tab_path))
 
-        import metatlas2.run_targeted_analysis as rtg
+        import metatlas2.shared_tools.paths as pth
         monkeypatch.setattr(
-            rtg, "set_up_paths",
+            pth, "set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
 
@@ -531,9 +531,9 @@ class TestNewMsmsRefsConfig:
             tmp_path, str(tmp_path / "nonexistent.tab")
         )
 
-        import metatlas2.run_targeted_analysis as rtg
+        import metatlas2.shared_tools.paths as pth
         monkeypatch.setattr(
-            rtg, "set_up_paths",
+            pth, "set_up_paths",
             lambda config, **kw: {"main_db_path": db_path},
         )
 

@@ -1,9 +1,9 @@
-"""Unit tests for metatlas2.get_db_table.
+"""Unit tests for metatlas2.shared_tools.get_db_table.
 
 Covers:
-* :func:`~metatlas2.get_db_table.export_table_to_csv` — happy path, invalid
+* :func:`~metatlas2.shared_tools.get_db_table.export_table_to_csv` — happy path, invalid
   table name, empty table, default output path, database_path override.
-* :func:`~metatlas2.get_db_table._get_valid_tables` — returns the live table list.
+* :func:`~metatlas2.shared_tools.get_db_table._get_valid_tables` — returns the live table list.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import metatlas2.database_interact as dbi
-from metatlas2.get_db_table import export_table_to_csv, _get_valid_tables
+import metatlas2.shared_tools.database_interact as dbi
+from metatlas2.shared_tools.get_db_table import export_table_to_csv, _get_valid_tables
 
 
 # ---------------------------------------------------------------------------

@@ -4,9 +4,9 @@
 These tests exercise the full Python-layer logic that the shell wrapper
 ``scripts/metatlas2.sh`` delegates to:
 
-  1. ``add-compounds``  →  :mod:`metatlas2.add_compounds_to_db`
-  2. ``add-atlases``    →  :mod:`metatlas2.add_atlases_to_db`
-  3. ``run``            →  :mod:`metatlas2.run_targeted_analysis` (project-setup
+  1. ``add-compounds``  →  :mod:`metatlas2.shared_tools.add_compounds_to_db`
+  2. ``add-atlases``    →  :mod:`metatlas2.shared_tools.add_atlases_to_db`
+  3. ``run``            →  :mod:`metatlas2.targeted.run_targeted_analysis` (project-setup
                            and RT-alignment stages only; auto-ID is mocked so
                            no real HDF5 data or SLURM cluster is required)
 
@@ -441,10 +441,10 @@ class TestPubChemPugViewParsing:
 
     def test_fetch_pubchem_xrefs_parses_all_fields(self) -> None:
         """fetch_pubchem_xrefs should extract all known cross-reference fields."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_xrefs
 
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value=_FAKE_OTHER_IDENTIFIERS_JSON,
         ):
             result = fetch_pubchem_xrefs("2519")
@@ -461,10 +461,10 @@ class TestPubChemPugViewParsing:
 
     def test_fetch_pubchem_xrefs_empty_on_api_failure(self) -> None:
         """fetch_pubchem_xrefs should return all-empty strings when the API call fails."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_xrefs
 
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value={},
         ):
             result = fetch_pubchem_xrefs("2519")
@@ -473,7 +473,7 @@ class TestPubChemPugViewParsing:
 
     def test_fetch_pubchem_xrefs_missing_heading_returns_empty(self) -> None:
         """fetch_pubchem_xrefs should return empty string for headings not present."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_xrefs
 
         # JSON with only CAS — all other fields should be empty
         partial_json = {
@@ -494,7 +494,7 @@ class TestPubChemPugViewParsing:
             }
         }
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value=partial_json,
         ):
             result = fetch_pubchem_xrefs("2519")
@@ -505,10 +505,10 @@ class TestPubChemPugViewParsing:
 
     def test_fetch_pubchem_description_prefers_mesh_over_wikipedia(self) -> None:
         """fetch_pubchem_description should prefer MeSH source over Wikipedia."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_description
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_description
 
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value=_FAKE_DESCRIPTION_JSON,
         ):
             result = fetch_pubchem_description("2519")
@@ -519,10 +519,10 @@ class TestPubChemPugViewParsing:
         self,
     ) -> None:
         """fetch_pubchem_description should return the first entry when no preferred source exists."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_description
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_description
 
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value=_FAKE_DESCRIPTION_WIKIPEDIA_ONLY_JSON,
         ):
             result = fetch_pubchem_description("2519")
@@ -531,10 +531,10 @@ class TestPubChemPugViewParsing:
 
     def test_fetch_pubchem_description_empty_on_api_failure(self) -> None:
         """fetch_pubchem_description should return empty string when the API call fails."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_description
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_description
 
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value={},
         ):
             result = fetch_pubchem_description("2519")
@@ -543,7 +543,7 @@ class TestPubChemPugViewParsing:
 
     def test_wikipedia_url_spaces_replaced_with_underscores(self) -> None:
         """Wikipedia article titles with spaces should produce valid URLs."""
-        from metatlas2.pubchem_retrieval import fetch_pubchem_xrefs
+        from metatlas2.shared_tools.pubchem_retrieval import fetch_pubchem_xrefs
 
         spaced_json = {
             "Record": {
@@ -569,7 +569,7 @@ class TestPubChemPugViewParsing:
             }
         }
         with patch(
-            "metatlas2.pubchem_retrieval.fetch_pubchem_pug_view",
+            "metatlas2.shared_tools.pubchem_retrieval.fetch_pubchem_pug_view",
             return_value=spaced_json,
         ):
             result = fetch_pubchem_xrefs("5957")
@@ -582,7 +582,7 @@ class TestPubChemPugViewParsing:
     ) -> None:
         """New xref and descriptor columns should be present in the compounds table after ingestion."""
         import duckdb
-        from metatlas2.database_interact import create_metatlas_database
+        from metatlas2.shared_tools.database_interact import create_metatlas_database
 
         db_path = tmp_path / "test_new_fields.duckdb"
         create_metatlas_database(str(db_path))
@@ -678,10 +678,10 @@ class TestMetaCycRetrieval:
 
     def test_fetch_metacyc_id_from_chebi_returns_accession(self) -> None:
         """fetch_metacyc_id_from_chebi should extract the MetaCyc accession from JSON."""
-        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+        from metatlas2.shared_tools.chebi_retrieval import fetch_metacyc_id_from_chebi
 
         mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_WITH_METACYC)
-        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+        with patch("metatlas2.shared_tools.chebi_retrieval._SESSION") as mock_session:
             mock_session.get.return_value = mock_resp
             result = fetch_metacyc_id_from_chebi("CHEBI:27732")
 
@@ -689,10 +689,10 @@ class TestMetaCycRetrieval:
 
     def test_fetch_metacyc_id_from_chebi_returns_empty_when_no_metacyc(self) -> None:
         """fetch_metacyc_id_from_chebi should return '' when no MetaCyc link exists."""
-        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+        from metatlas2.shared_tools.chebi_retrieval import fetch_metacyc_id_from_chebi
 
         mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_NO_METACYC)
-        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+        with patch("metatlas2.shared_tools.chebi_retrieval._SESSION") as mock_session:
             mock_session.get.return_value = mock_resp
             result = fetch_metacyc_id_from_chebi("CHEBI:99999")
 
@@ -700,10 +700,10 @@ class TestMetaCycRetrieval:
 
     def test_fetch_metacyc_id_from_chebi_joins_multiple_accessions(self) -> None:
         """fetch_metacyc_id_from_chebi should semicolon-join multiple MetaCyc accessions."""
-        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+        from metatlas2.shared_tools.chebi_retrieval import fetch_metacyc_id_from_chebi
 
         mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_MULTIPLE_METACYC)
-        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+        with patch("metatlas2.shared_tools.chebi_retrieval._SESSION") as mock_session:
             mock_session.get.return_value = mock_resp
             result = fetch_metacyc_id_from_chebi("CHEBI:15422")
 
@@ -713,9 +713,9 @@ class TestMetaCycRetrieval:
 
     def test_fetch_metacyc_id_from_chebi_returns_empty_on_api_failure(self) -> None:
         """fetch_metacyc_id_from_chebi should return '' on HTTP error."""
-        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+        from metatlas2.shared_tools.chebi_retrieval import fetch_metacyc_id_from_chebi
 
-        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+        with patch("metatlas2.shared_tools.chebi_retrieval._SESSION") as mock_session:
             mock_session.get.side_effect = Exception("connection refused")
             result = fetch_metacyc_id_from_chebi("CHEBI:27732")
 
@@ -723,9 +723,9 @@ class TestMetaCycRetrieval:
 
     def test_fetch_metacyc_id_from_chebi_returns_empty_for_blank_input(self) -> None:
         """fetch_metacyc_id_from_chebi should return '' without making an API call for blank input."""
-        from metatlas2.chebi_retrieval import fetch_metacyc_id_from_chebi
+        from metatlas2.shared_tools.chebi_retrieval import fetch_metacyc_id_from_chebi
 
-        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session:
+        with patch("metatlas2.shared_tools.chebi_retrieval._SESSION") as mock_session:
             result = fetch_metacyc_id_from_chebi("")
             mock_session.get.assert_not_called()
 
@@ -734,7 +734,7 @@ class TestMetaCycRetrieval:
     def test_retrieve_metacyc_info_adds_metacyc_id_column(self, tmp_path: Path) -> None:
         """retrieve_metacyc_info should add a metacyc_id column mapped from chebi_id."""
         import pandas as pd
-        from metatlas2.chebi_retrieval import retrieve_metacyc_info
+        from metatlas2.shared_tools.chebi_retrieval import retrieve_metacyc_info
 
         cache_path = tmp_path / "chebi_cache.json"
         mock_resp = self._make_mock_resp(_FAKE_CHEBI_JSON_WITH_METACYC)
@@ -744,8 +744,8 @@ class TestMetaCycRetrieval:
             "chebi_id":  ["CHEBI:27732", ""],
         })
 
-        with patch("metatlas2.chebi_retrieval._SESSION") as mock_session, \
-             patch("metatlas2.chebi_retrieval.time.sleep"):
+        with patch("metatlas2.shared_tools.chebi_retrieval._SESSION") as mock_session, \
+             patch("metatlas2.shared_tools.chebi_retrieval.time.sleep"):
             mock_session.get.return_value = mock_resp
             result = retrieve_metacyc_info(compounds, str(cache_path))
 
@@ -757,7 +757,7 @@ class TestMetaCycRetrieval:
         """retrieve_metacyc_info should use cached values and not make API calls for cached IDs."""
         import json
         import pandas as pd
-        from metatlas2.chebi_retrieval import retrieve_metacyc_info
+        from metatlas2.shared_tools.chebi_retrieval import retrieve_metacyc_info
 
         cache_path = tmp_path / "chebi_cache.json"
         cache_path.write_text(json.dumps({"CHEBI:27732": "CAFFEINE"}))
@@ -767,7 +767,7 @@ class TestMetaCycRetrieval:
             "chebi_id":  ["CHEBI:27732"],
         })
 
-        with patch("metatlas2.chebi_retrieval.requests.get") as mock_get:
+        with patch("metatlas2.shared_tools.chebi_retrieval.requests.get") as mock_get:
             result = retrieve_metacyc_info(compounds, str(cache_path))
             mock_get.assert_not_called()
 
@@ -776,7 +776,7 @@ class TestMetaCycRetrieval:
     def test_metacyc_id_column_in_compounds_table(self, tmp_path: Path) -> None:
         """The compounds table should have a metacyc_id column after DB creation."""
         import duckdb
-        from metatlas2.database_interact import create_metatlas_database
+        from metatlas2.shared_tools.database_interact import create_metatlas_database
 
         db_path = tmp_path / "test_metacyc_col.duckdb"
         create_metatlas_database(str(db_path))
@@ -794,7 +794,7 @@ class TestModelSEEDRetrieval:
     def test_retrieve_modelseed_info_maps_inchikey(self, tmp_path: Path) -> None:
         """retrieve_modelseed_info should add a modelseed_id column mapped from InChIKey."""
         import pandas as pd
-        from metatlas2.modelseed_retrieval import retrieve_modelseed_info
+        from metatlas2.shared_tools.modelseed_retrieval import retrieve_modelseed_info
 
         # Write a fake ModelSEED TSV cache
         cache_path = tmp_path / "modelseed.tsv"
@@ -817,7 +817,7 @@ class TestModelSEEDRetrieval:
     def test_retrieve_modelseed_info_no_cache_path(self) -> None:
         """retrieve_modelseed_info should return empty modelseed_id when no cache path given."""
         import pandas as pd
-        from metatlas2.modelseed_retrieval import retrieve_modelseed_info
+        from metatlas2.shared_tools.modelseed_retrieval import retrieve_modelseed_info
 
         compounds = pd.DataFrame({
             "inchi_key": ["GFFGJBXGBJISGV-UHFFFAOYSA-N"],
@@ -832,7 +832,7 @@ class TestModelSEEDRetrieval:
     def test_retrieve_modelseed_info_multiple_cpd_ids_joined(self, tmp_path: Path) -> None:
         """When multiple CPD IDs share an InChIKey they should be semicolon-joined."""
         import pandas as pd
-        from metatlas2.modelseed_retrieval import retrieve_modelseed_info
+        from metatlas2.shared_tools.modelseed_retrieval import retrieve_modelseed_info
 
         # Two rows with the same InChIKey but different CPD IDs
         tsv = (
@@ -858,7 +858,7 @@ class TestModelSEEDRetrieval:
     def test_modelseed_id_column_in_compounds_table(self, tmp_path: Path) -> None:
         """The compounds table should have a modelseed_id column after DB creation."""
         import duckdb
-        from metatlas2.database_interact import create_metatlas_database
+        from metatlas2.shared_tools.database_interact import create_metatlas_database
 
         db_path = tmp_path / "test_modelseed_col.duckdb"
         create_metatlas_database(str(db_path))
@@ -876,7 +876,7 @@ class TestModelSEEDRetrieval:
     ) -> None:
         """modelseed_id should be stored in the compounds table after add_compounds_to_db."""
         import duckdb
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         # Write a minimal compounds TSV
         tsv_path = tmp_path / "compounds.tsv"
@@ -891,8 +891,8 @@ class TestModelSEEDRetrieval:
             ).fillna("")
             return result
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_with_match):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_with_match):
             add_compounds_to_db(str(tsv_path), overwrite_db=True)
 
         main_db_path = metatlas_data_dir / "databases" / "main_db" / "metatlas.duckdb"
@@ -922,11 +922,11 @@ class TestAddCompounds:
         metatlas_data_dir: Path,
     ) -> None:
         """Running add_compounds_to_db should create the main DuckDB database file."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         assert main_db_path.exists(), "Main database was not created by add_compounds_to_db"
@@ -939,11 +939,11 @@ class TestAddCompounds:
     ) -> None:
         """Compounds from the TSV should be queryable from the main database after ingestion."""
         import duckdb
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
@@ -964,7 +964,7 @@ class TestAddCompounds:
     ) -> None:
         """Supplied structures are retained while missing metadata is enriched."""
         import duckdb
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         csv_path = tmp_path / "compounds.csv"
         pd.DataFrame([
@@ -994,12 +994,12 @@ class TestAddCompounds:
             },
         }
         with patch(
-            "metatlas2.pubchem_retrieval.load_or_create_pubchem_cache", return_value=cache,
+            "metatlas2.shared_tools.pubchem_retrieval.load_or_create_pubchem_cache", return_value=cache,
         ), patch(
-            "metatlas2.modelseed_retrieval._build_inchikey_to_cpd",
+            "metatlas2.shared_tools.modelseed_retrieval._build_inchikey_to_cpd",
             return_value={"GFFGJBXGBJISGV-UHFFFAOYSA-N": "cpd00003"},
         ), patch(
-            "metatlas2.chebi_retrieval.load_or_create_chebi_cache",
+            "metatlas2.shared_tools.chebi_retrieval.load_or_create_chebi_cache",
             return_value={"CHEBI:1": "META-1"},
         ):
             add_compounds_to_db(str(csv_path), overwrite_db=True)
@@ -1024,8 +1024,8 @@ class TestAddCompounds:
         self, tmp_path: Path, main_db_path: Path, metatlas_data_dir: Path,
     ) -> None:
         import duckdb
-        from metatlas2 import database_interact as dbi
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools import database_interact as dbi
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         dbi.create_metatlas_database(str(main_db_path))
         with duckdb.connect(str(main_db_path)) as conn:
@@ -1040,9 +1040,9 @@ class TestAddCompounds:
 
         csv_path = tmp_path / "compounds.csv"
         csv_path.write_text("compound_name,inchi_key\nNew name,new-key\n")
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(csv_path))
             add_compounds_to_db(str(csv_path))
 
@@ -1062,7 +1062,7 @@ class TestAddCompounds:
     ) -> None:
         """PubChem lookup runs when either smiles or inchi is absent from the CSV."""
         import duckdb
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         csv_path = tmp_path / "compounds.csv"
         pd.DataFrame([{
@@ -1077,13 +1077,13 @@ class TestAddCompounds:
             return result
 
         with patch(
-            "metatlas2.pubchem_retrieval.retrieve_pubchem_info",
+            "metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info",
             side_effect=_add_inchi,
         ) as pubchem, patch(
-            "metatlas2.modelseed_retrieval.retrieve_modelseed_info",
+            "metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info",
             side_effect=_fake_modelseed_info,
         ), patch(
-            "metatlas2.chebi_retrieval.retrieve_metacyc_info",
+            "metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info",
             side_effect=_fake_metacyc_info,
         ):
             add_compounds_to_db(str(csv_path), overwrite_db=True)
@@ -1101,11 +1101,11 @@ class TestAddCompounds:
     ) -> None:
         """The compounds table should contain exactly the number of rows in the input TSV."""
         import duckdb
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         conn = duckdb.connect(str(main_db_path), read_only=True)
@@ -1127,12 +1127,12 @@ class TestAddCompounds:
         We run a third call for good measure and confirm the count is still 2.
         """
         import duckdb
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         # First call: create the DB from scratch
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
         count_after_first = duckdb.connect(str(main_db_path), read_only=True).execute(
@@ -1141,9 +1141,9 @@ class TestAddCompounds:
         assert count_after_first == 2, f"Expected 2 compounds after first run, got {count_after_first}"
 
         # Second call: same data, no overwrite — upsert must not duplicate.
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=False)
 
         count_after_second = duckdb.connect(str(main_db_path), read_only=True).execute(
@@ -1152,9 +1152,9 @@ class TestAddCompounds:
         assert count_after_second == 2, f"Expected 2 compounds after second run (upsert), got {count_after_second}"
 
         # Third call: confirm idempotency holds across multiple reruns.
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=False)
 
         count_after_third = duckdb.connect(str(main_db_path), read_only=True).execute(
@@ -1168,7 +1168,7 @@ class TestAddCompounds:
         metatlas_data_dir: Path,
     ) -> None:
         """Passing a non-existent CSV path should raise an error."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         with pytest.raises(FileNotFoundError):
             add_compounds_to_db(str(tmp_path / "does_not_exist.csv"))
@@ -1178,7 +1178,7 @@ class TestAddCompounds:
         tmp_path: Path,
     ) -> None:
         """The routine accepts only direct CSV/TSV input, not a YAML config."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         yaml_path = tmp_path / "compounds.yaml"
         yaml_path.write_text("COMPOUNDS: {}\n")
@@ -1193,7 +1193,7 @@ class TestAddCompounds:
         metatlas_data_dir: Path,
     ) -> None:
         """Validate CSV columns before creating or overwriting the database."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
         csv_path = tmp_path / "missing_required.csv"
         csv_path.write_text("label\nAdenine\n")
@@ -1218,11 +1218,11 @@ class TestAddAtlases:
         metatlas_data_dir: Path,
     ) -> None:
         """Ensure the main DB is populated with compounds before atlas tests run."""
-        from metatlas2.add_compounds_to_db import add_compounds_to_db
+        from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
 
-        with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+        with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
             add_compounds_to_db(str(compounds_csv), overwrite_db=True)
 
     def test_add_atlases_creates_atlas_in_db(
@@ -1233,7 +1233,7 @@ class TestAddAtlases:
     ) -> None:
         """Running add_atlases_to_db should insert at least one atlas into the main DB."""
         import duckdb
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         add_atlases_to_db(str(atlases_yaml))
 
@@ -1251,7 +1251,7 @@ class TestAddAtlases:
     ) -> None:
         """The inserted atlas should carry the name and description from the YAML."""
         import duckdb
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         add_atlases_to_db(str(atlases_yaml))
 
@@ -1262,7 +1262,7 @@ class TestAddAtlases:
         ).df()
         conn.close()
 
-        from metatlas2.file_and_project_format import normalize_chromatography
+        from metatlas2.shared_tools.file_and_project_format import normalize_chromatography
 
         assert len(df) == 1
         row = df.iloc[0]
@@ -1282,7 +1282,7 @@ class TestAddAtlases:
     ) -> None:
         """Each compound in the TSV should be associated with the new atlas."""
         import duckdb
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         add_atlases_to_db(str(atlases_yaml))
 
@@ -1304,8 +1304,8 @@ class TestAddAtlases:
     ) -> None:
         """The atlas UID stored in the DB should allow round-trip retrieval via Atlas.from_database."""
         import duckdb
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
-        from metatlas2.workflow_objects import Atlas
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.workflow_objects import Atlas
 
         add_atlases_to_db(str(atlases_yaml))
 
@@ -1324,11 +1324,11 @@ class TestAddAtlases:
         metatlas_data_dir: Path,
     ) -> None:
         import duckdb
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
-        from metatlas2.atlas_sheet import _validate_database_atlas_uid
-        from metatlas2.database_interact import get_compound_metadata
-        from metatlas2.load_tools import save_atlas_data_to_csv
-        from metatlas2.workflow_objects import Atlas
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.atlas_sheet import _validate_database_atlas_uid
+        from metatlas2.shared_tools.database_interact import get_compound_metadata
+        from metatlas2.shared_tools.load_tools import save_atlas_data_to_csv
+        from metatlas2.shared_tools.workflow_objects import Atlas
 
         atlas_path = tmp_path / "custom_atlas.tsv"
         pd.DataFrame([
@@ -1414,7 +1414,7 @@ class TestAddAtlases:
         tmp_path: Path,
     ) -> None:
         """A YAML missing the top-level ATLASES key should raise a ValueError through add_atlases_to_db."""
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         bad_yaml = tmp_path / "bad_atlases.yaml"
         bad_yaml.write_text("SOMETHING_ELSE:\n  foo: bar\n")
@@ -1428,7 +1428,7 @@ class TestAddAtlases:
         atlas_tsv: Path,
     ) -> None:
         """An atlas entry missing the 'name' field should raise a ValueError through add_atlases_to_db."""
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         bad_yaml = tmp_path / "missing_path.yaml"
         bad_yaml.write_text(textwrap.dedent(f"""\
@@ -1449,7 +1449,7 @@ class TestAddAtlases:
         tmp_path: Path,
     ) -> None:
         """An atlas entry pointing at a non-existent TSV should raise FileNotFoundError through add_atlases_to_db."""
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         bad_yaml = tmp_path / "missing_atlas_tsv.yaml"
         bad_yaml.write_text(textwrap.dedent("""\
@@ -1473,7 +1473,7 @@ class TestAddAtlases:
     ) -> None:
         """An atlas entry with an empty path should be silently skipped (not raise)."""
         import duckdb
-        from metatlas2.add_atlases_to_db import add_atlases_to_db
+        from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
         # Write a YAML where path is null/empty — mirrors the commented-out
         # entries in the production jgi_production_atlases.yaml.
@@ -1538,12 +1538,12 @@ def seeded_main_db(
 ) -> tuple[Path, str]:
     """Seed the main DB with compounds and one atlas; return (main_db_path, atlas_uid)."""
     import duckdb
-    from metatlas2.add_compounds_to_db import add_compounds_to_db
-    from metatlas2.add_atlases_to_db import add_atlases_to_db
+    from metatlas2.shared_tools.add_compounds_to_db import add_compounds_to_db
+    from metatlas2.shared_tools.add_atlases_to_db import add_atlases_to_db
 
-    with patch("metatlas2.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
-             patch("metatlas2.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
-             patch("metatlas2.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
+    with patch("metatlas2.shared_tools.pubchem_retrieval.retrieve_pubchem_info", side_effect=_fake_pubchem_info), \
+             patch("metatlas2.shared_tools.modelseed_retrieval.retrieve_modelseed_info", side_effect=_fake_modelseed_info), \
+             patch("metatlas2.shared_tools.chebi_retrieval.retrieve_metacyc_info", side_effect=_fake_metacyc_info):
         add_compounds_to_db(str(compounds_csv), overwrite_db=True)
     add_atlases_to_db(str(atlases_yaml))
 
@@ -1577,9 +1577,9 @@ def project_config_and_paths(
     ``project_raw_data_dir`` so the raw-data directory already exists when
     ``set_up_paths`` validates it.
     """
-    from metatlas2.load_tools import load_metatlas2_config
-    from metatlas2.run_targeted_analysis import set_up_paths
-    from metatlas2 import atlas_sheet
+    from metatlas2.shared_tools.load_tools import load_metatlas2_config
+    from metatlas2.shared_tools.paths import set_up_paths
+    from metatlas2.shared_tools import atlas_sheet
 
     sheet_rows = pd.read_csv(atlas_tsv, sep="\t").fillna("")
     sheet_rows["tags"] = "system-test"
@@ -1612,8 +1612,8 @@ class TestRunTargetedAnalysis:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """set_up_paths should raise EnvironmentError when METATLAS_DATA_DIR is unset."""
-        from metatlas2.run_targeted_analysis import set_up_paths
-        from metatlas2.load_tools import load_metatlas2_config
+        from metatlas2.shared_tools.paths import set_up_paths
+        from metatlas2.shared_tools.load_tools import load_metatlas2_config
 
         monkeypatch.delenv("METATLAS_DATA_DIR", raising=False)
         config = load_metatlas2_config(str(analysis_yaml))
@@ -1626,8 +1626,8 @@ class TestRunTargetedAnalysis:
         analysis_yaml: Path,
     ) -> None:
         """set_up_paths should raise ValueError when the project raw-data directory is absent."""
-        from metatlas2.run_targeted_analysis import set_up_paths
-        from metatlas2.load_tools import load_metatlas2_config
+        from metatlas2.shared_tools.paths import set_up_paths
+        from metatlas2.shared_tools.load_tools import load_metatlas2_config
 
         config = load_metatlas2_config(str(analysis_yaml))
 
@@ -1665,8 +1665,8 @@ class TestRunTargetedAnalysis:
         seeded_analysis_yaml: Path,
     ) -> None:
         """load_metatlas2_config should parse the YAML into a Metatlas2Config object."""
-        from metatlas2.load_tools import load_metatlas2_config
-        from metatlas2.file_and_project_format import normalize_chromatography
+        from metatlas2.shared_tools.load_tools import load_metatlas2_config
+        from metatlas2.shared_tools.file_and_project_format import normalize_chromatography
 
         config = load_metatlas2_config(str(seeded_analysis_yaml))
 
@@ -1701,7 +1701,7 @@ class TestRunTargetedAnalysis:
         tmp_path: Path,
     ) -> None:
         """A YAML missing RT_ALIGNMENT should raise a ValueError."""
-        from metatlas2.load_tools import load_metatlas2_config
+        from metatlas2.shared_tools.load_tools import load_metatlas2_config
 
         bad = tmp_path / "no_rt_alignment.yaml"
         bad.write_text(textwrap.dedent("""\
@@ -1725,7 +1725,7 @@ class TestRunTargetedAnalysis:
         tmp_path: Path,
     ) -> None:
         """A YAML missing TARGETED_ANALYSES should raise a ValueError."""
-        from metatlas2.load_tools import load_metatlas2_config
+        from metatlas2.shared_tools.load_tools import load_metatlas2_config
 
         bad = tmp_path / "no_targeted_analyses.yaml"
         bad.write_text(textwrap.dedent("""\
@@ -1748,7 +1748,7 @@ class TestRunTargetedAnalysis:
         project_with_h5_files: Path,
     ) -> None:
         """run_project_setup should create the project DuckDB file on disk."""
-        from metatlas2.workflows import run_project_setup
+        from metatlas2.targeted.workflows import run_project_setup
 
         config, paths = project_config_and_paths
         run_project_setup(
@@ -1770,7 +1770,7 @@ class TestRunTargetedAnalysis:
     ) -> None:
         """run_project_setup should register the project in the main database projects table."""
         import duckdb
-        from metatlas2.workflows import run_project_setup
+        from metatlas2.targeted.workflows import run_project_setup
 
         config, paths = project_config_and_paths
         main_db, _ = seeded_main_db
@@ -1800,7 +1800,7 @@ class TestRunTargetedAnalysis:
     ) -> None:
         """run_project_setup should discover and persist LCMS runs from the raw-data directory."""
         import duckdb
-        from metatlas2.workflows import run_project_setup
+        from metatlas2.targeted.workflows import run_project_setup
 
         config, paths = project_config_and_paths
         run_project_setup(
@@ -1825,7 +1825,7 @@ class TestRunTargetedAnalysis:
     ) -> None:
         """run_project_setup should persist the config snapshot to the project DB."""
         import duckdb
-        from metatlas2.workflows import run_project_setup
+        from metatlas2.targeted.workflows import run_project_setup
 
         config, paths = project_config_and_paths
         run_project_setup(
@@ -1842,7 +1842,7 @@ class TestRunTargetedAnalysis:
         conn.close()
 
         assert count >= 1, "Config snapshot was not saved to project_config table"
-        from metatlas2.database_interact import load_config_from_db
+        from metatlas2.shared_tools.database_interact import load_config_from_db
 
         stored_config = load_config_from_db(paths["project_db_path"], 0, 0)
         assert stored_config is not None
@@ -1869,7 +1869,7 @@ class TestRunTargetedAnalysis:
     ) -> None:
         """Calling run_project_setup twice without overwrite should not raise or duplicate DB rows."""
         import duckdb
-        from metatlas2.workflows import run_project_setup
+        from metatlas2.targeted.workflows import run_project_setup
 
         config, paths = project_config_and_paths
         main_db, _ = seeded_main_db
@@ -1933,8 +1933,8 @@ class TestRunTargetedAnalysis:
         project_with_h5_files: Path,
     ) -> None:
         """get_project_db_path should locate the project DB after project setup."""
-        from metatlas2.run_targeted_analysis import get_project_db_path
-        from metatlas2.workflows import run_project_setup
+        from metatlas2.shared_tools.paths import get_project_db_path
+        from metatlas2.targeted.workflows import run_project_setup
 
         config, paths = project_config_and_paths
         run_project_setup(
@@ -1954,7 +1954,7 @@ class TestRunTargetedAnalysis:
         metatlas_data_dir: Path,
     ) -> None:
         """get_project_db_path should raise FileNotFoundError for an unknown project."""
-        from metatlas2.run_targeted_analysis import get_project_db_path
+        from metatlas2.shared_tools.paths import get_project_db_path
 
         with pytest.raises(FileNotFoundError):
             get_project_db_path("20990101_JGI_Ghost_99999_NoProject_Exp_Inst_HILICZ_Run001")
@@ -1969,7 +1969,7 @@ class TestRunTargetedAnalysis:
         The fixture supplies synthetic sheet rows without Google Sheets credentials.
         """
         import duckdb
-        from metatlas2.workflows import run_project_setup, run_rt_alignment
+        from metatlas2.targeted.workflows import run_project_setup, run_rt_alignment
 
         config, paths = project_config_and_paths
 
@@ -2028,7 +2028,7 @@ class TestRunTargetedAnalysis:
     ) -> None:
         """generate_slurm_script should write a valid bash script to disk."""
         import argparse
-        from metatlas2.run_targeted_analysis import generate_slurm_script
+        from metatlas2.targeted.run_targeted_analysis import generate_slurm_script
 
         config, paths = project_config_and_paths
         out_script = tmp_path / "test_slurm.sh"
@@ -2062,7 +2062,7 @@ class TestRunTargetedAnalysis:
         assert "#!/bin/bash" in content
         assert "#SBATCH" in content
         assert VALID_PROJECT_NAME in content
-        assert "metatlas2.run_targeted_analysis" in content
+        assert "metatlas2.targeted.run_targeted_analysis" in content
         assert paths["project_directory"] in content, (
             "#SBATCH --output should reference paths['project_directory']; "
             f"expected '{paths['project_directory']}' to appear in the script"

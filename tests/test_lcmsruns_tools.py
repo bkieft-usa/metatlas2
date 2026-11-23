@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/lcmsruns_tools.py.
+"""Unit tests for metatlas2/shared_tools/lcmsruns_tools.py.
 
 Tested functions
 ----------------
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from metatlas2.lcmsruns_tools import _classify_file_type, filter_lcmsruns_list
+from metatlas2.shared_tools.lcmsruns_tools import _classify_file_type, filter_lcmsruns_list
 
 
 # ---------------------------------------------------------------------------

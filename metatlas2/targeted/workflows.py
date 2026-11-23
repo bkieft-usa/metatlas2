@@ -1,0 +1,551 @@
+from __future__ import annotations
+
+from typing import Any
+import logging
+
+import socket
+import threading, time, os
+from IPython.display import display, HTML
+from pathlib import Path
+import pandas as pd
+
+from werkzeug.serving import make_server
+
+import metatlas2.shared_tools.database_interact as dbi
+import metatlas2.shared_tools.rt_align_tools as rat
+import metatlas2.targeted.ms2_hit_detection as mhd
+import metatlas2.targeted.create_curation_container as ccc
+import metatlas2.shared_tools.extract_data_from_h5 as edh
+import metatlas2.shared_tools.lcmsruns_tools as lrt
+import metatlas2.targeted.analysis_gui as agu
+import metatlas2.targeted.analysis_summary as asm
+import metatlas2.shared_tools.notebook_generator as nbg
+import metatlas2.shared_tools.load_tools as ldt
+import metatlas2.shared_tools.logging_config as lcf
+import metatlas2.shared_tools.gdrive_upload as gdu
+logger = lcf.get_logger('workflows')
+
+def run_project_setup(
+    project_name: str,
+    config: "Metatlas2Config",
+    paths: "PathsConfig",
+    overwrite_existing: bool = False,
+    rt_alignment_number: int | None = None,
+    analysis_number: int | None = None,
+) -> None:
+
+    from metatlas2.shared_tools.workflow_objects import Project
+
+    project_obj = Project()
+
+    project_obj.setup(
+        project_name=project_name,
+        config=config,
+        paths=paths,
+        overwrite_existing=overwrite_existing,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number,
+    )
+
+def run_rt_alignment(
+    project_name: str,
+    rt_alignment_number: int,
+    analysis_number: int,
+    skip_alignment: bool = False,
+) -> None:
+
+    from metatlas2.shared_tools.workflow_objects import RTAlign, Atlas, AtlasStage
+
+    rt_align_obj = RTAlign()
+
+    rt_align_obj.setup(
+        project_name=project_name,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number,
+        skip_alignment=skip_alignment,
+    )
+
+    if rt_align_obj.run_alignment is False:
+        logger.info(f"RT alignment is disabled or aligned atlases already exist for RT alignment number {rt_align_obj.rt_alignment_number}. Skipping RT alignment procedure and exiting.")
+        return
+
+    logger.info(f"Retrieving all LCMS runs for project...")
+    project_lcmsruns = dbi.get_lcmsruns_from_db(
+        project_db_path=rt_align_obj.paths['project_db_path'],
+    )
+
+    logger.info(f"Filtering {len(project_lcmsruns)} LCMS runs to run alignment against...")
+    rt_align_obj.aligner_lcmsruns = lrt.filter_lcmsruns_list(
+        lcmsruns=project_lcmsruns,
+        include_file_type=rt_align_obj.rt_alignment_params.get('include_lcmsruns', ["QC"]),
+        exclude_file_type=rt_align_obj.rt_alignment_params.get('exclude_lcmsruns', ["NEG"]),
+        chromatography=rt_align_obj.chromatography,
+        ms_level="ms1"
+    )
+    
+    logger.info("Retrieving QC Atlas from database...")
+    rt_align_obj.align_atlas_obj = Atlas.from_database(
+        database_path=rt_align_obj.paths['main_db_path'],
+        atlas_uid=rt_align_obj.align_atlas_uid
+    )
+    
+    logger.info("Passing Atlas and LCMSRuns to data extractor...")
+    edh.extract_data_from_raw(
+        obj=rt_align_obj,
+        stage="rt_alignment",
+    )
+
+    logger.info("Passing ExperimentalData, Atlas, and RTAlign to RT alignment model builder...")
+    rat.build_rt_alignment_model(
+        rt_align_obj=rt_align_obj
+    )
+
+    logger.info("Passing RTAlign object to model database table saver...")
+    dbi.save_rt_alignment_model_to_db(
+        rt_align_obj=rt_align_obj
+    )
+    
+    logger.info("Passing RTAlign object to model visualizer (summary)...")
+    rat.visualize_rt_alignment_model(
+        rt_align_obj=rt_align_obj
+    )
+
+    logger.info("Passing RTAlign object to all-files model visualizer...")
+    rat.visualize_rt_alignment_all(
+        rt_align_obj=rt_align_obj
+    )
+    
+    logger.info("Passing RTAlign object to alignment applicator...")
+    for ta in rt_align_obj.config.targeted_analyses:
+
+        rt_align_obj.unaligned_atlas_obj = Atlas.from_database(
+            rt_align_obj.paths['main_db_path'],
+            ta.atlas_uid  # the atlas from the config
+        )
+
+        if not ta.params.get('apply_alignment', True):
+            logger.info(
+                f"apply_alignment=false for {ta.chromatography}-{ta.polarity}-{ta.atlas_category.value}-{ta.atlas_name}. "
+                f"Registering reference atlas {ta.atlas_uid} as RT_ALIGNED without applying model..."
+            )
+            rt_align_obj.aligned_atlas_obj = rt_align_obj.unaligned_atlas_obj
+            rt_align_obj.aligned_atlas_obj.chromatography = ta.chromatography
+            rt_align_obj.aligned_atlas_obj.polarity = ta.polarity
+            rt_align_obj.aligned_atlas_obj.atlas_category = ta.atlas_category
+            rt_align_obj.aligned_atlas_obj.atlas_name = ta.atlas_name
+            rt_align_obj.aligned_atlas_obj.rt_alignment_number = rt_align_obj.rt_alignment_number
+            rt_align_obj.aligned_atlas_obj.analysis_number = None
+            dbi.save_atlas_to_db_and_disk(
+                obj=rt_align_obj,
+                atlas_to_update=rt_align_obj.aligned_atlas_obj,
+                stage=AtlasStage.RT_ALIGNED,
+            )
+            continue
+
+        logger.info(f"Cloning config Atlas {rt_align_obj.unaligned_atlas_obj.atlas_uid} for RT alignment stage...")
+        rt_align_obj.aligned_atlas_obj = dbi.clone_atlas(
+            obj=rt_align_obj,
+            stage=AtlasStage.RT_ALIGNED,
+            ta=ta
+        )
+
+        logger.info("Applying RT alignment model to new Atlas compound_mzrts...")
+        rt_shifted_data = rat.calculate_rt_shifts(
+            rt_align_obj=rt_align_obj,
+        )
+
+        logger.info("Updating RT-aligned Atlas compound_mzrts in database...")
+        dbi.update_compound_mzrt_for_atlas(
+            obj=rt_align_obj,
+            mz_rt_update_df=rt_shifted_data,
+            stage=AtlasStage.RT_ALIGNED,
+        )
+
+    if rt_align_obj.rt_alignment_params.get('upload_to_gdrive', False):
+        logger.info("Uploading RT alignment results to Google Drive...")
+        gdu.copy_outputs_to_google_drive(rt_align_obj, "RT_ALIGNMENT", overwrite=False)
+
+def run_auto_identification(
+    project_name: str,
+    rt_alignment_number: int = None,
+    analysis_number: int = None,
+    analysis_subset: list = None,
+    image_tag: str = "latest",
+) -> dict[str, int]:
+
+    from metatlas2.shared_tools.workflow_objects import Atlas, AutoIdentification, AtlasStage
+
+    auto_id_obj = AutoIdentification()
+
+    auto_id_obj.setup(
+        project_name=project_name,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number,
+        analysis_subset=analysis_subset,
+        image_tag=image_tag,
+    )
+
+    logger.info(f"Retrieving all LCMS runs for project...")
+    project_lcmsruns = dbi.get_lcmsruns_from_db(
+        project_db_path=auto_id_obj.paths['project_db_path'],
+    )
+
+    for ta in auto_id_obj.config.targeted_analyses:
+        
+        auto_id_obj.ta = ta
+        auto_id_obj.paths['analysis_results_output_dir'] = str(
+            Path(auto_id_obj.paths["analysis_output_dir"]) / auto_id_obj.ta.label
+        )
+
+        existing_autoid = dbi.get_atlas_uid_from_stage(
+            obj=auto_id_obj,
+            stage=AtlasStage.AUTO_IDED,
+        )
+        if existing_autoid:
+            logger.info(
+                f"AutoID results already exist for "
+                f"{ta.chromatography}-{ta.polarity}-{ta.atlas_category.value}-{ta.atlas_name} "
+                f"(RTA{auto_id_obj.rt_alignment_number}, TGA{auto_id_obj.analysis_number}). "
+                f"Skipping. To re-run, increment analysis_number."
+            )
+            continue
+
+        autoid_atlas_info = dbi.get_atlas_uid_from_stage(
+            obj=auto_id_obj,
+            stage=AtlasStage.RT_ALIGNED
+        )
+        if not autoid_atlas_info: continue
+
+        os.makedirs(auto_id_obj.paths['analysis_results_output_dir'], exist_ok=True)
+
+        auto_id_obj.aligned_atlas_obj = Atlas.from_database(
+            database_path=auto_id_obj.paths['project_db_path'],
+            atlas_uid=autoid_atlas_info['atlas_uid'],
+            main_db_path=auto_id_obj.paths['main_db_path']
+        )
+
+        logger.info(f"Cloning aligned Atlas {auto_id_obj.aligned_atlas_obj.atlas_uid} for auto identification stage...")
+        auto_id_obj.auto_ided_atlas_obj = dbi.clone_atlas(
+            obj=auto_id_obj,
+            stage=AtlasStage.AUTO_IDED,
+            ta=ta
+        )
+
+        logger.info("Finding LCMSRuns matching criteria for auto identification...")
+        auto_id_obj.autoid_lcmsruns = lrt.filter_lcmsruns_list(
+            lcmsruns=project_lcmsruns,
+            include_file_type=auto_id_obj.ta.params.get('include_lcmsruns', []),
+            exclude_file_type=auto_id_obj.ta.params['exclude_lcmsruns'].get('data_extraction', []),
+            chromatography=ta.chromatography,
+            polarity=ta.polarity
+        )
+
+        logger.info("Passing Atlas and LCMSRuns to data extractor...")
+        edh.extract_data_from_raw(
+            obj=auto_id_obj,
+            stage="auto_identification",
+        )
+
+        logger.info("Passing ExperimentalData to MS2 hit finder...")
+        mhd.find_ms2_hits(
+            auto_id_obj=auto_id_obj
+        )
+
+        logger.info("Passing ExperimentalData and Atlas to ManualCuration creator...")
+        ccc.create_manual_curation_obj(
+            auto_id_obj=auto_id_obj
+        )
+
+        logger.info("Passing filtered AutoIdentification object to database saver...")
+        dbi.save_auto_identification_results_to_db(
+            auto_id_obj=auto_id_obj
+        )
+
+        logger.info("Creating post-auto-ID Atlas from filtered data...")
+        dbi.update_compound_mzrt_for_atlas(
+            obj=auto_id_obj,
+            mz_rt_update_df=auto_id_obj.experimental_data.curation_df,
+            stage=AtlasStage.AUTO_IDED,
+        )
+
+        logger.info("Passing Atlas object to curation notebook generator...")
+        nbg.generate_gui_notebooks(
+            auto_id_obj=auto_id_obj
+        )
+
+    logger.info("Generating query notebook for RTA%s / TGA%s...", auto_id_obj.rt_alignment_number, auto_id_obj.analysis_number)
+    nbg.generate_query_notebook(
+        auto_id_obj=auto_id_obj
+    )
+
+    return
+
+def run_analysis_gui(
+    run_parameters: dict[str, Any],
+    override_parameters: dict[str, Any] = None,
+    dash_app_port: int = 8050,
+) -> dict:
+    """Launch the interactive manual-curation Dash GUI.
+
+    Returns
+    -------
+    dict
+        database flush errors, if they exist, to make sure summaries are not generated
+        if the manual curation data wasn't properly saved
+    """
+
+    from metatlas2.shared_tools.workflow_objects import Atlas, AnalysisGUI, AtlasStage
+
+    analysis_gui_obj = AnalysisGUI()
+
+    analysis_gui_obj.setup(
+        run_parameters=run_parameters,
+        override_parameters=override_parameters,
+    )
+
+    logger.info("Looking up Atlas UID for manual curation stage from database based on config parameters...")
+    curation_atlas_info = dbi.get_atlas_uid_from_stage(
+        obj=analysis_gui_obj,
+        stage=AtlasStage.AUTO_IDED, # updated data during GUI only lives in curation_df for now
+    )
+    if curation_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
+        raise ValueError(
+            f"Atlas UID mismatch: the database returned '{curation_atlas_info['atlas_uid']}' for the "
+            f"AUTO_IDED stage but the notebook specifies '{run_parameters['input_atlas_uid']}'. "
+            f"Update 'input_atlas_uid' in RUN_PARAMS to match the database value, or re-run auto-identification."
+        )
+    
+    logger.info(f"Retrieving Atlas UID {curation_atlas_info['atlas_uid']} for manual curation stage.")
+    analysis_gui_obj.auto_ided_atlas_obj = Atlas.from_database(
+        database_path=analysis_gui_obj.paths['project_db_path'],
+        atlas_uid=curation_atlas_info['atlas_uid'],
+        main_db_path=analysis_gui_obj.paths['main_db_path']
+    )
+
+    logger.info("Loading and filtering GUI inputs...")
+    dbi.load_and_filter_for_gui(
+        analysis_gui_obj=analysis_gui_obj
+    )
+
+    logger.info("Launching Analysis GUI...")
+    shutdown_holder = [None]
+
+    def _find_free_port(start: int, max_tries: int = 20) -> int:
+        """Return the first free TCP port in [start, start+max_tries)."""
+        for port in range(start, start + max_tries):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("0.0.0.0", port))
+                    return port
+                except OSError:
+                    continue
+        raise RuntimeError(
+            f"No free port found in the range {start}-{start + max_tries - 1}. "
+            "Close another notebook or specify a different starting port."
+        )
+    dash_app_port = _find_free_port(dash_app_port)
+
+    dash_app = agu.build_dash_app(
+        analysis_gui_obj=analysis_gui_obj,
+        port=dash_app_port,
+        shutdown_holder=shutdown_holder,
+        run_parameters=run_parameters,
+    )
+
+    server = make_server("0.0.0.0", dash_app_port, dash_app.server)
+    shutdown_holder[0] = server.shutdown
+
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    time.sleep(1)
+
+    if os.getenv('METATLAS2_STANDALONE') == 'true' or not os.getenv('JUPYTERHUB_SERVICE_PREFIX'):
+        url = f"http://localhost:{dash_app_port}/"
+    else:
+        service_prefix = os.getenv('JUPYTERHUB_SERVICE_PREFIX', '/')
+        url = f"{service_prefix}proxy/{dash_app_port}/"
+
+    display(HTML(f'<a href="{url}" target="_blank">▶ Open Dash App ↗</a>'))
+
+    t.join()
+    active_threads = getattr(dash_app, "active_flush_threads", [])
+    for ft in active_threads:
+        ft.join(timeout=30)
+    database_flush_errors = getattr(dash_app, "database_flush_errors", {})
+
+
+    if database_flush_errors:
+        logger.warning(
+            "DATABASE FLUSH ERRORS detected for %d compound(s) — their curation "
+            "data may NOT have been saved to the project database!" 
+            "Please go back and re-curate these compounds:\n%s",
+            len(database_flush_errors),
+            "\n".join(f"  • {k}: {v}" for k, v in database_flush_errors.items()),
+        )
+        print(
+            "\nWARNING: The following compounds could NOT be saved to the database "
+            "(the database may have been locked by another process):\n"
+            + "\n".join(f"  • {k}: {v}" for k, v in database_flush_errors.items())
+            + "\n\nDo NOT run the Analysis Summary until these errors are resolved "
+            "and the curation data has been successfully saved.\n"
+        )
+    else:
+        logger.info("All compound curation data flushed to the database successfully.")
+
+    return database_flush_errors
+
+def run_analysis_summary(
+    run_parameters: dict[str, Any],
+    override_parameters: dict[str, Any] = None,
+    overwrite: bool = False,
+    auto_curate: bool = False,
+    database_flush_errors: dict = None,
+) -> None:
+    """Run the post-curation analysis summary for one targeted analysis.
+
+    Parameters
+    ----------
+    run_parameters:
+        Dict with keys: ``project_name``, ``rt_alignment_number``,
+        ``analysis_number``, ``chromatography``, ``polarity``,
+        ``atlas_category``, ``atlas_name``, ``input_atlas_uid``.
+    override_parameters:
+        Optional dict of parameter overrides (same as the notebook GUI cell).
+    overwrite:
+        When ``True``, existing output files are overwritten.
+    auto_curate:
+        When ``True``, apply automatic curation defaults to the
+        ``curation_df`` before generating summary outputs.  This is used
+        by the ``--skip-curation`` command-line flag to bypass the manual
+        GUI step.  Defaults to ``False`` (normal notebook behaviour).
+    database_flush_errors:
+        Dict returned by ``run_analysis_gui()`` mapping
+        ``"label (adduct)"`` strings to error messages for any
+        compound whose curation data could not be flushed to the project
+        database.  When non-empty (or non-None), this function raises a
+        ``RuntimeError`` immediately rather than generating summary outputs
+        from potentially incomplete curation data.  Pass ``None`` (the
+        default) when calling from automated pipelines that bypass the GUI
+        (e.g. ``auto_curate=True``).
+    """
+
+    from metatlas2.shared_tools.workflow_objects import Atlas, AnalysisSummary, AtlasStage
+
+    if database_flush_errors:
+        error_lines = "\n".join(
+            f"  • {k}: {v}" for k, v in database_flush_errors.items()
+        )
+        raise RuntimeError(
+            f"Analysis summary aborted: {len(database_flush_errors)} compound(s) "
+            "could not be saved to the project database during the manual curation "
+            "GUI session.  Resolve the database lock / error (e.g., check if another "
+            "analysis is running for this project)and re-run the curation "
+            "GUI before generating the summary.\n\n"
+            f"Affected compounds:\n{error_lines}"
+        )
+
+    summary_obj = AnalysisSummary()
+    
+    summary_obj.setup(
+        run_parameters=run_parameters,
+        override_parameters=override_parameters,
+    )
+
+    logger.info(f"Creating analysis results output directory: {summary_obj.paths['analysis_results_output_dir']}")
+    os.makedirs(summary_obj.paths['analysis_results_output_dir'], exist_ok=True)
+
+    logger.info("Looking up Atlas UID for analysis summary stage from database based on config parameters...")
+    summary_atlas_info = dbi.get_atlas_uid_from_stage(
+        obj=summary_obj,
+        stage=AtlasStage.AUTO_IDED, # start with auto ided atlas again (like GUI), but this time clone and update based on mc GUI (curation_df)
+    )
+    if summary_atlas_info['atlas_uid'] != run_parameters['input_atlas_uid']:
+        raise ValueError(
+            f"Atlas UID mismatch: the database returned '{summary_atlas_info['atlas_uid']}' for the "
+            f"AUTO_IDED stage but the notebook specifies '{run_parameters['input_atlas_uid']}'. "
+            f"Update 'input_atlas_uid' in RUN_PARAMS to match the database value, or re-run auto-identification."
+        )
+    
+    logger.info(f"Retrieving Atlas UID {summary_atlas_info['atlas_uid']} for analysis summary stage.")
+    summary_obj.auto_ided_atlas_obj = Atlas.from_database(
+        database_path=summary_obj.paths['project_db_path'],
+        atlas_uid=summary_atlas_info['atlas_uid'],
+        main_db_path=summary_obj.paths['main_db_path']
+    )
+
+    logger.info(f"Cloning aligned Atlas {summary_obj.auto_ided_atlas_obj.atlas_uid} for analysis summary stage...")
+    summary_obj.manually_curated_atlas_obj = dbi.clone_atlas(
+        obj=summary_obj,
+        stage=AtlasStage.MANUALLY_CURATED,
+        ta=summary_obj.ta
+    )
+
+    logger.info("Loading analysis data scoped to atlas after manual curation...")
+    dbi.load_and_filter_for_summary(
+        summary_obj=summary_obj,
+        update_raw_in_feature=False
+    )
+
+    if auto_curate:
+        logger.info("auto_curate=True: applying automatic curation defaults to curation_df (skipping manual GUI)...")
+        asm.apply_auto_curation_defaults(summary_obj.experimental_data.curation_df)
+    else:
+        _gui_cfg = summary_obj.config.gui_config if summary_obj.config else {}
+        _overrides = getattr(summary_obj, "override_parameters", {}) or {}
+        _force_eval = (
+            _overrides["gui_require_all_evaluated"]
+            if _overrides.get("gui_require_all_evaluated") is not None
+            else _gui_cfg.get("gui_require_all_evaluated", True)
+        )
+        if _force_eval:
+            logger.info("Checking that all compounds have been evaluated in the GUI before allowing summary generation...")
+            dbi.check_require_evaluated(summary_obj)
+
+    logger.info("Updating compound mz_rt values for the curated atlas based on the manual curation...")
+    dbi.update_compound_mzrt_for_atlas(
+        obj=summary_obj,
+        mz_rt_update_df=summary_obj.experimental_data.curation_df,
+        stage=AtlasStage.MANUALLY_CURATED,
+    )
+
+    if summary_obj.override_parameters:
+        logger.info("Persisting GUI override parameters to workflow_runs table...")
+        dbi.update_config_overrides(
+            obj=summary_obj,
+            stage=AtlasStage.MANUALLY_CURATED,
+        )
+
+    logger.info("Creating and saving summary files and figures to output directory...")
+    asm.run_all_summaries(
+        summary_obj=summary_obj,
+        overwrite=overwrite,
+    )
+
+    logger.info("Changing group ownership of project output folder to the 'metatlas' group...")
+    ldt.change_ownership_to_metatlas_group(
+        project_dir_path=summary_obj.paths['project_directory']
+    )
+
+    logger.info(f"Analysis summary procedure complete for RTA{summary_obj.rt_alignment_number} and TGA{summary_obj.analysis_number}!")
+
+def run_parquet_query(
+    project_root: str,
+    params: dict | None = None,
+    rt_alignment_number: int | None = None,
+    analysis_number: int | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """Run a query against a project's Parquet results.
+    """
+    from metatlas2.shared_tools.workflow_objects import ParquetQueryInterpreter
+
+    if params is None:
+        raise ValueError("Query params must be provided.")
+
+    grain = params.get("grain", "compound_lfc")
+    engine = ParquetQueryInterpreter(
+        Path(project_root), grain,
+        rt_alignment_number=rt_alignment_number,
+        analysis_number=analysis_number,
+    )
+    return engine.execute(params)

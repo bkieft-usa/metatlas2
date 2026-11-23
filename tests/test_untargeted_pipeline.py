@@ -10,8 +10,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from metatlas2 import gdrive_upload as gdu
-from metatlas2.run_untargeted_pipeline import main as cli_main
+from metatlas2.shared_tools import gdrive_upload as gdu
+from metatlas2.untargeted.run_untargeted_pipeline import main as cli_main
 from metatlas2.untargeted.context import RunContext
 from metatlas2.untargeted.lims import InMemoryLims
 from metatlas2.untargeted.pipeline import parse_skip_steps, run_untargeted_pipeline

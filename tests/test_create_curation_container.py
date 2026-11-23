@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/create_curation_container.py.
+"""Unit tests for metatlas2/targeted/create_curation_container.py.
 
 Tested functions
 ----------------
@@ -20,13 +20,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from metatlas2.create_curation_container import (
+from metatlas2.targeted.create_curation_container import (
     _build_isomer_dict,
     _suggest_rt_bounds_from_ms1,
     analyze_ms1,
     create_manual_curation_obj,
 )
-from metatlas2.workflow_objects import ExperimentalData
+from metatlas2.shared_tools.workflow_objects import ExperimentalData
 
 from conftest import (
     ADENINE_MZ,
@@ -415,7 +415,7 @@ class TestCreateManualCurationObj:
     def _patch_enrich(self):
         """Patch the DB enrichment call so it is a no-op."""
         with patch(
-            "metatlas2.create_curation_container.dbi.enrich_atlas_df_with_compound_metadata",
+            "metatlas2.targeted.create_curation_container.dbi.enrich_atlas_df_with_compound_metadata",
             side_effect=lambda df, _path: df,
         ):
             yield

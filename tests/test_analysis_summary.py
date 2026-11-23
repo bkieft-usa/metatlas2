@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/analysis_summary.py.
+"""Unit tests for metatlas2/targeted/analysis_summary.py.
 
 Only pure calculation functions are tested — no database, no filesystem
 (except ``apply_auto_curation_defaults`` which operates on an in-memory
@@ -15,7 +15,7 @@ Tested functions
 * :func:`_display_compound_idx`
 * :func:`_get_file_color`
 * :func:`_short_fname`
-* :func:`~metatlas2.database_interact._apply_remove_flagged_compounds`
+* :func:`~metatlas2.shared_tools.database_interact._apply_remove_flagged_compounds`
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from metatlas2.analysis_summary import (
+from metatlas2.targeted.analysis_summary import (
     _compute_all_overlapping_compounds,
     _display_compound_idx,
     _get_file_color,
@@ -40,7 +40,7 @@ from metatlas2.analysis_summary import (
     rt_quality,
     total_score_and_msi,
 )
-from metatlas2.database_interact import _apply_remove_flagged_compounds, _file_group_from_filename
+from metatlas2.shared_tools.database_interact import _apply_remove_flagged_compounds, _file_group_from_filename
 
 
 # ===========================================================================
@@ -519,7 +519,7 @@ def _make_summary_obj(
     override_remove_flagged=None,
 ):
     """Build a minimal summary_obj stub for _apply_remove_flagged_compounds tests."""
-    from metatlas2.workflow_objects import ExperimentalData
+    from metatlas2.shared_tools.workflow_objects import ExperimentalData
 
     exp = ExperimentalData()
     exp.curation_df = pd.DataFrame(curation_rows)
@@ -703,7 +703,7 @@ def test_export_filenames_with_metadata_matches_summary_headers(tmp_path, monkey
         for name, file_type in zip(filenames, ["injbl", "qc", "experimental", "experimental"])
     ]
     monkeypatch.setattr(
-        "metatlas2.analysis_summary.dbi.get_lcmsruns_from_db",
+        "metatlas2.targeted.analysis_summary.dbi.get_lcmsruns_from_db",
         lambda project_db_path: runs,
     )
     curation = pd.DataFrame([{
@@ -755,7 +755,7 @@ def test_export_filenames_with_metadata_matches_summary_headers(tmp_path, monkey
 
 def test_export_filenames_with_metadata_rejects_empty_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "metatlas2.analysis_summary.dbi.get_lcmsruns_from_db",
+        "metatlas2.targeted.analysis_summary.dbi.get_lcmsruns_from_db",
         lambda project_db_path: [],
     )
     obj = SimpleNamespace(
@@ -774,10 +774,10 @@ def test_export_filenames_with_metadata_rejects_empty_runs(tmp_path, monkeypatch
 def test_run_all_summaries_passes_overwrite_to_filename_export(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "metatlas2.analysis_summary.export_filenames_with_metadata",
+        "metatlas2.targeted.analysis_summary.export_filenames_with_metadata",
         lambda obj, output_dir, overwrite: calls.append((output_dir, overwrite)),
     )
-    monkeypatch.setattr("metatlas2.analysis_summary._validate_required_note_selections", lambda obj: None)
+    monkeypatch.setattr("metatlas2.targeted.analysis_summary._validate_required_note_selections", lambda obj: None)
     skip_outputs = [
         "final_id_sheet", "id_figures", "eic_thumbnails", "tic_thumbnails",
         "compound_metric_plots", "boxplots", "data_sheets", "best_ms2_hits_csv",

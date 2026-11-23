@@ -1,4 +1,4 @@
-"""Unit tests for metatlas2/ms2_hit_detection.py.
+"""Unit tests for metatlas2/targeted/ms2_hit_detection.py.
 
 All tests exercise pure calculation functions — no database, no filesystem,
 no subprocess, and no network calls.  The ``matchms`` library is used directly
@@ -25,7 +25,7 @@ import pytest
 from matchms import Spectrum
 from matchms.similarity import CosineHungarian
 
-from metatlas2.ms2_hit_detection import (
+from metatlas2.targeted.ms2_hit_detection import (
     _add_precursor_to_ref,
     _align_spectra_for_plotting,
     _assign_hits,
@@ -127,7 +127,7 @@ def _ms1_df(uid: str) -> pd.DataFrame:
 
 
 def test_keyless_ms2_scans_skip_reference_lookup(monkeypatch):
-    import metatlas2.ms2_hit_detection as ms2_detection
+    import metatlas2.targeted.ms2_hit_detection as ms2_detection
 
     def unexpected_lookup(*_args, **_kwargs):
         raise AssertionError("Keyless scans must not look up MS/MS references.")

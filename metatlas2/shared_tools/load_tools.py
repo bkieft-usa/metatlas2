@@ -1,0 +1,996 @@
+from __future__ import annotations
+
+import pandas as pd
+import numpy as np
+import os
+import csv
+import yaml
+import json
+import re
+from pathlib import Path
+import grp
+import subprocess
+from matchms import Spectrum
+from typing import Any
+
+import metatlas2.shared_tools.file_and_project_format as fpf
+import metatlas2.shared_tools.logging_config as lcf
+logger = lcf.get_logger('load_tools')
+
+# ---------------------------------------------------------------------------
+# Polarity normalisation shared by both MSMS-refs loaders
+# ---------------------------------------------------------------------------
+_POLARITY_TO_MATCHMS: dict[str, str] = {
+    'pos': 'positive', 'positive': 'positive',
+    'neg': 'negative', 'negative': 'negative',
+}
+
+DEFAULT_EXCLUDE_LCMSRUNS = {
+    'gui': ['injbl'],
+    'id_sheet': ['injbl', 'refstd'],
+    'chromatograms': ['injbl'],
+    'id_plots': ['injbl', 'refstd'],
+    'data_sheets': ['injbl'],
+}
+
+DEFAULT_INCLUDE_LCMSRUNS_ANALYSES = [
+    'experimental',
+    'istd',
+    'exctrl',
+    'txctrl',
+    'refstd',
+    'injblk',
+    'qc',
+    'qc-c18qu'
+    ]
+
+DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT = ['qc']
+
+def load_msms_refs_file(
+    file_path: str,
+    database_filter: str | None = None,
+    polarity: str | None = None,
+    inchi_keys: list[str] | None = None,
+) -> dict[str, list[Spectrum]]:
+    """
+    Load an msms refs file (.jsonl format) and return a dict mapping
+    inchi_key -> list of matchms Spectrum objects.
+    Results are cached to a .pkl file and reloaded on subsequent calls
+    if the source file has not been modified.
+
+    Args:
+        file_path: Path to the msms_refs.jsonl file
+        database_filter: If provided, only load spectra where database == this string
+        polarity: If provided, only load spectra for the specified polarity
+        inchi_keys: If provided, only load spectra for the specified inchi_keys
+    Returns:
+        dict mapping inchi_key (str) -> list of matchms Spectrum objects
+    """
+
+    file_path = Path(file_path)
+    logger.info(
+        f"Loading reference spectra from {file_path}"
+        + (f" (database='{database_filter}')" if database_filter else "")
+        + (f" (polarity='{polarity}')" if polarity else "")
+        + (f" (filtered to {len(inchi_keys)} inchi_keys)" if inchi_keys is not None else "")
+        + "..."
+    )
+
+    if polarity is not None:
+        polarity_norm = _POLARITY_TO_MATCHMS.get(polarity.lower())
+        if polarity_norm is None:
+            raise ValueError(
+                f"Unrecognised polarity value {polarity!r}. "
+                f"Expected one of: {list(_POLARITY_TO_MATCHMS.keys())}. "
+            )
+    else:
+        polarity_norm = None
+
+    refs_by_inchi_key: dict[str, list[Spectrum]] = {}
+    n_skipped = 0
+    n_db_filtered = 0
+    n_pol_filtered = 0
+    inchi_key_set = set(inchi_keys) if inchi_keys is not None else None
+
+    with file_path.open('r') as fh:
+        for line_num, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.warning(f"  Line {line_num}: JSON parse error — {e}")
+                n_skipped += 1
+                continue
+
+            if database_filter and rec.get('database') != database_filter:
+                n_db_filtered += 1
+                continue
+
+            if polarity_norm and rec.get('polarity') != polarity_norm:
+                n_pol_filtered += 1
+                continue
+
+            rec_inchi_key = rec.get('inchi_key', '')
+            if inchi_key_set is not None and rec_inchi_key not in inchi_key_set:
+                continue
+
+            mz_list = rec.get('mz')
+            int_list = rec.get('intensities')
+            if not mz_list or not int_list or len(mz_list) != len(int_list):
+                n_skipped += 1
+                continue
+
+            # Direct construction from JSON arrays
+            mz = np.array(mz_list, dtype=np.float32)
+            intensities = np.array(int_list, dtype=np.float32)
+
+            precursor_mz = rec.get('precursor_mz')
+            try:
+                precursor_mz = float(rec.get('precursor_mz')) if rec.get('precursor_mz') is not None else None
+            except (TypeError, ValueError):
+                precursor_mz = None
+            if precursor_mz is not None and not np.isnan(precursor_mz):
+                mask = mz < precursor_mz + 2.5
+                mz = mz[mask]
+                intensities = intensities[mask]
+
+            if len(mz) == 0:
+                n_skipped += 1
+                continue
+
+            inchi_key = rec_inchi_key
+            # matchms requires m/z ascending
+            if len(mz) > 1 and not np.all(mz[:-1] <= mz[1:]):
+                order = np.argsort(mz, kind='stable')
+                mz = mz[order]
+                intensities = intensities[order]
+            spec = Spectrum(
+                mz=mz,
+                intensities=intensities,
+                metadata={
+                    'precursor_mz': float(precursor_mz) if precursor_mz is not None else 0.0,
+                    'database': str(rec.get('database', '')),
+                    'id': str(rec.get('id', '')),
+                    'name': str(rec.get('name', '')),
+                    'inchi_key': inchi_key,
+                }
+            )
+            refs_by_inchi_key.setdefault(inchi_key, []).append(spec)
+
+    if not refs_by_inchi_key:
+        parts = []
+        if database_filter:
+            parts.append(
+                f"database_filter={database_filter!r} filtered out {n_db_filtered} record(s)"
+            )
+        if polarity_norm:
+            parts.append(
+                f"polarity={polarity!r} (normalized to {polarity_norm!r}) filtered out {n_pol_filtered} record(s)"
+            )
+        detail = "; ".join(parts) if parts else "file may be empty or all records were unparseable"
+        raise ValueError(
+            f"No spectra remained after filtering in {file_path}. {detail}. "
+            f"Check filter values and the 'database'/'polarity' fields in the source file."
+        )
+
+    total = sum(len(v) for v in refs_by_inchi_key.values())
+    logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
+    if n_skipped > 0:
+        logger.warning(f"  Skipped {n_skipped} rows due to unparseable or empty spectra.")
+
+    return refs_by_inchi_key
+
+
+def load_msms_refs_from_db(
+    db_path: str,
+    database_filter: str | None = None,
+    polarity: str | None = None,
+    inchi_keys: list[str] | None = None,
+) -> dict[str, list[Spectrum]]:
+    """Load MSMS reference spectra from the ``msms_refs`` table
+    in the main metatlas DuckDB and return a dict mapping inchi_key ->
+    list of matchms Spectrum objects.
+
+    This is the database-backed counterpart to :func:`load_msms_refs_file`.
+    The two functions share the same signature and return type so that
+    :func:`~metatlas2.targeted.ms2_hit_detection.find_ms2_hits` can dispatch between
+    them transparently.
+
+    Args:
+        db_path:         Path to the main metatlas DuckDB file.
+        database_filter: If provided, only load spectra where ``database``
+                         matches this string exactly.
+        polarity:        If provided, only load spectra for the specified
+                         polarity (``"pos"``, ``"positive"``, ``"neg"``, or
+                         ``"negative"``).
+        inchi_keys:      If provided, only load spectra for these InChI keys.
+
+    Returns:
+        dict mapping inchi_key (str) -> list of matchms Spectrum objects.
+
+    Raises:
+        ValueError: If no spectra remain after applying the filters.
+    """
+    import metatlas2.shared_tools.database_interact as dbi
+
+    logger.info(
+        f"Loading reference spectra from DB at {db_path}"
+        + (f" (database='{database_filter}')" if database_filter else "")
+        + (f" (polarity='{polarity}')" if polarity else "")
+        + (f" (filtered to {len(inchi_keys)} inchi_keys)" if inchi_keys is not None else "")
+        + "..."
+    )
+
+    if polarity is not None:
+        polarity_norm = _POLARITY_TO_MATCHMS.get(polarity.lower())
+        if polarity_norm is None:
+            raise ValueError(
+                f"Unrecognised polarity value {polarity!r}. "
+                f"Expected one of: {list(_POLARITY_TO_MATCHMS.keys())}."
+            )
+    else:
+        polarity_norm = None
+
+    # Build parameterised query
+    conditions: list[str] = []
+    params: list = []
+
+    if database_filter:
+        conditions.append("database = ?")
+        params.append(database_filter)
+    if polarity_norm:
+        conditions.append("polarity = ?")
+        params.append(polarity_norm)
+    if inchi_keys is not None:
+        # Coerce numpy arrays (from ms2_df.unique()) to plain Python lists
+        if not isinstance(inchi_keys, list):
+            inchi_keys = list(inchi_keys)
+        if len(inchi_keys) == 0:
+            # Empty list → nothing can match; raise immediately
+            raise ValueError(
+                f"No spectra remained after filtering in msms_refs at {db_path}. "
+                "inchi_keys filter was an empty list — no spectra can match. "
+                "Pass None to load all spectra, or provide at least one InChI key."
+            )
+        placeholders = ", ".join(["?"] * len(inchi_keys))
+        conditions.append(f"inchi_key IN ({placeholders})")
+        params.extend(inchi_keys)
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    query = f"""
+        SELECT ref_uid, database, ref_id, name, inchi_key,
+               precursor_mz, mz, intensities
+        FROM msms_refs
+        {where_clause}
+    """
+
+    refs_by_inchi_key: dict[str, list[Spectrum]] = {}
+    n_skipped = 0
+
+    # Stream rows in small chunks to avoid materialising the full result set in
+    # Python RAM.  Processing happens inside the connection context so the cursor
+    # stays open; each chunk is discarded after processing.
+    _FETCH_CHUNK = 500
+    with dbi.get_db_connection(db_path, read_only=True) as conn:
+        # Cap DuckDB's internal buffer pool so it cannot silently consume all RAM
+        # while scanning the table before streaming rows to Python.
+        conn.execute("SET memory_limit='1GB'")
+        cursor = conn.execute(query, params)
+        while True:
+            chunk = cursor.fetchmany(_FETCH_CHUNK)
+            if not chunk:
+                break
+            for row in chunk:
+                (ref_uid, database, ref_id, name, inchi_key,
+                 precursor_mz, mz_list, int_list) = row
+
+                if not mz_list or not int_list or len(mz_list) != len(int_list):
+                    n_skipped += 1
+                    continue
+
+                # DuckDB returns REAL[] columns as Python lists — cast to float32 arrays
+                mz = np.array(mz_list, dtype=np.float32)
+                intensities = np.array(int_list, dtype=np.float32)
+
+                if len(mz) == 0:
+                    n_skipped += 1
+                    continue
+
+                # matchms requires m/z ascending
+                if len(mz) > 1 and not np.all(mz[:-1] <= mz[1:]):
+                    order = np.argsort(mz, kind='stable')
+                    mz = mz[order]
+                    intensities = intensities[order]
+
+                spec = Spectrum(
+                    mz=mz,
+                    intensities=intensities,
+                    metadata={
+                        'precursor_mz': float(precursor_mz) if precursor_mz is not None else 0.0,
+                        'database': str(database or ''),
+                        'id': str(ref_id or ''),
+                        'name': str(name or ''),
+                        'inchi_key': str(inchi_key or ''),
+                    }
+                )
+                refs_by_inchi_key.setdefault(str(inchi_key or ''), []).append(spec)
+
+    if not refs_by_inchi_key:
+        parts = []
+        if database_filter:
+            parts.append(f"database_filter={database_filter!r}")
+        if polarity_norm:
+            parts.append(f"polarity={polarity!r} (normalized to {polarity_norm!r})")
+        detail = "; ".join(parts) if parts else "table may be empty or all records were unparseable"
+        raise ValueError(
+            f"No spectra remained after filtering in msms_refs at {db_path}. "
+            f"{detail}. "
+            "Check filter values and the 'database'/'polarity' fields in the table."
+        )
+
+    total = sum(len(v) for v in refs_by_inchi_key.values())
+    logger.info(f"  Loaded {total} reference spectra for {len(refs_by_inchi_key)} unique InChI keys.")
+    if n_skipped > 0:
+        logger.warning(f"  Skipped {n_skipped} rows due to empty or mismatched mz/intensity arrays.")
+
+    return refs_by_inchi_key
+
+
+def _validate_rt_alignment_params(params: dict[str, Any], location: str) -> dict[str, Any]:
+    _VALID_MODEL_TYPES = {"polynomial", "linear", "median_offset"}
+    _VALID_RT_PEAK_SOURCES = {"min", "median", "max"}
+    model_type = str(params.get('model_type', 'polynomial')).lower()
+    if model_type not in _VALID_MODEL_TYPES:
+        raise ValueError(
+            f"{location}: invalid model_type '{model_type}'. "
+            f"Valid options: {sorted(_VALID_MODEL_TYPES)}"
+        )
+    params['model_type'] = model_type
+    # rt_peak_source: "min" | "median" | "max" | <filename>
+    # A filename value cannot be validated here (files not yet known), so we
+    # only normalise the three reserved keywords; anything else is kept as-is.
+    rt_peak_source = str(params.get('rt_peak_source', 'median')).strip()
+    params['rt_peak_source'] = rt_peak_source
+    params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', False))
+    params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_RT_ALIGNMENT
+    params['exclude_lcmsruns'] = list(params['exclude_lcmsruns']) if params.get('exclude_lcmsruns') else []
+    params['use_existing_rt_alignment'] = bool(params.get('use_existing_rt_alignment', False))
+    params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', False))
+    params['only_keep_data_in_feature'] = bool(params.get('only_keep_data_in_feature', True))
+    params['atlas_extra_time'] = float(params.get('atlas_extra_time', 2.0))
+    params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 0.0))
+    params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 0))
+    params['ms1_mz_tolerance_ppm'] = float(params.get('ms1_mz_tolerance_ppm', 5.0))
+    params['apply_model_to_min_max'] = bool(params.get('apply_model_to_min_max', True))
+    params['min_observations_per_compound'] = int(params.get('min_observations_per_compound', 1))
+    params['min_compounds_for_modeling'] = int(params.get('min_compounds_for_modeling', 2))
+    params['r2_threshold'] = float(params.get('r2_threshold', 0.5))
+    params['exclude_inchikeys'] = list(params['exclude_inchikeys']) if params.get('exclude_inchikeys') else []
+    return params
+
+def _validate_note_options_overrides(raw: Any) -> dict:
+    """Coerce and validate a note_options_overrides value."""
+    if not isinstance(raw, dict):
+        return {}
+    clean = {}
+    for note_type in ['ms1_notes', 'ms2_notes', 'other_notes']:
+        val = raw.get(note_type, None)
+        if val is None:
+            continue
+        if isinstance(val, dict):
+            clean[note_type] = {str(k): str(v) for k, v in val.items()}
+    return clean
+
+
+def _validate_gui_params(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate and coerce the GUI config block."""
+    params = dict(raw) if raw else {}
+    params['gui_require_all_evaluated'] = bool(params.get('gui_require_all_evaluated', True))
+    params['gui_top_n_hits'] = int(params.get('gui_top_n_hits', 10))
+    gui_colors = params.get('gui_lcmsruns_colors')
+    params['gui_lcmsruns_colors'] = dict(gui_colors) if gui_colors else {}
+    params['note_options_overrides'] = _validate_note_options_overrides(
+        params.get('note_options_overrides')
+    )
+    for dim_key in ('gui_width', 'gui_height'):
+        raw_val = params.get(dim_key)
+        params[dim_key] = float(raw_val) if raw_val is not None else None
+    return params
+
+
+def _validate_targeted_analysis_params(params: dict[str, Any], location: str) -> dict[str, Any]:
+    """Validate and coerce a single PARAMS block from TARGETED_ANALYSES.
+    """
+    params['include_lcmsruns'] = list(params['include_lcmsruns']) if params.get('include_lcmsruns') else DEFAULT_INCLUDE_LCMSRUNS_ANALYSES
+    excl = params.get('exclude_lcmsruns')
+    eet = params.get('extract_extra_time')
+    if excl is None:
+        params['exclude_lcmsruns'] = {step: list(runs) for step, runs in DEFAULT_EXCLUDE_LCMSRUNS.items()}
+    elif isinstance(excl, dict):
+        params['exclude_lcmsruns'] = {step: list(runs) if runs else [] for step, runs in excl.items()}
+    elif isinstance(excl, list):
+        params['exclude_lcmsruns'] = {'data_extraction': list(excl)}
+    else:
+        raise ValueError(f"{location}: exclude_lcmsruns must be a dict or list")
+    params['apply_alignment'] = bool(params.get('apply_alignment', True))
+    params['remove_unided_compounds'] = bool(params.get('remove_unided_compounds', True))
+    params['remove_flagged_compounds'] = bool(params.get('remove_flagged_compounds', True))
+    params['only_keep_data_in_feature'] = bool(params.get('only_keep_data_in_feature', False))
+    params['apply_istd_curation_to_ref'] = bool(params.get('apply_istd_curation_to_ref', True))
+    params['apply_cross_polarity_curation'] = bool(params.get('apply_cross_polarity_curation', True))
+    params['suggested_min_conf'] = float(params.get('suggested_min_conf', 0.75))
+    params['atlas_extra_time'] = float(params.get('atlas_extra_time', 0.5))
+    params['extract_extra_time'] = float(eet) if eet is not None else None
+    params['ms1_min_peak_intensity'] = float(params.get('ms1_min_peak_intensity', 1e5))
+    params['ms1_min_num_points'] = int(params.get('ms1_min_num_points', 5))
+    params['ms1_mz_tolerance_ppm'] = float(params.get('ms1_mz_tolerance_ppm', 5.0))
+    params['ms2_min_num_scans'] = int(params.get('ms2_min_num_scans', 1))
+    params['ms2_min_precursor_intensity'] = float(params.get('ms2_min_precursor_intensity', 0.0))
+    params['ms2_min_score'] = float(params.get('ms2_min_score', 0.25))
+    params['ms2_min_matching_frags'] = int(params.get('ms2_min_matching_frags', 1))
+    params['ms2_mz_tolerance_ppm'] = float(params.get('ms2_mz_tolerance_ppm', 20.0))
+    params['ms2_frag_mz_tolerance'] = float(params.get('ms2_frag_mz_tolerance', 0.05))
+    params['keep_top_scan_per_compound_file'] = bool(params.get('keep_top_scan_per_compound_file', True))
+    params['create_curation_notebooks'] = bool(params.get('create_curation_notebooks', True))
+    params['upload_to_gdrive'] = bool(params.get('upload_to_gdrive', True))
+    params['skip_outputs'] = params.get('skip_outputs', None)
+    return params
+
+def _parse_analysis_subset(
+    analysis_subset: list[str] | None,
+) -> set[tuple[str, str, str, str]] | None:
+    """Parse CHROM-POL-CATEGORY-NAME subset entries into normalized match keys."""
+    if not analysis_subset:
+        return None
+    keys: set[tuple[str, str, str, str]] = set()
+    for entry in analysis_subset:
+        parts = entry.strip().split('-', 3)
+        if len(parts) != 4:
+            raise ValueError(
+                f"Invalid analysis_subset entry '{entry}'. "
+                "Must be in 'CHROM-POL-CATEGORY-NAME' format (e.g. 'HILIC-POS-REF-EMA')."
+            )
+        chrom, pol, cat, name = parts
+        keys.add((
+            fpf.normalize_chromatography(chrom),
+            fpf.normalize_polarity(pol),
+            cat.lower(),
+            name.lower(),
+        ))
+    return keys
+
+
+def _build_metatlas2_config(
+    raw: dict[str, Any],
+    source_name: str,
+    analysis_subset: list[str] | None = None,
+) -> "Metatlas2Config":
+    from metatlas2.shared_tools.workflow_objects import Metatlas2Config, TargetedAnalysis
+
+    subset_keys = _parse_analysis_subset(analysis_subset)
+    subset_chroms = {k[0] for k in subset_keys} if subset_keys else None
+
+    for subsection in ("RT_ALIGNMENT", "TARGETED_ANALYSES"):
+        if subsection not in raw:
+            raise ValueError(f"Missing required configuration section: {subsection}")
+
+    gui_config = _validate_gui_params(dict(raw.get('GUI') or {}))
+
+    rt_alignment_config: dict[str, Any] = {}
+    for chrom_key, chrom_cfg in raw['RT_ALIGNMENT'].items():
+        chromatography = fpf.canonical_chromatography(chrom_key)
+        if subset_chroms is not None and fpf.normalize_chromatography(chromatography) not in subset_chroms:
+            logger.info(f"Skipping RT_ALIGNMENT {chromatography}: not in analysis subset")
+            continue
+        location = f"RT_ALIGNMENT {chromatography}"
+        if 'ATLAS' not in chrom_cfg:
+            raise ValueError(f"{location} missing ATLAS section")
+        tags, atlas_uid = normalize_atlas_selector(
+            chrom_cfg['ATLAS'], f"{location} ATLAS"
+        )
+        if 'polarity' not in chrom_cfg['ATLAS']:
+            raise ValueError(f"{location} missing ATLAS polarity field")
+        chrom_cfg['ATLAS']['tags'] = tags
+        chrom_cfg['ATLAS']['uid'] = atlas_uid
+        chrom_cfg['ATLAS']['polarity'] = fpf.canonical_polarity(
+            str(chrom_cfg['ATLAS']['polarity'])
+        )
+        chrom_cfg['PARAMS'] = _validate_rt_alignment_params(
+            dict(chrom_cfg.get('PARAMS') or {}), location
+        )
+        rt_alignment_config[chromatography] = chrom_cfg
+
+    from metatlas2.shared_tools.workflow_objects import AtlasCategory
+    valid_categories = {c.value for c in AtlasCategory}
+    targeted_analyses: list = []
+    for chrom_key, chrom_cfg in raw['TARGETED_ANALYSES'].items():
+        chromatography = fpf.canonical_chromatography(chrom_key)
+        for polarity_key, pol_cfg in chrom_cfg.items():
+            polarity = fpf.canonical_polarity(polarity_key)
+            for cat_key, named_entries in pol_cfg.items():
+                cat_upper = str(cat_key).upper()
+                if cat_upper not in valid_categories:
+                    raise ValueError(
+                        f"TARGETED_ANALYSES {chromatography}/{polarity}: invalid atlas_category '{cat_key}'. "
+                        f"Must be one of: {sorted(valid_categories)}"
+                    )
+                atlas_category = AtlasCategory(cat_upper)
+                if not isinstance(named_entries, dict):
+                    raise ValueError(
+                        f"TARGETED_ANALYSES {chromatography}/{polarity}/{cat_upper} "
+                        f"must be a dict mapping atlas_name -> {{ATLAS, PARAMS}}"
+                    )
+                for name_key, entry in named_entries.items():
+                    atlas_name = str(name_key)
+                    location = f"TARGETED_ANALYSES {chromatography}/{polarity}/{cat_upper}/{atlas_name}"
+                    if subset_keys is not None and (
+                        fpf.normalize_chromatography(chromatography),
+                        fpf.normalize_polarity(polarity),
+                        cat_upper.lower(),
+                        atlas_name.lower(),
+                    ) not in subset_keys:
+                        logger.info(f"Skipping {location}: not in analysis subset")
+                        continue
+                    if not isinstance(entry, dict):
+                        raise ValueError(f"{location} must be a dict with ATLAS and PARAMS keys")
+                    if 'ATLAS' not in entry:
+                        raise ValueError(f"{location} missing ATLAS section")
+                    tags, atlas_uid = normalize_atlas_selector(
+                        entry['ATLAS'], f"{location} ATLAS"
+                    )
+                    params = _validate_targeted_analysis_params(
+                        dict(entry.get('PARAMS') or {}), location
+                    )
+                    targeted_analyses.append(TargetedAnalysis(
+                        chromatography=chromatography,
+                        polarity=polarity,
+                        atlas_category=atlas_category,
+                        atlas_name=atlas_name,
+                        atlas_uid=atlas_uid,
+                        tags=tags,
+                        params=params,
+                        chromatography_label=chromatography,
+                        polarity_label=polarity,
+                        atlas_category_label=cat_upper,
+                    ))
+
+    _general_raw = raw.get('GENERAL') or {}
+    general_config: dict[str, Any] = dict(_general_raw)
+    _mw = general_config.get('max_workers')
+    general_config['max_workers'] = int(_mw) if _mw is not None else None
+
+    return Metatlas2Config(
+        general_config=general_config,
+        rt_alignment_config=rt_alignment_config,
+        targeted_analyses=targeted_analyses,
+        gui_config=gui_config,
+    )
+
+
+def normalize_atlas_selector(
+    atlas_config: Any,
+    location: str = "ATLAS",
+) -> tuple[list[str], str | None]:
+    """Validate mutually exclusive ``tags`` and ``uid`` atlas selectors."""
+    if not isinstance(atlas_config, dict):
+        raise ValueError(f"{location} must be a mapping with 'tags' or 'uid'")
+    has_tags = "tags" in atlas_config and atlas_config["tags"] is not None
+    has_uid = "uid" in atlas_config and atlas_config["uid"] is not None
+    if has_tags and has_uid: # only allow input of one way to get an atlas
+        raise ValueError(
+            f"{location} has both 'tags' and 'uid'; provide only one of 'tags' or 'uid', not both"
+        )
+    if not has_tags and not has_uid:
+        raise ValueError(f"{location} must specify exactly one of 'tags' or 'uid'")
+
+    if has_tags:
+        return normalize_atlas_tags(atlas_config["tags"], f"{location}.tags"), None
+
+    uid = atlas_config["uid"]
+    if not isinstance(uid, str) or not uid.strip():
+        raise ValueError(f"{location}.uid must be a non-empty string")
+    return [], uid.strip()
+
+
+def normalize_atlas_tags(value: Any, location: str = "ATLAS.tags") -> list[str]:
+    """Validate a tag selector and return unique, trimmed tags in input order."""
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError(f"{location} must be a tag string or a list of tag strings")
+
+    tags: list[str] = []
+    for tag in values:
+        if not isinstance(tag, str) or not tag.strip():
+            raise ValueError(f"{location} must contain only non-empty tag strings")
+        normalized = tag.strip()
+        if normalized not in tags:
+            tags.append(normalized)
+    if not tags:
+        raise ValueError(f"{location} must contain at least one tag")
+    return tags
+
+
+def load_metatlas2_config(
+    config_path: str,
+    analysis_subset: list[str] | None = None,
+) -> "Metatlas2Config":
+    """Load a config; if ``analysis_subset`` is given, sections outside it are skipped unvalidated."""
+    with open(config_path, 'r') as f:
+        raw = yaml.safe_load(f)
+    return _build_metatlas2_config(raw, config_path, analysis_subset)
+
+def load_metatlas2_config_from_string(config_yaml: str) -> "Metatlas2Config":
+    """
+    This is the companion to load_metatlas2_config used when YAML text
+    has been retrieved from the ``project_config`` database table rather than
+    read directly from a file on disk.
+    """    
+    raw = yaml.safe_load(config_yaml)
+    return _build_metatlas2_config(raw, "project_config.config_yaml")
+
+
+def load_compound_input(file_path: str) -> pd.DataFrame:
+    """Load compound input file (TSV/CSV) and validate required columns."""
+    file_path = Path(file_path)
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Compound input file not found: {file_path}")
+    
+    if file_path.suffix.lower() != '.csv':
+        df = pd.read_csv(file_path, sep='\t')
+    else:
+        df = pd.read_csv(file_path)
+
+    if 'label' not in df.columns and 'compound_name' in df.columns:
+        df['label'] = df['compound_name']
+    required_columns = ['inchi_key', 'label']
+    check_missing_columns(df, required_columns)
+    
+    logger.info(f"Loaded {len(df)} compounds from {file_path}")
+    return df
+
+def detect_atlas_input_chromatography(df: pd.DataFrame) -> str:
+    """Detect chromatography type from atlas input data."""
+    if 'chromatography' in df.columns:
+        chrom_values = df['chromatography'].dropna().unique()
+        return str(chrom_values[0])
+    return 'Unknown'
+
+def detect_atlas_input_polarity(df: pd.DataFrame) -> str:
+    """Detect polarity from atlas input data.
+
+    Returns the canonical polarity string (``"pos"`` or ``"neg"``) used
+    throughout the rest of the codebase.
+    """
+    if 'polarity' in df.columns:
+        pol_values = df['polarity'].dropna().unique()
+        if len(pol_values) > 0:
+            return fpf.normalize_polarity(str(pol_values[0]))
+
+    # Try to infer from adduct information
+    if 'adduct' in df.columns:
+        adducts = ' '.join(df['adduct'].dropna().astype(str))
+        if '[M+H]+' in adducts or '[M+Na]+' in adducts or '[M+NH4]+' in adducts:
+            return 'pos'
+        elif '[M-H]-' in adducts or '[M+Cl]-' in adducts or '[M-2H]-' in adducts or '[M+formate]-' in adducts:
+            return 'neg'
+
+    raise ValueError(
+        "Could not determine polarity from atlas input data. "
+        "Add a 'polarity' column (values: 'pos' or 'neg') or ensure adduct strings "
+        "contain recognisable patterns (e.g. '[M+H]+' or '[M-H]-')."
+    )
+
+def check_missing_columns(df: pd.DataFrame, required_columns: list) -> None:
+    """Check for missing required columns and raise error if any are missing."""
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+
+def _inchi_key_prefix(inchi_key: str) -> str:
+    """Return the first 14-character block of an InChI key (the connectivity layer)."""
+    return str(inchi_key).split("-")[0] if inchi_key else ""
+
+
+def load_atlas_input(
+    file_path: str,
+    atlas_category: "str | None" = None,
+    allow_missing_inchi_key: bool = False,
+) -> pd.DataFrame:
+    """Load atlas input file, validate required columns, and sort rows.
+
+    Sorting rules (applied in order of priority):
+    1. The QC-anchor compound (``LCMZECCEEOQWLQ-UHFFFAOYSA-N``) is always
+       placed first, regardless of its ``rt_peak``.
+    2. For **ISTD** and **QC** atlases only: when two or more rows share the
+       same InChI-key prefix (first 14 characters) *and* the same ``rt_peak``,
+       rows whose ``label`` contains an isotope-label string (currently
+       ``"13C"`` or ``"15N"``) are placed before unlabeled rows.
+    3. All remaining rows are sorted ascending by ``rt_peak``.
+
+    Args:
+        file_path:      Path to the atlas CSV or TSV file.
+        atlas_category: Optional atlas category string (``"QC"``, ``"ISTD"``,
+                        or ``"REF"``).  The labeled-before-unlabeled rule is
+                        only applied when this is ``"QC"`` or ``"ISTD"``.
+    """
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Atlas input file not found: {file_path}")
+
+    if file_path.suffix.lower() != '.csv':
+        df = pd.read_csv(file_path, sep='\t')
+    else:
+        df = pd.read_csv(file_path)
+
+    if 'label' not in df.columns and 'compound_name' in df.columns:
+        df['label'] = df['compound_name']
+    required_columns = ['label', 'rt_peak', 'mz', 'adduct']
+    if not allow_missing_inchi_key:
+        required_columns.insert(0, 'inchi_key')
+    check_missing_columns(df, required_columns)
+    if allow_missing_inchi_key:
+        if 'inchi_key' not in df.columns:
+            df['inchi_key'] = ''
+        df['inchi_key'] = df['inchi_key'].fillna('').astype(str).str.strip()
+
+    # Add default values for optional columns
+    if 'rt_min' not in df.columns:
+        df['rt_min'] = df['rt_peak'] - 0.5
+    if 'rt_max' not in df.columns:
+        df['rt_max'] = df['rt_peak'] + 0.5
+    if 'mz_tolerance' not in df.columns:
+        df['mz_tolerance'] = 5.0
+
+
+    df = sort_atlas_input_dataframe(df, atlas_category)
+    logger.info("Loaded %s atlas entries from %s", len(df), file_path)
+    return df
+
+
+def sort_atlas_input_dataframe(
+    df: pd.DataFrame,
+    atlas_category: "str | None" = None,
+) -> pd.DataFrame:
+    """Apply the standard atlas input ordering to an already-loaded frame."""
+    df = df.copy()
+    _ISOTOPE_LABEL_STRINGS: list[str] = ["13C", "15N"]
+    _FIRST_INCHI_KEY = "LCMZECCEEOQWLQ-UHFFFAOYSA-N"
+    df['_sort_priority'] = (df['inchi_key'] != _FIRST_INCHI_KEY).astype(int)
+    cat_upper = str(atlas_category).upper() if atlas_category else ""
+    apply_labeled_first = cat_upper in {"ISTD", "QC"}
+
+    if apply_labeled_first:
+        df['_ik_prefix'] = df['inchi_key'].apply(_inchi_key_prefix)
+
+        def _is_labeled(name: str) -> bool:
+            return any(lbl in str(name) for lbl in _ISOTOPE_LABEL_STRINGS)
+
+        df['_is_labeled'] = df['label'].apply(_is_labeled)
+
+        group_cols = ['_ik_prefix', 'rt_peak']
+        grp = df.groupby(group_cols)['_is_labeled']
+        has_labeled   = grp.transform('any')
+        has_unlabeled = grp.transform(lambda s: (~s).any())
+        mixed_group   = has_labeled & has_unlabeled & df['_ik_prefix'].ne('')
+
+        df['_labeled_priority'] = 0
+        df.loc[mixed_group & ~df['_is_labeled'], '_labeled_priority'] = 1
+
+        df = (
+            df.sort_values(
+                ['_sort_priority', 'rt_peak', '_labeled_priority'],
+                ascending=True,
+            )
+            .drop(columns=['_sort_priority', '_ik_prefix', '_is_labeled', '_labeled_priority'])
+            .reset_index(drop=True)
+        )
+    else:
+        df = (
+            df.sort_values(['_sort_priority', 'rt_peak'], ascending=True)
+              .drop(columns=['_sort_priority'])
+              .reset_index(drop=True)
+        )
+
+    return df
+
+def save_atlas_metadata_to_csv(atlas_obj: "Atlas", output_path: str) -> None:
+    """Save Atlas metadata to CSV file."""
+    logger.info(f"Saving Atlas data to {output_path}...")
+    atlas_info = atlas_obj.to_metadata_dict()
+    file_exists = os.path.isfile(output_path)
+    with open(output_path, "a", newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=atlas_info.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(atlas_info)
+
+def save_atlas_data_to_csv(
+    atlas_obj: "Atlas",
+    output_path: str,
+    project_name: str,
+    main_db_path: str | None = None,
+) -> None:
+    """Save atlas compound data to a CSV file, optionally enriched with all
+    compound metadata from the main database.
+
+    When *main_db_path* is provided, all columns from the ``compounds`` table
+    (including cross-reference identifiers, computed descriptors, ModelSEED ID,
+    description, and retrieval metadata) are joined onto the atlas DataFrame via
+    ``inchi_key`` before writing.  Columns that already exist in the atlas
+    DataFrame (e.g. ``inchi_key``) are not duplicated.
+
+    Args:
+        atlas_obj:     Atlas object whose compound_mzrts are serialised.
+        output_path:   Directory path where the CSV will be written.
+        project_name:  Project name used in the output filename.
+        main_db_path:  Optional path to the main metatlas DuckDB file.  When
+                       provided, compound metadata is joined from the
+                       ``compounds`` table.
+    """
+    import metatlas2.shared_tools.database_interact as dbi
+
+    atlas_df = atlas_obj.to_dataframe()
+
+    # Enrich with all compound metadata from the main DB when available
+    if main_db_path and "inchi_key" in atlas_df.columns:
+        inchi_keys = atlas_df["inchi_key"].dropna().unique().tolist()
+        meta_df = dbi.get_compound_metadata(main_db_path, inchi_keys)
+        if not meta_df.empty:
+            # Drop columns already present in atlas_df (except inchi_key join key)
+            overlap = [c for c in meta_df.columns if c in atlas_df.columns and c != "inchi_key"]
+            meta_df = meta_df.drop(columns=overlap, errors="ignore")
+            atlas_df = atlas_df.merge(meta_df, on="inchi_key", how="left")
+            logger.debug(
+                "save_atlas_data_to_csv: joined %d compound metadata columns for %d rows.",
+                len(meta_df.columns) - 1, len(atlas_df),
+            )
+
+    atlas_filename_part = (
+        f"{atlas_obj.chromatography}"
+        f"-{atlas_obj.polarity}"
+        f"-{atlas_obj.atlas_name}"
+        f"-{atlas_obj.atlas_stage.value}"
+    )
+    atlas_filename_part = atlas_filename_part.replace("MANUALLY_CURATED", "CURATED")
+    atlas_filename_part = atlas_filename_part.replace("AUTO_IDED", "AUTOIDED")
+    atlas_filename_part = atlas_filename_part.replace("RT_ALIGNED", "ALIGNED")
+    output_file = f"CompoundAtlas__{atlas_filename_part}__{project_name}.csv"
+    atlas_df.to_csv(f"{output_path}/{output_file}", index=False)
+
+def load_atlas_data_from_csv(file_path: str) -> pd.DataFrame:
+    """Load Atlas data from CSV file."""
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Atlas data file not found: {file_path}")
+    return pd.read_csv(file_path)
+
+def change_ownership_to_metatlas_group(project_dir_path: str) -> None:
+    """Change ownership of project directory to metatlas group for HPC environments."""
+    try:
+        grp.getgrnam('metatlas')
+    except KeyError:
+        logger.warning(f"Group '{'metatlas'}' not found. Skipping ownership change.")
+        return
+    try:
+        subprocess.run(['chgrp', '-R', 'metatlas', project_dir_path], check=True)
+        logger.info(f"Changed group of {project_dir_path} to {'metatlas'}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to change group: {e}")
+
+def log_filter_table(steps, starting_entries, starting_compounds, entries_label="Entries", title=None):
+    """
+    steps: list of (label, count, compounds) tuples; first entry should be the 'start' row.
+    starting_entries: row count before any filtering (denominator for % columns).
+    starting_compounds: unique compound count before any filtering (denominator for % columns).
+    entries_label: column header for the row-count column (e.g. 'Entries' or 'Scans').
+    title: optional log message title; defaults to '<entries_label> filtering summary'.
+    """
+    if title is None:
+        title = f"{entries_label} filtering summary"
+    pct_label = f"{entries_label} %"
+    col_w = [28, 10, 12, 10, 12]
+    header = (
+        f"{'Step':<{col_w[0]}} {entries_label:>{col_w[1]}} {pct_label:>{col_w[2]}} "
+        f"{'Compounds':>{col_w[3]}} {'Compounds %':>{col_w[4]}}"
+    )
+    sep = "-" * sum(col_w + [4])
+    rows = [header, sep]
+    for label, entries, compounds in steps:
+        pct_e = entries / starting_entries * 100 if starting_entries > 0 else 0.0
+        pct_c = compounds / starting_compounds * 100 if starting_compounds > 0 else 0.0
+        rows.append(
+            f"{label:<{col_w[0]}} {entries:>{col_w[1]}} {pct_e:>{col_w[2] - 1}.1f}% "
+            f"{compounds:>{col_w[3]}} {pct_c:>{col_w[4] - 1}.1f}%"
+        )
+    rows.append(sep)
+    logger.info(f"{title}:\n{chr(10).join(rows)}")
+
+def parse_atlas_creator_log(log_file: str, chromatography: str, polarity: str, atlas_category: str, atlas_name: str) -> dict:
+
+    chrom_lc = chromatography.lower()
+    pol_lc = polarity.lower()
+    cat_lc = atlas_category.lower()
+    name_lc = atlas_name.lower()
+
+    uid_prefix = f"atl-ref-{chrom_lc}-{pol_lc}-{cat_lc}-{name_lc}-"
+
+    uid_pattern = re.compile(r'\(UID:\s*(atl-[^\)]+)\)')
+
+    matched_uid = None
+    with open(log_file, 'r') as fh:
+        for line in fh:
+            if 'Created new atlas' not in line:
+                continue
+            m = uid_pattern.search(line)
+            if m:
+                uid = m.group(1).strip()
+                if uid.startswith(uid_prefix):
+                    matched_uid = uid 
+
+    return matched_uid
+    
+def load_standards_config(config_path: str) -> dict[str, Any]:
+    """Load and validate the standards-annotation YAML config.
+
+    Args:
+        config_path: Path to the YAML config file.
+
+    Returns:
+        Parsed config dict with lower-cased top-level keys.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        ValueError: If required keys are missing.
+    """
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    # Normalise top-level keys to lowercase
+    config = {k.lower(): v for k, v in raw.items()}
+
+    project = config.get("project", {})
+    if not project:
+        raise ValueError("Config missing required 'PROJECT' section")
+    if not project.get("standards_run_name"):
+        raise ValueError("Config PROJECT.standards_run_name is required")
+    if not project.get("standards_input_file"):
+        raise ValueError("Config PROJECT.standards_input_file is required")
+    if not Path(project["standards_input_file"]).exists():
+        raise FileNotFoundError(
+            f"standards_input_file not found: {project['standards_input_file']}"
+        )
+    if "chem_source" in project and not isinstance(project["chem_source"], str):
+        raise ValueError("PROJECT.chem_source must be a string.")
+
+    # Apply defaults for optional sections
+    config.setdefault("extraction", {})
+    config["extraction"].setdefault("ms1_mz_tolerance_ppm", 5.0)
+    config["extraction"].setdefault("ms1_min_num_points", 0)
+    config["extraction"].setdefault("ms1_min_peak_intensity", 0)
+    config["extraction"].setdefault("ms2_min_num_scans", 0)
+    config["extraction"].setdefault("ms2_min_precursor_intensity", 0)
+    config["extraction"].setdefault("ms2_top_n_per_peak", 5)
+    config["extraction"].setdefault("max_workers", 4)
+
+    config.setdefault("gui", {})
+    tags = config.setdefault("tags", {"atlas": ["EMA"]})
+    if not isinstance(tags, dict) or "atlas" not in tags:
+        raise ValueError("TAGS must be a mapping containing 'atlas'.")
+    tags["atlas"] = normalize_atlas_tags(tags["atlas"], "TAGS.atlas")
+    if any(";" in tag for tag in tags["atlas"]):
+        raise ValueError("TAGS.atlas entries cannot contain semicolons.")
+
+    logger.info(f"Loaded standards annotation config from {config_path}")
+    return config
