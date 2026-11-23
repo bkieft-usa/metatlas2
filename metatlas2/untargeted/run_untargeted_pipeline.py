@@ -7,9 +7,6 @@ Subcommands::
     mirror-raw   Hard/soft mirror a project's mzML files to GNPS2.
     write-config Write the default config YAML to a file.
 
-Flag names match the legacy ``run_untargeted_pipeline.py``. Every flag left
-unset keeps the value from ``--config`` (or the built-in defaults).
-
 In the container, MZmine jobs are handed to the host through
 ``--sbatch_queue_file`` (``scripts/metatlas2.sh untargeted run`` sets this).
 """

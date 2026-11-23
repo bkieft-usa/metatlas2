@@ -14,7 +14,7 @@ POLARITIES = ("positive", "negative")
 
 
 class TaskStatus(str, Enum):
-    """Status values stored in the LIMS ``untargeted_tasks`` list (unchanged from legacy)."""
+    """Status values stored in the LIMS ``untargeted_tasks`` list."""
 
     INITIATION = "01 initiation"
     RUNNING = "04 running"
@@ -97,7 +97,6 @@ class PolarityTask:
         return self.directory / f"{self.prefix}_peak-height-filtered-{label}.csv"
 
     def exists(self, kind: str) -> bool:
-        # os.path (not pathlib) so unreadable dirs count as "missing", like the legacy code.
         return os.path.isfile(self.path(kind))
 
 
@@ -111,9 +110,6 @@ def subset_df_by_status(
     df: pd.DataFrame, tasktype: str, status: list[str], inverse: bool = False
 ) -> pd.DataFrame:
     """Rows where *either* polarity's ``{tasktype}_{pol}_status`` is in *status*.
-
-    With ``inverse=True`` returns rows where either polarity is *not* in *status*
-    (legacy semantics, kept unchanged).
     """
     pos = df[f"{tasktype}_pos_status"].isin(status)
     neg = df[f"{tasktype}_neg_status"].isin(status)
@@ -130,7 +126,7 @@ def filter_common_bad_project_names(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def tab_print(message: str = "", indent_level: int = 0) -> str:
-    """Indent *message* with tabs (legacy log formatting)."""
+    """Indent *message* with tabs."""
     return "\t" * indent_level + message
 
 

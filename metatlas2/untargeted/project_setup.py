@@ -76,9 +76,6 @@ def find_raw_data_directory(
     return None
 
 
-#: Opt-out file names, compared case-insensitively. The data transfer only copies
-#: ``NO_UNTARGETED.TXT``; the legacy pipeline only looked for ``nountargeted.txt``,
-#: so in practice the opt-out never worked.
 OPT_OUT_FILE_NAMES = ("no_untargeted.txt", "nountargeted.txt")
 
 
@@ -124,9 +121,6 @@ def build_metadata_df(df_project: pd.DataFrame, polarity: str, background_design
     plus up to three constant columns holding the sample groups that contain a
     background designator.
 
-    LEGACY QUIRK: those constant columns are named ``CONTROL``, ``CASE`` and
-    ``ATTRIBUTE_media`` regardless of content, and the table includes every
-    file of the polarity (QC/InjBl/ISTD too), unlike the MZmine file list.
     """
     pol_short = polarity[:3].upper()
     meta = df_project[["basename", "sample_group"]].copy()
@@ -186,7 +180,7 @@ def write_metadata_per_new_project(
             pol_short = polarity[:3].upper()
             try:
                 subset = metadata_file_filter(df_project, pol_short, skip_blank_filter, nonstandard_filename=False)
-            except IndexError:  # pragma: no cover - kept for parity with legacy fallback
+            except IndexError:
                 subset = metadata_file_filter(df_project, pol_short, skip_blank_filter, nonstandard_filename=True)
             file_list = [os.path.join(mzml_dir, f) for f in subset]
             counts[polarity] = len(file_list)
@@ -216,7 +210,7 @@ def write_metadata_per_new_project(
 
 
 def _prepare_lcmsruns(df: pd.DataFrame) -> pd.DataFrame:
-    """Legacy cleanup of the ``lcmsrun_plus`` table."""
+    """Cleanup of the ``lcmsrun_plus`` table."""
     df = df[pd.notna(df["mzml_file"])].copy()
     df["basename"] = df["mzml_file"].apply(os.path.basename)
     df = df.sort_values("timeepoch", ascending=False)
@@ -380,7 +374,6 @@ def update_new_untargeted_tasks(ctx: RunContext) -> pd.DataFrame | None:
                 continue
             metadata_path = _write_polarity_inputs(ctx, project, polarity, info, template)
             if metadata_path is None:
-                # LEGACY: directory existed; the row is still inserted with '09 error'.
                 continue
             row[f"{short}_metadata_file"] = metadata_path
             row[f"num_{short}_files"] = info[polarity]["file_count"]

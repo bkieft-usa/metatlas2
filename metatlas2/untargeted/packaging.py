@@ -61,10 +61,6 @@ def zip_untargeted_results(
     abridged_name: str | None = None,
 ) -> Path:
     """Zip all files under *target_dirs* (plus *extra_files*) flat into one archive.
-
-    Equivalent to the legacy ``zip -rj``: directory structure is dropped. When
-    *abridged_name* is given, *project* is replaced by it in every file name
-    that contains it.
     """
     output_zip_archive = Path(output_zip_archive)
     entries: list[tuple[Path, str]] = []
