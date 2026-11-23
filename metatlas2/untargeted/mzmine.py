@@ -74,9 +74,6 @@ def render_batch_params(template_path: str | os.PathLike, output_prefix: str, pl
 
 def build_sbatch_script(task: PolarityTask, mzmine_cfg: dict[str, Any]) -> str:
     """Text of the MZmine sbatch script for one polarity.
-
-    The header and MZmine command match the legacy script; the status-marker
-    lines (``RUNNING``/``DONE``/``FAILED``) are new.
     """
     slurm = mzmine_cfg["slurm"]
     prefix = str(task.directory / task.prefix)
@@ -399,7 +396,7 @@ def submit_mzmine_jobs(ctx: RunContext, new_projects: pd.DataFrame | None = None
     """Step 3: submit MZmine jobs for initiated (and retryable errored) polarities.
 
     Automatic mode considers projects created by Step 1 in this run (``01
-    initiation``) and (bug fix vs. legacy) projects in ``09 error`` that this
+    initiation``) and projects in ``09 error`` that this
     pipeline queued before and that have retries left. Anything else needs
     ``--direct_input``.
     """
@@ -457,7 +454,6 @@ def submit_mzmine_jobs(ctx: RunContext, new_projects: pd.DataFrame | None = None
                     if not mzmine_cfg.get("auto_resubmit_errors", True):
                         continue
                     if attempts == 0:
-                        # Errored before this pipeline managed it (legacy); needs --direct_input.
                         continue
                     if attempts >= max_attempts:
                         logger.debug(tab_print(f"{task.prefix}: retry limit reached ({attempts}).", 2))
@@ -468,10 +464,7 @@ def submit_mzmine_jobs(ctx: RunContext, new_projects: pd.DataFrame | None = None
                 if task.exists("mzmine_sbatch") and not ctx.dry_run:
                     set_sbatch_time(task.path("mzmine_sbatch"), mzmine_cfg["slurm"]["retry_time"])
             elif status == TaskStatus.INITIATION and ctx.direct_input is None and project not in new_names:
-                # Legacy behaviour: only projects created by Step 1 in this run are submitted
-                # automatically. Stale '01 initiation' rows (LIMS has some from years ago) need
-                # --direct_input.
-                logger.debug(tab_print(f"Project {project} is '01 initiation' from an earlier run; skipping.", 2))
+                logger.debug(tab_print(f"Project {project} is '01 initiation' from an earlier run (stale); skipping.", 2))
                 continue
             if not task.exists("mzmine_sbatch"):
                 logger.warning(tab_print(f"Warning! No sbatch file for {task.prefix}. Skipping.", 2))

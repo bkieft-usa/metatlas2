@@ -14,10 +14,6 @@ logger = lcf.get_logger("untargeted.utils")
 
 def set_group(path: str | os.PathLike, group: str | None) -> None:
     """Recursively set the Unix group of *path* (file or directory).
-
-    Lightweight replacement for the legacy ``recursive_chown``. Failures are
-    logged at INFO (as before) so they don't pollute the warnings/errors email.
-    ``group=None`` disables the call.
     """
     if not group:
         return

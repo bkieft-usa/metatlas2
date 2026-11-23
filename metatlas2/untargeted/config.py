@@ -116,8 +116,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "mirror_raw_data": True,
         "mirror_mzmine_results": True,
         "submit_everything_bagel": True,
-        # Internal calibrant m/z removed from MGF files before FBMN submission.
-        "calibrant_mz": {"positive": 202.07770, "negative": 202.07880},
+        "calibrant_mz": {"positive": 202.07770, "negative": 202.07880}, # Internal calibrant m/z removed from MGF files before FBMN submission.
         "calibrant_ppm": 5,
         "fbmn_params": {
             "workflowname": "feature_based_molecular_networking_workflow",
@@ -164,9 +163,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "add_documentation": True,
         "doc_name": "Untargeted_metabolomics_GNPS2_Guide.docx",
         "abridged_filenames": True,
-        # Project is zipped only if total features across polarities exceeds this.
         "min_features": 0,
-        # Suffixes stripped from project names before building abridged file names.
         "abridged_strip_suffixes": ["_lenient", "_strict", "_custom", "_test"],
     },
 }

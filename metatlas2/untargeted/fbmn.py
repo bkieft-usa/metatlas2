@@ -142,13 +142,13 @@ def submit_fbmn_jobs(ctx: RunContext) -> None:
                     logger.info(tab_print(
                         f"Notice! No raw data files for {polarity} mode. Setting status to '12 not relevant'", 2))
                     df.loc[i, col] = TaskStatus.NOT_RELEVANT.value
-                    index_list.append(i)  # bug fix: legacy never wrote this change to LIMS
+                    index_list.append(i)
                     continue
                 if (row.get(f"num_{task.short}_msms", 0) or 0) < 2:
                     logger.info(tab_print(
                         f"Notice! Insufficient MSMS detected for {polarity} mode. Setting status to '12 not relevant'", 2))
                     df.loc[i, col] = TaskStatus.NOT_RELEVANT.value
-                    index_list.append(i)  # bug fix: legacy never wrote this change to LIMS
+                    index_list.append(i)
                     continue
                 logger.warning(tab_print(
                     f"Warning! Project {polarity} mode has an error status but appears to have raw data and Mzmine "
