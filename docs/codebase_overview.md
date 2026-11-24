@@ -343,7 +343,7 @@ metatlas2/
 │   └── workflows/
 │       └── docker.yml                # CI: build + push on main push and version tags
 └── scripts/
-    ├── metatlas2.sh                  # Host wrapper script (run/submit, --image, --dev, --standalone)
+    ├── metatlas2.sh                  # Host wrapper script (run/submit, --image, --dev, --sandbox)
     ├── install_kernels.sh            # Registers metatlas2/metatlas2-dev/metatlas2-{tag} kernels
     └── pull_latest.sh                # Cronjob helper: shifterimg pull latest
 ```
@@ -388,8 +388,8 @@ metatlas2.sh --image sha-a1b2c3d run --config analysis.yaml --project MY_PROJECT
 # Use local working-tree edits instead of the installed image (dev mode)
 metatlas2.sh --dev run --config analysis.yaml --project MY_PROJECT_0000_0000_00 --rt-align-num 0 --analysis-num 0
 
-# Launch standalone dev environment with JupyterLab (Docker, local machine)
-metatlas2.sh --standalone
+# Developer sandbox off NERSC (Docker): fresh DB + JupyterLab on the sandbox dataset
+metatlas2.sh --sandbox
 ```
 
 Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch) inside the container at the same absolute paths, so no explicit `-v` flags are needed for data access. The host network is used by default, so the Dash curation server and Jupyter kernel ZMQ ports are directly reachable by JupyterHub.
@@ -437,7 +437,7 @@ To test local changes without waiting for CI to build and push an image:
    **Important:** only Python source code changes are picked up this way.  If you change `pyproject.toml` (add/upgrade a package) or the `Dockerfile` (add a system library), those changes live in the container image — you must push to `main`, wait for CI to build and push the new image, then run `pull_latest.sh` and `install_kernels.sh` before the dev kernel reflects them.
 2. **CLI `run`, `add-compounds`, `add-atlases`**: Add `--dev` to the wrapper script — the local `metatlas2/` package directory is bind-mounted over the installed copy inside the container.  The same caveat applies: environment-level changes require a new image.
 3. **SLURM batch**: Dev mode is not currently supported for SLURM batch jobs.
-4. **Standalone (local Docker)**: Use `metatlas2.sh --standalone` to launch a full JupyterLab environment on your local machine with Docker. See [standalone_dev_environment.md](standalone_dev_environment.md) for details.
+4. **Sandbox (off NERSC, Docker)**: On a feature branch, run `metatlas2.sh --sandbox` to build a fresh database and run the whole workflow on the sandbox dataset, with your clone mounted live. See [portable_mode.md](portable_mode.md#sandbox-develop-and-test-changes).
 
 ---
 

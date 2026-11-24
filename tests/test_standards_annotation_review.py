@@ -1820,8 +1820,8 @@ def test_docker_jupyter_mounts_external_standards_config(tmp_path, inline):
     subprocess.run(["/bin/bash", str(script), "jupyter", *args], env=env, capture_output=True, text=True, check=True)
     docker_args = calls.read_text().splitlines()
     assert f"{tmp_path}:{tmp_path}:ro" in docker_args
-    key = Path("/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json")
-    assert (f"{key}:{key}:ro" in docker_args) == key.is_file()
+    # The centralized atlas sheet is NERSC-only: its key is never mounted into Docker.
+    assert not any("atlas_google_api_key" in arg for arg in docker_args)
 
 
 def _build_gui(project, monkeypatch, annotation_run_id=None):

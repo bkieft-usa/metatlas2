@@ -63,18 +63,16 @@ metatlas2 run \
 
 See **[add_compounds_to_db.md](docs/add_compounds_to_db.md)**, **[add_atlases_to_db.md](docs/add_atlases_to_db.md)**, and **[run_targeted_analysis.md](docs/run_targeted_analysis.md)** for complete details.
 
-### Running on your local machine or non-NERSC HPC
+### Running off NERSC (portable mode)
 
-See **[run_anywhere.md](docs/run_anywhere.md)** for complete details.
+With Docker, run the workflow on your own data (**local**), or develop and test code changes on
+a small fixed dataset (**sandbox**, `metatlas2.sh --sandbox`). See
+**[portable_mode.md](docs/portable_mode.md)**.
 
 ### Managing centralized atlas tags
 
 See **[update_centralized_atlas_tags.md](docs/update_centralized_atlas_tags.md)** for
 instructions on managing tags in the shared Google Sheet.
-
-### Standalone Development Mode
-
-See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for complete details.
 
 ---
 
@@ -103,7 +101,7 @@ See **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** for 
 
 | Document | Description |
 |----------|-------------|
-| **[standalone_dev_environment.md](docs/standalone_dev_environment.md)** | Standalone development environment for testing on any Linux machine without NERSC access |
+| **[portable_mode.md](docs/portable_mode.md)** | Running off NERSC with Docker: local runs on your own data, and the developer sandbox |
 | **[codebase_overview.md](docs/codebase_overview.md)** | Programmer-oriented reference: module structure, workflow phases, and key classes |
 | **[database_schema.md](docs/database_schema.md)** | Complete database schema documentation including table structures and relationships |
 | **[parquet_file_structure.md](docs/parquet_file_structure.md)** | Parquet file format specification for MS1/MS2 data storage |

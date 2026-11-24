@@ -1,0 +1,19 @@
+# Sandbox atlases, added to the fresh sandbox DB by sandbox_workflow.ipynb.
+# ${SANDBOX_INPUTS} is replaced with the absolute path of sandbox/inputs/ in the mounted repo.
+# Structure: ATLASES -> chromatography -> polarity -> atlas_category -> atlas_name -> {path, desc}
+ATLASES:
+  HILICZ:
+    POS:
+      QC:
+        SandboxQC:
+          path: ${SANDBOX_INPUTS}/atlases/qc_hilicz_pos.tsv
+          desc: Sandbox QC compounds for RT alignment
+      REF:
+        SandboxEMA:
+          path: ${SANDBOX_INPUTS}/atlases/ref_ema_hilicz_pos.tsv
+          desc: Sandbox EMA compounds, positive mode
+    NEG:
+      REF:
+        SandboxEMA:
+          path: ${SANDBOX_INPUTS}/atlases/ref_ema_hilicz_neg.tsv
+          desc: Sandbox EMA compounds, negative mode

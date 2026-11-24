@@ -1,0 +1,3 @@
+# Sandbox MS/MS reference spectra, added to the fresh sandbox DB by sandbox_workflow.ipynb.
+MSMS_REFS:
+  - path: ${SANDBOX_INPUTS}/msms_refs.tab

@@ -11,8 +11,8 @@ Tested functions
 * :func:`get_project_chromatography`
 * :func:`get_file_parts`
 
-Real filename and project-name examples are taken from the dev data package
-defined in ``local/prepare_local_data_package.sh``.
+Real filename and project-name examples are taken from the sandbox data package
+defined in ``sandbox/prepare_sandbox_data_package.sh``.
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ _HILICZ_NEG_FILE = (
     "NEG_MS2_56_T1-256534-8-Tr-RE_1__Run159.h5"
 )
 
-# Standalone dev project name
-_STANDALONE_PROJECT = "20260101_JGI_XX_000000_STANDALONE-DEV_test_EXP000_HILICZ_TESTXXXX"
+# Sandbox project name (sandbox/sandbox_workflow.ipynb)
+_SANDBOX_PROJECT = "20260101_JGI_XX_000000_SANDBOX_test_EXP000_HILICZ_TESTXXXX"
 
 # C18-EP project name
 _C18_PROJECT = "20260805_EB_MdR_109570-002_WaveStab6_20260724-20260731_EXP120A_C18-EP_USDAY99655"
@@ -207,9 +207,9 @@ class TestParseFileName:
 
 class TestParseProjectName:
 
-    def test_standalone_project_accepted(self):
-        result = parse_project_name(_STANDALONE_PROJECT)
-        assert result == _STANDALONE_PROJECT
+    def test_sandbox_project_accepted(self):
+        result = parse_project_name(_SANDBOX_PROJECT)
+        assert result == _SANDBOX_PROJECT
 
     def test_c18_project_accepted(self):
         result = parse_project_name(_C18_PROJECT)
@@ -220,13 +220,13 @@ class TestParseProjectName:
             parse_project_name("not_a_valid_project")
 
     def test_returns_project_name_string(self):
-        result = parse_project_name(_STANDALONE_PROJECT)
+        result = parse_project_name(_SANDBOX_PROJECT)
         assert isinstance(result, str)
 
     def test_jgi_owner_accepted(self):
-        # _STANDALONE_PROJECT has owner JGI
-        result = parse_project_name(_STANDALONE_PROJECT)
-        assert result == _STANDALONE_PROJECT
+        # _SANDBOX_PROJECT has owner JGI
+        result = parse_project_name(_SANDBOX_PROJECT)
+        assert result == _SANDBOX_PROJECT
 
     def test_eb_owner_accepted(self):
         # _C18_PROJECT has owner EB
@@ -242,7 +242,7 @@ class TestGetProjectChromatography:
 
     def test_hilicz_project_returns_hilic_uppercase(self):
         # Project name has "HILICZ" → alias-substituted to "HILIC" (case preserved)
-        result = get_project_chromatography(_STANDALONE_PROJECT)
+        result = get_project_chromatography(_SANDBOX_PROJECT)
         assert result == "HILIC"
 
     def test_c18_ep_project_returns_c18_uppercase(self):
@@ -256,7 +256,7 @@ class TestGetProjectChromatography:
 
     def test_normalize_of_result_is_lowercase(self):
         # normalize_chromatography on the result still gives lowercase for matching
-        result = get_project_chromatography(_STANDALONE_PROJECT)
+        result = get_project_chromatography(_SANDBOX_PROJECT)
         from metatlas2.shared_tools.file_and_project_format import normalize_chromatography
         assert normalize_chromatography(result) == "hilic"
 
