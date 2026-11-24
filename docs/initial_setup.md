@@ -60,7 +60,7 @@ Run these steps once on behalf of all analysts. Requires credentials to pull the
 ### 1. Clone the repository to a shared location
 
 ```bash
-git clone https://github.com/bkieft-usa/metatlas2.git /global/cfs/cdirs/metatlas/tools/metatlas2
+git clone https://github.com/biorack/metatlas2.git /global/cfs/cdirs/metatlas/tools/metatlas2
 chgrp -R <shared_group> /global/cfs/cdirs/metatlas/tools/metatlas2
 chmod -R g+rX /global/cfs/cdirs/metatlas/tools/metatlas2
 ```
@@ -69,7 +69,7 @@ chmod -R g+rX /global/cfs/cdirs/metatlas/tools/metatlas2
 
 ```bash
 shifterimg login ghcr.io   # enter GitHub username + classic PAT with read:packages scope
-shifterimg pull ghcr.io/bkieft-usa/metatlas2:latest
+shifterimg pull ghcr.io/biorack/metatlas2:latest
 ```
 
 ### 3. Register a cron job to keep the image current

@@ -38,7 +38,7 @@ The script uses the same lock file as before (`/tmp/msdata.<vol>.lockfile`), so 
 To set up the VM, as `svc-metabolomics@lbl.gov`:
 
 ```bash
-git clone https://github.com/bkieft-usa/metatlas2.git ~/metatlas2      # public repo, no credentials needed
+git clone https://github.com/biorack/metatlas2.git ~/metatlas2      # public repo, no credentials needed
 crontab -e
 ```
 

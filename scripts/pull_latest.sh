@@ -1,6 +1,6 @@
 #!/bin/bash
 
-IMAGE="ghcr.io/bkieft-usa/metatlas2:latest"
+IMAGE="ghcr.io/biorack/metatlas2:latest"
 echo "[$(date -Iseconds)] Pulling docker:${IMAGE} via shifterimg ..."
 OUTPUT="$(shifterimg pull "docker:${IMAGE}" 2>&1)"
 echo "${OUTPUT}"

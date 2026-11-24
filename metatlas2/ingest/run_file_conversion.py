@@ -23,7 +23,7 @@ from metatlas2.ingest.conversion import TRFP_IMAGE, ConversionSettings, Converte
 
 DEFAULT_LOG_DIR = "/global/cfs/cdirs/m2650/file_converter_logs"
 DEFAULT_RAW_DATA_DIR = "/global/cfs/cdirs/metatlas/raw_data"
-DEFAULT_IMAGE = "docker:ghcr.io/bkieft-usa/metatlas2:latest"
+DEFAULT_IMAGE = "docker:ghcr.io/biorack/metatlas2:latest"
 
 
 def _default_workers() -> int:

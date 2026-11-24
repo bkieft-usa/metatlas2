@@ -1,6 +1,6 @@
 services:
   jupyterlab:
-    image: ghcr.io/bkieft-usa/metatlas2:${METATLAS2_IMAGE_TAG:-latest}
+    image: ghcr.io/biorack/metatlas2:${METATLAS2_IMAGE_TAG:-latest}
     entrypoint: ["/bin/bash", "-c"]
     command: >
       "/app/.venv/bin/python -m ipykernel install

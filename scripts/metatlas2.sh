@@ -57,7 +57,7 @@ set -euo pipefail
 ZENODO_MAIN_DB_DOI="https://doi.org/10.5281/zenodo.22968291"
 ZENODO_DEV_DATA_DOI="https://doi.org/10.5281/zenodo.23697968"
 
-IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
+IMAGE_REPO="ghcr.io/biorack/metatlas2"
 IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
 DEV_MODE=false
 STANDALONE_MODE=false

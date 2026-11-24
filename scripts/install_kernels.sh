@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-IMAGE_REPO="ghcr.io/bkieft-usa/metatlas2"
+IMAGE_REPO="ghcr.io/biorack/metatlas2"
 REPO_DIR="/global/cfs/cdirs/metatlas/tools/metatlas2"
 EXTRA_TAG=""
 

@@ -884,7 +884,7 @@ METADATA_UPDATE=$(cat <<EOF
         "publication_date": "$(date +%Y-%m-%d)",
         "related_identifiers": [
             {
-                "identifier": "https://github.com/bkieft-usa/metatlas2",
+                "identifier": "https://github.com/biorack/metatlas2",
                 "relation": "isSupplementTo",
                 "resource_type": "software"
             }

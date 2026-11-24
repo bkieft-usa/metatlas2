@@ -313,8 +313,8 @@ Four distinct layers interact every time the entrypoint script is called.
 
 | Layer | What lives here | Role |
 |---|---|---|
-| **GitHub** (`bkieft-usa/metatlas2`) | Source code, `Dockerfile`, CI workflow (`.github/workflows/docker.yml`) | Every push to `main` triggers a CI action, which builds and pushes a new container image to GHCR |
-| **GHCR** (`ghcr.io/bkieft-usa/metatlas2`) | Frozen container images (e.g., `:latest`, `:sha-fb90592`) | The versioned Python runtime; pulled to the login node by a cronjob (every 5 min) or manually |
+| **GitHub** (`biorack/metatlas2`) | Source code, `Dockerfile`, CI workflow (`.github/workflows/docker.yml`) | Every push to `main` triggers a CI action, which builds and pushes a new container image to GHCR |
+| **GHCR** (`ghcr.io/biorack/metatlas2`) | Frozen container images (e.g., `:latest`, `:sha-fb90592`) | The versioned Python runtime; pulled to the login node by a cronjob (every 5 min) or manually |
 | **NERSC host filesystem** | `~/metatlas2/scripts/metatlas2.sh` (bash wrapper), `~/.jupyter/kernels/` (kernel specs), `$METATLAS_DATA_DIR/` (raw data + databases on shared CFS), project outputs under `$METATLAS_DATA_DIR/projects/targeted_outputs/<owner>/<user>/<project>/` | Input data, user config, project outputs, and the thin shell scripts that glue everything together; **no Python runs here** |
 | **Container** (Shifter process) | `/app/metatlas2/` (Python package + all deps, frozen at build time) | All Python execution; NERSC GPFS filesystems are auto-mounted at identical absolute paths — no path translation |
 
@@ -352,7 +352,7 @@ metatlas2/
 
 ### Image Registry and Tagging
 
-Images are hosted at `ghcr.io/bkieft-usa/metatlas2`.  Every push to `main` builds a new image and pushes **two tags simultaneously**:
+Images are hosted at `ghcr.io/biorack/metatlas2`.  Every push to `main` builds a new image and pushes **two tags simultaneously**:
 
 | Tag | Meaning |
 |---|---|
@@ -401,7 +401,7 @@ Shifter automatically mounts all NERSC GPFS filesystems (home, CFS, scratch) ins
 1. The wrapper pre-generates a temp path with `mktemp /tmp/metatlas2_XXXXXX.sh` and calls `shifter … --entrypoint submit --script-only --output /tmp/metatlas2_XXXX.sh` — Python writes the SLURM `.sh` script to that path and exits. `/tmp` is accessible in the container because GPFS is auto-mounted and `/tmp` is on local storage which shifter also makes available.
 2. The wrapper calls `sbatch` on the pre-known temp path directly.
 
-The SLURM script uses `shifter --image=docker:ghcr.io/bkieft-usa/metatlas2:{tag}` so the batch job runs inside the same container image.  The image tag is embedded in the script at generation time; pass `--image v1.2.3` to the wrapper to pin a specific release for a batch job.
+The SLURM script uses `shifter --image=docker:ghcr.io/biorack/metatlas2:{tag}` so the batch job runs inside the same container image.  The image tag is embedded in the script at generation time; pass `--image v1.2.3` to the wrapper to pin a specific release for a batch job.
 
 ---
 
