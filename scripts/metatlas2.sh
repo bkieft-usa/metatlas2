@@ -22,17 +22,21 @@
 #   metatlas2 [--image TAG] [--dev] untargeted run [--config FILE] [--dry_run] [--direct_input P1,P2] ...
 #   metatlas2 [--image TAG] [--dev] untargeted status [--print_recent N] [--direct_input P1,P2]
 #   metatlas2 [--image TAG] [--dev] untargeted mirror-raw --mode {hard|soft} --direct_input P1,P2
-#   metatlas2 [--image TAG] [--standalone] [--update-data]
+#   metatlas2 [--image TAG] --sandbox
 #
 # Flags (consumed by this script, not forwarded to Python):
 #   --image TAG   Use a specific image tag instead of the default (latest).
 #                 Overrides the METATLAS2_IMAGE_TAG environment variable.
 #   --dev         Mount the local repository source over the installed package,
 #                 so edits to the working tree take effect immediately.
-#   --standalone  Launch standalone dev environment with JupyterLab notebook.
-#                 Downloads dev data if needed to ~/.metatlas2-dev/.
-#   --update-data Force re-download of dev data (use with --standalone).
-#                 Useful when new Zenodo versions are published.
+#   --sandbox     Developer sandbox (Docker only): download the sandbox data package
+#                 to ~/.metatlas2-sandbox/, wipe its DB and outputs, and open
+#                 JupyterLab with the sandbox workflow notebook and the local repo
+#                 mounted (implies --dev). Refuses to start on 'main' or a
+#                 detached HEAD; create a feature branch first.
+#   --skip-db-update
+#                 Docker only: do not download the main DB from Zenodo, even if a
+#                 newer version is published (keeps local add-atlases changes).
 #   --port PORT   JupyterLab port for the 'jupyter' subcommand (default: 8889).
 #                 Can also be set via METATLAS2_JUPYTER_PORT env var.
 #
@@ -41,27 +45,29 @@
 #   - Otherwise, if 'docker' is found on PATH, Docker is used.
 #   - If neither is found, the script exits with an error.
 #
-# Docker-specific requirements:
-#   - METATLAS_DATA_DIR must be set and the config file must reside somewhere
-#     under that directory (e.g. $METATLAS_DATA_DIR/configs/my_config.yaml).
-#     This ensures the config is accessible inside the container via the single
-#     volume mount of $METATLAS_DATA_DIR.
-#   - On first run (or when the database version changes), the main metatlas
-#     DuckDB is downloaded automatically from Zenodo into
-#     $METATLAS_DATA_DIR/databases/main_db/metatlas.duckdb.
-#     To publish a new database version, run scripts/upload_main_db_to_zenodo.sh
-#     on NERSC and update ZENODO_MAIN_DB_DOI below.
+# Docker (portable mode, off NERSC) has two branches:
+#   - local (default): your own .h5 files and config under $METATLAS_DATA_DIR,
+#     always on the 'latest' image (--image is rejected). On first run (or when
+#     ZENODO_MAIN_DB_DOI changes) the main DuckDB is downloaded from Zenodo into
+#     $METATLAS_DATA_DIR/databases/main_db/metatlas.duckdb (see --skip-db-update).
+#     Atlas 'tags' are not supported off NERSC; use add-atlases + 'uid'.
+#   - sandbox (--sandbox): see above. The sandbox data package is published with
+#     sandbox/prepare_sandbox_data_package.sh (on NERSC), which updates
+#     ZENODO_SANDBOX_DATA_DOI below.
+#   To publish a new main DB version, run scripts/upload_main_db_to_zenodo.sh on
+#   NERSC and update ZENODO_MAIN_DB_DOI below.
 
 set -euo pipefail
 
 ZENODO_MAIN_DB_DOI="https://doi.org/10.5281/zenodo.22968291"
-ZENODO_DEV_DATA_DOI="https://doi.org/10.5281/zenodo.23697968"
+ZENODO_SANDBOX_DATA_DOI="https://doi.org/10.5281/zenodo.24517305"
 
 IMAGE_REPO="ghcr.io/biorack/metatlas2"
 IMAGE_TAG="${METATLAS2_IMAGE_TAG:-latest}"
 DEV_MODE=false
-STANDALONE_MODE=false
-UPDATE_DATA=false
+SANDBOX_MODE=false
+SKIP_DB_UPDATE=false
+JUPYTER_DEFAULT_URL=""
 JUPYTER_PORT="${METATLAS2_JUPYTER_PORT:-8889}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -103,6 +109,8 @@ _stamp_stale() {
 # _zenodo_get DIR DOI [FOLLOW_UP_CMD] -> download a Zenodo record into DIR via the image
 _zenodo_get() {
     docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -e HOME=/tmp \
         --entrypoint /bin/bash \
         -v "$1:/data" \
         -w /data \
@@ -118,8 +126,8 @@ while [[ $# -gt 0 ]]; do
         --image)        IMAGE_TAG="$2"; shift 2 ;;
         --image=*)      IMAGE_TAG="${1#*=}"; shift ;;
         --dev)          DEV_MODE=true; shift ;;
-        --standalone)   STANDALONE_MODE=true; shift ;;
-        --update-data)  UPDATE_DATA=true; shift ;;
+        --sandbox)      SANDBOX_MODE=true; shift ;;
+        --skip-db-update) SKIP_DB_UPDATE=true; shift ;;
         --port)         JUPYTER_PORT="$2"; shift 2 ;;
         --port=*)       JUPYTER_PORT="${1#*=}"; shift ;;
         *)              PASSTHROUGH_ARGS+=("$1"); shift ;;
@@ -142,93 +150,71 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Standalone mode (always Docker + Compose)
+# Docker image policy and sandbox setup
 # ---------------------------------------------------------------------------
-if [[ "${STANDALONE_MODE}" == "true" ]]; then
-    STANDALONE_DIR="${HOME}/.metatlas2-dev"
-    STANDALONE_PORT="${STANDALONE_PORT:-8889}"
-    TARBALL_NAME="metatlas2-dev-data.tar.gz"
-    VERSION_FILE="${STANDALONE_DIR}/.zenodo_version"
+if [[ "${RUNTIME}" == "docker" && "${SANDBOX_MODE}" != "true" && "${IMAGE_TAG}" != "latest" ]]; then
+    die "Error: --image is only supported with --sandbox when running with Docker." \
+        "Local (non-NERSC) runs always use the latest image."
+fi
 
-    echo "=========================================="
-    echo "Metatlas2 Standalone Development Mode"
-    echo "=========================================="
-    echo ""
+if [[ "${SANDBOX_MODE}" == "true" ]]; then
+    [[ "${RUNTIME}" == "docker" ]] || die \
+        "Error: --sandbox requires Docker (it is for developing off NERSC)." \
+        "On NERSC, use the 'metatlas2 (dev - local repo)' kernel instead."
+    [[ -z "${SUBCOMMAND}" ]] || die "Error: --sandbox does not take a subcommand (got '${SUBCOMMAND}')."
 
-    command -v docker &>/dev/null || die \
-        "Error: 'docker' is required but not found on PATH." \
-        "Install Docker Desktop: https://docs.docker.com/get-docker/"
-    docker compose version &>/dev/null || die \
-        "Error: 'docker compose' (v2) is required." \
-        "Update Docker Desktop or install the compose plugin."
-
-    if [[ ! -d "${STANDALONE_DIR}" || "${UPDATE_DATA}" == "true" ]] \
-        || _stamp_stale "${VERSION_FILE}" "${ZENODO_DEV_DATA_DOI}"; then
-        echo "Downloading dev data from Zenodo..."
-        rm -rf "${STANDALONE_DIR}"
-        mkdir -p "${STANDALONE_DIR}"
-        _zenodo_get "${STANDALONE_DIR}" "${ZENODO_DEV_DATA_DOI}" \
-            "tar -xzf '${TARBALL_NAME}' --strip-components=1 && rm '${TARBALL_NAME}'"
-        echo "${ZENODO_DEV_DATA_DOI}" > "${VERSION_FILE}"
-        echo "Dev data setup complete"
-        echo ""
+    # Edits must happen on a feature branch so they can become a PR.
+    BRANCH="$(git -C "${REPO_DIR}" symbolic-ref --short -q HEAD || true)"
+    if [[ -z "${BRANCH}" || "${BRANCH}" == "main" ]]; then
+        die "Error: the sandbox runs your local clone (${REPO_DIR}), which is on '${BRANCH:-a detached HEAD}'." \
+            "Create a feature branch before editing code, then re-run:" \
+            "    git -C '${REPO_DIR}' switch -c <your-branch-name>"
     fi
 
-    PROJECTS_DIR="${STANDALONE_DIR}/projects/targeted_outputs"
-    if [[ -d "${PROJECTS_DIR}" ]]; then
-        echo "Cleaning up previous workflow outputs..."
-        rm -rf "${PROJECTS_DIR}"
-        echo ""
+    SANDBOX_DIR="${HOME}/.metatlas2-sandbox"
+    SANDBOX_STAMP="${SANDBOX_DIR}/.zenodo_version"
+    echo "=========================================="
+    echo "Metatlas2 sandbox"
+    echo "=========================================="
+    echo "Repo:    ${REPO_DIR} (branch '${BRANCH}', mounted read-only)"
+    echo "Data:    ${SANDBOX_DIR}"
+    echo "Image:   ${IMAGE_FULL}"
+    echo "Package: ${ZENODO_SANDBOX_DATA_DOI}"
+    echo "         If your change affects the sandbox h5 data, publish a new package first:"
+    echo "         sandbox/prepare_sandbox_data_package.sh (on NERSC)."
+    echo ""
+
+    if [[ ! -d "${SANDBOX_DIR}/raw_data" ]] || _stamp_stale "${SANDBOX_STAMP}" "${ZENODO_SANDBOX_DATA_DOI}"; then
+        echo "Downloading sandbox data package from Zenodo..."
+        rm -rf "${SANDBOX_DIR}"
+        mkdir -p "${SANDBOX_DIR}"
+        _zenodo_get "${SANDBOX_DIR}" "${ZENODO_SANDBOX_DATA_DOI}" \
+            "tar -xzf metatlas2-sandbox-data.tar.gz --strip-components=1 && rm metatlas2-sandbox-data.tar.gz"
+        echo "${ZENODO_SANDBOX_DATA_DOI}" > "${SANDBOX_STAMP}"
     fi
 
-    echo "Copying fresh notebook to ${STANDALONE_DIR}..."
-    mkdir -p "${STANDALONE_DIR}/notebooks"
-    cp "${REPO_DIR}/local/local_workflow.ipynb" "${REPO_DIR}/local/parquet_query.ipynb" \
-        "${STANDALONE_DIR}/notebooks/"
-    echo ""
+    echo "Resetting sandbox database and outputs..."
+    rm -rf "${SANDBOX_DIR}/databases/main_db" "${SANDBOX_DIR}/projects" "${SANDBOX_DIR}/configs" "${SANDBOX_DIR}/logs"
+    mkdir -p "${SANDBOX_DIR}/databases/modelseed_db"
+    cp "${REPO_DIR}/sandbox/inputs/modelseed.tsv" "${SANDBOX_DIR}/databases/modelseed_db/modelseed.tsv"
 
-    echo "Pulling latest container image..."
-    docker pull "${IMAGE_FULL}"
-    echo ""
+    # Fresh copy of the workflow notebook, pointed at the kernel registered below.
+    KERNEL_NAME="metatlas2"; [[ "${IMAGE_TAG}" == "latest" ]] || KERNEL_NAME="metatlas2-${IMAGE_TAG}"
+    sed "s/\"name\": \"metatlas2\"/\"name\": \"${KERNEL_NAME}\"/" \
+        "${REPO_DIR}/sandbox/sandbox_workflow.ipynb" > "${SANDBOX_DIR}/sandbox_workflow.ipynb"
 
-    # Fresh Jupyter config in a temp dir
-    JUPYTER_CONFIG_TMPDIR=$(mktemp -d)
-    trap "rm -rf '${JUPYTER_CONFIG_TMPDIR}'" EXIT
-    cat > "${JUPYTER_CONFIG_TMPDIR}/jupyter_server_config.py" <<'EOF'
-c.ServerApp.ip = '0.0.0.0'
-c.ServerApp.port = 8889
-c.IdentityProvider.token = ''
-c.ServerApp.password = ''
-c.ServerApp.open_browser = False
-c.ServerApp.allow_root = True
-EOF
-
-    echo "=========================================="
-    echo "Launching JupyterLab..."
-    echo ""
-    echo "Data dir: ${STANDALONE_DIR}"
-    echo "Repo dir: ${REPO_DIR} (live edits enabled)"
-    echo ""
-    echo "Open your browser at:"
-    echo "   http://localhost:${STANDALONE_PORT}/lab"
-    echo ""
-    echo "Press Ctrl+C to stop"
-    echo "=========================================="
-    echo ""
-
-    REPO_DIR="${REPO_DIR}" \
-    STANDALONE_DIR="${STANDALONE_DIR}" \
-    JUPYTER_CONFIG_TMPDIR="${JUPYTER_CONFIG_TMPDIR}" \
-    METATLAS2_IMAGE_TAG="${IMAGE_TAG}" \
-    STANDALONE_PORT="${STANDALONE_PORT}" \
-        docker compose \
-            -f "${REPO_DIR}/local/docker-compose.standalone.yml" \
-            up --remove-orphans
-    exit 0
+    # Continue as 'metatlas2.sh --dev jupyter' on the sandbox data dir.
+    export METATLAS_DATA_DIR="${SANDBOX_DIR}"
+    DEV_MODE=true
+    MODE="dev"
+    SUBCOMMAND="jupyter"
+    PASSTHROUGH_ARGS=("jupyter")
+    SUB_ARGS=()
+    JUPYTER_DEFAULT_URL="/lab/tree/sandbox_workflow.ipynb"
 fi
 
 # ---------------------------------------------------------------------------
-# Validation (non-standalone)
+# Validation
 # ---------------------------------------------------------------------------
 [[ -n "${METATLAS_DATA_DIR:-}" ]] || die \
     "Error: METATLAS_DATA_DIR is not set." \
@@ -241,6 +227,9 @@ fi
 if [[ "${SUBCOMMAND}" == "submit" && "${RUNTIME}" == "docker" ]]; then
     die "Error: 'submit' (SLURM/sbatch) is only supported on NERSC/Shifter systems."
 fi
+if [[ "${SUBCOMMAND}" == "update-tags" && "${RUNTIME}" == "docker" ]]; then
+    die "Error: 'update-tags' edits the centralized atlas sheet, which is only available on NERSC."
+fi
 
 # Dev mode prepends the repo to PYTHONPATH
 PYTHONPATH_VALUE="/app"
@@ -251,7 +240,6 @@ PYTHONPATH_VALUE="/app"
 # add a read-only mount if it lives outside $METATLAS_DATA_DIR.
 # ---------------------------------------------------------------------------
 EXTRA_CONFIG_MOUNT=""
-TAG_INPUT_MOUNT=""
 if [[ "${RUNTIME}" == "docker" ]]; then
     IS_STANDARDS=false
     case "${SUBCOMMAND}" in
@@ -289,31 +277,6 @@ if [[ "${RUNTIME}" == "docker" ]]; then
         SUB_ARGS=("${PASSTHROUGH_ARGS[@]:1}")
     fi
 
-    if [[ "${SUBCOMMAND}" == "update-tags" ]]; then
-        for i in "${!SUB_ARGS[@]}"; do
-            arg="${SUB_ARGS[$i]}"
-            if [[ "${arg}" == "--input-csv" || "${arg}" == "--input_csv" ]]; then
-                TAG_INPUT_PATH="${SUB_ARGS[$i+1]:-}"
-                TAG_INPUT_IDX=$((i+1))
-                TAG_INPUT_PREFIX=""
-            elif [[ "${arg}" == --input-csv=* || "${arg}" == --input_csv=* ]]; then
-                TAG_INPUT_PATH="${arg#*=}"
-                TAG_INPUT_IDX=$i
-                TAG_INPUT_PREFIX="${arg%%=*}="
-            else
-                continue
-            fi
-            [[ -f "${TAG_INPUT_PATH}" ]] || die "Error: input CSV not found: ${TAG_INPUT_PATH}"
-            TAG_INPUT_DIR="$(cd "$(dirname "${TAG_INPUT_PATH}")" && pwd -P)"
-            TAG_INPUT_ABS="${TAG_INPUT_DIR}/$(basename "${TAG_INPUT_PATH}")"
-            SUB_ARGS[TAG_INPUT_IDX]="${TAG_INPUT_PREFIX}${TAG_INPUT_ABS}"
-            DATA_ABS="$(cd "${METATLAS_DATA_DIR}" && pwd -P)"
-            if [[ "${TAG_INPUT_ABS}" != "${DATA_ABS}/"* ]]; then
-                TAG_INPUT_MOUNT="${TAG_INPUT_ABS}"
-            fi
-            break
-        done
-    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -339,15 +302,31 @@ if [[ "${RUNTIME}" == "shifter" ]]; then
         fi
     fi
 else
-    # Docker (local macOS / non-NERSC HPC): ensure main DuckDB is present and current.
-    if [[ -n "${ZENODO_MAIN_DB_DOI}" && "${SUBCOMMAND}" != "update-tags" ]]; then
+    # Docker (portable mode). Always run the current image: 'docker run' would
+    # otherwise reuse a stale cached copy of the tag.
+    if ! docker pull -q "${IMAGE_FULL}" >/dev/null; then
+        docker image inspect "${IMAGE_FULL}" &>/dev/null \
+            || die "Error: could not pull ${IMAGE_FULL} and no local copy exists."
+        echo "Warning: could not pull ${IMAGE_FULL}; using the cached local copy." >&2
+    fi
+
+    # Local branch: make sure the main DuckDB is present and current. The sandbox
+    # builds its own DB from scratch in the workflow notebook.
+    if [[ "${SANDBOX_MODE}" != "true" ]]; then
         MAIN_DB_DIR="${METATLAS_DATA_DIR}/databases/main_db"
         MAIN_DB_PATH="${MAIN_DB_DIR}/metatlas.duckdb"
 
-        if [[ ! -f "${MAIN_DB_PATH}" ]] || _stamp_stale "${MAIN_DB_DIR}/.zenodo_version" "${ZENODO_MAIN_DB_DOI}"; then
+        if [[ "${SKIP_DB_UPDATE}" == "true" ]]; then
+            if [[ -f "${MAIN_DB_PATH}" ]]; then
+                echo "Skipping main database update check (--skip-db-update)."
+            else
+                echo "Warning: no main database at ${MAIN_DB_PATH}; skipping download as requested (--skip-db-update)." >&2
+            fi
+        elif [[ ! -f "${MAIN_DB_PATH}" ]] || _stamp_stale "${MAIN_DB_DIR}/.zenodo_version" "${ZENODO_MAIN_DB_DOI}"; then
             echo "Downloading metatlas main database from Zenodo..."
             echo "  DOI: ${ZENODO_MAIN_DB_DOI}"
             echo "  Destination: ${MAIN_DB_PATH}"
+            [[ ! -f "${MAIN_DB_PATH}" ]] || echo "  This replaces your current copy, including any atlases you added. Use --skip-db-update to keep it."
             mkdir -p "${MAIN_DB_DIR}"
             _zenodo_get "${MAIN_DB_DIR}" "${ZENODO_MAIN_DB_DOI}"
 
@@ -366,6 +345,7 @@ else
     DOCKER_ARGS=(
         "--rm"
         "-e" "METATLAS2_IMAGE_TAG=${IMAGE_TAG}"
+        "-e" "METATLAS2_PORTABLE=true"
         "-e" "METATLAS_DATA_DIR=${METATLAS_DATA_DIR}"
         "-e" "HOME=${HOME}"
         "-e" "USER=${USER:-$(id -un)}"
@@ -381,18 +361,12 @@ else
     # Config directory outside $METATLAS_DATA_DIR.
     [[ -n "${EXTRA_CONFIG_MOUNT}" ]] && \
         DOCKER_ARGS+=("-v" "${EXTRA_CONFIG_MOUNT}:${EXTRA_CONFIG_MOUNT}:ro")
-    [[ -n "${TAG_INPUT_MOUNT}" ]] && \
-        DOCKER_ARGS+=("-v" "${TAG_INPUT_MOUNT}:${TAG_INPUT_MOUNT}:ro")
     # rclone config (Google Drive upload on non-NERSC systems).
     [[ -d "${HOME}/.config/rclone" ]] && \
         DOCKER_ARGS+=("-v" "${HOME}/.config/rclone:${HOME}/.config/rclone:ro")
-    if [[ "${SUBCOMMAND}" == "jupyter" ]]; then
-        ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-        [[ ! -f "${ATLAS_KEY}" ]] || DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
-    fi
     if [[ "${DEV_MODE}" == "true" ]]; then
-        DOCKER_ARGS+=("-v" "${REPO_DIR}:${REPO_DIR}:ro")
-        [[ "${SUBCOMMAND}" == "update-tags" ]] || echo "Dev mode enabled: using local repo at ${REPO_DIR}"
+        DOCKER_ARGS+=("-v" "${REPO_DIR}:${REPO_DIR}:ro" "-e" "METATLAS2_REPO_DIR=${REPO_DIR}")
+        echo "Dev mode enabled: using local repo at ${REPO_DIR}"
     fi
 fi
 
@@ -496,23 +470,23 @@ case "${SUBCOMMAND}" in
         exit "${UNT_RC}"
         ;;
 
-    update-tags)
-        if [[ "${RUNTIME}" == "docker" ]]; then
-            ATLAS_KEY="/global/cfs/cdirs/metatlas/.jgi_production_atlas_google_api_key_1d798f188868.json"
-            [[ ! -f "${ATLAS_KEY}" ]] || DOCKER_ARGS+=("-v" "${ATLAS_KEY}:${ATLAS_KEY}:ro")
-        fi
+    update-tags)  # Shifter only (Docker rejected above)
         run_in_container /app/.venv/bin/python -m metatlas2.shared_tools.update_tags "${SUB_ARGS[@]}"
         ;;
 
     jupyter)  # Docker only (Shifter rejected above)
+        # Kernel name must match what notebook_generator.py writes into the
+        # generated curation notebooks: metatlas2 for latest, else metatlas2-<tag>.
+        KERNEL_NAME="metatlas2"; [[ "${IMAGE_TAG}" == "latest" ]] || KERNEL_NAME="metatlas2-${IMAGE_TAG}"
         echo "=========================================="
         echo "Metatlas2 JupyterLab (portable mode)"
         echo "=========================================="
         echo ""
         echo "Data dir: ${METATLAS_DATA_DIR}"
+        echo "Kernel:   ${KERNEL_NAME} (${IMAGE_FULL})"
         echo ""
         echo "Open your browser at:"
-        echo "   http://localhost:${JUPYTER_PORT}/lab"
+        echo "   http://localhost:${JUPYTER_PORT}${JUPYTER_DEFAULT_URL:-/lab}"
         echo ""
         echo "Press Ctrl+C to stop"
         echo "=========================================="
@@ -527,8 +501,8 @@ case "${SUBCOMMAND}" in
             -c "
                 mkdir -p '${METATLAS_DATA_DIR}/.jupyter_data/kernels' \
                 && /app/.venv/bin/python -m ipykernel install \
-                    --name metatlas2 \
-                    --display-name 'metatlas2 (latest)' \
+                    --name '${KERNEL_NAME}' \
+                    --display-name 'metatlas2 (${IMAGE_TAG})' \
                     --prefix '${METATLAS_DATA_DIR}/.jupyter_data' \
                 && JUPYTER_DATA_DIR='${METATLAS_DATA_DIR}/.jupyter_data' \
                    IPYTHONDIR='${METATLAS_DATA_DIR}/.ipython' \
@@ -540,7 +514,8 @@ case "${SUBCOMMAND}" in
                     --IdentityProvider.token='' \
                     --ServerApp.password='' \
                     --ServerApp.root_dir='${METATLAS_DATA_DIR}' \
-                    --MultiKernelManager.default_kernel_name=metatlas2
+                    --MultiKernelManager.default_kernel_name='${KERNEL_NAME}' \
+                    ${JUPYTER_DEFAULT_URL:+--ServerApp.default_url='${JUPYTER_DEFAULT_URL}'}
             "
         ;;
 

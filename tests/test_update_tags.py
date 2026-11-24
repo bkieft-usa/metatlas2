@@ -140,15 +140,34 @@ def test_main_reads_csv_and_updates_sheet(tmp_path, monkeypatch):
     assert sheet.changes[0][0] == [{"range": "B2", "values": [["EMA;New Set;Second"]]}]
 
 
-@pytest.mark.parametrize("runtime", ["docker", "shifter"])
-@pytest.mark.parametrize("operation", ["add", "retrieve"])
-def test_entrypoint_dispatches_tag_command(tmp_path, runtime, operation):
+def test_entrypoint_rejects_tag_command_under_docker(tmp_path):
+    """The centralized atlas sheet is NERSC-only, so Docker (portable mode) refuses update-tags."""
     script = Path(__file__).resolve().parents[1] / "scripts" / "metatlas2.sh"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for command in ("dirname", "basename", "id"):
         (bin_dir / command).symlink_to(f"/usr/bin/{command}")
-    executable = bin_dir / runtime
+    docker = bin_dir / "docker"
+    docker.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o755)
+    env = {"PATH": str(bin_dir), "HOME": str(tmp_path), "METATLAS_DATA_DIR": str(tmp_path)}
+    result = subprocess.run(
+        ["/bin/bash", str(script), "update-tags", "retrieve"],
+        env=env, text=True, capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "only available on NERSC" in result.stderr
+
+
+@pytest.mark.parametrize("operation", ["add", "retrieve"])
+def test_entrypoint_dispatches_tag_command(tmp_path, operation):
+    """On NERSC (Shifter) update-tags runs the update_tags module in the container."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "metatlas2.sh"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for command in ("dirname", "basename", "id"):
+        (bin_dir / command).symlink_to(f"/usr/bin/{command}")
+    executable = bin_dir / "shifter"
     executable.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n', encoding="utf-8")
     executable.chmod(0o755)
     data = tmp_path / "data"
@@ -172,5 +191,3 @@ def test_entrypoint_dispatches_tag_command(tmp_path, runtime, operation):
     assert result.stdout == ""
     expected = ["/app/.venv/bin/python", "-m", "metatlas2.shared_tools.update_tags", *arguments]
     assert args[-len(expected):] == expected
-    if runtime == "docker" and operation == "add":
-        assert f"{csv_path}:{csv_path}:ro" in args

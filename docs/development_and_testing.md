@@ -4,6 +4,22 @@ This document covers the metatlas2 test suite, how to run and extend it, and how
 
 ---
 
+## Making a Change
+
+1. **Branch first**: `git switch main && git pull && git switch -c <branch-name>`.
+2. **Try the change end to end**:
+   - Off NERSC: `metatlas2.sh --sandbox` builds a fresh DB and runs the whole targeted workflow
+     (setup → RT alignment → auto-ID → GUI → summary) on the sandbox dataset, with your clone
+     mounted live. See [portable_mode.md](portable_mode.md#sandbox-develop-and-test-changes).
+   - On NERSC: use the `metatlas2 (dev - local repo)` kernel, or `metatlas2.sh --dev ...`.
+3. **If the sandbox h5 data must change** (new runs, or atlas windows outside the current
+   subset), publish a new package with `sandbox/prepare_sandbox_data_package.sh` on NERSC and
+   commit the updated `ZENODO_SANDBOX_DATA_DOI` in `scripts/metatlas2.sh`. Changes to
+   `sandbox/inputs/` (compounds, atlases, MS/MS refs, configs) need no new package.
+4. **Run the tests** (below), commit, push, and open a PR into `main`. CI runs the unit and system tests.
+
+---
+
 ## Test Suite Overview
 
 The test suite is split into two tiers:

@@ -330,3 +330,20 @@ class TestCustomAtlasInput:
 
         df = ldt.load_atlas_input(path, atlas_category="QC", allow_missing_inchi_key=True)
         assert list(df["label"]) == ["Compound unlabeled", "Compound 13C-labeled"]
+
+
+class TestPortableAtlasSelector:
+    """Off NERSC (METATLAS2_PORTABLE=true) the centralized atlas sheet is unavailable."""
+
+    def test_tags_rejected_in_portable_mode(self, monkeypatch):
+        monkeypatch.setenv("METATLAS2_PORTABLE", "true")
+        with pytest.raises(ValueError, match="cannot access the centralized atlas sheet"):
+            ldt.normalize_atlas_selector({"tags": ["EMA"]}, "TEST ATLAS")
+
+    def test_uid_allowed_in_portable_mode(self, monkeypatch):
+        monkeypatch.setenv("METATLAS2_PORTABLE", "true")
+        assert ldt.normalize_atlas_selector({"uid": "abc"}, "TEST ATLAS") == ([], "abc")
+
+    def test_tags_allowed_on_nersc(self, monkeypatch):
+        monkeypatch.delenv("METATLAS2_PORTABLE", raising=False)
+        assert ldt.normalize_atlas_selector({"tags": ["EMA"]}, "TEST ATLAS") == (["EMA"], None)

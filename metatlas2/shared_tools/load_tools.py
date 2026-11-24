@@ -587,6 +587,12 @@ def normalize_atlas_selector(
         raise ValueError(f"{location} must specify exactly one of 'tags' or 'uid'")
 
     if has_tags:
+        if os.getenv("METATLAS2_PORTABLE") == "true":
+            raise ValueError(
+                f"{location} uses 'tags', but local (non-NERSC) runs cannot access the "
+                "centralized atlas sheet. Add your atlas with 'metatlas2.sh add-atlases' "
+                "and select it with 'uid' in the config instead."
+            )
         return normalize_atlas_tags(atlas_config["tags"], f"{location}.tags"), None
 
     uid = atlas_config["uid"]

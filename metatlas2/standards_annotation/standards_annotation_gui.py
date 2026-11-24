@@ -1083,10 +1083,7 @@ def build_standards_annotation_gui(
 
     # ── Dash app setup ────────────────────────────────────────────────────────
     try:
-        if (
-            os.getenv("METATLAS2_STANDALONE") == "true"
-            or not os.getenv("JUPYTERHUB_SERVICE_PREFIX")
-        ):
+        if not os.getenv("JUPYTERHUB_SERVICE_PREFIX"):
             requests_prefix = "/"
         else:
             requests_prefix = (
@@ -1995,10 +1992,7 @@ def build_standards_annotation_gui(
     t.start()
     time.sleep(1)
 
-    if (
-        os.getenv("METATLAS2_STANDALONE") == "true"
-        or not os.getenv("JUPYTERHUB_SERVICE_PREFIX")
-    ):
+    if not os.getenv("JUPYTERHUB_SERVICE_PREFIX"):
         url = f"http://localhost:{port}/"
     else:
         service_prefix = os.getenv("JUPYTERHUB_SERVICE_PREFIX", "/")
