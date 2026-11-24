@@ -41,7 +41,7 @@ Add the `export GITHUB_TOKEN=...` line to `~/.bashrc` (Linux) or `~/.zshrc` (mac
 ### 3. Clone the repository
 
 ```bash
-git clone https://github.com/bkieft-usa/metatlas2.git ~/metatlas2
+git clone https://github.com/biorack/metatlas2.git ~/metatlas2
 ```
 
 ### 4. Add `scripts/` to your PATH

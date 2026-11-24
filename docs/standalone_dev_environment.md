@@ -40,7 +40,7 @@ The standalone development environment allows you to run metatlas2 on any machin
 ```bash
 # Clone or pull the latest repo
 cd ~
-git clone https://github.com/bkieft-usa/metatlas2.git
+git clone https://github.com/biorack/metatlas2.git
 # OR
 cd ~/metatlas2
 git pull
@@ -59,7 +59,7 @@ This will automatically:
 
 ### Using the Notebook
 
-The notebook `standalone_dev_workflow.ipynb` runs the current production workflow in explicit stages. These are all identical calls to the production metatlas2 version, so see the documentation for [running the pipeline](https://github.com/bkieft-usa/metatlas2/blob/main/docs/run_targeted_analysis.md) and [running the GUI](https://github.com/bkieft-usa/metatlas2/blob/main/docs/manual_curation_and_summary.md).
+The notebook `standalone_dev_workflow.ipynb` runs the current production workflow in explicit stages. These are all identical calls to the production metatlas2 version, so see the documentation for [running the pipeline](https://github.com/biorack/metatlas2/blob/main/docs/run_targeted_analysis.md) and [running the GUI](https://github.com/biorack/metatlas2/blob/main/docs/manual_curation_and_summary.md).
 
 **NOTE:** The database and compounds are initialized in Cell 6. Project setup resolves atlas tags from the shared master atlas sheet and stores the resulting atlas UIDs in the project snapshot. The sheet and configured service-account credentials must be accessible from the standalone container.
 

@@ -25,7 +25,7 @@ SLURM_TEMPLATE = """\
 #SBATCH --error={analysis_output_dir}/auto_id_slurm_%j.err
 
 shifter --module=none \\
-    --image=docker:ghcr.io/bkieft-usa/metatlas2:{image_tag} \\
+    --image=docker:ghcr.io/biorack/metatlas2:{image_tag} \\
     --env=METATLAS2_IMAGE_TAG={image_tag} \\
     --env=METATLAS_DATA_DIR={metatlas_data_dir} \\
     --env=HOME={home} \\
