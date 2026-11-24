@@ -29,6 +29,6 @@ report_body=$( "${SCRIPT_DIR}/conversion_report.sh" "$1" "$2" 2>/dev/null )
 eval "$summary_line"          # creates $converted $failed $pending $in_progress
 subject="${1} conversion report: ${converted} succeeded, ${failed} failed, ${pending} pending, ${in_progress} in-progress"
 # shellcheck disable=SC2086
-printf "%s\n" "$report_body" | mailx -s "$subject" "${sender_args[@]}" ${addresses}
+printf "%s\n" "$report_body" | mailx -S sendwait -s "$subject" "${sender_args[@]}" ${addresses}
 
 printf "%s INFO: report generation and emailing complete\n" "$(date '+%b %d %H:%M:%S')"

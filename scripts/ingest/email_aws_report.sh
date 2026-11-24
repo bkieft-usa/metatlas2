@@ -107,7 +107,7 @@ addresses=$(grep -v '^[[:space:]]*#' "$ADDRESS_FILE" | grep -v '^[[:space:]]*$' 
 
 # Send the e‑mail.  Using `mailx -s "$subject" -R "$FROM_ADDR" $addresses`
 printf '%s\n' "$report_body" |
-    mailx -s "$subject" ${FROM_ADDR:+-R "$FROM_ADDR"} $addresses
+    mailx -S sendwait -s "$subject" ${FROM_ADDR:+-R "$FROM_ADDR"} $addresses
 
 # --------------------------- final log -------------------------------
 printf "INFO: %s report for %s (last %s days) - %s uploaded, %s errors - emailed to %s\n" \
