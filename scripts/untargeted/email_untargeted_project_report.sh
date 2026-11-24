@@ -21,6 +21,6 @@ sender_args=()
 
 # shellcheck disable=SC2086
 "${SCRIPT_DIR}/untargeted_project_summary_report.sh" "$1" "$2" | \
-  mailx -s "untargeted projects completion report" "${sender_args[@]}" ${addresses}
+  mailx -S sendwait -s "untargeted projects completion report" "${sender_args[@]}" ${addresses}
 
 printf "INFO: report generation and emailing complete\n"

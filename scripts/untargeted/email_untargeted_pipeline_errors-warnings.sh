@@ -20,6 +20,6 @@ sender_args=()
 
 # shellcheck disable=SC2086
 "${SCRIPT_DIR}/untargeted_warning-error_report.sh" "$1" | \
-  mailx -s "untargeted pipeline warnings and errors report" "${sender_args[@]}" ${addresses}
+  mailx -S sendwait -s "untargeted pipeline warnings and errors report" "${sender_args[@]}" ${addresses}
 
 printf "INFO: report generation and emailing complete\n"
