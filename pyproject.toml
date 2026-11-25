@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["metatlas2*"]
 
+[tool.setuptools.package-data]
+"metatlas2.targeted" = ["assets/*.css"]
+
 [project]
 name = "metatlas2"
 version = "0.1.0"
