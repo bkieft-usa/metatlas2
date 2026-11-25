@@ -1,11 +1,22 @@
-import json, os, re, time, uuid, threading
-import numpy as np, pandas as pd
-import plotly.graph_objects as go
-import dash
-from dash import dcc, html, ctx, Input, Output, State
-import dash_bootstrap_components as dbc
-from dash_extensions import EventListener
+import json
+import math
+import os
+import re
+import threading
+import time
 import traceback
+import uuid
+from collections import OrderedDict
+from contextlib import contextmanager
+
+import dash
+import dash_bootstrap_components as dbc
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.io as pio
+from dash import Input, Output, Patch, State, ctx, dcc, html
+from dash_extensions import EventListener
 
 import metatlas2.shared_tools.database_interact as dbi
 import metatlas2.shared_tools.logging_config as lcf
@@ -14,7 +25,61 @@ from metatlas2.targeted.note_options import (
     normalize_note_value,
     should_require_note_selection,
 )
+
 logger = lcf.get_logger("analysis_gui")
+
+# ---------------------------------------------------------------------------
+# Visual constants shared by the layout, the CSS (assets/analysis_gui.css) and
+# the Plotly template.  Semantic trace colors (green bounds, orange suggestions,
+# purple atlas RT, isomer red/blue) are intentionally unchanged.
+# ---------------------------------------------------------------------------
+FONT_STACK = "Arial, Helvetica, 'Liberation Sans', sans-serif"
+_TEXT_COLOR = "#1f2933"
+_AXIS_COLOR = "#9aa5b1"
+
+pio.templates["metatlas"] = go.layout.Template(
+    layout=dict(
+        font=dict(family=FONT_STACK, size=13, color=_TEXT_COLOR),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        xaxis=dict(showline=True, linecolor=_AXIS_COLOR, ticks="outside", tickcolor=_AXIS_COLOR,
+                   showgrid=False, zeroline=False, automargin=True,
+                   title=dict(font=dict(size=16), standoff=14), tickfont=dict(size=14)),
+        yaxis=dict(showline=True, linecolor=_AXIS_COLOR, ticks="outside", tickcolor=_AXIS_COLOR,
+                   showgrid=False, zeroline=False, automargin=True,
+                   title=dict(font=dict(size=16), standoff=16), tickfont=dict(size=14),
+                   exponentformat="e"),
+        hoverlabel=dict(bgcolor="white", bordercolor="#cbd2d9",
+                        font=dict(family=FONT_STACK, size=13, color=_TEXT_COLOR)),
+        title=dict(font=dict(family=FONT_STACK, size=16, color=_TEXT_COLOR)),
+    )
+)
+_TEMPLATE_JSON = pio.templates["metatlas"].to_plotly_json()
+
+# Max points per file kept on the (invisible) hover/click trace.
+_MAX_HOVER_PTS = 75
+# Static EIC span is snapped outward to this grid (minutes) so that small RT
+# nudges keep the same span and can be sent as a partial (Patch) update.
+_SPAN_GRID = 0.5
+
+
+@contextmanager
+def _timed(name):
+    """Log wall-clock duration of a block at DEBUG level."""
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        logger.debug(f"[timing] {name}: {(time.perf_counter() - t0) * 1000:.1f} ms")
+
+
+def _f32(arr, decimals=None):
+    """Compact numpy array for JSON transport (float32, optional rounding)."""
+    a = np.asarray(arr, dtype=np.float64)
+    if decimals is not None:
+        a = np.round(a, decimals)
+    return a.astype(np.float32)
+
 
 def build_dash_app(
     analysis_gui_obj,
@@ -36,6 +101,7 @@ def build_dash_app(
     force_eval = _resolved_cfg.get("gui_require_all_evaluated", False)
     async_flush_errors: dict = {}
     database_flush_errors: dict = {}
+    notes_cfg = analysis_gui_obj.notes
 
     # Extract metadata for display
     project_shortname = analysis_gui_obj.project_name.split("_")[4]
@@ -65,6 +131,7 @@ def build_dash_app(
             external_stylesheets=[dbc.themes.BOOTSTRAP],
             requests_pathname_prefix=requests_prefix,
             suppress_callback_exceptions=True,
+            update_title=None,  # no "Updating..." flicker in the browser tab
         )
         app.title = f"{project_shortname} | {chrom} | {pol} | {atlas_category}-{atlas_name} | RTA{rta} | TGA{tga}"
         logger.debug("App built successfully")
@@ -77,8 +144,27 @@ def build_dash_app(
     flush_lock = threading.RLock()
     latest_flushed_seq_by_session = {}
     db_write_lock = threading.Lock()
+    _cache_lock = threading.RLock()  # guards the render caches below (server is threaded)
     isomer_string_cache = {}
+    _ms1_prep_cache: OrderedDict[str, dict] = OrderedDict()
+    _ms1_static_cache: OrderedDict[tuple, dict] = OrderedDict()
+    _ms2_scans_cache: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
     _active_flush_threads: list[threading.Thread] = []
+
+    def _lru_get(cache, key):
+        with _cache_lock:
+            if key in cache:
+                cache.move_to_end(key)
+                return cache[key]
+        return None
+
+    def _lru_put(cache, key, value, maxsize):
+        with _cache_lock:
+            cache[key] = value
+            cache.move_to_end(key)
+            while len(cache) > maxsize:
+                cache.popitem(last=False)
+        return value
 
     # Pre-index DataFrames by mz_rt_uid for fast lookups
     ms1_by_compound = {}
@@ -104,12 +190,22 @@ def build_dash_app(
         except Exception:
             return raw
 
+    def _best_score(h):
+        if isinstance(h, list) and h and isinstance(h[0], dict):
+            try:
+                s = float(h[0].get("score", float("-inf")))
+                return s if np.isfinite(s) else float("-inf")
+            except (TypeError, ValueError):
+                return float("-inf")
+        return float("-inf")
+
     for mz_rt_uid, group in analysis_gui_obj.experimental_data.ms2_df.groupby(["mz_rt_uid"], observed=True):
         if len(mz_rt_uid) == 1:
             mz_rt_uid = mz_rt_uid[0]
+        group = group.copy()
         if "hits" in group.columns:
-            group = group.copy()
             group["hits"] = group["hits"].apply(_presort_hits)
+            group["_best_hit_score"] = group["hits"].apply(_best_score)
         ms2_by_compound[mz_rt_uid] = group
 
     ms2_markers_by_compound = {}
@@ -119,12 +215,7 @@ def build_dash_app(
             rt = getattr(r, "scan_rt", None)
             if rt is None or (isinstance(rt, float) and np.isnan(rt)):
                 continue
-            hits = getattr(r, "hits", [])
-            if hits and isinstance(hits[0], dict):
-                score = hits[0].get("score", None)
-                best_score = float(score) if isinstance(score, (int, float)) and np.isfinite(score) else float("-inf")
-            else:
-                best_score = float("-inf")
+            best_score = getattr(r, "_best_hit_score", float("-inf"))
             markers.append((float(rt), best_score))
         # Sort by score descending so [:100] slice always gives the top-100 by score
         markers.sort(key=lambda x: x[1], reverse=True)
@@ -155,8 +246,8 @@ def build_dash_app(
     def _load_state(compound_idx, ms2_idx=0, session_id=None, edit_seq=0):
         row = _compound_row(compound_idx)
         rt_min, rt_max = float(row["rt_min"]), float(row["rt_max"])
-        ms2_note = normalize_note_value(row.get("ms2_notes"), analysis_gui_obj.notes["ms2_notes"])
-        ms1_note = normalize_note_value(row.get("ms1_notes"), analysis_gui_obj.notes["ms1_notes"])
+        ms2_note = normalize_note_value(row.get("ms2_notes"), notes_cfg["ms2_notes"])
+        ms1_note = normalize_note_value(row.get("ms1_notes"), notes_cfg["ms1_notes"])
         other_notes_raw = row.get("other_notes", [])
         if other_notes_raw is None or other_notes_raw == "":
             other_note = []
@@ -170,8 +261,8 @@ def build_dash_app(
                     other_note = list(other_notes_raw)
             except Exception:
                 other_note = [other_notes_raw] if other_notes_raw else []
-        other_note = [v for v in other_note if v in analysis_gui_obj.notes["other_notes"]]
-        
+        other_note = [v for v in other_note if v in notes_cfg["other_notes"]]
+
         return {
             "session_id": session_id or str(uuid.uuid4()),
             "edit_seq": int(edit_seq),
@@ -195,11 +286,10 @@ def build_dash_app(
         new_state.update(changes)
         old_seq = int(state.get("edit_seq", 0))
         new_state["edit_seq"] = old_seq + 1
-        #logger.info(f"_patch_with_seq: edit_seq {old_seq} -> {new_state['edit_seq']}, changes={list(changes.keys())}")
         return new_state
 
     def _ensure_valid_state(state):
-        if "compound_idx" in state:
+        if isinstance(state, dict) and "compound_idx" in state:
             return state
         logger.warning(
             "Malformed session-store state (%s). Resetting to starting compound.",
@@ -210,22 +300,12 @@ def build_dash_app(
     def _patch_rt_change(state, new_min, new_max):
         rt_min = max(0.0, min(new_min, new_max))
         rt_max = max(rt_min, new_max)
-        logger.debug(f"[_patch_rt_change] Called with new_min={new_min}, new_max={new_max} -> rt_min={rt_min}, rt_max={rt_max}")
-        new_state = _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4), ms2_idx=0)
-        logger.debug(f"[_patch_rt_change] Returning new_state with edit_seq={new_state.get('edit_seq')}, rt_min={new_state.get('rt_min')}, rt_max={new_state.get('rt_max')}")
-        # Preserve y_max cache and the RT window bounds used to compute it.
-        # The figure builder will update these after recomputing y_max.
-        if "cached_y_max" in state:
-            new_state["cached_y_max"] = state["cached_y_max"]
-        if "cached_exp_rt_min" in state:
-            new_state["cached_exp_rt_min"] = state["cached_exp_rt_min"]
-        if "cached_exp_rt_max" in state:
-            new_state["cached_exp_rt_max"] = state["cached_exp_rt_max"]
-        return new_state
+        logger.debug(f"[_patch_rt_change] new_min={new_min}, new_max={new_max} -> rt_min={rt_min}, rt_max={rt_max}")
+        return _patch_with_seq(state, rt_min=round(rt_min, 4), rt_max=round(rt_max, 4), ms2_idx=0)
 
     def _find_starting_compound_idx():
         """Find the first compound with no ms2_notes set.
-        
+
         Looks for compounds where ms2_notes is blank (empty string or NaN) and returns next index to start
         """
 
@@ -259,6 +339,9 @@ def build_dash_app(
         events=[{"event": "keydown", "props": ["key", "timeStamp", "target.tagName"]}],
     )
 
+    # ------------------------------------------------------------------
+    # Sizing (honors gui_width / gui_height config, in inches)
+    # ------------------------------------------------------------------
     PX_PER_ROW = 52
     FIXED_CHROME = 340
     BUTTON_ROW_H = 48
@@ -267,9 +350,9 @@ def build_dash_app(
     DPI = 96
 
     n_rows = (
-        len(analysis_gui_obj.notes["ms1_notes"])
-        + len(analysis_gui_obj.notes["ms2_notes"])
-        + len(analysis_gui_obj.notes["other_notes"])
+        len(notes_cfg["ms1_notes"])
+        + len(notes_cfg["ms2_notes"])
+        + len(notes_cfg["other_notes"])
     )
 
     if _gui_height_in is not None:
@@ -290,481 +373,352 @@ def build_dash_app(
     _font_scale = left_bar_h / _auto_left_bar_h if _auto_left_bar_h > 0 else 1.0
     _font_scale = max(0.5, min(_font_scale, 2.0))
 
-    def _fs(base_rem: float) -> str:
-        """Return a scaled rem font-size string."""
-        return f"{round(base_rem * _font_scale, 3)}rem"
+    # ------------------------------------------------------------------
+    # Layout helpers
+    # ------------------------------------------------------------------
+    def _option_label(text, key):
+        """Radio/checklist label with a right-aligned hotkey badge."""
+        children = [html.Span(text, className="opt-text")]
+        if key:
+            children.append(html.Kbd(key, className="hotkey"))
+        return html.Span(children, className="opt-label")
 
-    _OVERLAY_HIDDEN_STYLE = {
-        "display": "none",
-        "position": "fixed",
-        "top": 0, "left": 0, "right": 0, "bottom": 0,
-        "backgroundColor": "rgba(0,0,0,0.35)",
-        "zIndex": 9999,
-        "pointerEvents": "all",
-    }
-    _OVERLAY_VISIBLE_STYLE = {
-        "display": "flex",
-        "alignItems": "center",
-        "justifyContent": "center",
-        "position": "fixed",
-        "top": 0, "left": 0, "right": 0, "bottom": 0,
-        "backgroundColor": "rgba(0,0,0,0.35)",
-        "zIndex": 9999,
-        "pointerEvents": "all",
-    }
+    def _note_options(kind):
+        hotkeys = notes_cfg[f"{kind}_hotkeys"]
+        return [{"label": _option_label(lbl, hotkeys.get(lbl, "")), "value": lbl}
+                for lbl in notes_cfg[f"{kind}_notes"]]
 
-    app.layout = dbc.Container(
+    def _section(title, body, extra_class="", grow=0):
+        # grow > 0: the card takes a share of spare left-panel height so the
+        # panel matches the plot column (options spread out evenly).
+        return dbc.Card(
+            [dbc.CardHeader(title, className="section-header"), dbc.CardBody(body, className="section-body")],
+            className=f"panel-card {extra_class}".strip(),
+            style={"flexGrow": grow} if grow else None,
+        )
+
+    def _shortcut_table(rows):
+        return dbc.Table(
+            html.Tbody([html.Tr([html.Td(html.Kbd(k), className="kbd-cell"), html.Td(desc)]) for k, desc in rows]),
+            bordered=False, size="sm", className="shortcut-table mb-3",
+        )
+
+    def _scale_toggle(component_id):
+        return dbc.RadioItems(
+            id=component_id,
+            options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
+            value="linear",
+            className="btn-group scale-toggle",
+            inputClassName="btn-check",
+            labelClassName="btn btn-outline-secondary btn-sm",
+            labelCheckedClassName="active",
+        )
+
+    def _counter(counter_id, progress_id, color, initial_value=0):
+        return html.Div(
+            [
+                html.Div(id=counter_id, className="counter-text"),
+                dbc.Progress(id=progress_id, value=initial_value, color=color, className="counter-progress"),
+            ],
+            className="counter",
+        )
+
+    def _build_header():
+        return html.Header(
+            [
+                html.Div(
+                    [html.Span("Metatlas", className="brand-strong"), html.Span("Targeted Curation", className="brand-light")],
+                    className="brand",
+                ),
+                html.Div(app.title, className="meta-text"),
+                html.Div(id="save-indicator", className="save-indicator"),
+                html.Div(
+                    [
+                        dbc.Button("Hotkeys", id="help-btn", color="secondary", outline=True, size="sm", className="header-btn"),
+                        dbc.Button("Figure guide", id="guide-btn", color="secondary", outline=True, size="sm", className="header-btn"),
+                        dbc.Button("Save & exit", id="exit-open-btn", color="danger", size="sm", className="header-btn"),
+                    ],
+                    className="header-actions",
+                ),
+            ],
+            className="app-header",
+        )
+
+    def _build_left_panel():
+        return [
+            _section(
+                "Compound",
+                [
+                    dcc.Dropdown(id="compound-dd", options=compound_options, value=starting_compound_idx,
+                                 clearable=False, className="compound-dd"),
+                    html.Div(id="id-notes", className="id-notes", children="No identification notes"),
+                ],
+            ),
+            _section(
+                "Analyst notes",
+                dbc.Textarea(id="analyst-notes", placeholder="Free-text notes for this compound…",
+                             debounce=True, className="analyst-notes", rows=2),
+            ),
+            _section(
+                "MS1 quality",
+                dcc.RadioItems(id="ms1-radio", options=_note_options("ms1"), value=notes_cfg["ms1_notes"][0],
+                               className="note-options", labelClassName="note-option", inputClassName="note-input"),
+                extra_class="note-card", grow=len(notes_cfg["ms1_notes"]),
+            ),
+            _section(
+                "MS2 quality",
+                dcc.RadioItems(id="ms2-radio", options=_note_options("ms2"), value=notes_cfg["ms2_notes"][0],
+                               className="note-options", labelClassName="note-option", inputClassName="note-input"),
+                extra_class="note-card", grow=len(notes_cfg["ms2_notes"]),
+            ),
+            _section(
+                "Other notes",
+                dcc.Checklist(id="other-checklist", options=_note_options("other"), value=[],
+                              className="note-options", labelClassName="note-option", inputClassName="note-input"),
+                extra_class="note-card", grow=len(notes_cfg["other_notes"]),
+            ),
+            _section("Current selection", html.Div(id="status-current"), extra_class="status-card"),
+        ]
+
+    def _build_plot_panel():
+        return [
+            html.Div(id="error-banner"),
+            dbc.Card(
+                [
+                    dcc.Graph(
+                        id="ms1-graph",
+                        config={
+                            "displayModeBar": True,
+                            "displaylogo": False,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                            "toImageButtonOptions": {"filename": f"{project_shortname}_{chrom}_{pol}_MS1"},
+                            "edits": {"shapePosition": True, "titleText": False},
+                            "doubleClick": True,
+                        },
+                        style={"height": f"{ms1_height}px"},
+                    ),
+                    html.Div(
+                        [
+                            dbc.ButtonGroup(
+                                [
+                                    dbc.Button("◀ Prev", id="prev-btn", color="primary", size="sm"),
+                                    dbc.Button("Next ▶", id="next-btn", color="primary", size="sm"),
+                                ],
+                                className="nav-group",
+                            ),
+                            _counter("compound-counter", "compound-progress", "primary",
+                                     round((starting_compound_idx + 1) / max(len(compound_options), 1) * 100, 1)),
+                            html.Div(className="toolbar-spacer"),
+                            dbc.Button("Accept suggestions", id="accept-suggestions", color="warning", size="sm",
+                                       className="tool-btn"),
+                            dbc.Button("Snap to isomer", id="snap-to-isomer", color="secondary", outline=True,
+                                       size="sm", className="tool-btn"),
+                            _scale_toggle("yaxis-scale-radio"),
+                        ],
+                        className="plot-toolbar",
+                    ),
+                ],
+                className="plot-card",
+            ),
+            dbc.Card(
+                [
+                    dcc.Graph(
+                        id="ms2-graph",
+                        config={
+                            "displayModeBar": True,
+                            "displaylogo": False,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                            "toImageButtonOptions": {"filename": f"{project_shortname}_{chrom}_{pol}_MS2"},
+                        },
+                        style={"height": f"{ms2_height}px"},
+                    ),
+                    html.Div(
+                        [
+                            dbc.ButtonGroup(
+                                [
+                                    dbc.Button("◀ Prev MS2", id="ms2-prev-1", color="primary", size="sm"),
+                                    dbc.Button("Next MS2 ▶", id="ms2-next-1", color="primary", size="sm"),
+                                ],
+                                className="nav-group",
+                            ),
+                            _counter("ms2-counter-1", "ms2-progress-1", "secondary"),
+                            html.Div(className="toolbar-spacer"),
+                            _scale_toggle("ms2-yaxis-scale-radio"),
+                        ],
+                        className="plot-toolbar",
+                    ),
+                ],
+                className="plot-card",
+            ),
+        ]
+
+    def _tooltips():
+        tips = [
+            ("prev-btn", "Previous compound  (j / ←) — saves current compound"),
+            ("next-btn", "Next compound  (k / →) — saves current compound"),
+            ("accept-suggestions", "Use the suggested RT bounds (orange)  (n)"),
+            ("snap-to-isomer", "Snap RT bounds to the next isomer box  (m)"),
+            ("ms2-prev-1", "Previous MS2 scan  (l / ↑)"),
+            ("ms2-next-1", "Next MS2 scan  (; / ↓)"),
+            ("help-btn", "Keyboard shortcuts"),
+            ("guide-btn", "Plot legend and how-to"),
+            ("exit-open-btn", "Save the current compound and close the app"),
+        ]
+        return [dbc.Tooltip(text, target=target, placement="bottom", delay={"show": 400, "hide": 0})
+                for target, text in tips]
+
+    help_offcanvas = dbc.Offcanvas(
+        id="help-offcanvas",
+        title="Keyboard shortcuts",
+        is_open=False,
+        placement="end",
+        className="help-offcanvas",
+        children=[
+            html.H6("Compound navigation", className="offcanvas-heading"),
+            _shortcut_table([("j", "Previous compound"), ("k", "Next compound"),
+                             ("←", "Previous compound"), ("→", "Next compound")]),
+            html.H6("RT bound nudge", className="offcanvas-heading"),
+            _shortcut_table([("a", "RT min − 0.05"), ("s", "RT min + 0.05"),
+                             ("d", "RT max − 0.05"), ("f", "RT max + 0.05")]),
+            html.H6("MS2 scan navigation", className="offcanvas-heading"),
+            _shortcut_table([("l", "Previous MS2 scan"), (";", "Next MS2 scan"),
+                             ("↑", "Previous MS2 scan"), ("↓", "Next MS2 scan")]),
+            html.H6("Other actions", className="offcanvas-heading"),
+            _shortcut_table([("n", "Accept RT suggestions"), ("m", "Snap to isomer")]),
+            html.H6("MS1 quality", className="offcanvas-heading"),
+            _shortcut_table([(notes_cfg["ms1_hotkeys"].get(lbl, "—"), lbl) for lbl in notes_cfg["ms1_notes"]]),
+            html.H6("MS2 quality", className="offcanvas-heading"),
+            _shortcut_table([(notes_cfg["ms2_hotkeys"].get(lbl, "—"), lbl) for lbl in notes_cfg["ms2_notes"]]),
+            html.H6("Other notes", className="offcanvas-heading"),
+            _shortcut_table([(notes_cfg["other_hotkeys"].get(lbl, "—"), lbl) for lbl in notes_cfg["other_notes"]]),
+        ],
+    )
+
+    def _swatch(color, dashed=False, box=False):
+        cls = "swatch-box" if box else ("swatch-line dashed" if dashed else "swatch-line")
+        return html.Span(className=cls, style={"--swatch": color})
+
+    guide_offcanvas = dbc.Offcanvas(
+        id="guide-offcanvas",
+        title="Figure guide",
+        is_open=False,
+        placement="end",
+        className="guide-offcanvas",
+        children=[
+            html.H6("MS1 plot legend", className="offcanvas-heading"),
+            dbc.Table(
+                html.Tbody([
+                    html.Tr([html.Td([_swatch("gray"), "Sample lines"]),
+                             html.Td(["Experimental samples are gray. Technical samples: ",
+                                      ", ".join(f"{k} = {v}" for k, v in lcmsruns_color_map.items()) or "none configured",
+                                      ". Click a line to highlight that file."])]),
+                    html.Tr([html.Td([_swatch("purple"), "Atlas RT"]), html.Td("Atlas RT peak")]),
+                    html.Tr([html.Td([_swatch("orange"), "Suggested"]), html.Td("Suggested RT bounds (solid: min, dashed: max)")]),
+                    html.Tr([html.Td([_swatch("green"), "Current"]), html.Td("Current RT bounds (solid: min, dashed: max) — drag to edit")]),
+                    html.Tr([html.Td([html.Span("▲", className="swatch-tri"), "MS2 scans"]), html.Td("RT of MS2 scans (top 100 by score)")]),
+                    html.Tr([html.Td([_swatch("rgba(150,205,255,0.8)", box=True), _swatch("rgba(255,96,96,0.8)", box=True), "Isomers"]),
+                             html.Td("Isomer RT windows (identical m/z or matching InChIKey prefix). Red when overlapping, blue otherwise.")]),
+                ]),
+                bordered=False, size="sm", className="guide-table mb-3",
+            ),
+            html.H6("Adjusting RT bounds", className="offcanvas-heading"),
+            html.Ul([
+                html.Li("Drag the green lines directly on the plot."),
+                html.Li(["Nudge with ", html.Kbd("a"), " ", html.Kbd("s"), " (min) and ",
+                         html.Kbd("d"), " ", html.Kbd("f"), " (max)."]),
+                html.Li(["Press ", html.Kbd("m"), " to snap to the next shaded isomer box."]),
+                html.Li(["Press ", html.Kbd("n"), " to accept the suggested (orange) bounds."]),
+            ], className="guide-list"),
+            html.H6("Range slider", className="offcanvas-heading"),
+            html.P(
+                "The blue dotted line is the max intensity across all files at every RT for this compound. "
+                "The white area is in view; drag the slider handles to view the gray area.",
+                className="guide-text",
+            ),
+            html.H6("MS2 plot legend", className="offcanvas-heading"),
+            dbc.Table(
+                html.Tbody([
+                    html.Tr([html.Td("Mirror plot"), html.Td("Data ions (up) vs. reference ions (down)")]),
+                    html.Tr([html.Td("Ref scaled"), html.Td("Reference intensity is scaled to the data spectrum peak")]),
+                    html.Tr([html.Td([_swatch("green"), "Green"]), html.Td("Matching fragments")]),
+                    html.Tr([html.Td([_swatch("red"), "Red"]), html.Td("Non-matching fragments")]),
+                ]),
+                bordered=False, size="sm", className="guide-table mb-3",
+            ),
+            html.H6("Saving", className="offcanvas-heading"),
+            html.P(
+                "RT bounds and notes are written to the project database when you move to another compound "
+                "(buttons, hotkeys or dropdown) and when you use Save & exit.",
+                className="guide-text",
+            ),
+        ],
+    )
+
+    exit_modal = dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Save and exit?")),
+            dbc.ModalBody([
+                html.P("The current compound will be saved to the project database and the app will shut down."),
+                html.Div(id="save-exit-status", className="save-exit-status"),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button("Cancel", id="exit-cancel-btn", color="secondary", outline=True),
+                dbc.Button("Save & exit", id="save-exit-btn", color="danger"),
+            ]),
+        ],
+        id="exit-modal",
+        is_open=False,
+        centered=True,
+    )
+
+    app.layout = html.Div(
         [
             dcc.Store(id="session-store", storage_type="memory", data=_load_state(starting_compound_idx)),
-            dcc.Store(id="controls-compound-idx", storage_type="memory", data=starting_compound_idx),
-            dcc.Store(id="yaxis-scale-store", storage_type="memory", data="linear"),
-            dcc.Store(id="ms2-yaxis-scale-store", storage_type="memory", data="linear"),
             dcc.Store(id="nav-trigger-store", storage_type="memory", data={"idx": starting_compound_idx, "ts": 0}),
             dcc.Store(id="ms1-render-key", storage_type="memory", data=None),
             dcc.Store(id="ms2-render-key", storage_type="memory", data=None),
             html.Div(
                 id="loading-overlay",
-                children=[
-                    html.Div(
-                        "Loading compound...",
-                        style={
-                            "color": "white",
-                            "fontSize": "1.6rem",
-                            "fontWeight": "bold",
-                            "background": "rgba(0,0,0,0.55)",
-                            "padding": "1.2rem 2.4rem",
-                            "borderRadius": "0.5rem",
-                            "letterSpacing": "0.04em",
-                        },
-                    )
-                ],
-                style=_OVERLAY_HIDDEN_STYLE,
+                className="loading-overlay",
+                children=html.Div(
+                    [
+                        dbc.Spinner(color="light", size="md"),
+                        html.Div("Loading compound…", id="loading-overlay-text", className="loading-text"),
+                    ],
+                    className="loading-box",
+                ),
+                style={"display": "none"},
             ),
-            # Save-confirmation toast — slides in from bottom-right after each compound save
             dbc.Toast(
                 id="save-toast",
-                header="Saved",
+                header="Saved to database",
                 is_open=False,
                 dismissable=True,
                 duration=6000,
                 icon="success",
-                style={
-                    "position": "fixed",
-                    "bottom": "1.5rem",
-                    "right": "1.5rem",
-                    "zIndex": 10000,
-                    "minWidth": "260px",
-                },
+                className="save-toast",
             ),
-            # Keyboard shortcut cheat-sheet panel
-            dbc.Offcanvas(
-                id="help-offcanvas",
-                title="Keyboard Shortcuts",
-                is_open=False,
-                placement="end",
-                style={"width": "420px"},
-                children=[
-                    html.H6("Compound Navigation", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([html.Td(html.Kbd("j"), className="text-center"), html.Td("Previous compound")]),
-                                html.Tr([html.Td(html.Kbd("k"), className="text-center"), html.Td("Next compound")]),
-                                html.Tr([html.Td(html.Kbd("←"), className="text-center"), html.Td("Previous compound")]),
-                                html.Tr([html.Td(html.Kbd("→"), className="text-center"), html.Td("Next compound")]),
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    html.H6("RT Bound Nudge", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([html.Td(html.Kbd("a"), className="text-center"), html.Td("RT min - 0.05")]),
-                                html.Tr([html.Td(html.Kbd("s"), className="text-center"), html.Td("RT min + 0.05")]),
-                                html.Tr([html.Td(html.Kbd("d"), className="text-center"), html.Td("RT max - 0.05")]),
-                                html.Tr([html.Td(html.Kbd("f"), className="text-center"), html.Td("RT max + 0.05")]),
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    html.H6("MS2 Scan Navigation", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([html.Td(html.Kbd("l"), className="text-center"), html.Td("Previous MS2 scan")]),
-                                html.Tr([html.Td(html.Kbd(";"), className="text-center"), html.Td("Next MS2 scan")]),
-                                html.Tr([html.Td(html.Kbd("↑"), className="text-center"), html.Td("Previous MS2 scan")]),
-                                html.Tr([html.Td(html.Kbd("↓"), className="text-center"), html.Td("Next MS2 scan")]),
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    html.H6("Other Actions", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([html.Td(html.Kbd("n"), className="text-center"), html.Td("Accept RT suggestions")]),
-                                html.Tr([html.Td(html.Kbd("m"), className="text-center"), html.Td("Snap to isomer")]),
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    html.H6("MS1 Quality", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([
-                                    html.Td(html.Kbd(analysis_gui_obj.notes["ms1_hotkeys"].get(lbl, "—")), className="text-center"),
-                                    html.Td(lbl),
-                                ])
-                                for lbl in analysis_gui_obj.notes["ms1_notes"]
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    html.H6("MS2 Quality", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([
-                                    html.Td(html.Kbd(analysis_gui_obj.notes["ms2_hotkeys"].get(lbl, "—")), className="text-center"),
-                                    html.Td(lbl),
-                                ])
-                                for lbl in analysis_gui_obj.notes["ms2_notes"]
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    html.H6("Other Notes", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([
-                                    html.Td(html.Kbd(analysis_gui_obj.notes["other_hotkeys"].get(lbl, "—")), className="text-center"),
-                                    html.Td(lbl),
-                                ])
-                                for lbl in analysis_gui_obj.notes["other_notes"]
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                ],
-            ),
-            # Figure Guide cheat-sheet panel
-            dbc.Offcanvas(
-                id="guide-offcanvas",
-                title="Figure Guide",
-                is_open=False,
-                placement="end",
-                style={"width": "600px"},
-                children=[
-                    html.H6("MS1 Plot Legend", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([html.Td("Sample Line Colors", className="fw-bold"), html.Td(f"Experimental samples: gray.\nTechnical samples: {lcmsruns_color_map}")]),
-                                html.Tr([html.Td("Purple VLine", className="fw-bold"), html.Td("Atlas RT peak")]),
-                                html.Tr([html.Td("Orange VLines", className="fw-bold"), html.Td("Suggested RT bounds (Solid: min, Dashed: max)")]),
-                                html.Tr([html.Td("Green VLines", className="fw-bold"), html.Td("Current RT bounds (Solid: min, Dashed: max)")]),
-                                html.Tr([html.Td("Black Triangles", className="fw-bold"), html.Td("RT of MS2 scans")]),
-                                html.Tr([html.Td("Red/Blue Shaded Boxes", className="fw-bold"), html.Td("Isomers (identical m/z or matching InChIKey prefix)")]),
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                    #html.H6("MS1 Interaction", className="mt-2 mb-1 fw-bold"),
-                    html.Div([
-                        html.P("RT Bound Adjustment:", className="fw-bold mb-1"),
-                        html.Ul([
-                            html.Li("Drag the green lines directly on the plot"),
-                            html.Li("Use hotkeys 'a', 's' (min; left/right) and 'd', 'f' (max; left/right)"),
-                            html.Li("Press 'm' to snap to the next shaded isomer box"),
-                            html.Li("Press 'n' to accept suggested RT bounds (orange lines)"),
-                        ], style={"fontSize": "0.9rem", "paddingLeft": "1.2rem"}),
-                        
-                        html.P("Range Slider:", className="fw-bold mb-1"),
-                        html.P(
-                            "The blue dotted line represents the max intensity point across all files at every RT for this compound. The white area is in the viewframe, and the gray area can be viewed by dragging the handles of the range slider.",
-                            style={"fontSize": "0.9rem"}
-                        ),
-                    ], className="mb-3"),
-                    html.H6("MS2 Plot Legend", className="mt-2 mb-1 fw-bold"),
-                    dbc.Table(
-                        [
-                            html.Tbody([
-                                html.Tr([html.Td("Mirror Plot", className="fw-bold"), html.Td("Data ions (up) vs. Reference ions (down)")]),
-                                html.Tr([html.Td("Ref Scaled", className="fw-bold"), html.Td("Reference spectrum intensity is scaled to match the data spectrum peak")]),
-                                html.Tr([html.Td("Green Bars", className="fw-bold"), html.Td("Matching fragments")]),
-                                html.Tr([html.Td("Red Bars", className="fw-bold"), html.Td("Non-matching fragments")]),
-                            ])
-                        ],
-                        bordered=True, size="sm", className="mb-3",
-                    ),
-                ],
-            ),
+            help_offcanvas,
+            guide_offcanvas,
+            exit_modal,
             keyboard_listener,
-            dbc.Row(
-                [
-                    dbc.Col(
-                        [
-                            html.Div(
-                                f"{project_shortname}  |  {chrom}  |  {pol}  |  {atlas_category}  |  RTA{rta}  |  TGA{tga}",
-                                style={"fontSize": _fs(1.0), "fontWeight": "bold", "marginBottom": "0.5rem", "color": "#333"}
-                            ),
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dcc.Dropdown(id="compound-dd", options=compound_options, value=starting_compound_idx, clearable=False, style={"width": "100%", "fontSize": _fs(1.5)}),
-                                        width=11, className="mb-3",
-                                    ),
-                                ],
-                            ),
-                            dbc.Textarea(id="analyst-notes", placeholder="Analyst notes...", debounce=True, style={"width": "100%", "height": "40px"}, className="my-2"),
-                            dbc.FormText(
-                                id="id-notes",
-                                style={
-                                    "width": "100%",
-                                    "height": "100px",
-                                    "whiteSpace": "pre-line",
-                                    "display": "block",
-                                    "backgroundColor": "#f8f9fa",
-                                    "border": "1px solid #ced4da",
-                                    "borderRadius": "0.25rem",
-                                    "padding": "0.375rem 0.75rem",
-                                    "fontSize": _fs(1.0),
-                                },
-                                className="my-2",
-                                children="No identification notes"
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("MS1 quality:", className="fw-bold", style={"fontSize": _fs(1.5)}),
-                                    dcc.RadioItems(
-                                        id="ms1-radio",
-                                        options=[{"label": f"[{analysis_gui_obj.notes['ms1_hotkeys'].get(lbl, '')}] {lbl}", "value": lbl} for lbl in analysis_gui_obj.notes["ms1_notes"]],
-                                        value=analysis_gui_obj.notes["ms1_notes"][0],
-                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": _fs(1.5)},
-                                        inputStyle={"margin-right": "6px", "transform": f"scale({round(1.5 * _font_scale, 3)})"},
-                                    ),
-                                ],
-                                className="my-3",
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("MS2 quality:", className="fw-bold", style={"fontSize": _fs(1.5)}),
-                                    dcc.RadioItems(
-                                        id="ms2-radio",
-                                        options=[{"label": f"[{analysis_gui_obj.notes['ms2_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["ms2_notes"]],
-                                        value=analysis_gui_obj.notes["ms2_notes"][0],
-                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": _fs(1.5)},
-                                        inputStyle={"margin-right": "6px", "transform": f"scale({round(1.5 * _font_scale, 3)})"},
-                                    ),
-                                ],
-                                className="my-3",
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("Other notes:", className="fw-bold", style={"fontSize": _fs(1.5)}),
-                                    dcc.Checklist(
-                                        id="other-checklist",
-                                        options=[{"label": f"[{analysis_gui_obj.notes['other_hotkeys'].get(val, '')}] {val}", "value": val} for val in analysis_gui_obj.notes["other_notes"]],
-                                        value=[],
-                                        labelStyle={"display": "block", "margin-bottom": "6px", "fontSize": _fs(1.5)},
-                                        inputStyle={"margin-right": "6px", "transform": f"scale({round(1.5 * _font_scale, 3)})"},
-                                    ),
-                                ],
-                                className="my-3",
-                            ),
-                            html.Div(id="status-current", className="my-2", style={"fontSize": _fs(1.0)}),
-                            html.Div(id="error-banner", className="my-2", style={"fontSize": _fs(1.0)}),
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "Save and Exit",
-                                            id="save-exit-btn",
-                                            color="danger",
-                                            size="sm",
-                                            style={"marginTop": "0.5rem"},
-                                        ),
-                                        width="auto",
-                                        className="d-flex justify-content-start",
-                                    ),
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "Hotkeys Help",
-                                            id="help-btn",
-                                            color="dark",
-                                            size="sm",
-                                            style={"marginTop": "0.5rem"},
-                                            title="Keyboard shortcuts",
-                                        ),
-                                        width="auto",
-                                        className="d-flex justify-content-center",
-                                    ),
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "Figure Guide",
-                                            id="guide-btn",
-                                            color="dark",
-                                            size="sm",
-                                            style={"marginTop": "0.5rem"},
-                                            title="Legend and Readme",
-                                        ),
-                                        width="auto",
-                                        className="d-flex justify-content-center",
-                                    ),
-                                    dbc.Col(
-                                        html.Div(id="save-exit-status", className="text-muted fst-italic text-end w-100"),
-                                        className="d-flex align-items-center justify-content-end",
-                                    ),
-                                ],
-                                className="mt-3 mb-1",
-                                align="center",
-                            ),
-                        ],
-                        width=3,
-                        style={"fontSize": "1rem"},
-                    ),
-                    dbc.Col(
-                        [
-                            dcc.Graph(
-                                id="ms1-graph",
-                                config={
-                                    "displayModeBar": True,
-                                    "edits": {"shapePosition": True, "titleText": False},
-                                    "doubleClick": True,
-                                    #"modeBarButtonsToRemove": ["autoScale2d", "resetScale2d"],
-                                },
-                                style={"height": f"{str(ms1_height)}px"},
-                            ),
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "◀ Prev ID",
-                                            id="prev-btn",
-                                            color="primary",
-                                            className="me-2 w-100",
-                                            style={"fontSize": _fs(1.0)}),
-                                            width=2),
-                                    dbc.Col(
-                                        html.Div(
-                                            [
-                                                html.Div(
-                                                    id="compound-counter",
-                                                    className="fw-bold text-center mb-1",
-                                                    style={"fontSize": _fs(0.85)},
-                                                ),
-                                                dbc.Progress(
-                                                    id="compound-progress",
-                                                    value=round((starting_compound_idx + 1) / max(len(compound_options), 1) * 100, 1),
-                                                    style={"height": "8px"},
-                                                    color="primary",
-                                                    className="w-100",
-                                                ),
-                                            ],
-                                            className="d-flex flex-column justify-content-center",
-                                        ),
-                                        width=2),
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "Next ID ▶",
-                                            id="next-btn",
-                                            color="primary",
-                                            className="ms-2 w-100",
-                                            style={"fontSize": _fs(1.0)}),
-                                            width=2),
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "Accept Suggestions",
-                                            id="accept-suggestions",
-                                            color="warning",
-                                            className="w-100",
-                                            style={"fontSize": _fs(1.0)}),
-                                            width=2),
-                                    dbc.Col(
-                                        dbc.Button(
-                                            "Snap to Isomer",
-                                            id="snap-to-isomer",
-                                            color="secondary",
-                                            className="w-100",
-                                            style={"fontSize": _fs(1.0)}),
-                                            width=2),
-                                    dbc.Col(
-                                        dcc.RadioItems(
-                                            id="yaxis-scale-radio",
-                                            options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
-                                            value="linear",
-                                            labelStyle={"display": "inline-block", "margin-right": "12px", "fontSize": _fs(1.0)},
-                                            inputStyle={"margin-right": "6px", "transform": f"scale({round(1.3 * _font_scale, 3)})"},
-                                            className="w-100",
-                                        ),
-                                        width=1,
-                                        className="d-flex align-items-center",
-                                    ),
-                                ],
-                                className="my-2 align-items-center",
-                                style={"width": "100%"},
-                                justify="start",
-                            ),
-                            dcc.Graph(
-                                id="ms2-graph",
-                                config={"displayModeBar": True},
-                                style={"height": f"{str(ms2_height)}px"}
-                            ),
-                            dbc.Row(
-                                [
-                                    dbc.Col(dbc.Button("◀ Prev MS2", id="ms2-prev-1", className="me-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
-                                                    dbc.Col(
-                                                        html.Div(
-                                                            [
-                                                                html.Div(
-                                                                    id="ms2-counter-1",
-                                                                    className="fw-bold text-center mb-1",
-                                                                    style={"fontSize": _fs(0.85)},
-                                                                ),
-                                                                dbc.Progress(
-                                                                    id="ms2-progress-1",
-                                                                    value=0,
-                                                                    style={"height": "8px"},
-                                                                    color="secondary",
-                                                                    className="w-100",
-                                                                ),
-                                                            ],
-                                                            className="d-flex flex-column justify-content-center",
-                                                        ),
-                                                        width=2),
-                                                    dbc.Col(dbc.Button("Next MS2 ▶", id="ms2-next-1", className="ms-2 w-100", style={"fontSize": _fs(1.0)}), width=2),
-                                    dbc.Col(
-                                        dcc.RadioItems(
-                                            id="ms2-yaxis-scale-radio",
-                                            options=[{"label": "Linear", "value": "linear"}, {"label": "Log", "value": "log"}],
-                                            value="linear",
-                                            labelStyle={"display": "inline-block", "margin-right": "12px", "fontSize": _fs(1.0)},
-                                            inputStyle={"margin-right": "6px", "transform": f"scale({round(1.3 * _font_scale, 3)})"},
-                                            className="w-100",
-                                        ),
-                                        width=1,
-                                        className="d-flex align-items-center",
-                                    ),
-                                ],
-                                className="my-2 align-items-center",
-                                style={"width": "100%"},
-                                justify="start",
-                            ),
-                        ],
-                        width=8,
-                    ),
-                ],
-                className="mt-1",
+            *_tooltips(),
+            _build_header(),
+            html.Main(
+                dbc.Row(
+                    [
+                        dbc.Col(html.Div(_build_left_panel(), className="left-panel-inner"), width=3, className="left-panel"),
+                        dbc.Col(_build_plot_panel(), width=9, className="plot-panel"),
+                    ],
+                    className="g-3",
+                ),
+                className="app-main",
             ),
         ],
         id="root-container",
-        fluid=False,
+        className="app-root",
         style={
-            "paddingTop": "0.5rem",
+            "--ui-scale": str(round(_font_scale, 3)),
             "width": f"{app_width}px",
             "minWidth": f"{app_width}px",
             "maxWidth": f"{app_width}px",
@@ -773,6 +727,9 @@ def build_dash_app(
 
     logger.debug("Layout constructed successfully")
 
+    # ------------------------------------------------------------------
+    # Data helpers
+    # ------------------------------------------------------------------
     def _get_sorted_isomer_rt_bounds(row):
         """Return list of (rt_min, rt_max) for isomers, sorted by rt_min."""
         isomers = json.loads(row.get("isomers", "[]"))
@@ -791,60 +748,44 @@ def build_dash_app(
 
     def _sanitize_numeric_list(vals):
         if vals is None:
-            return []
-        out = []
-        for v in vals:
-            try:
-                out.append(float(v))
-            except (TypeError, ValueError):
-                out.append(np.nan)
-        return out
-
-    def _get_all_ms2_scans_in_window(row, rt_min=None, rt_max=None):
-        """Return ALL MS2 scans within the RT window, with no score-sorting or
-        top-N truncation.  Used exclusively for the MS1 plot markers so that
-        every scan timepoint is shown regardless of hit score or count.
-        """
-        mz_rt_uid = row["mz_rt_uid"]
-        ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
-        if ms2_sub.empty:
-            return pd.DataFrame()
-        if rt_min is not None and rt_max is not None:
-            ms2_sub = ms2_sub[(ms2_sub["scan_rt"] >= rt_min) & (ms2_sub["scan_rt"] <= rt_max)]
-        return ms2_sub
+            return np.array([], dtype=np.float64)
+        try:
+            return np.asarray(vals, dtype=np.float64)
+        except (TypeError, ValueError):
+            out = []
+            for v in vals:
+                try:
+                    out.append(float(v))
+                except (TypeError, ValueError):
+                    out.append(np.nan)
+            return np.asarray(out, dtype=np.float64)
 
     def _get_ms2_scans(row, rt_min=None, rt_max=None):
         """Return a DataFrame of the top N MS2 scans across all collision energies,
         sorted by best hit score descending then scan_rt ascending.
 
-        Hits lists are pre-sorted at startup, so this function only needs to read
-        hits[0].score to rank scans — no per-call hit sorting required.
-
-        Returns a single DataFrame (not grouped by CE) with at most top_n_hits rows.
+        Hits lists are pre-sorted at startup and each scan's best score is cached
+        in ``_best_hit_score``.  Results are memoized per (compound, RT window);
+        callers must treat the returned DataFrame as read-only.
         """
         mz_rt_uid = row["mz_rt_uid"]
+        key = (mz_rt_uid, rt_min, rt_max)
+        cached = _lru_get(_ms2_scans_cache, key)
+        if cached is not None:
+            return cached
 
         ms2_sub = ms2_by_compound.get(mz_rt_uid, pd.DataFrame())
         if not ms2_sub.empty and rt_min is not None and rt_max is not None:
             ms2_sub = ms2_sub[(ms2_sub["scan_rt"] >= rt_min) & (ms2_sub["scan_rt"] <= rt_max)]
 
         if ms2_sub.empty:
-            return pd.DataFrame()
-
-        result = ms2_sub.copy()
-        if "hits" in result.columns:
-            # Hits are pre-sorted by score at startup — just read the first entry's score.
-            result["_best_hit_score"] = result["hits"].apply(
-                lambda h: float(h[0].get("score", float("-inf")))
-                if isinstance(h, list) and h and isinstance(h[0], dict)
-                else float("-inf")
-            )
-            result = result.sort_values(["_best_hit_score", "scan_rt"], ascending=[False, True])
-            result = result.drop(columns=["_best_hit_score"])
+            result = pd.DataFrame()
+        elif "_best_hit_score" in ms2_sub.columns:
+            result = ms2_sub.sort_values(["_best_hit_score", "scan_rt"], ascending=[False, True]).head(top_n_hits)
         else:
-            result = result.sort_values("scan_rt")
+            result = ms2_sub.sort_values("scan_rt").head(top_n_hits)
 
-        return result.head(top_n_hits)
+        return _lru_put(_ms2_scans_cache, key, result, maxsize=256)
 
     def _format_collision_energy_label(ce_float):
         if abs(ce_float - 23.333) < 0.01:
@@ -947,7 +888,7 @@ def build_dash_app(
                     manual_curation_df.at[df_idx, "rt_max"] = state["rt_max"]
         except Exception as exc:
             logger.warning(f"Optimistic in-memory RT update failed: {exc}")
-        
+
         # Instead of blocking UI, compute metrics and write DB in background
         def _async_flush_worker():
             try:
@@ -970,8 +911,8 @@ def build_dash_app(
                         "rt_peak": row.get("rt_peak", None),
                         "rt_error": row.get("rt_error", None),
                         "mz_error": row.get("mz_error", None),
-                        "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
-                        "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                        "ms2_notes": normalize_note_value(state.get("ms2_note"), notes_cfg["ms2_notes"]),
+                        "ms1_notes": normalize_note_value(state.get("ms1_note"), notes_cfg["ms1_notes"]),
                         "other_notes": " // ".join(state.get("other_note", [])),
                         "analyst_notes": state.get("analyst_notes", ""),
                         "identification_notes": state.get("id_notes", ""),
@@ -980,8 +921,8 @@ def build_dash_app(
                     window_metrics = _compute_window_ms1_metrics(state)
                     if window_metrics is None:
                         updates = {
-                            "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
-                            "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                            "ms2_notes": normalize_note_value(state.get("ms2_note"), notes_cfg["ms2_notes"]),
+                            "ms1_notes": normalize_note_value(state.get("ms1_note"), notes_cfg["ms1_notes"]),
                             "other_notes": " // ".join(state.get("other_note", [])),
                             "analyst_notes": state.get("analyst_notes", ""),
                             "identification_notes": state.get("id_notes", ""),
@@ -995,8 +936,8 @@ def build_dash_app(
                             "rt_peak": window_metrics["rt_peak"],
                             "rt_error": window_metrics["rt_error"],
                             "mz_error": window_metrics["mz_error"],
-                            "ms2_notes": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
-                            "ms1_notes": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
+                            "ms2_notes": normalize_note_value(state.get("ms2_note"), notes_cfg["ms2_notes"]),
+                            "ms1_notes": normalize_note_value(state.get("ms1_note"), notes_cfg["ms1_notes"]),
                             "other_notes": " // ".join(state.get("other_note", [])),
                             "analyst_notes": state.get("analyst_notes", ""),
                             "identification_notes": state.get("id_notes", ""),
@@ -1033,7 +974,7 @@ def build_dash_app(
                 # if the flush breaks, log it for export
                 compound_label = f"{row.get('label', 'unknown')} ({row.get('adduct', '?')})"
                 database_flush_errors[compound_label] = str(e)
-        
+
         # Launch async worker thread - don't block UI!
         thread = threading.Thread(target=_async_flush_worker, daemon=True)
         thread.start()
@@ -1046,8 +987,8 @@ def build_dash_app(
             "index": state["compound_idx"]+1,
             "rt_min": state["rt_min"],
             "rt_max": state["rt_max"],
-            "ms1": normalize_note_value(state.get("ms1_note"), analysis_gui_obj.notes["ms1_notes"]),
-            "ms2": normalize_note_value(state.get("ms2_note"), analysis_gui_obj.notes["ms2_notes"]),
+            "ms1": normalize_note_value(state.get("ms1_note"), notes_cfg["ms1_notes"]),
+            "ms2": normalize_note_value(state.get("ms2_note"), notes_cfg["ms2_notes"]),
             "other": state.get("other_note", []),
             "analyst_notes": state.get("analyst_notes", ""),
             "id_notes": state.get("id_notes", ""),
@@ -1056,509 +997,478 @@ def build_dash_app(
         state["flush_error"] = None
         return state
 
-    # main figures for ms data display
-    def _make_ms1_figure(state, yaxis_scale="linear"):
-        # lcmsruns_color_map is resolved once at factory scope from _resolved_cfg
-        row = _compound_row(state["compound_idx"])
-        compound_display_idx = state["compound_idx"]+1
-        mz_rt_uid = row["mz_rt_uid"]
-        adduct = row.get("adduct", "")
-        inchi_key = row.get("inchi_key", "")
-        rt_min, rt_max = state["rt_min"], state["rt_max"]
-        x_window_min, x_window_max = _default_plot_bounds_from_row(row)
-
+    # ------------------------------------------------------------------
+    # MS1 figure
+    #
+    # The figure is split into two layers so that RT-bound edits can be sent
+    # as a small dash.Patch instead of re-sending every EIC:
+    #
+    #   static layer  - EIC lines (grouped by color), the merged hover/click
+    #                   trace, the max-EIC slider trace, title, axes and the
+    #                   isomer legend.  Depends on (compound, highlighted
+    #                   files, EIC span) - NOT on rt_min / rt_max.
+    #   RT layer      - everything that depends on rt_min / rt_max: y-range,
+    #                   isomer boxes (heights + overlap color), atlas /
+    #                   suggested lines (heights), MS2 scan markers and the
+    #                   two editable green shapes.
+    #
+    # Trace order:  [isomer boxes][static traces][atlas/suggested lines][ms2 markers]
+    # A full render and (previous full render + Patch) are built from the same
+    # _ms1_rt_layer() output, so they cannot drift apart (see
+    # tests/test_analysis_gui.py).
+    # ------------------------------------------------------------------
+    def _ms1_prepared(mz_rt_uid):
+        """Per-compound MS1 arrays + per-file metadata, computed once (LRU)."""
+        cached = _lru_get(_ms1_prep_cache, mz_rt_uid)
+        if cached is not None:
+            return cached
         sub = ms1_by_compound.get(mz_rt_uid, pd.DataFrame())
-
-        if sub.empty:
-            fig = go.Figure()
-            fig.update_layout(
-                title=f"No MS1 data available for {row.get('label', 'Unknown')} ({adduct})",
-                xaxis_title="Retention Time (min)",
-                yaxis_title="Intensity",
-                xaxis_range=[x_window_min, x_window_max],
-                yaxis_type=yaxis_scale,
-                yaxis_range=[0, 1],
-            )
-            return fig
-
-        y_min_positive_data = None
-        _rt_peak = row.get("rt_peak", np.nan)
-        try:
-            _rt_peak = float(_rt_peak) if _rt_peak is not None and not (isinstance(_rt_peak, float) and np.isnan(_rt_peak)) else np.nan
-        except (TypeError, ValueError):
-            _rt_peak = np.nan
-        _eic_rt_lo = min(state["rt_min"], _rt_peak) if not np.isnan(_rt_peak) else state["rt_min"]
-        _eic_rt_hi = max(state["rt_max"], _rt_peak) if not np.isnan(_rt_peak) else state["rt_max"]
-        expanded_rt_min = _eic_rt_lo - 1
-        expanded_rt_max = _eic_rt_hi + 1
-
-        def _compute_y_max_in_range(df, lo, hi):
-            y_max = 1.0
-            for r in df.itertuples(index=False):
-                rt_arr = getattr(r, "spec_rts", None)
-                int_arr = getattr(r, "spec_ints", None)
-                if rt_arr is None or len(rt_arr) == 0:
-                    continue
-                mask = (rt_arr >= lo) & (rt_arr <= hi)
-                if np.any(mask):
-                    local_max = float(np.nanmax(int_arr[mask]))
-                    if local_max > y_max:
-                        y_max = local_max
-            return y_max
-
-        cached_y = state.get("cached_y_max")
-        old_exp_min = state.get("cached_exp_rt_min")
-        old_exp_max = state.get("cached_exp_rt_max")
-        force_recalc = state.get("force_y_recalc", False)
-
-        if force_recalc or cached_y is None or old_exp_min is None or old_exp_max is None:
-            y_max_data = _compute_y_max_in_range(sub, expanded_rt_min, expanded_rt_max)
-        elif expanded_rt_min > old_exp_min or expanded_rt_max < old_exp_max:
-            y_max_data = _compute_y_max_in_range(sub, expanded_rt_min, expanded_rt_max)
-        elif expanded_rt_min < old_exp_min or expanded_rt_max > old_exp_max:
-            y_max_data = cached_y
-            if expanded_rt_min < old_exp_min:
-                sliver_max = _compute_y_max_in_range(sub, expanded_rt_min, old_exp_min)
-                y_max_data = max(y_max_data, sliver_max)
-            if expanded_rt_max > old_exp_max:
-                sliver_max = _compute_y_max_in_range(sub, old_exp_max, expanded_rt_max)
-                y_max_data = max(y_max_data, sliver_max)
-        else:
-            y_max_data = cached_y
-
-        # Update cache with current window bounds and computed y_max
-        state["cached_y_max"] = y_max_data
-        state["cached_exp_rt_min"] = expanded_rt_min
-        state["cached_exp_rt_max"] = expanded_rt_max
-        if yaxis_scale == "log":
-            y_min_positive_data = y_max_data / 1e6  # Assume 6 orders of magnitude dynamic range
-        y_upper_bound = max(y_max_data * 1.1, 1.0)
-        y_marker_band = y_upper_bound * 0.03
-        if yaxis_scale == "log":
-            log_min = max((y_min_positive_data or 1e-6), 1e-12)
-            y_range = [np.log10(log_min), np.log10(y_upper_bound)]
-        else:
-            y_range = [-y_marker_band, y_upper_bound]
-
-        # Initialize figure before adding traces
-        fig = go.Figure()
-
-        # Cache isomer metadata, draw rectangles separately
-        compound_idx = state["compound_idx"]
-        if compound_idx in isomer_string_cache:
-            resolved_isomers = isomer_string_cache[compound_idx]
-        else:
-            resolved_isomers = []
-            try:
-                isomers = json.loads(row.get("isomers", "[]"))
-                if isomers:
-                    # Build resolved_isomers list (cache this part)
-                    for iso in isomers:
-                        iso_inchi = iso.get('inchi_key', '')
-                        iso_name = iso.get('label', '')
-                        iso_adduct = iso.get('adduct', '')
-                        iso_rt = iso.get('rt', None)
-                        iso_mz = iso.get('mz', None)
-                        mask = (
-                            (manual_curation_df["inchi_key"] == iso_inchi) &
-                            (manual_curation_df["label"] == iso_name) &
-                            (manual_curation_df["adduct"] == iso_adduct)
-                        )
-                        isomer_match = manual_curation_df[mask]
-                        if len(isomer_match) > 1:
-                            logger.warning(f"Multiple isomer matches for {iso_name} {iso_adduct}")
-                        if isomer_match.empty:
-                            continue
-                        if "remove" in isomer_match.iloc[0]["ms1_notes"].lower():
-                            continue
-                        iso_df_idx = isomer_match.index[0]
-                        iso_pos_idx = manual_curation_df.index.get_loc(iso_df_idx)
-                        resolved_isomers.append({
-                            "display_idx": iso_pos_idx + 1,  # 1-based for display
-                            "name": iso_name,
-                            "adduct": iso_adduct,
-                            "rt": iso_rt,
-                            "mz": iso_mz,
-                            "df_idx": iso_df_idx,
-                        })
-            except Exception as exc:
-                traceback.print_exc()
-                logger.error(f"Isomer detection failed with {exc}")
-            # Store in cache (metadata only, not rectangles)
-            isomer_string_cache[compound_idx] = resolved_isomers
-        
-        isomer_lines = []
-        if resolved_isomers:
-            def _window_overlaps(a_min, a_max, b_min, b_max):
-                return (a_min <= b_max) and (b_min <= a_max)
-            current_rt_min = state["rt_min"]
-            current_rt_max = state["rt_max"]
-            for i, iso in enumerate(resolved_isomers):
-                # Read RT bounds live from manual_curation_df so edits made to an
-                # isomer are reflected immediately, even when metadata is cached.
-                try:
-                    iso_row = manual_curation_df.loc[iso["df_idx"]]
-                    iso_rt_min = float(iso_row["rt_min"])
-                    iso_rt_max = float(iso_row["rt_max"])
-                except Exception:
-                    continue
-
-                overlaps = _window_overlaps(iso_rt_min, iso_rt_max, current_rt_min, current_rt_max)
-                if not overlaps:
-                    for j, other in enumerate(resolved_isomers):
-                        if i == j:
-                            continue
-                        try:
-                            other_row = manual_curation_df.loc[other["df_idx"]]
-                            other_rt_min = float(other_row["rt_min"])
-                            other_rt_max = float(other_row["rt_max"])
-                        except Exception:
-                            continue
-                        if _window_overlaps(iso_rt_min, iso_rt_max, other_rt_min, other_rt_max):
-                            overlaps = True
-                            break
-                fillcolor = "rgba(255,96,96,0.28)" if overlaps else "rgba(150,205,255,0.28)"
-                fig.add_trace(go.Scatter(
-                    x=[iso_rt_min, iso_rt_min, iso_rt_max, iso_rt_max, iso_rt_min],
-                    y=[0.0, y_upper_bound, y_upper_bound, 0.0, 0.0],
-                    mode="lines",
-                    fill="toself",
-                    fillcolor=fillcolor,
-                    line=dict(width=0, color="rgba(0,0,0,0)"),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ))
-                rt_str = f"{iso['rt']:.3f}"
-                mz_str = f"{iso['mz']:.4f}"
-                # iso['display_idx'] is now 1-based
-                isomer_lines.append(
-                    f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
-                    f"RT: {rt_str}  |  m/z: {mz_str}"
-                )
-        if isomer_lines:
-            #sort all isomers by ascending RT
-            isomer_lines.sort(key=lambda x: float(x.split("RT: ")[1].split("  |")[0]))
-
-        # Add max EIC trace after isomer rectangles so it appears in the rangeslider
-        max_eic_rt = row.get("max_eic_rt", [])
-        max_eic_intensity = row.get("max_eic_intensity", [])
-        if len(max_eic_rt) > 0 and len(max_eic_intensity) > 0 and len(max_eic_rt) == len(max_eic_intensity):
-            # Filter to only points above 5% of max intensity
-            try:
-                max_int = max(max_eic_intensity)
-                threshold = 0.03 * max_int
-                filtered_points = [(x, y) for x, y in zip(max_eic_rt, max_eic_intensity) if y > threshold]
-                if filtered_points:
-                    filtered_rt, filtered_int = zip(*filtered_points)
-                    fig.add_trace(go.Scatter(
-                        x=filtered_rt,
-                        y=filtered_int,
-                        mode="lines",
-                        name="Max EIC (slider)",
-                        line=dict(color="#0074D9", width=1, dash="dot"),
-                        opacity=1.0,
-                        hoverinfo="skip",
-                        showlegend=False
-                    ))
-            except Exception:
-                pass
-        
-        # Now add MS1 data traces
-        highlighted_files = state.get("highlighted_files") or []
-        # expanded_rt_min/max already computed above (incorporates rt_peak)
-
-        # Keep an invisible file-specific trace for hover/click events, then group other traces (for speed)
-        color_groups: dict = {}
-        highlight_groups: dict = {}
-
-        ms1_file_count = 0
+        files = []
         for r in sub.itertuples(index=False):
             fn = getattr(r, "filename", "unknown")
-            short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fn).split(".")[0].split("_")[11:]))
-            color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
-            is_highlighted = fn in highlighted_files
-
-            # spec_rts/spec_ints are pre-converted to numpy arrays at startup
             rt_arr = getattr(r, "spec_rts", None)
             int_arr = getattr(r, "spec_ints", None)
-
             if rt_arr is None or len(rt_arr) == 0:
                 logger.warning(f"MS1 data for {fn} has no RT points; skipping trace")
                 continue
+            short_name = re.sub(r"_ms[12]_(?:neg|pos)$", "", "_".join(os.path.basename(fn).split(".")[0].split("_")[11:]))
+            color = next((c for k, c in lcmsruns_color_map.items() if k.lower() in fn.lower()), "gray")
+            files.append({
+                "fn": fn,
+                "short": short_name,
+                "color": color,
+                "rt": np.asarray(rt_arr, dtype=np.float64),
+                "int": np.asarray(int_arr, dtype=np.float64),
+            })
+        if files:
+            all_rt = np.concatenate([f["rt"] for f in files])
+            all_int = np.concatenate([f["int"] for f in files])
+        else:
+            all_rt = all_int = np.array([], dtype=np.float64)
+        prep = {"files": files, "all_rt": all_rt, "all_int": all_int}
+        return _lru_put(_ms1_prep_cache, mz_rt_uid, prep, maxsize=16)
 
-            # Filter for RT window
-            mask = (rt_arr >= expanded_rt_min) & (rt_arr <= expanded_rt_max)
-            filt_rt = rt_arr[mask]
-            filt_int = int_arr[mask]
+    def _y_max_in_range(prep, lo, hi):
+        rt, it = prep["all_rt"], prep["all_int"]
+        if rt.size == 0:
+            return 1.0
+        vals = it[(rt >= lo) & (rt <= hi)]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return 1.0
+        return max(1.0, float(vals.max()))
 
-            if len(filt_rt) == 0:
-                continue
-
-            ms1_file_count += 1
-
-            _MAX_HOVER_PTS = 75
-            _step = max(1, len(filt_rt) // _MAX_HOVER_PTS)
-            hover_rt = filt_rt[::_step]
-            hover_int = filt_int[::_step]
-            fig.add_trace(go.Scattergl(
-                x=hover_rt,
-                y=hover_int,
-                mode="lines",
-                line=dict(color=color, width=3),
-                opacity=0.001,
-                customdata=[[fn]] * len(hover_rt),
-                hovertemplate=f"File: {short_name}<extra></extra>",
-                showlegend=False,
-            ))
-
-            filt_rt_list = filt_rt.tolist()
-            filt_int_list = filt_int.tolist()
-            filt_rt_list.append(None)
-            filt_int_list.append(None)
-
-            if is_highlighted:
-                if color not in highlight_groups:
-                    highlight_groups[color] = [[], []]
-                highlight_groups[color][0].extend(filt_rt_list)
-                highlight_groups[color][1].extend(filt_int_list)
-            else:
-                if color not in color_groups:
-                    color_groups[color] = [[], []]
-                color_groups[color][0].extend(filt_rt_list)
-                color_groups[color][1].extend(filt_int_list)
-
-        # --- Emit visible color-group traces (normal weight) ---
-        for color, (xs, ys) in color_groups.items():
-            fig.add_trace(go.Scattergl(
-                x=xs,
-                y=ys,
-                mode="lines",
-                line=dict(color=color, width=1.5),
-                hoverinfo="skip",
-                showlegend=False,
-            ))
-
-        # --- Emit visible highlight overlay traces (thick) ---
-        for color, (xs, ys) in highlight_groups.items():
-            fig.add_trace(go.Scattergl(
-                x=xs,
-                y=ys,
-                mode="lines",
-                line=dict(color=color, width=5.0),
-                hoverinfo="skip",
-                showlegend=False,
-            ))
-
-        logger.debug(
-            f"MS1 traces: {ms1_file_count} files → "
-            f"{len(color_groups)} color-group traces + "
-            f"{len(highlight_groups)} highlight traces + "
-            f"{ms1_file_count} invisible hover/click traces"
-        )
-
-        # Atlas RT peak line (purple, static)
-        fig.add_trace(go.Scatter(
-            x=[row["atlas_rt_peak"], row["atlas_rt_peak"]],
-            y=[0.0, y_upper_bound],
-            mode="lines",
-            opacity=0.75,
-            line=dict(color="purple", width=3.5),
-            showlegend=False,
-            hoverinfo="skip",
-        ))
-
-        # Suggested RT lines (orange, static)
-        if pd.notnull(row.get("suggested_rt_min")):
-            fig.add_trace(go.Scatter(
-                x=[row["suggested_rt_min"], row["suggested_rt_min"]],
-                y=[0.0, y_upper_bound],
-                mode="lines",
-                opacity=0.75,
-                line=dict(color="orange", width=3.5),
-                showlegend=False,
-                hoverinfo="skip",
-            ))
-        if pd.notnull(row.get("suggested_rt_max")):
-            fig.add_trace(go.Scatter(
-                x=[row["suggested_rt_max"], row["suggested_rt_max"]],
-                y=[0.0, y_upper_bound],
-                mode="lines",
-                opacity=0.75,
-                line=dict(color="orange", width=3.5, dash="dash"),
-                showlegend=False,
-                hoverinfo="skip",
-            ))
-
-        # RT min (green, solid, editable): always span full y-axis
-        fig.add_shape(
-            type="line", x0=rt_min, x1=rt_min, y0=0, y1=1,
-            xref="x", yref="paper",
-            opacity=0.75,
-            line=dict(color="green", width=9),
-            name="RT min", editable=True,
-        )
-
-        # RT max (green, dashed, editable): always span full y-axis
-        fig.add_shape(
-            type="line", x0=rt_max, x1=rt_max, y0=0, y1=1,
-            xref="x", yref="paper",
-            opacity=0.75,
-            line=dict(color="green", width=9, dash="dash"),
-            name="RT max", editable=True,
-        )
-
-        ms1_title_text = (
-            f"<span style='font-size:1.2em'><b>[{compound_display_idx}] {row['label']} | {adduct} | {inchi_key}</b></span><br>"
-            f"Atlas RT: {row['atlas_rt_peak']:.4f}  |  AutoID RT: {row['rt_peak']:.4f}  |  RT Δ: {row['rt_error']:.3f}<br>"
-            f"Atlas m/z: {row['atlas_mz']:.4f}  |  AutoID M/Z: {row['mz']:.4f}  |  M/Z ppm Δ: {row['mz_error']:.2f}"
-        )
-
-        # Calculate rangeslider min/max based on atlas_rt_min and atlas_rt_max
-        atlas_rt_min = row.get("atlas_rt_min", x_window_min)
-        atlas_rt_max = row.get("atlas_rt_max", x_window_max)
+    def _expanded_window(row, state):
+        _rt_peak = row.get("rt_peak", np.nan)
         try:
-            slider_min = max(0, float(atlas_rt_min) - 5)
+            _rt_peak = float(_rt_peak) if _rt_peak is not None else np.nan
+        except (TypeError, ValueError):
+            _rt_peak = np.nan
+        lo = min(state["rt_min"], _rt_peak) if not np.isnan(_rt_peak) else state["rt_min"]
+        hi = max(state["rt_max"], _rt_peak) if not np.isnan(_rt_peak) else state["rt_max"]
+        return float(lo) - 1, float(hi) + 1
+
+    def _ms1_span(row, state):
+        """RT span for which EIC lines are sent: default view ∪ expanded RT window,
+        snapped outward to a coarse grid so small RT nudges keep the same span."""
+        xw_lo, xw_hi = _default_plot_bounds_from_row(row)
+        ex_lo, ex_hi = _expanded_window(row, state)
+        lo = math.floor(min(xw_lo, ex_lo) / _SPAN_GRID) * _SPAN_GRID
+        hi = math.ceil(max(xw_hi, ex_hi) / _SPAN_GRID) * _SPAN_GRID
+        return [round(lo, 4), round(hi, 4)]
+
+    def _resolve_isomers(compound_idx, row):
+        """Isomer metadata for the compound (cached; RT bounds are read live)."""
+        with _cache_lock:
+            if compound_idx in isomer_string_cache:
+                return isomer_string_cache[compound_idx]
+        resolved_isomers = []
+        try:
+            isomers = json.loads(row.get("isomers", "[]"))
+            for iso in isomers or []:
+                iso_inchi = iso.get('inchi_key', '')
+                iso_name = iso.get('label', '')
+                iso_adduct = iso.get('adduct', '')
+                mask = (
+                    (manual_curation_df["inchi_key"] == iso_inchi) &
+                    (manual_curation_df["label"] == iso_name) &
+                    (manual_curation_df["adduct"] == iso_adduct)
+                )
+                isomer_match = manual_curation_df[mask]
+                if len(isomer_match) > 1:
+                    logger.warning(f"Multiple isomer matches for {iso_name} {iso_adduct}")
+                if isomer_match.empty:
+                    continue
+                if "remove" in str(isomer_match.iloc[0]["ms1_notes"]).lower():
+                    continue
+                iso_df_idx = isomer_match.index[0]
+                iso_pos_idx = manual_curation_df.index.get_loc(iso_df_idx)
+                resolved_isomers.append({
+                    "display_idx": iso_pos_idx + 1,  # 1-based for display
+                    "name": iso_name,
+                    "adduct": iso_adduct,
+                    "rt": iso.get('rt', None),
+                    "mz": iso.get('mz', None),
+                    "df_idx": iso_df_idx,
+                })
+        except Exception as exc:
+            traceback.print_exc()
+            logger.error(f"Isomer detection failed with {exc}")
+        with _cache_lock:
+            isomer_string_cache[compound_idx] = resolved_isomers
+        return resolved_isomers
+
+    def _ms1_static_traces(mz_rt_uid, highlighted, span):
+        """EIC color-group traces + one merged hover/click trace (LRU cached)."""
+        key = (mz_rt_uid, tuple(highlighted), tuple(span))
+        cached = _lru_get(_ms1_static_cache, key)
+        if cached is not None:
+            return cached
+        prep = _ms1_prepared(mz_rt_uid)
+        lo, hi = span
+        highlighted_set = set(highlighted)
+        nan = np.array([np.nan])
+        color_groups: OrderedDict[str, list] = OrderedDict()
+        highlight_groups: OrderedDict[str, list] = OrderedDict()
+        hx, hy, hcd, htext = [], [], [], []
+        n_files = 0
+        for i, f in enumerate(prep["files"]):
+            m = (f["rt"] >= lo) & (f["rt"] <= hi)
+            frt, fint = f["rt"][m], f["int"][m]
+            if frt.size == 0:
+                continue
+            n_files += 1
+            target = highlight_groups if f["fn"] in highlighted_set else color_groups
+            g = target.setdefault(f["color"], [[], []])
+            g[0].extend((frt, nan))
+            g[1].extend((fint, nan))
+            # Hover/click points only where this file has signal (>= 5% of its
+            # max in the span): baseline points of hundreds of overlapping files
+            # cannot identify a file anyway, and per-point labels are costly.
+            finite = np.isfinite(fint)
+            fmax = fint[finite].max() if finite.any() else 0.0
+            sig = finite & (fint >= 0.05 * fmax)
+            if not sig.any():
+                continue
+            hrt, hint = frt[sig], fint[sig]
+            step = max(1, hrt.size // _MAX_HOVER_PTS)
+            px, py = hrt[::step], hint[::step]
+            hx.extend((px, nan))
+            hy.extend((py, nan))
+            hcd.extend((np.full(px.size, i, dtype=np.int32), np.array([-1], dtype=np.int32)))
+            htext.extend([f["short"]] * px.size + [""])
+
+        traces = []
+        if hx:
+            traces.append({
+                "type": "scattergl",
+                "x": _f32(np.concatenate(hx), 4),
+                "y": _f32(np.concatenate(hy), 0),
+                "mode": "lines",
+                "line": {"color": "gray", "width": 3},
+                "opacity": 0.001,
+                "customdata": np.concatenate(hcd),
+                "text": htext,
+                "hovertemplate": "File: %{text}<extra></extra>",
+                "showlegend": False,
+            })
+        for color, (xs, ys) in color_groups.items():
+            traces.append({
+                "type": "scattergl", "x": _f32(np.concatenate(xs), 4), "y": _f32(np.concatenate(ys), 0),
+                "mode": "lines", "line": {"color": color, "width": 1.5},
+                "hoverinfo": "skip", "showlegend": False,
+            })
+        for color, (xs, ys) in highlight_groups.items():
+            traces.append({
+                "type": "scattergl", "x": _f32(np.concatenate(xs), 4), "y": _f32(np.concatenate(ys), 0),
+                "mode": "lines", "line": {"color": color, "width": 5.0},
+                "hoverinfo": "skip", "showlegend": False,
+            })
+        logger.debug(f"MS1 static layer: {n_files} files → {len(traces)} traces")
+        return _lru_put(_ms1_static_cache, key, traces, maxsize=8)
+
+    def _max_eic_trace(row):
+        max_eic_rt = row.get("max_eic_rt", [])
+        max_eic_intensity = row.get("max_eic_intensity", [])
+        try:
+            if max_eic_rt is None or max_eic_intensity is None:
+                return None
+            x = np.asarray(max_eic_rt, dtype=np.float64)
+            y = np.asarray(max_eic_intensity, dtype=np.float64)
+            if x.size == 0 or x.size != y.size:
+                return None
+            # Only points above 3% of max intensity
+            keep = y > 0.03 * np.nanmax(y)
+            if not keep.any():
+                return None
+            return {
+                "type": "scatter", "x": _f32(x[keep], 4), "y": _f32(y[keep], 0), "mode": "lines",
+                "name": "Max EIC (slider)", "line": {"color": "#0074D9", "width": 1, "dash": "dot"},
+                "opacity": 1.0, "hoverinfo": "skip", "showlegend": False,
+            }
+        except Exception:
+            return None
+
+    def _ms1_rt_layer(row, state, yaxis_scale, resolved_isomers, prep):
+        """Every MS1 element that depends on rt_min / rt_max."""
+        rt_min, rt_max = float(state["rt_min"]), float(state["rt_max"])
+        exp_lo, exp_hi = _expanded_window(row, state)
+        y_max_data = _y_max_in_range(prep, exp_lo, exp_hi)
+        y_upper = max(y_max_data * 1.1, 1.0)
+        band = y_upper * 0.03
+        if yaxis_scale == "log":
+            log_min = max(y_max_data / 1e6, 1e-12)  # assume 6 orders of magnitude dynamic range
+            y_range = [float(np.log10(log_min)), float(np.log10(y_upper))]
+        else:
+            y_range = [-band, y_upper]
+
+        def _overlaps(a_min, a_max, b_min, b_max):
+            return (a_min <= b_max) and (b_min <= a_max)
+
+        iso_bounds = []
+        for iso in resolved_isomers:
+            try:
+                iso_row = manual_curation_df.loc[iso["df_idx"]]
+                iso_bounds.append((float(iso_row["rt_min"]), float(iso_row["rt_max"])))
+            except Exception:
+                iso_bounds.append(None)
+
+        iso_traces = []
+        for i, b in enumerate(iso_bounds):
+            if b is None:
+                # Placeholder keeps trace indices stable for Patch updates.
+                iso_traces.append({"type": "scatter", "x": [], "y": [], "mode": "lines",
+                                   "showlegend": False, "hoverinfo": "skip"})
+                continue
+            lo, hi = b
+            overlap = _overlaps(lo, hi, rt_min, rt_max) or any(
+                j != i and o is not None and _overlaps(lo, hi, o[0], o[1]) for j, o in enumerate(iso_bounds)
+            )
+            iso_traces.append({
+                "type": "scatter",
+                "x": [lo, lo, hi, hi, lo],
+                "y": [0.0, y_upper, y_upper, 0.0, 0.0],
+                "mode": "lines",
+                "fill": "toself",
+                "fillcolor": "rgba(255,96,96,0.28)" if overlap else "rgba(150,205,255,0.28)",
+                "line": {"width": 0, "color": "rgba(0,0,0,0)"},
+                "showlegend": False,
+                "hoverinfo": "skip",
+            })
+
+        def _vline(x, color, dash=None):
+            line = {"color": color, "width": 3.5}
+            if dash:
+                line["dash"] = dash
+            return {"type": "scatter", "x": [x, x], "y": [0.0, y_upper], "mode": "lines", "opacity": 0.75,
+                    "line": line, "showlegend": False, "hoverinfo": "skip"}
+
+        line_traces = [_vline(float(row["atlas_rt_peak"]), "purple")]
+        if pd.notnull(row.get("suggested_rt_min")):
+            line_traces.append(_vline(float(row["suggested_rt_min"]), "orange"))
+        if pd.notnull(row.get("suggested_rt_max")):
+            line_traces.append(_vline(float(row["suggested_rt_max"]), "orange", dash="dash"))
+
+        # MS2 scan RT markers: top-100 by score within the expanded window
+        all_markers = ms2_markers_by_compound.get(row["mz_rt_uid"], [])
+        marker_x = [rt for rt, _ in all_markers if exp_lo <= rt <= exp_hi][:100]
+        marker_trace = {
+            "type": "scatter", "x": marker_x, "y": [-band / 2] * len(marker_x), "mode": "markers",
+            "marker": {"color": "black", "size": 10, "symbol": "triangle-up"},
+            "cliponaxis": False, "showlegend": False, "hoverinfo": "skip",
+        }
+
+        shapes = [
+            {"type": "line", "x0": rt_min, "x1": rt_min, "y0": 0, "y1": 1, "xref": "x", "yref": "paper",
+             "opacity": 0.75, "line": {"color": "green", "width": 9}, "name": "RT min", "editable": True},
+            {"type": "line", "x0": rt_max, "x1": rt_max, "y0": 0, "y1": 1, "xref": "x", "yref": "paper",
+             "opacity": 0.75, "line": {"color": "green", "width": 9, "dash": "dash"}, "name": "RT max", "editable": True},
+        ]
+        return {"iso": iso_traces, "lines": line_traces, "marker": marker_trace, "shapes": shapes, "y_range": y_range}
+
+    def _ms1_static_count(row, state):
+        """Number of traces between the isomer boxes and the vertical lines."""
+        prep_traces = _ms1_static_traces(row["mz_rt_uid"], list(state.get("highlighted_files") or []), _ms1_span(row, state))
+        return len(prep_traces) + (1 if _max_eic_trace(row) is not None else 0)
+
+    def _isomer_annotations(resolved_isomers):
+        lines = []
+        for iso in resolved_isomers:
+            try:
+                rt_val, mz_val = float(iso["rt"]), float(iso["mz"])
+            except (TypeError, ValueError):
+                continue
+            lines.append((rt_val, (f"[{iso['display_idx']}] {iso['name']} ({iso['adduct']})  |  "
+                                  f"RT: {rt_val:.3f}  |  m/z: {mz_val:.4f}")))
+        if not lines:
+            return []
+        lines.sort(key=lambda t: t[0])
+        return [
+            {"text": "<b>Isomers</b>", "xref": "paper", "yref": "paper", "x": 0.99, "y": 0.99,
+             "xanchor": "right", "yanchor": "bottom", "showarrow": False,
+             "font": {"size": 15}, "align": "right"},
+            {"text": "<br>".join(t for _, t in lines), "xref": "paper", "yref": "paper", "x": 0.99, "y": 0.99,
+             "xanchor": "right", "yanchor": "top", "showarrow": False, "font": {"size": 14}, "align": "right",
+             "bgcolor": "rgba(255,255,255,0.7)", "bordercolor": "rgba(100,100,100,0.4)", "borderwidth": 1,
+             "borderpad": 6},
+        ]
+
+    def _fmt(v, spec):
+        try:
+            return format(float(v), spec)
+        except (TypeError, ValueError):
+            return "—"
+
+    def _make_ms1_figure(state, yaxis_scale="linear"):
+        """Full MS1 figure (plain dict, no plotly validation)."""
+        row = _compound_row(state["compound_idx"])
+        adduct = row.get("adduct", "")
+        x_window_min, x_window_max = _default_plot_bounds_from_row(row)
+        mz_rt_uid = row["mz_rt_uid"]
+        prep = _ms1_prepared(mz_rt_uid)
+
+        if not prep["files"]:
+            return {
+                "data": [],
+                "layout": {
+                    "template": _TEMPLATE_JSON,
+                    "title": {"text": f"No MS1 data available for {row.get('label', 'Unknown')} ({adduct})", "x": 0.5},
+                    "xaxis": {"title": {"text": "Retention time (min)"}, "range": [x_window_min, x_window_max]},
+                    "yaxis": {"title": {"text": "Intensity"}, "type": yaxis_scale, "range": [0, 1]},
+                },
+            }
+
+        resolved_isomers = _resolve_isomers(state["compound_idx"], row)
+        span = _ms1_span(row, state)
+        static = _ms1_static_traces(mz_rt_uid, list(state.get("highlighted_files") or []), span)
+        max_eic = _max_eic_trace(row)
+        rt_layer = _ms1_rt_layer(row, state, yaxis_scale, resolved_isomers, prep)
+
+        data = list(rt_layer["iso"])
+        if max_eic is not None:
+            data.append(max_eic)
+        data.extend(static)
+        data.extend(rt_layer["lines"])
+        data.append(rt_layer["marker"])
+
+        title_text = (
+            f"<span style='font-size:1.15em'><b>[{state['compound_idx'] + 1}] {row['label']}</b>"
+            f"  ·  {adduct}  ·  <span style='color:#616e7c'>{row.get('inchi_key', '')}</span></span><br>"
+            f"Atlas RT {_fmt(row['atlas_rt_peak'], '.4f')}  |  AutoID RT {_fmt(row['rt_peak'], '.4f')}  |  "
+            f"RT Δ {_fmt(row['rt_error'], '.3f')}<br>"
+            f"Atlas m/z {_fmt(row['atlas_mz'], '.4f')}  |  AutoID m/z {_fmt(row['mz'], '.4f')}  |  "
+            f"ppm Δ {_fmt(row['mz_error'], '.2f')}"
+        )
+
+        try:
+            slider_min = max(0, float(row.get("atlas_rt_min", x_window_min)) - 5)
         except Exception:
             slider_min = 0
         try:
-            slider_max = min(20, float(atlas_rt_max) + 5)
+            slider_max = min(20, float(row.get("atlas_rt_max", x_window_max)) + 5)
         except Exception:
             slider_max = 20
 
-        fig.update_layout(
-            title=dict(text=ms1_title_text, x=0.5, xanchor="center", font=dict(size=18)),
-            xaxis_title="RT",
-            yaxis_title="Intensity",
-            hovermode="closest",
-            showlegend=False,
-            margin=dict(l=50, r=20, t=100, b=40),
-            dragmode="zoom",
-            plot_bgcolor="white",
-            uirevision=str(state["compound_idx"]),
-            xaxis=dict(
-                rangeslider=dict(
-                    visible=True,
-                    range=[slider_min, slider_max],
-                    thickness=0.12,
-                ),
-                showgrid=False,
-                zeroline=False,
-                range=[x_window_min, x_window_max],
-                title_font=dict(size=18),
-                tickfont=dict(size=15),
-                autorange=False,
-            ),
-            yaxis=dict(
-                showgrid=False,
-                zeroline=False,
-                type=yaxis_scale,
-                range=y_range,
-                fixedrange=False,
-                title_font=dict(size=18),
-                tickfont=dict(size=15),
-                autorange=False,
-            ),
-        )
+        layout = {
+            "template": _TEMPLATE_JSON,
+            "title": {"text": title_text, "x": 0.5, "xanchor": "center", "font": {"size": 15}},
+            "hovermode": "closest",
+            "showlegend": False,
+            "margin": {"l": 64, "r": 20, "t": 96, "b": 40},
+            "dragmode": "zoom",
+            "uirevision": str(state["compound_idx"]),
+            "xaxis": {
+                "rangeslider": {"visible": True, "range": [slider_min, slider_max], "thickness": 0.12,
+                                "bgcolor": "#f5f7fa", "bordercolor": "#e4e7eb", "borderwidth": 1},
+                "range": [x_window_min, x_window_max],
+                "autorange": False,
+                "title": {"text": "Retention time (min)"},
+            },
+            "yaxis": {
+                "type": yaxis_scale,
+                "range": rt_layer["y_range"],
+                "fixedrange": False,
+                "autorange": False,
+                "title": {"text": "Intensity"},
+            },
+            "shapes": rt_layer["shapes"],
+            "annotations": _isomer_annotations(resolved_isomers),
+        }
+        return {"data": data, "layout": layout}
 
-        # Isomer annotation box in top-right corner (50% transparent background)
-        if isomer_lines:
-            isomer_annotation_text = "<br>".join(isomer_lines)
-            # Label above the box
-            fig.add_annotation(
-                text="<b>Isomers</b>",
-                xref="paper", yref="paper",
-                x=0.99, y=0.99,
-                xanchor="right", yanchor="bottom",
-                showarrow=False,
-                font=dict(size=18, color="black"),
-                align="right",
-                bgcolor="rgba(0,0,0,0)",
-                bordercolor="rgba(0,0,0,0)",
-                borderwidth=0,
-                borderpad=2,
-            )
-            # Box with isomer details (slightly larger font)
-            fig.add_annotation(
-                text=isomer_annotation_text,
-                xref="paper", yref="paper",
-                x=0.99, y=0.99,
-                xanchor="right", yanchor="top",
-                showarrow=False,
-                font=dict(size=16, color="black"),
-                align="right",
-                bgcolor="rgba(255,255,255,0.5)",
-                bordercolor="rgba(100,100,100,0.5)",
-                borderwidth=1,
-                borderpad=6,
-            )
+    def _make_ms1_rt_patch(state, yaxis_scale="linear"):
+        """Patch that turns an MS1 figure for the same compound/highlights/span/scale
+        into the figure _make_ms1_figure(state) would build."""
+        row = _compound_row(state["compound_idx"])
+        prep = _ms1_prepared(row["mz_rt_uid"])
+        resolved_isomers = _resolve_isomers(state["compound_idx"], row)
+        rt_layer = _ms1_rt_layer(row, state, yaxis_scale, resolved_isomers, prep)
+        n_iso = len(rt_layer["iso"])
+        base = n_iso + _ms1_static_count(row, state)
+        patch = Patch()
+        for i, t in enumerate(rt_layer["iso"]):
+            patch["data"][i] = t
+        for j, t in enumerate(rt_layer["lines"]):
+            patch["data"][base + j] = t
+        patch["data"][base + len(rt_layer["lines"])] = rt_layer["marker"]
+        patch["layout"]["shapes"] = rt_layer["shapes"]
+        patch["layout"]["yaxis"]["range"] = rt_layer["y_range"]
+        return patch
 
-        # MS2 scan RT markers: top-100 by score
-        all_markers = ms2_markers_by_compound.get(mz_rt_uid, [])
-        in_window = [rt for rt, _ in all_markers if expanded_rt_min <= rt <= expanded_rt_max]
-        ms2_marker_rts = in_window[:100]
-        if ms2_marker_rts:
-            marker_y = -y_marker_band / 2
-            fig.add_trace(go.Scatter(
-                x=ms2_marker_rts,
-                y=[marker_y] * len(ms2_marker_rts),
-                mode="markers",
-                marker=dict(color="black", size=10, symbol="triangle-up"),
-                cliponaxis=False,
-                showlegend=False,
-                hoverinfo="skip",
-            ))
-
-        return fig
-
-    def _add_ms2_stick_traces(fig, mz_vals, intensities, hover_label, colors=None, default_color="red", line_width_px=3):
-        """Add MS2 peak sticks with fixed pixel width. Handles NaNs by ignoring them."""
-        if mz_vals is None or intensities is None:
-            return
-
-        def _as_float_or_nan(v):
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return np.nan
-
-        grouped = {}
-        # Use provided colors if available, otherwise everything gets the default_color
-        if colors is not None and len(colors) == len(mz_vals):
-            for mz, intensity, color in zip(mz_vals, intensities, colors):
-                mz = _as_float_or_nan(mz)
-                intensity = _as_float_or_nan(intensity)
-                if np.isnan(mz): continue # Skip NaNs in aligned data
-                grouped.setdefault(color or default_color, []).append((mz, intensity))
+    # ------------------------------------------------------------------
+    # MS2 figure
+    # ------------------------------------------------------------------
+    def _stick_traces(mz_vals, intensities, hover_label, colors=None, default_color="red", line_width_px=3):
+        """MS2 peak sticks (one trace per color), NaN m/z values dropped."""
+        mz_vals = np.asarray(mz_vals, dtype=np.float64)
+        intensities = np.asarray(intensities, dtype=np.float64)
+        if mz_vals.size == 0:
+            return []
+        if colors is not None and len(colors) == mz_vals.size:
+            color_arr = np.array([c or default_color for c in colors], dtype=object)
         else:
-            # Filter out NaNs for raw spectra plotting
-            pairs = []
-            for mz, i in zip(mz_vals, intensities):
-                mz = _as_float_or_nan(mz)
-                i = _as_float_or_nan(i)
-                if np.isnan(mz):
-                    continue
-                pairs.append((mz, i))
-            grouped[default_color] = pairs
+            color_arr = np.full(mz_vals.size, default_color, dtype=object)
+        keep = ~np.isnan(mz_vals)
+        mz_vals, intensities, color_arr = mz_vals[keep], intensities[keep], color_arr[keep]
+        traces = []
+        for color in dict.fromkeys(color_arr.tolist()):
+            sel = color_arr == color
+            mz, it = mz_vals[sel], intensities[sel]
+            n = mz.size
+            x = np.empty(n * 3); y = np.empty(n * 3)
+            x[0::3] = mz; x[1::3] = mz; x[2::3] = np.nan
+            y[0::3] = 0.0; y[1::3] = it; y[2::3] = np.nan
+            cd = np.empty(n * 3); cd[0::3] = it; cd[1::3] = it; cd[2::3] = np.nan
+            traces.append({
+                "type": "scatter", "x": x, "y": y, "customdata": cd, "mode": "lines",
+                "line": {"color": color, "width": line_width_px}, "showlegend": False,
+                "hovertemplate": f"m/z: %{{x:.4f}}<br>Int: %{{customdata:.2e}}<extra>{hover_label}</extra>",
+            })
+        return traces
 
-        for color, pairs in grouped.items():
-            x_vals, y_vals, custom_vals = [], [], []
-            for mz, intensity in pairs:
-                x_vals.extend([mz, mz, None])
-                y_vals.extend([0.0, intensity, None])
-                custom_vals.extend([intensity, intensity, None])
+    def _to_log_mirror(vals):
+        v = np.asarray(vals, dtype=np.float64)
+        out = np.full(v.shape, np.nan)
+        finite = np.isfinite(v)
+        out[finite & (v == 0.0)] = 0.0
+        nz = finite & (v != 0.0)
+        out[nz] = np.sign(v[nz]) * np.log10(np.abs(v[nz]))
+        return out
 
-            fig.add_trace(
-                go.Scatter(
-                    x=x_vals, y=y_vals, customdata=custom_vals,
-                    mode="lines",
-                    line=dict(color=color, width=line_width_px),
-                    showlegend=False,
-                    hovertemplate=f"m/z: %{{x:.4f}}<br>Int: %{{customdata:.2e}}<extra>{hover_label}</extra>",
-                ),
-            )
+    def _empty_figure(text):
+        return {
+            "data": [],
+            "layout": {
+                "template": _TEMPLATE_JSON,
+                "margin": {"l": 64, "r": 20, "t": 80, "b": 40},
+                "xaxis": {"visible": False}, "yaxis": {"visible": False},
+                "annotations": [{"text": text, "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5,
+                                 "showarrow": False, "font": {"size": 15, "color": "#7b8794"}}],
+            },
+        }
 
     def _make_ms2_figure(state, scans, yaxis_scale="linear"):
-        """Build the MS2 mirror plot.
+        """Build the MS2 mirror plot (plain dict).
 
         Parameters
         ----------
@@ -1570,18 +1480,11 @@ def build_dash_app(
         row = _compound_row(compound_idx)
 
         if scans.empty:
-            fig = go.Figure()
-            fig.add_annotation(text=f"{row['label']} - No MS2 data",
-                               xref="paper", yref="paper", x=0.5, y=0.5,
-                               showarrow=False, font=dict(size=14))
-            fig.update_layout(margin=dict(l=50, r=20, t=80, b=40), plot_bgcolor="white",
-                               xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False))
-            return fig
+            return _empty_figure(f"{row['label']} — no MS2 scans in the current RT window")
 
         actual_idx = max(0, min(int(state.get("ms2_idx", 0)), len(scans) - 1))
         scan = scans.iloc[actual_idx]
 
-        # Collision energy label for x-axis title
         ce_val = scan.get("collision_energy", None)
         try:
             ce_label = _format_collision_energy_label(float(ce_val)) if ce_val is not None else "MS2"
@@ -1589,32 +1492,17 @@ def build_dash_app(
             ce_label = "MS2"
 
         use_log = (yaxis_scale == "log")
-
-        def _to_log_mirror(y_vals_raw):
-            result = []
-            for v in y_vals_raw:
-                if v is None or (isinstance(v, float) and np.isnan(v)):
-                    result.append(np.nan)
-                elif v == 0.0:
-                    result.append(0.0)
-                else:
-                    result.append(np.sign(v) * np.log10(abs(v)))
-            return result
-
-        fig = go.Figure()
-
-        # DATA EXTRACTION FROM HITS LIST
+        data = []
         hits = scan.get('hits', [])
-        hit = hits[0] if hits else None  # best hit of this scan (hits are pre-sorted by score)
+        hit = hits[0] if isinstance(hits, list) and hits else None  # best hit (pre-sorted)
 
-        label_points = []
         scale = 1.0
         stick_width_px = 3
         num_ref_fragments = 0
         num_matching_fragments = 0
+        label_mz, label_y = [], []
 
         if hit:
-            # Extract pre-aligned arrays from the hit dictionary
             q_mz_raw, q_int_raw = hit['query_aligned']
             r_mz_raw, r_int_raw = hit['ref_aligned']
             q_mz = _sanitize_numeric_list(q_mz_raw)
@@ -1623,89 +1511,59 @@ def build_dash_app(
             r_int = _sanitize_numeric_list(r_int_raw)
             frag_colors = hit['fragment_colors']
 
-            # Handle scaling for the mirror plot
-            q_max = np.nanmax(q_int) if q_int and np.any(np.isfinite(q_int)) else 0
-            r_max = np.nanmax(r_int) if r_int and np.any(np.isfinite(r_int)) else 0
+            q_max = float(np.nanmax(q_int)) if q_int.size and np.any(np.isfinite(q_int)) else 0.0
+            r_max = float(np.nanmax(r_int)) if r_int.size and np.any(np.isfinite(r_int)) else 0.0
             scale = (q_max / r_max) if r_max > 0 else 1.0
 
-            # Scale the reference intensities and invert for mirror
-            ref_y = [(-i * scale) if np.isfinite(i) else np.nan for i in r_int]
-
-            # Apply log transform if requested (after sign assignment)
+            ref_y = np.where(np.isfinite(r_int), -r_int * scale, np.nan)
             plot_q_int = _to_log_mirror(q_int) if use_log else q_int
             plot_ref_y = _to_log_mirror(ref_y) if use_log else ref_y
 
-            # Plot Query (Top)
-            _add_ms2_stick_traces(fig, q_mz, plot_q_int, "Query",
-                                  colors=frag_colors, default_color="red", line_width_px=stick_width_px)
-
-            # Plot Reference (Bottom)
-            _add_ms2_stick_traces(fig, r_mz, plot_ref_y, "Reference",
-                                  colors=frag_colors, default_color="red", line_width_px=stick_width_px)
+            data += _stick_traces(q_mz, plot_q_int, "Query", colors=frag_colors, line_width_px=stick_width_px)
+            data += _stick_traces(r_mz, plot_ref_y, "Reference", colors=frag_colors, line_width_px=stick_width_px)
 
             num_ref_fragments = hit.get('ref_frags', 0)
             num_matching_fragments = len(hit.get('matched_fragments', []))
-            label_points.extend(zip(q_mz, plot_q_int))
-            label_points.extend(zip(r_mz, plot_ref_y))
+            label_mz = np.concatenate([q_mz, r_mz])
+            label_y = np.concatenate([plot_q_int, plot_ref_y])
         else:
-            # Fallback to raw spectrum if no hit is selected/available
             mz = _sanitize_numeric_list(scan.get('frag_mzs', []))
             ints = _sanitize_numeric_list(scan.get('frag_ints', []))
             plot_ints = _to_log_mirror(ints) if use_log else ints
-            _add_ms2_stick_traces(fig, mz, plot_ints, "MS2", default_color="red", line_width_px=stick_width_px)
-            label_points.extend(zip(mz, plot_ints))
+            data += _stick_traces(mz, plot_ints, "MS2", line_width_px=stick_width_px)
+            label_mz, label_y = mz, plot_ints
 
-        # ANNOTATION & STYLING
-        fig.add_hline(y=0, line=dict(color="black", width=1.5))
-
-        y_vals = [y for _, y in label_points if y is not None and not np.isnan(y)] or [0]
-        y_min, y_max = min(y_vals), max(y_vals)
+        label_mz = np.asarray(label_mz, dtype=np.float64)
+        label_y = np.asarray(label_y, dtype=np.float64)
+        finite_y = label_y[np.isfinite(label_y)]
+        y_min = float(finite_y.min()) if finite_y.size else 0.0
+        y_max = float(finite_y.max()) if finite_y.size else 0.0
         y_span = max(y_max - y_min, max(abs(y_min), abs(y_max)), 1.0)
-        label_pad, y_pad, TEXT_HEIGHT_OFFSET = y_span * 0.01, y_span * 0.01, y_span * 0.01
+        label_pad = y_pad = text_offset = y_span * 0.01
+        label_y_ceiling = y_max * 0.90 if y_max > 0 else 0.0
+        label_y_floor = y_min * 0.90 if y_min < 0 else 0.0
 
-        LABEL_CEILING_FRAC = 0.90   # labels above 90 % of y_max get flipped downward
-        LABEL_FLOOR_FRAC   = 0.90   # labels below 90 % of |y_min| get flipped upward
-        label_y_ceiling =  y_max * LABEL_CEILING_FRAC if y_max > 0 else 0.0
-        label_y_floor   =  y_min * LABEL_FLOOR_FRAC   if y_min < 0 else 0.0
-
-        top_label_idxs = {idx for idx, _ in sorted(enumerate(label_points), key=lambda item: abs(item[1][1] if not np.isnan(item[1][1]) else 0), reverse=True)[:7]}
-        top_labels_sorted = sorted([(idx, mz_val, y_val) for idx, (mz_val, y_val) in enumerate(label_points) if idx in top_label_idxs and not np.isnan(mz_val)], key=lambda item: item[1])
-
-        prev_mz, stagger_level = None, 0
-        for idx, mz_val, y_val in top_labels_sorted:
-            if prev_mz is not None and abs(mz_val - prev_mz) < 5.0:
-                stagger_level += 1
-            else:
-                stagger_level = 0
-
+        # Top-7 peaks by |intensity| get m/z labels (staggered when close together)
+        abs_y = np.where(np.isfinite(label_y), np.abs(label_y), 0.0)
+        top_idx = np.argsort(-abs_y, kind="stable")[:7]
+        top = sorted(((label_mz[i], label_y[i]) for i in top_idx
+                      if not np.isnan(label_mz[i]) and not np.isnan(label_y[i])), key=lambda t: t[0])
+        annotations = []
+        prev_mz, stagger = None, 0
+        for mz_val, y_val in top:
+            stagger = stagger + 1 if prev_mz is not None and abs(mz_val - prev_mz) < 5.0 else 0
             if y_val >= 0:
-                y_base = y_val + label_pad + stagger_level * TEXT_HEIGHT_OFFSET
-                if y_base > label_y_ceiling:
-                    # Bar tip is too close to the title — place label inside the bar
-                    y_pos = y_val - label_pad
-                    yanchor = "top"
-                else:
-                    y_pos = y_base
-                    yanchor = "bottom"
+                y_base = y_val + label_pad + stagger * text_offset
+                y_pos, yanchor = ((y_val - label_pad, "top") if y_base > label_y_ceiling else (y_base, "bottom"))
             else:
-                y_base = y_val - label_pad - stagger_level * TEXT_HEIGHT_OFFSET
-                if y_base < label_y_floor:
-                    # Bar tip is too close to the bottom — place label inside the bar
-                    y_pos = y_val + label_pad
-                    yanchor = "bottom"
-                else:
-                    y_pos = y_base
-                    yanchor = "top"
-
-            fig.add_annotation(x=mz_val, y=y_pos, text=f"{mz_val:.4f}", showarrow=False,
-                               xanchor="center", yanchor=yanchor,
-                               font=dict(size=12))
+                y_base = y_val - label_pad - stagger * text_offset
+                y_pos, yanchor = ((y_val + label_pad, "bottom") if y_base < label_y_floor else (y_base, "top"))
+            annotations.append({"x": float(mz_val), "y": float(y_pos), "text": f"{mz_val:.4f}", "showarrow": False,
+                                "xanchor": "center", "yanchor": yanchor, "font": {"size": 12}})
             prev_mz = mz_val
 
-        # Build y-axis tick labels for log mode (show original intensity values)
         yaxis_extra = {}
         if use_log:
-            # Generate symmetric tick positions in log space and label with original values
             abs_max_log = max(abs(y_min), abs(y_max), 1.0)
             log_ticks_pos = [v for v in np.arange(0, abs_max_log + 1, 1.0) if v <= abs_max_log + 0.01]
             tick_vals = sorted(set([-t for t in log_ticks_pos if t > 0] + log_ticks_pos))
@@ -1721,74 +1579,58 @@ def build_dash_app(
                         tick_texts.append(f"{int(orig):,}")
                     else:
                         tick_texts.append(f"{orig:.0f}")
-            yaxis_extra = dict(tickvals=tick_vals, ticktext=tick_texts)
+            yaxis_extra = {"tickvals": [float(t) for t in tick_vals], "ticktext": tick_texts}
 
-        fig.update_xaxes(
-            title_text=f"m/z ({ce_label})",
-            showgrid=False,
-            zeroline=False,
-            title_font=dict(size=18),
-            tickfont=dict(size=15),
-        )
-        scale_label = " [log₁₀]" if use_log else ""
-        fig.update_yaxes(
-            title_text=f"Intensity (Ref scaled x{scale:.2f}){scale_label}",
-            showgrid=False,
-            zeroline=False,
-            range=[y_min - y_pad, y_max + y_pad],
-            title_font=dict(size=18),
-            tickfont=dict(size=15),
-            autorange=False,
-            **yaxis_extra,
-        )
-
-        fname = "_".join(os.path.basename(scan.get("filename", "")).split(".")[0].split("_")[11:])
+        fname = "_".join(os.path.basename(str(scan.get("filename", ""))).split(".")[0].split("_")[11:])
         if hit:
             scan_info = (
-                f"<span style='font-size:1.2em'>"
-                f"<b>CoS: {hit.get('score', 0):.4f}</b>  |  "
-                f"Ions: {num_matching_fragments}/{num_ref_fragments}  |  "
-                f"RT: {scan.get('scan_rt', 0):.4f} min | "
-                f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
-                f"Ref. m/z: {hit.get('mz_theoretical', 0):.4f}  |  "
-                f"<b>ppm Δ: {hit.get('ppm_error', 0):.2f}</b>"
-                f"<br>"
-                f"Hit: {hit.get('ref_name', 'Unknown')}  |  File: {fname}</span><br><br>"
+                f"<b>CoS {hit.get('score', 0):.4f}</b>  |  "
+                f"Ions {num_matching_fragments}/{num_ref_fragments}  |  "
+                f"RT {scan.get('scan_rt', 0):.4f} min  |  "
+                f"Exp. m/z {scan.get('precursor_MZ', 0):.4f}  |  "
+                f"Ref. m/z {hit.get('mz_theoretical', 0):.4f}  |  "
+                f"<b>ppm Δ {hit.get('ppm_error', 0):.2f}</b>"
+                f"<br><span style='color:#616e7c'>Hit: {hit.get('ref_name', 'Unknown')}  |  File: {fname}</span>"
             )
         else:
             scan_info = (
-                f"<span style='font-size:1.2em'>"
-                f"<b>No Hit</b>  |  "
-                f"RT: {scan.get('scan_rt', 0):.4f} min | "
-                f"Exp. m/z: {scan.get('precursor_MZ', 0):.4f}  |  "
-                f"<br>"
-                f"File: {fname}</span><br><br>"
+                f"<b>No hit</b>  |  RT {scan.get('scan_rt', 0):.4f} min  |  "
+                f"Exp. m/z {scan.get('precursor_MZ', 0):.4f}"
+                f"<br><span style='color:#616e7c'>File: {fname}</span>"
             )
+        annotations.append({"text": scan_info, "xref": "x domain", "yref": "y domain", "x": 0.5, "y": 1.02,
+                            "showarrow": False, "font": {"size": 14}, "xanchor": "center", "yanchor": "bottom"})
 
-        fig.add_annotation(text=scan_info, xref="x domain", yref="y domain",
-                           x=0.5, y=1.02, showarrow=False, font=dict(size=14),
-                           xanchor="center", yanchor="bottom")
-
-        fig.update_layout(
-            barmode="overlay",
-            hovermode="closest",
-            margin=dict(l=50, r=20, t=120, b=40),
-            plot_bgcolor="white",
-            showlegend=False,
-        )
-        return fig
+        scale_label = " [log₁₀]" if use_log else ""
+        layout = {
+            "template": _TEMPLATE_JSON,
+            "barmode": "overlay",
+            "hovermode": "closest",
+            "margin": {"l": 64, "r": 20, "t": 84, "b": 40},
+            "showlegend": False,
+            "xaxis": {"title": {"text": f"m/z ({ce_label})"}},
+            "yaxis": {"title": {"text": f"Intensity (ref scaled ×{scale:.2f}){scale_label}"},
+                      "range": [y_min - y_pad, y_max + y_pad], "autorange": False, **yaxis_extra},
+            "shapes": [{"type": "line", "xref": "x domain", "x0": 0, "x1": 1, "yref": "y", "y0": 0, "y1": 0,
+                        "line": {"color": "black", "width": 1.5}}],
+            "annotations": annotations,
+        }
+        return {"data": data, "layout": layout}
 
     logger.debug("App helpers defined successfully")
 
     # Build the complete hotkey set once at factory scope.
-    # Captured as a closure by handle_keyboard so it is never rebuilt per keydown.
     _ALL_HOTKEYS = (
-        set(analysis_gui_obj.notes["ms2_key_to_label"])
-        | set(analysis_gui_obj.notes["ms1_key_to_label"])
-        | set(analysis_gui_obj.notes["other_key_to_label"])
+        set(notes_cfg["ms2_key_to_label"])
+        | set(notes_cfg["ms1_key_to_label"])
+        | set(notes_cfg["other_key_to_label"])
         | {"a", "s", "d", "f", "j", "k", "l", ";", ">", "/", "n", "m",
            "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"}
     )
+
+    def _nav_payload(new_idx):
+        row = _compound_row(new_idx)
+        return {"idx": new_idx, "ts": time.time(), "label": f"[{new_idx + 1}] {row['label']} ({row['adduct']})"}
 
     # all app callbacks that fire when GUI is interacted with
     def _flush_and_load_compound(old_state, new_idx, delta=None):
@@ -1799,7 +1641,7 @@ def build_dash_app(
         warning check; pass None when navigating via dropdown (no direction).
         """
         old_state = dict(old_state)
-    
+
         flush_error = None
         ms2_warning = None
         ms1_warning = None
@@ -1834,17 +1676,15 @@ def build_dash_app(
 
         return new_state
 
-    # Clientside callback: show overlay instantly when nav-trigger-store changes.
-    # This fires in the browser with zero server round-trip latency.
+    # Clientside callback: show the loading overlay as soon as a navigation
+    # result arrives (before the new figures are built/rendered).
     app.clientside_callback(
         """
         function(nav) {
             var el = document.getElementById('loading-overlay');
-            if (el) {
-                el.style.display = 'flex';
-                el.style.alignItems = 'center';
-                el.style.justifyContent = 'center';
-            }
+            if (el) { el.style.display = 'flex'; }
+            var txt = document.getElementById('loading-overlay-text');
+            if (txt) { txt.textContent = (nav && nav.label) ? ('Loading ' + nav.label + '…') : 'Loading compound…'; }
             return window.dash_clientside.no_update;
         }
         """,
@@ -1872,25 +1712,24 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
 
         new_state = _flush_and_load_compound(old_state, compound_idx, delta=None)
-        return new_state, {"idx": compound_idx, "ts": time.time()}
+        return new_state, _nav_payload(compound_idx)
 
     def _get_force_eval_and_warnings(state, delta):
         """Return warning messages for required-evaluation navigation logic."""
-        # force_eval is resolved once at factory scope from _resolved_cfg
         ms2_warning = None
         ms1_warning = None
         if (
             delta == 1
             and force_eval
-            and "remove" not in state.get("ms1_note", analysis_gui_obj.notes["ms1_notes"][0]).lower()
-            and should_require_note_selection(state.get("ms2_note", analysis_gui_obj.notes["ms2_notes"][0]), analysis_gui_obj.notes["ms2_notes"])
+            and "remove" not in state.get("ms1_note", notes_cfg["ms1_notes"][0]).lower()
+            and should_require_note_selection(state.get("ms2_note", notes_cfg["ms2_notes"][0]), notes_cfg["ms2_notes"])
         ):
             ms2_warning = "Please select MS2 quality note before proceeding"
         if (
             delta == 1
             and force_eval
-            and "remove" not in state.get("ms1_note", analysis_gui_obj.notes["ms1_notes"][0]).lower()
-            and should_require_note_selection(state.get("ms1_note", analysis_gui_obj.notes["ms1_notes"][0]), analysis_gui_obj.notes["ms1_notes"])
+            and "remove" not in state.get("ms1_note", notes_cfg["ms1_notes"][0]).lower()
+            and should_require_note_selection(state.get("ms1_note", notes_cfg["ms1_notes"][0]), notes_cfg["ms1_notes"])
         ):
             ms1_warning = "Please select MS1 quality note before proceeding"
         return ms2_warning, ms1_warning
@@ -1917,8 +1756,9 @@ def build_dash_app(
         if new_idx == int(state["compound_idx"]):
             raise dash.exceptions.PreventUpdate
 
-        new_state = _flush_and_load_compound(state, new_idx, delta=delta)
-        return new_state, new_idx, {"idx": new_idx, "ts": time.time()}
+        with _timed("navigate_compound"):
+            new_state = _flush_and_load_compound(state, new_idx, delta=delta)
+        return new_state, new_idx, _nav_payload(new_idx)
 
     @app.callback(
         Output("session-store", "data", allow_duplicate=True),
@@ -2003,7 +1843,7 @@ def build_dash_app(
     def set_other_note(vals, state):
         if state is None:
             raise dash.exceptions.PreventUpdate
-        filtered_vals = [v for v in vals if v in analysis_gui_obj.notes["other_notes"]] if vals else []
+        filtered_vals = [v for v in vals if v in notes_cfg["other_notes"]] if vals else []
         if filtered_vals == state.get("other_note"):
             raise dash.exceptions.PreventUpdate
         return _patch_with_seq(state, other_note=filtered_vals)
@@ -2030,7 +1870,7 @@ def build_dash_app(
                 if (!relayoutData) return window.dash_clientside.no_update;
                 var keys = Object.keys(relayoutData);
                 var isShapeDrag = keys.some(function(k) {
-                    return /shapes\[\\d+\]\\.x0/.test(k);
+                    return /shapes\\[\\d+\\]\\.x0/.test(k);
                 });
                 if (!isShapeDrag) {
                     // Zoom / pan / other — pass through immediately
@@ -2059,11 +1899,10 @@ def build_dash_app(
     def rt_drag(relayout, state):
         if not relayout or state is None:
             raise dash.exceptions.PreventUpdate
-        
+
         rt_min_shape_idx = 0
         rt_max_shape_idx = 1
-        assert rt_min_shape_idx == 0 and rt_max_shape_idx == 1, "Shape order changed"
-        
+
         new_min, new_max = state["rt_min"], state["rt_max"]
         updated = False
         y_moved = False
@@ -2073,13 +1912,13 @@ def build_dash_app(
                 continue
             if not (k.startswith("shapes[") and k.endswith("].x0")):
                 continue
-            
+
             try:
                 idx_str = k.split("[")[1].split("]")[0]
                 shape_idx = int(idx_str)
             except (IndexError, ValueError):
                 continue
-            
+
             # Process the editable green lines
             if shape_idx == rt_min_shape_idx:
                 new_min = float(v)
@@ -2087,18 +1926,20 @@ def build_dash_app(
             elif shape_idx == rt_max_shape_idx:
                 new_max = float(v)
                 updated = True
-        
+
         if not updated:
             # If the user drags vertically, force a redraw with current RTs to snap lines back.
             if y_moved:
-                return _patch_with_seq(state)
+                new_state = _patch_with_seq(state)
+                new_state["force_ms1_redraw"] = int(state.get("force_ms1_redraw", 0)) + 1
+                return new_state
             raise dash.exceptions.PreventUpdate
-        
+
         rt_min_change = abs(new_min - state["rt_min"])
         rt_max_change = abs(new_max - state["rt_max"])
         if rt_min_change < 0.001 and rt_max_change < 0.001:
             raise dash.exceptions.PreventUpdate
-        
+
         return _patch_rt_change(state, new_min, new_max)
 
     @app.callback(
@@ -2114,11 +1955,22 @@ def build_dash_app(
         points = click_data.get("points", [])
         if not points:
             raise dash.exceptions.PreventUpdate
-        # customdata is [[fn]] per point — extract the filename from the inner list.
         raw_cd = points[0].get("customdata")
-        if not raw_cd:
+        if raw_cd is None:
             raise dash.exceptions.PreventUpdate
-        fp = raw_cd[0] if isinstance(raw_cd, (list, tuple)) else raw_cd
+        if isinstance(raw_cd, (list, tuple)):
+            raw_cd = raw_cd[0] if raw_cd else None
+        # customdata on the merged hover trace is the file's index in the
+        # compound's prepared file list (-1 on gap points).
+        fp = None
+        if isinstance(raw_cd, (int, float)) and not isinstance(raw_cd, bool):
+            row = _compound_row(state["compound_idx"])
+            files = _ms1_prepared(row["mz_rt_uid"])["files"]
+            i = int(raw_cd)
+            if 0 <= i < len(files):
+                fp = files[i]["fn"]
+        elif isinstance(raw_cd, str):
+            fp = raw_cd
         if not fp:
             raise dash.exceptions.PreventUpdate
         highlighted = list(state.get("highlighted_files") or [])
@@ -2213,17 +2065,17 @@ def build_dash_app(
             return new_state, dash.no_update, dash.no_update
 
         # --- Note hotkeys --- (must come before compound navigation so they are reachable)
-        if key in analysis_gui_obj.notes["ms2_key_to_label"]:
-            return _patch_with_seq(state, ms2_note=analysis_gui_obj.notes["ms2_key_to_label"][key]), dash.no_update, dash.no_update
+        if key in notes_cfg["ms2_key_to_label"]:
+            return _patch_with_seq(state, ms2_note=notes_cfg["ms2_key_to_label"][key]), dash.no_update, dash.no_update
 
-        if key in analysis_gui_obj.notes["ms1_key_to_label"]:
-            return _patch_with_seq(state, ms1_note=analysis_gui_obj.notes["ms1_key_to_label"][key]), dash.no_update, dash.no_update
+        if key in notes_cfg["ms1_key_to_label"]:
+            return _patch_with_seq(state, ms1_note=notes_cfg["ms1_key_to_label"][key]), dash.no_update, dash.no_update
 
-        if key in analysis_gui_obj.notes["other_key_to_label"]:
+        if key in notes_cfg["other_key_to_label"]:
             current = state.get("other_note")
             if not isinstance(current, list):
                 current = []
-            label = analysis_gui_obj.notes["other_key_to_label"][key]
+            label = notes_cfg["other_key_to_label"][key]
             if label in current:
                 current = [v for v in current if v != label]
             else:
@@ -2236,10 +2088,20 @@ def build_dash_app(
             new_idx = (int(state["compound_idx"]) + delta) % len(compound_options)
             if new_idx == int(state["compound_idx"]):
                 raise dash.exceptions.PreventUpdate
-            new_state = _flush_and_load_compound(state, new_idx, delta=delta)
-            return new_state, new_idx, {"idx": new_idx, "ts": time.time()}
+            with _timed("navigate_compound (keyboard)"):
+                new_state = _flush_and_load_compound(state, new_idx, delta=delta)
+            return new_state, new_idx, _nav_payload(new_idx)
 
         raise dash.exceptions.PreventUpdate
+
+    def _banners(flush_err, ms2_warning, ms1_warning):
+        banners = []
+        if flush_err:
+            banners.append(dbc.Alert(str(flush_err), color="warning", dismissable=True, className="app-alert"))
+        for w in (ms2_warning, ms1_warning):
+            if w:
+                banners.append(dbc.Alert(w, color="danger", className="app-alert app-alert-strong"))
+        return banners
 
     @app.callback(
         Output("ms1-graph", "figure"),
@@ -2252,62 +2114,53 @@ def build_dash_app(
     )
     def update_ms1_figure(state, yaxis_scale, prev_render_key):
         state = _ensure_valid_state(state)
+        yaxis_scale = yaxis_scale or "linear"
 
-        flush_err = state.get("flush_error")
-        ms2_warning = state.get("ms2_warning")
-        ms1_warning = state.get("ms1_warning")
-
-        # Only re-render when fields that actually affect the MS1 figure change.
-        # Note/radio/checklist/analyst-notes changes do not affect the figure.
-        render_key = {
+        # Only fields that affect the MS1 figure / banner.  Everything is a
+        # JSON-native type (lists, not tuples) so the comparison with the
+        # value round-tripped through dcc.Store is meaningful.
+        row = _compound_row(state["compound_idx"])
+        fig_key = {
             "compound_idx": state.get("compound_idx"),
-            "rt_min": state.get("rt_min"),
-            "rt_max": state.get("rt_max"),
-            "highlighted_files": tuple(state.get("highlighted_files") or []),
+            "highlighted_files": list(state.get("highlighted_files") or []),
             "yaxis_scale": yaxis_scale,
-            "flush_error": flush_err,
-            "ms2_warning": ms2_warning,
-            "ms1_warning": ms1_warning,
+            "span": _ms1_span(row, state),
+        }
+        render_key = {
+            "fig": fig_key,
+            # force_ms1_redraw: bumped when a green line is dragged vertically so
+            # the patch path re-sends the shapes and snaps them back.
+            "rt": [state.get("rt_min"), state.get("rt_max"), state.get("force_ms1_redraw", 0)],
+            "banner": [state.get("flush_error"), state.get("ms2_warning"), state.get("ms1_warning")],
         }
         if prev_render_key == render_key:
             raise dash.exceptions.PreventUpdate
 
-        try:
-            ms1_fig = _make_ms1_figure(state, yaxis_scale)
+        prev = prev_render_key or {}
+        banner_out = (
+            dash.no_update if prev.get("banner") == render_key["banner"]
+            else (_banners(*render_key["banner"]) or "")
+        )
 
-            banners = []
-            if flush_err:
-                banners.append(html.Div(
-                    f"{flush_err}",
-                    style={"color": "red", "fontSize": "14px", "fontWeight": "bold", "marginBottom": "8px"},
-                ))
-            if ms2_warning:
-                banners.append(html.Div(
-                    ms2_warning,
-                    style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
-                ))
-            if ms1_warning:
-                banners.append(html.Div(
-                    ms1_warning,
-                    style={"color": "white", "backgroundColor": "#d32f2f", "fontSize": "20px", "fontWeight": "bold", "padding": "12px", "borderRadius": "6px", "textAlign": "center", "marginBottom": "8px"},
-                ))
-            banner = banners if banners else ""
-            return ms1_fig, banner, render_key
+        try:
+            if prev.get("fig") == fig_key:
+                if prev.get("rt") == render_key["rt"]:
+                    fig_out = dash.no_update
+                else:
+                    with _timed("update_ms1_figure (patch)"):
+                        fig_out = _make_ms1_rt_patch(state, yaxis_scale)
+            else:
+                with _timed("update_ms1_figure (full)"):
+                    fig_out = _make_ms1_figure(state, yaxis_scale)
+            return fig_out, banner_out, render_key
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"update_ms1_figure error: {exc}")
-            err_html = html.Span(
-                f"MS1 figure error: {type(exc).__name__}: {exc}",
-                style={"color": "red", "fontSize": "11px", "fontWeight": "bold"},
-            )
-            empty = go.Figure()
-            empty.update_layout(margin=dict(l=50, r=20, t=40, b=40))
-            return empty, err_html, render_key
+            err = dbc.Alert(f"MS1 figure error: {type(exc).__name__}: {exc}", color="danger", className="app-alert")
+            # render key None forces a full redraw on the next update
+            return _empty_figure("MS1 figure could not be drawn"), err, None
 
-    # Hide the overlay after the MS1 figure has been rendered to the browser.
-    # This clientside callback fires when ms1-graph.figure changes, which only
-    # happens after the server has finished computing and the browser has received
-    # the new figure data — guaranteeing the overlay disappears at the right time.
+    # Hide the overlay after the MS1 figure has been delivered to the browser.
     app.clientside_callback(
         """
         function(figure) {
@@ -2332,49 +2185,45 @@ def build_dash_app(
     def update_ms2_figure(state, ms2_yaxis_scale, prev_ms2_render_key):
         state = _ensure_valid_state(state)
 
-        triggered = [t["prop_id"] for t in dash.callback_context.triggered]
-        scale_changed = any("ms2-yaxis-scale-radio" in t for t in triggered)
-
-        # Fetch scans once — used for both the fingerprint check and figure building.
+        # Memoized: shared with update_status for the same RT window.
         row = _compound_row(state["compound_idx"])
         scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
 
-        # Build a lightweight fingerprint: sorted list of scan RTs (rounded to 4 dp).
-        # This captures whether the set of scans in the RT window changed without any
-        # frozenset→JSON→frozenset round-trip through dcc.Store.
+        # Fingerprint of the scans in the window: a new top-N scan entering the
+        # RT window changes this and forces a full MS2 redraw.
         scan_rt_fp = sorted(
             round(float(rt), 4)
             for rt in scans["scan_rt"]
             if not (isinstance(rt, float) and np.isnan(rt))
         ) if not scans.empty and "scan_rt" in scans.columns else []
 
-        # The render key now embeds the scan-RT fingerprint directly, so a single
-        # dict comparison handles both "nothing changed" and "RT nudge with no new scans".
         ms2_render_key = {
             "compound_idx": state.get("compound_idx"),
             "ms2_idx": state.get("ms2_idx"),
             "ms2_yaxis_scale": ms2_yaxis_scale,
             "scan_rt_fp": scan_rt_fp,
         }
-        if not scale_changed and prev_ms2_render_key == ms2_render_key:
+        if prev_ms2_render_key == ms2_render_key:
             raise dash.exceptions.PreventUpdate
 
         try:
-            return _make_ms2_figure(state, scans, ms2_yaxis_scale or "linear"), ms2_render_key
+            with _timed("update_ms2_figure"):
+                return _make_ms2_figure(state, scans, ms2_yaxis_scale or "linear"), ms2_render_key
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"update_ms2_figure error: {exc}")
-            empty = go.Figure()
-            empty.update_layout(margin=dict(l=50, r=20, t=40, b=40))
-            return empty, ms2_render_key
+            return _empty_figure("MS2 figure could not be drawn"), None
+
+    def _dl_row(term, value):
+        return [html.Dt(term), html.Dd(value)]
 
     @app.callback(
         Output("status-current", "children"),
         Output("compound-counter", "children"),
         Output("compound-progress", "value"),
-        Output("compound-progress", "label"),
         Output("ms2-counter-1", "children"),
         Output("ms2-progress-1", "value"),
+        Output("save-indicator", "children"),
         Input("session-store", "data"),
         prevent_initial_call=False,
     )
@@ -2383,30 +2232,40 @@ def build_dash_app(
         row = _compound_row(state["compound_idx"])
         n_total = max(len(compound_options), 1)
         current_1based = state["compound_idx"] + 1
-        comp_txt = f"{current_1based} / {n_total}"
+        comp_txt = f"Compound {current_1based} / {n_total}"
         progress_val = round(current_1based / n_total * 100, 1)
-        progress_label = ""
 
         scans = _get_ms2_scans(row, state["rt_min"], state["rt_max"])
         n_scans = len(scans)
         ms2_idx = max(0, min(int(state.get("ms2_idx", 0)), max(n_scans - 1, 0)))
-        ms2_txt_1 = f"MS2: {ms2_idx + 1}/{n_scans}" if n_scans > 0 else "MS2: No scans"
+        ms2_txt = f"MS2 scan {ms2_idx + 1} / {n_scans}" if n_scans > 0 else "No MS2 scans"
         ms2_progress_val = round((ms2_idx + 1) / max(n_scans, 1) * 100, 1) if n_scans > 0 else 0
 
-        pending = html.Span(
+        other = state.get("other_note") or []
+        analyst = str(state.get("analyst_notes") or "")
+        selection = html.Dl(
             [
-                html.I("Pending changes: ", style={"color": "black"}),
-                html.Br(), f"[{current_1based}] {row['label']} ({row['adduct']})",
-                html.Br(), f"RT [{state['rt_min']:.4f}, {state['rt_max']:.4f}]",
-                html.Br(), f"MS1: {state['ms1_note']}",
-                html.Br(), f"MS2: {state['ms2_note']}",
-                html.Br(), f"Other: {state['other_note']}",
-                html.Br(), f"Analyst Notes: {state['analyst_notes'][:50]}{'...' if len(state['analyst_notes']) > 50 else ''}",
+                *_dl_row("RT window", f"{state['rt_min']:.4f} – {state['rt_max']:.4f}"),
+                *_dl_row("MS1", state["ms1_note"]),
+                *_dl_row("MS2", state["ms2_note"]),
+                *_dl_row("Other", ", ".join(other) if other else "—"),
+                *_dl_row("Analyst", (analyst[:60] + ("…" if len(analyst) > 60 else "")) or "—"),
             ],
-            style={"color": "#b8860b", "fontSize": "16px", "fontWeight": "bold"},
+            className="selection-list",
         )
 
-        return pending, comp_txt, progress_val, progress_label, ms2_txt_1, ms2_progress_val
+        # Header save indicator: last successful save (or a save error).
+        s = state.get("last_saved")
+        if state.get("flush_error"):
+            indicator = html.Span([html.Span(className="dot dot-error"), "Save failed — see banner"],
+                                  className="indicator indicator-error")
+        elif s:
+            indicator = html.Span([html.Span(className="dot dot-ok"), f"Saved [{s['index']}] {s['name']} at {s['timestamp']}"],
+                                  className="indicator indicator-ok")
+        else:
+            indicator = ""
+
+        return selection, comp_txt, progress_val, ms2_txt, ms2_progress_val, indicator
 
     @app.callback(
         Output("save-toast", "is_open"),
@@ -2423,23 +2282,23 @@ def build_dash_app(
         s = state.get("last_saved")
         if not s:
             raise dash.exceptions.PreventUpdate
-        toast_body = html.Span(
+        other = s.get("other") or []
+        analyst = str(s.get("analyst_notes") or "")
+        toast_body = html.Div(
             [
-                f"[{s['index']}] {s['name']} ({s['adduct']})",
-                html.Br(),
-                f"RT [{s['rt_min']:.4f}, {s['rt_max']:.4f}]",
-                html.Br(),
-                f"MS1: {s['ms1']}",
-                html.Br(),
-                f"MS2: {s['ms2']}",
-                html.Br(),
-                f"Other: {s['other']}",
-                html.Br(),
-                f"Analyst Notes: {s['analyst_notes'][:50]}{'...' if len(s['analyst_notes']) > 50 else ''}",
-                html.Br(),
-                f"Timestamp: {s['timestamp']}",
+                html.Div(f"[{s['index']}] {s['name']} ({s['adduct']})", className="toast-title"),
+                html.Dl(
+                    [
+                        *_dl_row("RT", f"{s['rt_min']:.4f} – {s['rt_max']:.4f}"),
+                        *_dl_row("MS1", s["ms1"]),
+                        *_dl_row("MS2", s["ms2"]),
+                        *_dl_row("Other", ", ".join(other) if other else "—"),
+                        *_dl_row("Analyst", (analyst[:50] + ("…" if len(analyst) > 50 else "")) or "—"),
+                    ],
+                    className="selection-list compact",
+                ),
+                html.Div(f"Queued at {s['timestamp']}", className="toast-time"),
             ],
-            style={"fontSize": "0.85rem"},
         )
         return True, toast_body
 
@@ -2466,24 +2325,48 @@ def build_dash_app(
         raise dash.exceptions.PreventUpdate
 
     @app.callback(
+        Output("exit-modal", "is_open"),
+        Input("exit-open-btn", "n_clicks"),
+        Input("exit-cancel-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def toggle_exit_modal(_open, _cancel):
+        return ctx.triggered_id == "exit-open-btn"
+
+    @app.callback(
         Output("analyst-notes", "value"),
         Output("id-notes", "children"),
         Output("ms1-radio", "value"),
         Output("ms2-radio", "value"),
         Output("other-checklist", "value"),
-        Output("controls-compound-idx", "data"),
         Input("session-store", "data"),
+        State("analyst-notes", "value"),
+        State("ms1-radio", "value"),
+        State("ms2-radio", "value"),
+        State("other-checklist", "value"),
         prevent_initial_call=False,  # Always fire, including on initial load
     )
-    def sync_controls(state):
+    def sync_controls(state, cur_analyst, cur_ms1, cur_ms2, cur_other):
+        """Push session-store values into the controls.  Values that already
+        match are returned as no_update so the set_* callbacks are not
+        re-triggered by an echo (saves a server round-trip per edit)."""
         state = _ensure_valid_state(state)
-        ms2_val = state["ms2_note"] if state["ms2_note"] in analysis_gui_obj.notes["ms2_notes"] else analysis_gui_obj.notes["ms2_notes"][0]
-        ms1_val = state["ms1_note"] if state["ms1_note"] in analysis_gui_obj.notes["ms1_notes"] else analysis_gui_obj.notes["ms1_notes"][0]
-        other_val = [v for v in state["other_note"] if v in analysis_gui_obj.notes["other_notes"]] if isinstance(state["other_note"], list) else []
+        ms2_val = state["ms2_note"] if state["ms2_note"] in notes_cfg["ms2_notes"] else notes_cfg["ms2_notes"][0]
+        ms1_val = state["ms1_note"] if state["ms1_note"] in notes_cfg["ms1_notes"] else notes_cfg["ms1_notes"][0]
+        other_val = [v for v in state["other_note"] if v in notes_cfg["other_notes"]] if isinstance(state["other_note"], list) else []
         analyst_notes = state.get("analyst_notes", "")
-        id_notes = state.get("id_notes", "No identification notes")
-        compound_idx = state.get("compound_idx", 0)
-        return analyst_notes, id_notes, ms1_val, ms2_val, other_val, compound_idx
+        id_notes = state.get("id_notes") or "No identification notes"
+
+        def _nu(new, cur):
+            return dash.no_update if new == cur else new
+
+        return (
+            _nu(analyst_notes, cur_analyst if cur_analyst is not None else ""),
+            id_notes,
+            _nu(ms1_val, cur_ms1),
+            _nu(ms2_val, cur_ms2),
+            _nu(other_val, list(cur_other or [])),
+        )
 
     @app.callback(
         Output("save-exit-status", "children"),
@@ -2498,12 +2381,13 @@ def build_dash_app(
             raise dash.exceptions.PreventUpdate
         try:
             _flush_to_db(state)
-            logger.debug(f"Save and Exit.")
-            msg = "Analysis saved and app port closed."
+            logger.debug("Save and Exit.")
+            msg = dbc.Alert("Analysis saved and app port closed. You can close this tab.", color="success",
+                            className="mb-0")
         except Exception as exc:
             traceback.print_exc()
             logger.error(f"Save and Exit: flush failed for compound {state.get('compound_idx')}: {exc}")
-            msg = f"Save failed: {type(exc).__name__}: {exc}."
+            msg = dbc.Alert(f"Save failed: {type(exc).__name__}: {exc}.", color="danger", className="mb-0")
 
         if shutdown_holder is not None and shutdown_holder[0] is not None:
             threading.Timer(1.5, shutdown_holder[0]).start()
@@ -2516,5 +2400,4 @@ def build_dash_app(
 
     app.database_flush_errors = database_flush_errors
     app.active_flush_threads = _active_flush_threads
-
     return app

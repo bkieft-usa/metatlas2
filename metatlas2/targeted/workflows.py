@@ -352,7 +352,9 @@ def run_analysis_gui(
         run_parameters=run_parameters,
     )
 
-    server = make_server("0.0.0.0", dash_app_port, dash_app.server)
+    # threaded=True: each browser request (figure updates, note toggles, hotkeys)
+    # is served on its own thread, so a slow MS1 render never blocks a checkbox.
+    server = make_server("0.0.0.0", dash_app_port, dash_app.server, threaded=True)
     shutdown_holder[0] = server.shutdown
 
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
