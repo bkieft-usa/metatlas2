@@ -39,19 +39,19 @@ _AXIS_COLOR = "#9aa5b1"
 
 pio.templates["metatlas"] = go.layout.Template(
     layout=dict(
-        font=dict(family=FONT_STACK, size=13, color=_TEXT_COLOR),
+        font=dict(family=FONT_STACK, size=15, color=_TEXT_COLOR),
         paper_bgcolor="white",
         plot_bgcolor="white",
         xaxis=dict(showline=True, linecolor=_AXIS_COLOR, ticks="outside", tickcolor=_AXIS_COLOR,
                    showgrid=False, zeroline=False, automargin=True,
-                   title=dict(font=dict(size=16), standoff=14), tickfont=dict(size=14)),
+                   title=dict(font=dict(size=18), standoff=14), tickfont=dict(size=16)),
         yaxis=dict(showline=True, linecolor=_AXIS_COLOR, ticks="outside", tickcolor=_AXIS_COLOR,
                    showgrid=False, zeroline=False, automargin=True,
-                   title=dict(font=dict(size=16), standoff=16), tickfont=dict(size=14),
+                   title=dict(font=dict(size=18), standoff=16), tickfont=dict(size=16),
                    exponentformat="e"),
         hoverlabel=dict(bgcolor="white", bordercolor="#cbd2d9",
-                        font=dict(family=FONT_STACK, size=13, color=_TEXT_COLOR)),
-        title=dict(font=dict(family=FONT_STACK, size=16, color=_TEXT_COLOR)),
+                        font=dict(family=FONT_STACK, size=15, color=_TEXT_COLOR)),
+        title=dict(font=dict(family=FONT_STACK, size=18, color=_TEXT_COLOR)),
     )
 )
 _TEMPLATE_JSON = pio.templates["metatlas"].to_plotly_json()
@@ -1306,9 +1306,9 @@ def build_dash_app(
         return [
             {"text": "<b>Isomers</b>", "xref": "paper", "yref": "paper", "x": 0.99, "y": 0.99,
              "xanchor": "right", "yanchor": "bottom", "showarrow": False,
-             "font": {"size": 15}, "align": "right"},
+             "font": {"size": 17}, "align": "right"},
             {"text": "<br>".join(t for _, t in lines), "xref": "paper", "yref": "paper", "x": 0.99, "y": 0.99,
-             "xanchor": "right", "yanchor": "top", "showarrow": False, "font": {"size": 14}, "align": "right",
+             "xanchor": "right", "yanchor": "top", "showarrow": False, "font": {"size": 16}, "align": "right",
              "bgcolor": "rgba(255,255,255,0.7)", "bordercolor": "rgba(100,100,100,0.4)", "borderwidth": 1,
              "borderpad": 6},
         ]
@@ -1371,10 +1371,10 @@ def build_dash_app(
 
         layout = {
             "template": _TEMPLATE_JSON,
-            "title": {"text": title_text, "x": 0.5, "xanchor": "center", "font": {"size": 15}},
+            "title": {"text": title_text, "x": 0.5, "xanchor": "center", "font": {"size": 17}},
             "hovermode": "closest",
             "showlegend": False,
-            "margin": {"l": 64, "r": 20, "t": 96, "b": 40},
+            "margin": {"l": 64, "r": 20, "t": 112, "b": 40},
             "dragmode": "zoom",
             "uirevision": str(state["compound_idx"]),
             "xaxis": {
@@ -1463,7 +1463,7 @@ def build_dash_app(
                 "margin": {"l": 64, "r": 20, "t": 80, "b": 40},
                 "xaxis": {"visible": False}, "yaxis": {"visible": False},
                 "annotations": [{"text": text, "xref": "paper", "yref": "paper", "x": 0.5, "y": 0.5,
-                                 "showarrow": False, "font": {"size": 15, "color": "#7b8794"}}],
+                                 "showarrow": False, "font": {"size": 17, "color": "#7b8794"}}],
             },
         }
 
@@ -1559,7 +1559,7 @@ def build_dash_app(
                 y_base = y_val - label_pad - stagger * text_offset
                 y_pos, yanchor = ((y_val + label_pad, "bottom") if y_base < label_y_floor else (y_base, "top"))
             annotations.append({"x": float(mz_val), "y": float(y_pos), "text": f"{mz_val:.4f}", "showarrow": False,
-                                "xanchor": "center", "yanchor": yanchor, "font": {"size": 12}})
+                                "xanchor": "center", "yanchor": yanchor, "font": {"size": 14}})
             prev_mz = mz_val
 
         yaxis_extra = {}
@@ -1599,14 +1599,14 @@ def build_dash_app(
                 f"<br><span style='color:#616e7c'>File: {fname}</span>"
             )
         annotations.append({"text": scan_info, "xref": "x domain", "yref": "y domain", "x": 0.5, "y": 1.02,
-                            "showarrow": False, "font": {"size": 14}, "xanchor": "center", "yanchor": "bottom"})
+                            "showarrow": False, "font": {"size": 16}, "xanchor": "center", "yanchor": "bottom"})
 
         scale_label = " [log₁₀]" if use_log else ""
         layout = {
             "template": _TEMPLATE_JSON,
             "barmode": "overlay",
             "hovermode": "closest",
-            "margin": {"l": 64, "r": 20, "t": 84, "b": 40},
+            "margin": {"l": 64, "r": 20, "t": 96, "b": 40},
             "showlegend": False,
             "xaxis": {"title": {"text": f"m/z ({ce_label})"}},
             "yaxis": {"title": {"text": f"Intensity (ref scaled ×{scale:.2f}){scale_label}"},

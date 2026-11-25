@@ -35,6 +35,12 @@ body,
 .tooltip {
   font-family: var(--font-stack);
 }
+/* Base text size for the whole app: every rem-based size (Bootstrap and this
+ * file) scales from it.  Browser default is 100% (16px); 112.5% = 18px.
+ * Plot text is sized separately in analysis_gui.py (Plotly uses px). */
+html {
+  font-size: 112.5%;
+}
 html,
 body {
   background: var(--bg);
